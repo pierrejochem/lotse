@@ -14,10 +14,14 @@ struct Cluster {
 
 impl Cluster {
     fn new(n: u64) -> Self {
+        Self::with(n, None)
+    }
+
+    fn with(n: u64, lease_ticks: Option<u32>) -> Self {
         let ids: Vec<NodeId> = (1..=n).collect();
         let nodes = ids
             .iter()
-            .map(|&id| (id, MemNode::new(Config { seed: id * 7919, ..Config::new(id, ids.clone()) })))
+            .map(|&id| (id, MemNode::new(Config { seed: id * 7919, lease_ticks, ..Config::new(id, ids.clone()) })))
             .collect();
         Cluster { nodes, net: VecDeque::new(), cut: BTreeSet::new() }
     }
@@ -247,7 +251,7 @@ fn a_follower_with_the_snapshot_entry_keeps_its_log() {
     let meta = c.nodes[&l].raft.snapshot_meta();
     assert_eq!(meta.index, at);
     let term = c.nodes[&l].raft.term();
-    c.nodes.get_mut(&f).unwrap().raft.step(l, Message::Snapshot { term, meta, data: Bytes::new() });
+    c.nodes.get_mut(&f).unwrap().raft.step(l, Message::Snapshot { term, meta, data: Bytes::new(), seq: 0 });
     c.nodes.get_mut(&f).unwrap().process();
     assert_eq!(c.nodes[&f].log, before, "nothing dropped, nothing installed");
     assert_eq!(c.nodes[&f].snapshot_index(), 0);
@@ -348,10 +352,191 @@ fn a_voter_grants_its_vote_to_a_node_it_does_not_know_yet() {
     // Node 2 lags: its log predates the promotion of node 4. During the joint
     // change it may be the vote that decides, so it must not ignore 4.
     let mut n = MemNode::new(Config::new(2, vec![1, 2, 3]));
-    n.raft.step(4, Message::Vote { term: 1, last_index: 10, last_term: 1, pre: false });
+    n.raft.step(4, Message::Vote { term: 1, last_index: 10, last_term: 1, pre: false, transfer: false });
     let out = n.process();
     assert!(
         out.iter().any(|s| s.to == 4 && matches!(s.msg, Message::VoteReply { granted: true, pre: false, .. })),
         "vote requests are not filtered by membership: {out:?}"
     );
+}
+
+#[test]
+fn leadership_moves_to_the_chosen_voter() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(2);
+    let to = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.nodes.get_mut(&l).unwrap().raft.transfer_leadership(to).unwrap();
+    assert_eq!(
+        c.nodes.get_mut(&l).unwrap().propose(1, "x"),
+        Err(NotLeader { leader: Some(to) }),
+        "no proposals while handing over"
+    );
+    c.pump();
+    assert_eq!(c.leader(), Some(to));
+    c.nodes.get_mut(&to).unwrap().propose(1, "after").unwrap();
+    c.ticks(3);
+    for n in c.nodes.values() {
+        assert_eq!(n.applied_data(), vec![Bytes::from("after")]);
+    }
+}
+
+#[test]
+fn a_lagging_target_is_brought_up_to_date_first() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let to = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.cut.insert(to);
+    for i in 0..5 {
+        c.nodes.get_mut(&l).unwrap().propose(2, format!("v{i}")).unwrap();
+        c.ticks(1);
+    }
+    c.cut.clear();
+    c.nodes.get_mut(&l).unwrap().raft.transfer_leadership(to).unwrap();
+    c.ticks(3);
+    assert_eq!(c.leader(), Some(to), "it could only win with the whole log");
+    assert_eq!(c.nodes[&to].applied_data().len(), 5);
+}
+
+#[test]
+fn a_transfer_that_does_not_happen_is_given_up() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let to = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.cut.insert(to);
+    c.nodes.get_mut(&l).unwrap().raft.transfer_leadership(to).unwrap();
+    c.ticks(10);
+    assert_eq!(c.leader(), Some(l));
+    assert!(c.nodes.get_mut(&l).unwrap().propose(1, "x").is_ok(), "the leader carries on");
+    assert_eq!(c.nodes.get_mut(&l).unwrap().raft.transfer_leadership(99), Err(TransferError::NotVoter));
+}
+
+#[test]
+fn reads_are_confirmed_by_a_quorum_and_batched() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(1, "a").unwrap();
+    c.ticks(2);
+    let commit = c.nodes[&l].raft.commit();
+    for ctx in 1..=3 {
+        c.nodes.get_mut(&l).unwrap().raft.read_index(ctx).unwrap();
+    }
+    // The round goes out with the next ready; nothing is confirmed before.
+    let out = c.nodes.get_mut(&l).unwrap().process();
+    assert!(c.nodes[&l].reads.is_empty());
+    let seqs: BTreeSet<u64> = out
+        .iter()
+        .filter_map(|s| match s.msg {
+            Message::Append { seq, .. } => Some(seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seqs.len(), 1, "one round for all three reads");
+    c.net.extend(out.into_iter().map(|s| (l, s)));
+    c.pump();
+    let served: Vec<(u64, u64)> = c.nodes[&l].reads.iter().map(|(r, _)| (r.ctx, r.index)).collect();
+    assert_eq!(served, vec![(1, commit), (2, commit), (3, commit)]);
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    assert_eq!(c.nodes.get_mut(&f).unwrap().raft.read_index(9), Err(NotLeader { leader: Some(l) }));
+}
+
+#[test]
+fn a_single_node_confirms_reads_alone() {
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().raft.read_index(7).unwrap();
+    c.pump();
+    assert_eq!(c.nodes[&l].reads.len(), 1);
+}
+
+#[test]
+fn an_isolated_leader_never_confirms_a_read() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(2);
+    c.cut.insert(l);
+    c.nodes.get_mut(&l).unwrap().raft.read_index(5).unwrap();
+    c.ticks(25);
+    assert!(c.nodes[&l].reads.is_empty(), "no quorum answered");
+    assert_eq!(c.nodes[&l].reads_aborted, vec![5], "aborted when it stepped down");
+}
+
+#[test]
+fn a_lease_serves_reads_without_a_round_until_it_runs_out() {
+    let mut c = Cluster::with(3, Some(4));
+    let l = c.elect();
+    c.ticks(2);
+    c.nodes.get_mut(&l).unwrap().raft.read_index(1).unwrap();
+    c.nodes.get_mut(&l).unwrap().process();
+    assert_eq!(c.nodes[&l].reads.len(), 1, "served from the lease, no round needed");
+    // Cut off, the lease runs out and reads need a quorum again.
+    c.cut.insert(l);
+    c.ticks(5);
+    c.nodes.get_mut(&l).unwrap().raft.read_index(2).unwrap();
+    c.ticks(1);
+    assert_eq!(c.nodes[&l].reads.len(), 1, "no lease, no quorum: not served");
+}
+
+#[test]
+fn with_leases_a_restarted_node_waits_before_voting() {
+    let mut c = Cluster::with(3, Some(4));
+    let l = c.elect();
+    c.ticks(2);
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.nodes.get_mut(&f).unwrap().restart();
+    let term = c.nodes[&f].raft.term();
+    let last = c.nodes[&f].raft.last_index();
+    let last_term = c.nodes[&f].raft.log().last_term();
+    let vote = Message::Vote { term: term + 1, last_index: last + 10, last_term, pre: false, transfer: false };
+    c.nodes.get_mut(&f).unwrap().raft.step(99, vote);
+    assert!(c.nodes.get_mut(&f).unwrap().process().is_empty(), "quiet right after a restart");
+}
+
+#[test]
+fn a_read_is_not_confirmed_by_a_round_sent_before_it() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(2);
+    // A round goes out; hold back the replies.
+    for _ in 0..2 {
+        c.nodes.get_mut(&l).unwrap().raft.tick();
+    }
+    let round: Vec<(NodeId, Send)> = c.nodes.get_mut(&l).unwrap().process().into_iter().map(|s| (l, s)).collect();
+    let mut replies = Vec::new();
+    for (from, s) in round {
+        let to = s.to;
+        c.nodes.get_mut(&to).unwrap().raft.step(from, s.msg);
+        replies.extend(c.nodes.get_mut(&to).unwrap().process().into_iter().map(|s| (to, s)));
+    }
+    // The read arrives after that round was sent. Its replies come in, but
+    // they prove leadership only up to before the read.
+    c.nodes.get_mut(&l).unwrap().raft.read_index(1).unwrap();
+    for (from, s) in replies {
+        c.nodes.get_mut(&l).unwrap().raft.step(from, s.msg);
+    }
+    let next_round = c.nodes.get_mut(&l).unwrap().process();
+    assert!(c.nodes[&l].reads.is_empty(), "confirmed by a round older than the read");
+    c.net.extend(next_round.into_iter().map(|s| (l, s)));
+    c.pump();
+    assert_eq!(c.nodes[&l].reads.len(), 1, "confirmed by the next round");
+}
+
+#[test]
+fn a_leader_that_tried_a_transfer_gives_up_its_lease() {
+    let mut c = Cluster::with(3, Some(4));
+    let l = c.elect();
+    c.ticks(2);
+    let to = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.cut.insert(to);
+    c.nodes.get_mut(&l).unwrap().raft.transfer_leadership(to).unwrap();
+    c.ticks(10); // the transfer is given up
+    c.cut.clear();
+    c.ticks(1);
+    assert_eq!(c.leader(), Some(l));
+    c.nodes.get_mut(&l).unwrap().raft.read_index(1).unwrap();
+    let round = c.nodes.get_mut(&l).unwrap().process();
+    assert!(c.nodes[&l].reads.is_empty(), "a late TimeoutNow could still elect the target: no lease reads");
+    c.net.extend(round.into_iter().map(|s| (l, s)));
+    c.pump();
+    assert_eq!(c.nodes[&l].reads.len(), 1, "served through ReadIndex instead");
 }

@@ -6,8 +6,10 @@
 //! persisted). Meanwhile nodes snapshot and compact their logs at random, and
 //! the leader is asked to change members at random: add and remove learners,
 //! promote them, remove voters (the leader too) and replace several voters in
-//! one joint change. Removed nodes keep running. Throughout, it checks the
-//! Raft guarantees:
+//! one joint change. Removed nodes keep running. Leadership is handed over
+//! at random, clients send linearizable reads to random nodes, and some runs
+//! serve reads from a leader lease. Throughout, it checks the Raft
+//! guarantees:
 //!
 //! - **Vote safety:** a node grants at most one vote per term, even across
 //!   crashes.
@@ -16,6 +18,8 @@
 //!   same order.
 //! - **Durability:** once a node holds a committed entry, it never loses it.
 //! - **Leader completeness:** a leader holds every committed entry.
+//! - **Linearizable reads:** a confirmed read is served at an index at least
+//!   as high as anything committed before the read was asked.
 //!
 //! Then it heals everything and checks **liveness**: a leader emerges, a new
 //! proposal commits and every member applies it.
@@ -50,6 +54,7 @@ struct World {
     rng: SimRng,
     f: Faults,
     pre_vote: bool,
+    lease_ticks: Option<u32>,
     /// Ids that may ever be members: the initial voters and two spares.
     pool: Vec<NodeId>,
     now: u64,
@@ -70,6 +75,11 @@ struct World {
     committed_by: Vec<u64>,
     kept: BTreeMap<NodeId, usize>,
     proposals: u64,
+    /// Read ctx -> the highest index committed anywhere when it was asked.
+    reads: BTreeMap<u64, u64>,
+    /// Per node: how many of its served reads were checked.
+    read_seen: BTreeMap<NodeId, usize>,
+    next_read: u64,
 }
 
 impl World {
@@ -85,10 +95,17 @@ impl World {
         // Pre-vote is optional in the core and hides bugs in the vote rules,
         // so runs mix it. (Check-quorum is always on.)
         let pre_vote = rng.chance(1, 2);
-        let nodes = ids.iter().map(|&id| (id, fresh(&rng, id, ids.clone(), pre_vote))).collect();
+        // A third of the runs read from leases. The lease leaves room for
+        // the clock drift below: a follower may tick twice as fast.
+        let lease_ticks = rng.chance(1, 3).then_some(3);
+        let nodes = ids.iter().map(|&id| (id, fresh(&rng, id, ids.clone(), pre_vote, lease_ticks))).collect();
         World {
             pool: (1..=n + 2).collect(),
             pre_vote,
+            lease_ticks,
+            reads: BTreeMap::new(),
+            read_seen: BTreeMap::new(),
+            next_read: 1,
             rng,
             f,
             now: 0,
@@ -155,9 +172,29 @@ impl World {
             }
         }
 
-        // An operator changes members now and then.
+        // An operator changes members now and then, or moves the leader.
         if self.faults && r.chance(1, 60) {
             self.change_members();
+        }
+        if self.faults
+            && r.chance(1, 80)
+            && let Some(l) = self.leader()
+        {
+            let voters: Vec<NodeId> = self.nodes[&l].raft.membership().voters.iter().copied().collect();
+            let to = voters[r.below(voters.len() as u64) as usize];
+            let _ = self.nodes.get_mut(&l).unwrap().raft.transfer_leadership(to);
+        }
+
+        // Clients read from whichever node they reach.
+        if r.chance(1, 4) {
+            let up = self.up();
+            let id = up[r.below(up.len() as u64) as usize];
+            let ctx = self.next_read;
+            if self.nodes.get_mut(&id).unwrap().raft.read_index(ctx).is_ok() {
+                self.next_read += 1;
+                let committed = self.nodes.values().map(|n| n.raft.commit()).max().unwrap_or(0);
+                self.reads.insert(ctx, committed);
+            }
         }
 
         // Clients propose to whichever node they reach.
@@ -194,7 +231,9 @@ impl World {
                 if !before_persist {
                     self.nodes.get_mut(&id).unwrap().process();
                 }
-                self.down.insert(id, self.now + 5 + r.below(150));
+                // Some restarts are immediate, as a process restart can be.
+                let downtime = if r.chance(1, 4) { 1 } else { 5 + r.below(150) };
+                self.down.insert(id, self.now + downtime);
                 continue;
             }
             for _ in 0..4 {
@@ -225,6 +264,20 @@ impl World {
     }
 
     fn check(&mut self) {
+        // Linearizable reads.
+        for (id, n) in &self.nodes {
+            let seen = self.read_seen.entry(*id).or_default();
+            for (read, _) in &n.reads[*seen..] {
+                let bound = self.reads[&read.ctx];
+                assert!(
+                    read.index >= bound,
+                    "node {id} served read {} at index {}, but {bound} was committed before it was asked",
+                    read.ctx,
+                    read.index
+                );
+            }
+            *seen = n.reads.len();
+        }
         // Election safety.
         for id in self.up() {
             let n = &self.nodes[&id];
@@ -291,7 +344,7 @@ impl World {
                 let id = pick(&outside);
                 // Re-added nodes keep whatever state they had.
                 if !self.nodes.contains_key(&id) {
-                    let node = fresh(&r, id, Vec::new(), self.pre_vote);
+                    let node = fresh(&r, id, Vec::new(), self.pre_vote, self.lease_ticks);
                     self.nodes.insert(id, node);
                 }
                 new_learners.insert(id);
@@ -348,8 +401,8 @@ impl World {
     }
 }
 
-fn fresh(rng: &SimRng, id: NodeId, voters: Vec<NodeId>, pre_vote: bool) -> MemNode {
-    let cfg = Config { seed: rng.next_u64(), pre_vote, ..Config::new(id, voters) };
+fn fresh(rng: &SimRng, id: NodeId, voters: Vec<NodeId>, pre_vote: bool, lease_ticks: Option<u32>) -> MemNode {
+    let cfg = Config { seed: rng.next_u64(), pre_vote, lease_ticks, ..Config::new(id, voters) };
     let mut node = MemNode::new(cfg);
     node.max_fill_bytes = 1 + rng.below(250) as usize; // often one entry per append
     node

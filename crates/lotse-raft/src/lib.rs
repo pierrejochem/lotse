@@ -42,9 +42,28 @@
 //! that only counts entries of the leader's own term, snapshots, learners and
 //! joint consensus.
 //!
-//! # Not yet
+//! # Leader transfer
 //!
-//! Leader transfer and linearizable reads (ReadIndex, optional leases).
+//! [`RaftGroup::transfer_leadership`] hands leadership to a voter: the leader
+//! stops taking proposals, brings the target up to date and tells it to
+//! campaign at once ([`Message::TimeoutNow`]); its vote requests pass leader
+//! stickiness. If nothing happens within an election timeout, the leader
+//! carries on.
+//!
+//! # Linearizable reads
+//!
+//! [`RaftGroup::read_index`] confirms that this node still leads before a
+//! read is served: every append and heartbeat carries a round number
+//! (`seq`) that followers echo, and a read waits for a quorum to answer a
+//! round sent after it arrived. Reads arriving between two [`Ready`]s share
+//! one round. A new leader first commits an entry of its own term. The
+//! driver serves each [`ReadState`] once it has applied up to its index.
+//!
+//! With [`Config::lease_ticks`], the leader instead serves reads at once
+//! while a quorum answered a round sent less than `lease_ticks` ago. That is
+//! only safe if no clock runs much faster than another: followers ignore
+//! votes for an election timeout after they last heard from the leader, and
+//! after a restart, so the lease must end well before that.
 
 #![warn(missing_docs)]
 
@@ -158,6 +177,9 @@ pub enum Message {
         last_term: u64,
         /// Pre-vote.
         pre: bool,
+        /// Sent on the leader's request ([`Message::TimeoutNow`]): passes
+        /// leader stickiness.
+        transfer: bool,
     },
     /// Answer to [`Message::Vote`].
     VoteReply {
@@ -181,6 +203,8 @@ pub enum Message {
         entries: Vec<Entry>,
         /// Leader's commit index.
         commit: u64,
+        /// Leader's round, echoed in the reply.
+        seq: u64,
     },
     /// Answer to [`Message::Append`] and [`Message::Snapshot`].
     AppendReply {
@@ -188,6 +212,8 @@ pub enum Message {
         term: u64,
         /// Outcome.
         result: AppendResult,
+        /// The round of the message answered.
+        seq: u64,
     },
     /// The leader's snapshot, for a follower whose next entry the leader
     /// has compacted away. Answered with an [`Message::AppendReply`].
@@ -199,6 +225,13 @@ pub enum Message {
         meta: SnapshotMeta,
         /// The core leaves this empty and sets [`Send::attach_snapshot`].
         data: Bytes,
+        /// Leader's round, echoed in the reply.
+        seq: u64,
+    },
+    /// The leader hands over: campaign now, without pre-vote.
+    TimeoutNow {
+        /// Leader's term.
+        term: u64,
     },
 }
 
@@ -210,7 +243,8 @@ impl Message {
             | Message::VoteReply { term, .. }
             | Message::Append { term, .. }
             | Message::AppendReply { term, .. }
-            | Message::Snapshot { term, .. } => *term,
+            | Message::Snapshot { term, .. }
+            | Message::TimeoutNow { term } => *term,
         }
     }
 }
@@ -246,8 +280,22 @@ pub struct Ready {
     pub entries: Vec<Entry>,
     /// Newly committed indices `(first, last)`, to apply in order.
     pub committed: Option<(u64, u64)>,
+    /// Confirmed reads: serve each once applied up to its index.
+    pub reads: Vec<ReadState>,
+    /// Reads that will not be confirmed (this node stopped leading): the
+    /// client should retry with the leader.
+    pub reads_aborted: Vec<u64>,
     /// Messages to send once the above is durable.
     pub messages: Vec<Send>,
+}
+
+/// A confirmed linearizable read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadState {
+    /// The driver's id for the read, from [`RaftGroup::read_index`].
+    pub ctx: u64,
+    /// Serve the read once the state machine has applied this index.
+    pub index: u64,
 }
 
 impl Ready {
@@ -258,6 +306,8 @@ impl Ready {
             && self.truncate_from.is_none()
             && self.entries.is_empty()
             && self.committed.is_none()
+            && self.reads.is_empty()
+            && self.reads_aborted.is_empty()
             && self.messages.is_empty()
     }
 }
@@ -285,6 +335,10 @@ pub struct Config {
     /// learnt so keeps raising the term and unseats every leader, pre-vote
     /// or not.
     pub pre_vote: bool,
+    /// Serve reads from a leader lease of this many ticks instead of a
+    /// heartbeat round; `None` (the default) for ReadIndex only. Must be
+    /// below `election_ticks` by more than the clock drift between nodes.
+    pub lease_ticks: Option<u32>,
     /// Seed for the randomised election timeout.
     pub seed: u64,
 }
@@ -293,7 +347,7 @@ impl Config {
     /// Defaults for node `id` among `voters`: 10-tick elections,
     /// heartbeats every 2 ticks, pre-vote on.
     pub fn new(id: NodeId, voters: Vec<NodeId>) -> Self {
-        Config { id, voters, election_ticks: 10, heartbeat_ticks: 2, pre_vote: true, seed: id }
+        Config { id, voters, election_ticks: 10, heartbeat_ticks: 2, pre_vote: true, lease_ticks: None, seed: id }
     }
 }
 
@@ -333,6 +387,15 @@ pub struct NotLeader {
     pub leader: Option<NodeId>,
 }
 
+/// Why [`RaftGroup::transfer_leadership`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferError {
+    /// Only the leader hands over.
+    NotLeader(NotLeader),
+    /// The target is not a voter, or a membership change is joint.
+    NotVoter,
+}
+
 /// Why [`RaftGroup::propose_membership`] refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeError {
@@ -353,6 +416,14 @@ struct Progress {
     inflight: bool,
     inflight_ticks: u32,
     active: bool,
+    /// Highest round it answered.
+    acked: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Transfer {
+    to: NodeId,
+    elapsed: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +460,28 @@ pub struct RaftGroup {
     pending_truncate: Option<u64>,
     pending_entries: Vec<Entry>,
     outbox: Vec<Send>,
+    /// Ticks since this node started.
+    ticks: u64,
+    /// With leases: ticks left during which a just-started node ignores
+    /// vote requests (it may have forgotten a leader whose lease runs).
+    quiet: u32,
+    /// Current round; the leader stamps every append with it.
+    seq: u64,
+    /// Rounds of this leadership and the tick each was started.
+    rounds: std::collections::VecDeque<(u64, u64)>,
+    /// A round has to go out for waiting reads.
+    need_round: bool,
+    /// Reads waiting for this leader's first commit.
+    reads_waiting: Vec<u64>,
+    /// Reads waiting for a quorum to answer `seq`: (ctx, index, seq).
+    reads_pending: Vec<(u64, u64, u64)>,
+    reads_ready: Vec<ReadState>,
+    reads_aborted: Vec<u64>,
+    transfer: Option<Transfer>,
+    /// This leader tried a transfer in its term. A delayed `TimeoutNow`
+    /// may still make the target campaign past stickiness, so the lease is
+    /// off for the rest of the term (reads go through ReadIndex).
+    transfer_tried: bool,
 }
 
 impl RaftGroup {
@@ -396,6 +489,7 @@ impl RaftGroup {
     /// `Restored::default()`).
     pub fn new(cfg: Config, restored: Restored) -> Self {
         assert!(cfg.election_ticks > cfg.heartbeat_ticks, "elections must take longer than heartbeats");
+        assert!(cfg.lease_ticks.is_none_or(|l| l < cfg.election_ticks), "a lease must end before elections can start");
         let last = restored.log.last_index();
         let snap = restored.log.snapshot_index();
         let base_membership = match restored.snapshot {
@@ -427,6 +521,17 @@ impl RaftGroup {
             pending_truncate: None,
             pending_entries: Vec::new(),
             outbox: Vec::new(),
+            ticks: 0,
+            quiet: if cfg.lease_ticks.is_some() { cfg.election_ticks } else { 0 },
+            seq: 0,
+            rounds: std::collections::VecDeque::new(),
+            need_round: false,
+            reads_waiting: Vec::new(),
+            reads_pending: Vec::new(),
+            reads_ready: Vec::new(),
+            reads_aborted: Vec::new(),
+            transfer: None,
+            transfer_tried: false,
             cfg,
         };
         g.reset_timeout();
@@ -510,6 +615,8 @@ impl RaftGroup {
 
     /// Advances logical time by one tick.
     pub fn tick(&mut self) {
+        self.ticks += 1;
+        self.quiet = self.quiet.saturating_sub(1);
         if matches!(self.state, State::Leader { .. }) {
             self.tick_leader();
         } else {
@@ -529,6 +636,12 @@ impl RaftGroup {
         self.heartbeat_elapsed += 1;
         self.election_elapsed += 1;
         let election = self.cfg.election_ticks;
+        if let Some(t) = &mut self.transfer {
+            t.elapsed += 1;
+            if t.elapsed >= election {
+                self.transfer = None; // the target did not take over: carry on
+            }
+        }
         if let State::Leader { progress } = &mut self.state {
             for p in progress.values_mut() {
                 if p.inflight {
@@ -558,10 +671,19 @@ impl RaftGroup {
         }
         if self.heartbeat_elapsed >= self.cfg.heartbeat_ticks {
             self.heartbeat_elapsed = 0;
-            for f in self.followers() {
-                self.replicate_or_heartbeat(f);
-            }
+            self.start_round();
         }
+    }
+
+    /// Starts a round: a heartbeat (or append) with a new `seq` to everyone.
+    fn start_round(&mut self) {
+        self.seq += 1;
+        self.rounds.push_back((self.seq, self.ticks));
+        self.need_round = false;
+        for f in self.followers() {
+            self.replicate_or_heartbeat(f);
+        }
+        self.check_reads();
     }
 
     /// A voter campaigns. So does a node that the newest, still uncommitted
@@ -588,6 +710,13 @@ impl RaftGroup {
     // ----- role changes -------------------------------------------------
 
     fn become_follower(&mut self, term: u64, leader: Option<NodeId>) {
+        if matches!(self.state, State::Leader { .. }) {
+            self.reads_aborted.append(&mut self.reads_waiting);
+            self.reads_aborted.extend(self.reads_pending.drain(..).map(|r| r.0));
+            self.rounds.clear();
+            self.need_round = false;
+            self.transfer = None;
+        }
         if term > self.term {
             self.term = term;
             self.vote = None;
@@ -611,11 +740,15 @@ impl RaftGroup {
         let (last_index, last_term) = (self.log.last_index(), self.log.last_term());
         let term = self.term + 1;
         for v in self.other_voters() {
-            self.send(v, Message::Vote { term, last_index, last_term, pre: true });
+            self.send(v, Message::Vote { term, last_index, last_term, pre: true, transfer: false });
         }
     }
 
     fn campaign(&mut self) {
+        self.campaign_with(false);
+    }
+
+    fn campaign_with(&mut self, transfer: bool) {
         self.term += 1;
         self.vote = Some(self.cfg.id);
         self.hs_dirty = true;
@@ -631,7 +764,7 @@ impl RaftGroup {
         }
         let (last_index, last_term, term) = (self.log.last_index(), self.log.last_term(), self.term);
         for v in self.other_voters() {
-            self.send(v, Message::Vote { term, last_index, last_term, pre: false });
+            self.send(v, Message::Vote { term, last_index, last_term, pre: false, transfer });
         }
     }
 
@@ -642,11 +775,11 @@ impl RaftGroup {
         self.leader = Some(self.cfg.id);
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
+        self.rounds.clear();
+        self.transfer_tried = false;
         // Entries of earlier terms only commit through an entry of this term.
         self.append_own(1, EntryKind::Noop, Bytes::new());
-        for f in self.followers() {
-            self.replicate_or_heartbeat(f);
-        }
+        self.start_round();
         self.maybe_commit();
     }
 
@@ -664,6 +797,7 @@ impl RaftGroup {
                     inflight: false,
                     inflight_ticks: 0,
                     active: true,
+                    acked: 0,
                 });
             }
         }
@@ -675,9 +809,7 @@ impl RaftGroup {
     /// indices it occupies; the driver stamps the batch with
     /// `base_offset = first - 1` and the current term.
     pub fn propose(&mut self, records: u64, data: Bytes) -> Result<(u64, u64), NotLeader> {
-        if !matches!(self.state, State::Leader { .. }) {
-            return Err(NotLeader { leader: self.leader });
-        }
+        self.check_leading()?;
         let range = self.append_own(records.max(1), EntryKind::Normal, data);
         for f in self.followers() {
             self.replicate(f);
@@ -695,9 +827,8 @@ impl RaftGroup {
         voters: BTreeSet<NodeId>,
         learners: BTreeSet<NodeId>,
     ) -> Result<(u64, u64), ChangeError> {
-        let State::Leader { progress } = &self.state else {
-            return Err(ChangeError::NotLeader(NotLeader { leader: self.leader }));
-        };
+        self.check_leading().map_err(ChangeError::NotLeader)?;
+        let State::Leader { progress } = &self.state else { unreachable!() };
         if voters.is_empty() || !voters.is_disjoint(&learners) {
             return Err(ChangeError::Invalid);
         }
@@ -723,6 +854,114 @@ impl RaftGroup {
             self.replicate(f);
         }
         Ok(range)
+    }
+
+    /// `Ok` on a leader that is not handing over; otherwise where to go.
+    fn check_leading(&self) -> Result<(), NotLeader> {
+        match (&self.state, self.transfer) {
+            (State::Leader { .. }, None) => Ok(()),
+            (State::Leader { .. }, Some(t)) => Err(NotLeader { leader: Some(t.to) }),
+            _ => Err(NotLeader { leader: self.leader }),
+        }
+    }
+
+    // ----- leader transfer ----------------------------------------------
+
+    /// Hands leadership to voter `to`. Proposals are refused (with `to` as
+    /// the leader to try) until it takes over or an election timeout passes.
+    pub fn transfer_leadership(&mut self, to: NodeId) -> Result<(), TransferError> {
+        self.check_leading().map_err(TransferError::NotLeader)?;
+        if to == self.cfg.id {
+            return Ok(());
+        }
+        let m = self.membership();
+        if m.is_joint() || !m.voters.contains(&to) {
+            return Err(TransferError::NotVoter);
+        }
+        self.transfer = Some(Transfer { to, elapsed: 0 });
+        self.transfer_tried = true;
+        // Probe the target afresh: an append to it may be lost in flight.
+        if let State::Leader { progress } = &mut self.state
+            && let Some(p) = progress.get_mut(&to)
+        {
+            p.inflight = false;
+        }
+        self.maybe_timeout_now(to);
+        Ok(())
+    }
+
+    /// Tells the transfer target to campaign once it has the whole log.
+    fn maybe_timeout_now(&mut self, f: NodeId) {
+        if self.transfer.is_none_or(|t| t.to != f) {
+            return;
+        }
+        let last = self.log.last_index();
+        let State::Leader { progress } = &self.state else { return };
+        if progress.get(&f).is_some_and(|p| p.matched == last) {
+            let term = self.term;
+            self.send(f, Message::TimeoutNow { term });
+        } else {
+            self.replicate(f);
+        }
+    }
+
+    // ----- linearizable reads -------------------------------------------
+
+    /// Asks to confirm a linearizable read with the driver's id `ctx`. It
+    /// shows up in [`Ready::reads`] (or [`Ready::reads_aborted`]).
+    pub fn read_index(&mut self, ctx: u64) -> Result<(), NotLeader> {
+        self.check_leading()?;
+        if self.log.term_at(self.commit) != Some(self.term) {
+            // A new leader's commit index may lag: wait for its own entry.
+            self.reads_waiting.push(ctx);
+            return Ok(());
+        }
+        self.register_read(ctx);
+        Ok(())
+    }
+
+    fn register_read(&mut self, ctx: u64) {
+        let index = self.commit;
+        if self.lease_valid() {
+            self.reads_ready.push(ReadState { ctx, index });
+        } else {
+            self.reads_pending.push((ctx, index, self.seq + 1));
+            self.need_round = true;
+        }
+    }
+
+    /// Highest round a quorum (this node included) has answered.
+    fn quorum_seq(&self) -> u64 {
+        let State::Leader { progress } = &self.state else { return 0 };
+        let (me, seq) = (self.cfg.id, self.seq);
+        self.membership().committed(|v| if v == me { seq } else { progress.get(&v).map_or(0, |p| p.acked) })
+    }
+
+    fn lease_valid(&self) -> bool {
+        let Some(lease) = self.cfg.lease_ticks else { return false };
+        if self.transfer_tried {
+            return false;
+        }
+        let q = self.quorum_seq();
+        // The round's start tick: a quorum heard from us after it.
+        self.rounds.iter().rev().find(|r| r.0 <= q).is_some_and(|r| self.ticks < r.1 + u64::from(lease))
+    }
+
+    fn check_reads(&mut self) {
+        let q = self.quorum_seq();
+        let mut i = 0;
+        while i < self.reads_pending.len() {
+            if self.reads_pending[i].2 <= q {
+                let (ctx, index, _) = self.reads_pending.remove(i);
+                self.reads_ready.push(ReadState { ctx, index });
+            } else {
+                i += 1;
+            }
+        }
+        // Rounds older than what a quorum answered are no longer needed.
+        while self.rounds.len() > 1 && self.rounds.get(1).is_some_and(|r| r.0 <= q) {
+            self.rounds.pop_front();
+        }
     }
 
     fn append_config(&mut self, m: Membership) -> (u64, u64) {
@@ -775,7 +1014,7 @@ impl RaftGroup {
 
     fn replicate(&mut self, f: NodeId) {
         let last = self.log.last_index();
-        let (term, commit) = (self.term, self.commit);
+        let (term, commit, seq) = (self.term, self.commit, self.seq);
         let snapshot = self.snapshot_meta();
         let State::Leader { progress } = &mut self.state else { return };
         let Some(p) = progress.get_mut(&f) else { return };
@@ -789,7 +1028,7 @@ impl RaftGroup {
             // The entries it needs are compacted: send the snapshot.
             self.outbox.push(Send {
                 to: f,
-                msg: Message::Snapshot { term, meta: snapshot, data: Bytes::new() },
+                msg: Message::Snapshot { term, meta: snapshot, data: Bytes::new(), seq },
                 fill_from: None,
                 attach_snapshot: true,
             });
@@ -799,7 +1038,7 @@ impl RaftGroup {
         let prev_term = self.log.term_at(prev_index).expect("prev is in the log");
         self.outbox.push(Send {
             to: f,
-            msg: Message::Append { term, prev_index, prev_term, entries: Vec::new(), commit },
+            msg: Message::Append { term, prev_index, prev_term, entries: Vec::new(), commit, seq },
             fill_from: Some(fill),
             attach_snapshot: false,
         });
@@ -807,7 +1046,7 @@ impl RaftGroup {
 
     fn replicate_or_heartbeat(&mut self, f: NodeId) {
         let last = self.log.last_index();
-        let (term, commit) = (self.term, self.commit);
+        let (term, commit, seq) = (self.term, self.commit, self.seq);
         let State::Leader { progress } = &self.state else { return };
         let Some(p) = progress.get(&f) else { return };
         if !p.inflight && p.next <= last {
@@ -821,7 +1060,7 @@ impl RaftGroup {
         let prev_term = self.log.term_at(prev_index).expect("matched is in the log");
         self.send(
             f,
-            Message::Append { term, prev_index, prev_term, entries: Vec::new(), commit: commit.min(prev_index) },
+            Message::Append { term, prev_index, prev_term, entries: Vec::new(), commit: commit.min(prev_index), seq },
         );
     }
 
@@ -839,11 +1078,12 @@ impl RaftGroup {
         self.log.run_start(index).max(matched + 1)
     }
 
-    fn on_append_reply(&mut self, from: NodeId, result: AppendResult) {
+    fn on_append_reply(&mut self, from: NodeId, result: AppendResult, seq: u64) {
         let State::Leader { progress } = &self.state else { return };
         let Some(p) = progress.get(&from).cloned() else { return };
         let mut p = p;
         p.active = true;
+        p.acked = p.acked.max(seq);
         match result {
             AppendResult::Accepted { last } => {
                 // A heartbeat's answer (last < next) says nothing about the
@@ -860,6 +1100,7 @@ impl RaftGroup {
                 // Only the answer to the append in flight moves `next`.
                 if prev_index + 1 != p.next || prev_index < p.matched {
                     self.put_progress(from, p);
+                    self.check_reads();
                     return;
                 }
                 p.inflight = false;
@@ -875,8 +1116,10 @@ impl RaftGroup {
             }
         }
         self.put_progress(from, p);
+        self.check_reads();
         self.maybe_commit();
         self.replicate(from);
+        self.maybe_timeout_now(from);
     }
 
     fn put_progress(&mut self, f: NodeId, p: Progress) {
@@ -898,6 +1141,9 @@ impl RaftGroup {
             self.hs_dirty = true;
             // Followers learn the new commit index with the next append or
             // heartbeat.
+            for ctx in std::mem::take(&mut self.reads_waiting) {
+                self.register_read(ctx);
+            }
         }
         self.after_commit();
     }
@@ -934,11 +1180,13 @@ impl RaftGroup {
         // removed node that keeps campaigning is held off by pre-vote (its
         // log is behind) and leader stickiness.
         if mterm > self.term {
-            if let Message::Vote { .. } = msg {
+            if let Message::Vote { transfer, .. } = msg {
                 // Leader stickiness: while we hear from a leader, nobody can
-                // take over by asking for votes.
+                // take over by asking for votes, unless the leader asked.
                 let in_lease = self.leader.is_some() && self.election_elapsed < self.cfg.election_ticks;
-                if in_lease {
+                // With leases, a node that just started may have forgotten
+                // such a leader: it waits an election timeout.
+                if (in_lease && !transfer) || self.quiet > 0 {
                     return;
                 }
             }
@@ -950,7 +1198,7 @@ impl RaftGroup {
             }
         } else if mterm < self.term {
             match msg {
-                Message::Append { prev_index, .. } => {
+                Message::Append { prev_index, seq, .. } => {
                     let last_index = self.log.last_index();
                     let term = self.term;
                     self.send(
@@ -958,14 +1206,15 @@ impl RaftGroup {
                         Message::AppendReply {
                             term,
                             result: AppendResult::Rejected { prev_index, last_index, conflict: None },
+                            seq,
                         },
                     );
                 }
-                Message::Snapshot { meta, .. } => {
+                Message::Snapshot { meta, seq, .. } => {
                     let last_index = self.log.last_index();
                     let term = self.term;
                     let result = AppendResult::Rejected { prev_index: meta.index, last_index, conflict: None };
-                    self.send(from, Message::AppendReply { term, result });
+                    self.send(from, Message::AppendReply { term, result, seq });
                 }
                 Message::Vote { pre, .. } => {
                     let term = self.term;
@@ -977,17 +1226,25 @@ impl RaftGroup {
         }
 
         match msg {
-            Message::Vote { term, last_index, last_term, pre } => self.on_vote(from, term, last_index, last_term, pre),
+            Message::Vote { term, last_index, last_term, pre, .. } => {
+                self.on_vote(from, term, last_index, last_term, pre)
+            }
             Message::VoteReply { term, granted, pre } => self.on_vote_reply(from, term, granted, pre),
-            Message::Append { term, prev_index, prev_term, entries, commit } => {
+            Message::Append { term, prev_index, prev_term, entries, commit, seq } => {
                 self.follow(term, from);
-                self.on_append(from, prev_index, prev_term, entries, commit);
+                self.on_append(from, prev_index, prev_term, entries, commit, seq);
             }
-            Message::Snapshot { term, meta, data } => {
+            Message::Snapshot { term, meta, data, seq } => {
                 self.follow(term, from);
-                self.on_snapshot(from, meta, data);
+                self.on_snapshot(from, meta, data, seq);
             }
-            Message::AppendReply { result, .. } => self.on_append_reply(from, result),
+            Message::AppendReply { result, seq, .. } => self.on_append_reply(from, result, seq),
+            Message::TimeoutNow { .. } => {
+                // The leader hands over: campaign now, skipping pre-vote.
+                if !matches!(self.state, State::Leader { .. }) && self.can_campaign() {
+                    self.campaign_with(true);
+                }
+            }
         }
     }
 
@@ -1059,6 +1316,7 @@ impl RaftGroup {
         mut prev_term: u64,
         mut entries: Vec<Entry>,
         commit: u64,
+        seq: u64,
     ) {
         let term = self.term;
         let last_index = self.log.last_index();
@@ -1068,6 +1326,7 @@ impl RaftGroup {
                 Message::AppendReply {
                     term,
                     result: AppendResult::Rejected { prev_index, last_index, conflict: None },
+                    seq,
                 },
             );
             return;
@@ -1091,6 +1350,7 @@ impl RaftGroup {
                 Message::AppendReply {
                     term,
                     result: AppendResult::Rejected { prev_index, last_index, conflict: Some((have, first)) },
+                    seq,
                 },
             );
             return;
@@ -1122,10 +1382,10 @@ impl RaftGroup {
             self.commit = new_commit;
             self.hs_dirty = true;
         }
-        self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: last_new } });
+        self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: last_new }, seq });
     }
 
-    fn on_snapshot(&mut self, from: NodeId, meta: SnapshotMeta, data: Bytes) {
+    fn on_snapshot(&mut self, from: NodeId, meta: SnapshotMeta, data: Bytes, seq: u64) {
         let term = self.term;
         let index = meta.index;
         if index <= self.commit {
@@ -1150,7 +1410,7 @@ impl RaftGroup {
             self.pending_snapshot = Some(Snapshot { meta, data });
         }
         // Either way the log now matches the leader's up to `index`.
-        self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: index } });
+        self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: index }, seq });
     }
 
     fn truncate_from(&mut self, index: u64) {
@@ -1182,11 +1442,18 @@ impl RaftGroup {
             || self.pending_truncate.is_some()
             || !self.pending_entries.is_empty()
             || !self.outbox.is_empty()
+            || self.need_round
+            || !self.reads_ready.is_empty()
+            || !self.reads_aborted.is_empty()
             || self.commit > self.applied
     }
 
     /// Takes everything the driver has to do. See [`Ready`] for the order.
     pub fn ready(&mut self) -> Ready {
+        // Every read that arrived since the last ready shares one round.
+        if self.need_round && matches!(self.state, State::Leader { .. }) {
+            self.start_round();
+        }
         let hard_state = std::mem::take(&mut self.hs_dirty).then_some(HardState {
             term: self.term,
             vote: self.vote,
@@ -1206,6 +1473,8 @@ impl RaftGroup {
             truncate_from: self.pending_truncate.take(),
             entries,
             committed,
+            reads: std::mem::take(&mut self.reads_ready),
+            reads_aborted: std::mem::take(&mut self.reads_aborted),
             messages: std::mem::take(&mut self.outbox),
         }
     }

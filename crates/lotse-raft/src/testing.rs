@@ -11,7 +11,8 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
-    Config, Entry, EntryKind, HardState, Membership, Message, RaftGroup, Restored, Send, SnapshotMeta, TermRuns,
+    Config, Entry, EntryKind, HardState, Membership, Message, RaftGroup, ReadState, Restored, Send, SnapshotMeta,
+    TermRuns,
 };
 
 /// Size of a batch header in `lotse-record`; counts towards the fill limit.
@@ -33,6 +34,10 @@ pub struct MemNode {
     /// Largest number of bytes (headers included) per append; at least one
     /// entry is always sent.
     pub max_fill_bytes: usize,
+    /// Reads confirmed so far, with the index applied when each was served.
+    pub reads: Vec<(ReadState, u64)>,
+    /// Reads aborted so far.
+    pub reads_aborted: Vec<u64>,
     cfg: Config,
 }
 
@@ -46,6 +51,8 @@ impl MemNode {
             applied: Vec::new(),
             snapshot: None,
             max_fill_bytes: 64 * 1024,
+            reads: Vec::new(),
+            reads_aborted: Vec::new(),
             cfg,
         }
     }
@@ -143,6 +150,13 @@ impl MemNode {
             assert_eq!(slice.last().map(|e| e.last), Some(last), "committed range ends inside an entry");
             self.applied.extend_from_slice(slice);
         }
+        // Reads are served after applying; their index is applied by now.
+        let applied = self.applied.last().map_or(0, |e| e.last);
+        for r in ready.reads {
+            assert!(r.index <= applied, "read {} served before its index {} was applied", r.ctx, r.index);
+            self.reads.push((r, applied));
+        }
+        self.reads_aborted.extend(ready.reads_aborted);
         self.raft.advance();
         let mut out = ready.messages;
         for s in &mut out {
