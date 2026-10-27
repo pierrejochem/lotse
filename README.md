@@ -9,9 +9,14 @@ Status: foundation. The runtime seam, the record format, the segmented log, the 
 ## Documentation
 
 - [Design document](docs/design.md): architecture and storage design with the reasons behind each decision (German).
+- [Architecture decisions](docs/adr/): one record per decision, with its reasons.
 - [Architecture overview](docs/architecture.png): the whole system on one page.
 - [Brand](docs/brand/): the Fairway mark, logos, colours, type and design tokens.
 - [Console](docs/console/): screenshots and mockups of the management console.
+
+## Contributing
+
+[AGENTS.md](AGENTS.md) holds the rules, commands and conventions for everyone who changes this repository, people and AI coding agents alike; [agents/lotse-engineer.md](agents/lotse-engineer.md) describes the project's dedicated coding agent.
 
 ## Crates
 
