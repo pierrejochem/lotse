@@ -1,8 +1,17 @@
 # Lotse
 
+<p><img src="docs/brand/logos/lotse-wordmark.svg" alt="Lotse" height="56"></p>
+
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
 Status: foundation. The runtime seam, the record format, the segmented log, the Raft core and the simulation harness exist and are tested, and so does the management console, which runs against a built-in demo cluster. Transactions, queue and stream semantics and the broker server come next.
+
+## Documentation
+
+- [Design document](docs/design.md): architecture and storage design with the reasons behind each decision (German).
+- [Architecture overview](docs/architecture.png): the whole system on one page.
+- [Brand](docs/brand/): the Fairway mark, logos, colours, type and design tokens.
+- [Console](docs/console/): screenshots and mockups of the management console.
 
 ## Crates
 

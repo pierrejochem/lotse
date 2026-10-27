@@ -1,0 +1,27 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-10-27T17:45:00Z"},
+  "title": "Lotse Console",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1440, "h": 1560, "title": "Cluster overview", "expand": "fill", "is_interactive": true},
+    "Streams.dc.html": {"x": 1520, "y": 0, "w": 1440, "h": 1560, "title": "Stream detail", "expand": "fill", "is_interactive": true},
+    "Queues.dc.html": {"x": 3040, "y": 0, "w": 1440, "h": 1560, "title": "Queue detail", "expand": "fill", "is_interactive": true},
+    "Messages.dc.html": {"x": 0, "y": 1980, "w": 1440, "h": 1100, "title": "Message browser", "expand": "fill", "is_interactive": true},
+    "Nodes.dc.html": {"x": 1520, "y": 1980, "w": 1440, "h": 1100, "title": "Nodes and rolling upgrade", "expand": "fill", "is_interactive": true},
+    "Tenants.dc.html": {"x": 3040, "y": 1980, "w": 1440, "h": 1100, "title": "Tenants and access", "expand": "fill", "is_interactive": true},
+    "CreateQueue.dc.html": {"x": 0, "y": 3500, "w": 1440, "h": 900, "title": "Create queue dialog"},
+    "Nav.dc.html": {"x": 1520, "y": 3500, "w": 240, "h": 960, "title": "Navigation (shared component)", "is_interactive": true}
+  },
+  "order": ["Main.dc.html", "Streams.dc.html", "Queues.dc.html", "Messages.dc.html", "Nodes.dc.html", "Tenants.dc.html", "CreateQueue.dc.html", "Nav.dc.html"],
+  "notes": {
+    "row1": {"x": 0, "y": -300, "text": "Cluster and data", "kind": "title1", "maxW": 4480},
+    "row2": {"x": 0, "y": 1680, "text": "Operations and access", "kind": "title1", "maxW": 4480},
+    "row3": {"x": 0, "y": 3200, "text": "Dialogs and shared parts", "kind": "title1", "maxW": 4480},
+    "stack": {"x": 1840, "y": 3500, "w": 560, "fill": "blue", "size": "m", "text": "Frontend: React 18 + TypeScript, Radix primitives styled with the Lotse tokens.\n\nTabs: Tabs · Time range: ToggleGroup · Cluster and account menus, row actions: DropdownMenu · Tenant filter: Select · Create queue: Dialog · Purge: AlertDialog · Hints: Tooltip · Upgrade: Progress · Results: Toast · Long tables: ScrollArea · Switches: Switch.\n\nServed by lotse-console on its own node. The browser only talks to lotse-console (REST + WebSocket); lotse-console talks the native protocol to the cluster."}
+  },
+  "designSystems": [
+    {"title": "Lotse", "namespace": "lotse", "artifact": "https://claude.ai/artifact/6VW18LmsUHS1Upk5ucGQHg", "version": "1793091456-32db", "copiedAt": "2026-10-27T17:45:00Z"}
+  ]
+}

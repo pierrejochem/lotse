@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Message browser</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="messages" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600;">Message browser</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 24px;">
+      <div>
+        <h1 style="margin: 0; font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.01em;">Message browser</h1>
+        <p style="margin: 6px 0 0; font-size: 14px; color: #4F6575;">Reads records without joining a consumer group or moving any offset. Reads are logged in the audit log.</p>
+      </div>
+
+      <form aria-label="What to read" style="display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px; padding: 16px 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="src" style="font-size: 13px; font-weight: 600;">Stream or queue</label>
+          <button id="src" type="button" aria-haspopup="listbox" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 200px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; cursor: pointer;">orders<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="part" style="font-size: 13px; font-weight: 600;">Partition</label>
+          <button id="part" type="button" aria-haspopup="listbox" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 96px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; cursor: pointer;">P4<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+        </div>
+        <fieldset style="margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 6px;">
+          <legend style="padding: 0; margin-bottom: 6px; font-size: 13px; font-weight: 600;">Start at</legend>
+          <div role="group" aria-label="Start at" style="display: flex; gap: 2px; padding: 3px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9;">
+            <button type="button" aria-pressed="true" style="height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Offset</button>
+            <button type="button" aria-pressed="false" style="height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: #4F6575; font: inherit; font-size: 14px; cursor: pointer;">Time</button>
+            <button type="button" aria-pressed="false" style="height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: #4F6575; font: inherit; font-size: 14px; cursor: pointer;">Newest</button>
+          </div>
+        </fieldset>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="offset" style="font-size: 13px; font-weight: 600;">Offset</label>
+          <input id="offset" type="text" inputmode="numeric" value="18,442,100" style="box-sizing: border-box; width: 150px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px; flex: 1 1 180px;">
+          <label for="key" style="font-size: 13px; font-weight: 600;">Key contains</label>
+          <input id="key" type="text" placeholder="e.g. ord_" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; height: 40px;">
+          <button type="button" role="switch" aria-checked="false" aria-labelledby="iso-label" style="position: relative; width: 40px; height: 24px; padding: 0; border: 0; border-radius: 12px; background: #4F6575; cursor: pointer;"><span style="position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 9px; background: #FFFFFF;"></span></button>
+          <span id="iso-label" style="font-size: 14px;">Committed only</span>
+        </div>
+        <button type="submit" style="height: 40px; padding: 0 18px; border: 0; border-radius: 8px; background: #C8322B; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Read 50 records</button>
+      </form>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start;">
+        <section aria-label="Records" style="flex: 3 1 520px; min-width: 0; overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Offset</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Time</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Key</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Size</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Transaction</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{records}}" as="r" hint-placeholder-count="12">
+                <tr style="{{r.rowStyle}}">
+                  <td style="padding: 10px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{r.offset}}</td>
+                  <td style="padding: 10px 16px; border-top: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4F6575; white-space: nowrap;">{{r.time}}</td>
+                  <td style="padding: 10px 16px; border-top: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; white-space: nowrap;">{{r.key}}</td>
+                  <td style="padding: 10px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;">{{r.size}}</td>
+                  <td style="padding: 10px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{r.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{r.tx}}</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </section>
+
+        <aside aria-labelledby="rec-title" style="flex: 2 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;">
+            <div>
+              <span style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Record</span>
+              <h2 id="rec-title" style="margin: 2px 0 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 18px; line-height: 26px; font-weight: 500;">orders / P4 / 18,442,107</h2>
+            </div>
+            <button type="button" aria-label="Close record" style="display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; cursor: pointer;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#0F2B3D" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+          </div>
+
+          <dl style="margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; font-size: 14px;">
+            <div><dt style="color: #4F6575; font-size: 13px;">Key</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">ord_7KfQ2m</dd></div>
+            <div><dt style="color: #4F6575; font-size: 13px;">Timestamp</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">17:44:58.214</dd></div>
+            <div><dt style="color: #4F6575; font-size: 13px;">Transaction</dt><dd style="margin: 0;">Committed by marker at 18,442,110</dd></div>
+            <div><dt style="color: #4F6575; font-size: 13px;">Producer</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">id 7311 · epoch 2 · seq 88,016</dd></div>
+            <div><dt style="color: #4F6575; font-size: 13px;">Batch</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">18,442,105–18,442,108</dd></div>
+            <div><dt style="color: #4F6575; font-size: 13px;">Raft term</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">18 · leader broker-2</dd></div>
+          </dl>
+
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <h3 style="margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Headers</h3>
+            <table style="width: 100%; border-collapse: collapse; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+              <tbody>
+                <tr><th scope="row" style="padding: 6px 12px 6px 0; text-align: left; font-weight: 500; color: #4F6575; white-space: nowrap; border-top: 1px solid #D5DEE4;">lotse.schema-id</th><td style="padding: 6px 0; border-top: 1px solid #D5DEE4;">42</td></tr>
+                <tr><th scope="row" style="padding: 6px 12px 6px 0; text-align: left; font-weight: 500; color: #4F6575; white-space: nowrap; border-top: 1px solid #D5DEE4;">content-type</th><td style="padding: 6px 0; border-top: 1px solid #D5DEE4;">application/json</td></tr>
+                <tr><th scope="row" style="padding: 6px 12px 6px 0; text-align: left; font-weight: 500; color: #4F6575; white-space: nowrap; border-top: 1px solid #D5DEE4;">traceparent</th><td style="padding: 6px 0; border-top: 1px solid #D5DEE4; word-break: break-all;">00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+              <h3 style="margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Value · 412 B · JSON</h3>
+              <button type="button" style="height: 32px; padding: 0 10px; border: 1px solid #D5DEE4; border-radius: 6px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;">Copy value</button>
+            </div>
+            <pre style="margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: 8px; background: #F6F8F9; border: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; white-space: pre;">{
+  "order_id": "ord_7KfQ2m",
+  "customer_id": "cus_19Aa0",
+  "status": "paid",
+  "currency": "EUR",
+  "total_minor": 8450,
+  "lines": [
+    { "sku": "HB-4410", "qty": 2, "unit_minor": 3200 },
+    { "sku": "HB-0007", "qty": 1, "unit_minor": 2050 }
+  ],
+  "paid_at": "2026-10-27T17:44:58.102Z"
+}</pre>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <h3 style="margin: 0; font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Same read from the CLI</h3>
+            <pre style="margin: 0; padding: 12px 16px; overflow-x: auto; border-radius: 8px; background: #0F2B3D; color: #E8EFF3; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; white-space: pre;">lotse-cli read orders --partition 4 \
+  --offset 18442107 --count 1 --isolation uncommitted</pre>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      warn: chip + 'background: #FBF0DC; color: #7A4F0E;',
+      info: chip + 'background: #E3EAEF; color: #0F2B3D;',
+      none: chip + 'background: transparent; color: #4F6575; padding-left: 0;'
+    };
+    const row = (offset, time, key, size, tx, kind, selected) => ({
+      offset, time, key, size, tx, chipStyle: tone[kind],
+      rowStyle: selected ? 'background: #FDF0EE;' : (kind === 'info' && tx.indexOf('marker') >= 0 ? 'color: #4F6575;' : '')
+    });
+    return {
+      records: [
+        row('18,442,100', '17:44:57.880', 'ord_6TbP0x', '388 B', 'None', 'none'),
+        row('18,442,101', '17:44:57.931', 'ord_6TbP1c', '402 B', 'Committed', 'ok'),
+        row('18,442,102', '17:44:58.004', 'ord_6TbP1c', '96 B', 'Aborted', 'info'),
+        row('18,442,103', '17:44:58.005', '—', '24 B', 'ABORT marker', 'info'),
+        row('18,442,104', '17:44:58.090', 'ord_6TbP2r', '371 B', 'None', 'none'),
+        row('18,442,105', '17:44:58.198', 'ord_7KfQ2m', '410 B', 'Committed', 'ok'),
+        row('18,442,106', '17:44:58.201', 'ord_7KfQ2m', '128 B', 'Committed', 'ok'),
+        row('18,442,107', '17:44:58.214', 'ord_7KfQ2m', '412 B', 'Committed', 'ok', true),
+        row('18,442,108', '17:44:58.214', 'ord_7KfQ2m', '88 B', 'Committed', 'ok'),
+        row('18,442,109', '17:44:58.230', 'ord_7KfQ9z', '395 B', 'Open', 'warn'),
+        row('18,442,110', '17:44:58.241', '—', '24 B', 'COMMIT marker', 'info'),
+        row('18,442,111', '17:44:58.302', 'ord_7KfR0a', '366 B', 'None', 'none')
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Queue payments.capture</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="queues" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <a href="#queues" style="color: #4F6575;">Queues</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">payments.capture</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="listbox" style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; cursor: pointer;">All tenants<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 28px;">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px;">
+        <div style="min-width: 0; display: flex; flex-direction: column; gap: 10px;">
+          <span style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Queue · tenant commerce</span>
+          <h1 style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 36px; font-weight: 500; letter-spacing: -0.01em;">payments.capture</h1>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">3 priority levels</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Single active consumer</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Dead letter after 5 deliveries</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Message TTL 24 h</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Bound to <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px;">payments</span> · <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px;">payment.*.capture</span></span>
+          </div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px;">
+          <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Peek messages</button>
+          <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Edit config</button>
+          <button type="button" aria-haspopup="dialog" style="height: 40px; padding: 0 14px; border: 1px solid #C8322B; border-radius: 8px; background: #FFFFFF; color: #C8322B; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Purge queue…</button>
+        </div>
+      </div>
+
+      <dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; border: 1px solid #D5DEE4; border-radius: 8px; overflow: hidden; background: #D5DEE4;">
+        <sc-for list="{{stats}}" as="s" hint-placeholder-count="6">
+          <div style="display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; background: #FFFFFF;">
+            <dt style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">{{s.label}}</dt>
+            <dd style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700; font-variant-numeric: tabular-nums;">{{s.value}}</dd>
+            <dd style="margin: 0; font-size: 13px; line-height: 18px; color: #4F6575;">{{s.note}}</dd>
+          </div>
+        </sc-for>
+      </dl>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 16px;">
+        <section aria-labelledby="prio-title" style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 16px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <div>
+            <h2 id="prio-title" style="margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;">Priority levels</h2>
+            <p style="margin: 4px 0 0; font-size: 13px; line-height: 18px; color: #4F6575;">Each level is its own sub-log and Raft group. Delivery drains the highest non-empty level first.</p>
+          </div>
+          <sc-for list="{{levels}}" as="l" hint-placeholder-count="3">
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+              <div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px;">
+                <span style="font-weight: 600;">{{l.name}} <span style="font-weight: 400; font-size: 13px; color: #4F6575;">leader <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;">{{l.leader}}</span></span></span>
+                <span style="font-size: 14px; font-variant-numeric: tabular-nums;"><span style="font-weight: 600;">{{l.ready}}</span> ready · oldest {{l.oldest}}</span>
+              </div>
+              <span style="position: relative; display: block; height: 8px; border-radius: 4px; background: #E3EAEF;" aria-hidden="true"><span style="{{l.bar}}"></span></span>
+            </div>
+          </sc-for>
+        </section>
+
+        <section aria-labelledby="sac-title" style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <h2 id="sac-title" style="margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;">Last handover</h2>
+          <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; font-size: 14px;">
+            <li style="display: flex; gap: 12px;"><span style="flex: 0 0 52px; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4F6575;">16:12:04</span><span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">capture-worker-3</span> missed its credit deadline (30 s) and was dropped.</span></li>
+            <li style="display: flex; gap: 12px;"><span style="flex: 0 0 52px; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4F6575;">16:12:04</span><span>Its 2 open ack transactions were aborted; 14 messages became deliverable again.</span></li>
+            <li style="display: flex; gap: 12px;"><span style="flex: 0 0 52px; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4F6575;">16:12:05</span><span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">capture-worker-1</span> became the active consumer and received them first.</span></li>
+          </ol>
+        </section>
+      </div>
+
+      <section aria-labelledby="consumers-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <h2 id="consumers-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Consumers</h2>
+        <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Consumer</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Principal</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Connection</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Credit in use</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Acks/s</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{consumers}}" as="c" hint-placeholder-count="3">
+                <tr>
+                  <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500; white-space: nowrap;">{{c.tag}}</th>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{c.principal}}</span> <span style="color: #4F6575; font-size: 13px;">mTLS</span></td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; white-space: nowrap; color: #4F6575;">{{c.conn}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                      <span style="position: relative; display: block; width: 96px; height: 8px; border-radius: 4px; background: #E3EAEF;" aria-hidden="true"><span style="{{c.bar}}"></span></span>
+                      <span>{{c.credit}}</span>
+                    </div>
+                  </td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{c.acks}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{c.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{c.state}}</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="dlq-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px;">
+          <h2 id="dlq-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Dead letters <span style="font-weight: 500; font-size: 15px; color: #4F6575;">in <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 14px;">payments.capture.dlq</span></span></h2>
+          <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Requeue all 211</button>
+        </div>
+        <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Offset</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Key</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Reason</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Deliveries</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Dead-lettered</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{dead}}" as="d" hint-placeholder-count="5">
+                <tr>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{d.offset}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; white-space: nowrap;">{{d.key}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4;">{{d.reason}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{d.deliveries}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap; color: #4F6575;">{{d.when}}</td>
+                  <td style="padding: 8px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;"><button type="button" aria-label="{{d.requeueLabel}}" style="height: 32px; padding: 0 10px; border: 1px solid #D5DEE4; border-radius: 6px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;">Requeue</button></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1560}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      info: chip + 'background: #E3EAEF; color: #0F2B3D;'
+    };
+    const bar = (pct, color) => 'position: absolute; left: 0; top: 0; height: 8px; border-radius: 4px; width: ' + pct + '%; background: ' + color + ';';
+    return {
+      stats: [
+        { label: 'Ready', value: '1,942', note: 'across 3 levels' },
+        { label: 'In flight', value: '118', note: 'delivered, not acked' },
+        { label: 'In open txns', value: '6', note: 'acks waiting for commit' },
+        { label: 'Publish', value: '820/s', note: 'via exchange payments' },
+        { label: 'Ack', value: '805/s', note: 'p99 ack 42 ms' },
+        { label: 'Dead-lettered', value: '211', note: '+38 in the last hour' }
+      ],
+      levels: [
+        { name: 'Level 2, high', leader: 'broker-1', ready: '12', oldest: '0.4 s', bar: bar(1, '#8A6416') },
+        { name: 'Level 1, normal', leader: 'broker-2', ready: '1,880', oldest: '2 min 10 s', bar: bar(97, '#0F2B3D') },
+        { name: 'Level 0, low', leader: 'broker-1', ready: '50', oldest: '9 min 41 s', bar: bar(3, '#4F6575') }
+      ],
+      consumers: [
+        { tag: 'capture-worker-1', principal: 'CN=capture-svc', conn: '10.4.6.21 → broker-2', credit: '118 / 128 msgs · 3.1 / 4 MiB', bar: bar(92, '#0F2B3D'), acks: '805', state: 'Active', chipStyle: tone.ok },
+        { tag: 'capture-worker-2', principal: 'CN=capture-svc', conn: '10.4.6.22 → broker-2', credit: '0 / 128 msgs · standby', bar: bar(0, '#0F2B3D'), acks: '0', state: 'Standby', chipStyle: tone.info },
+        { tag: 'capture-worker-4', principal: 'CN=capture-svc', conn: '10.4.7.30 → broker-1', credit: '0 / 128 msgs · standby', bar: bar(0, '#0F2B3D'), acks: '0', state: 'Standby', chipStyle: tone.info }
+      ],
+      dead: [
+        { offset: '4,812,330', key: 'pay_8Hq2LmT', reason: 'Rejected without requeue (Nack requeue=false)', deliveries: '1', when: '17:43:12', requeueLabel: 'Requeue offset 4,812,330' },
+        { offset: '4,812,118', key: 'pay_3vR9xKa', reason: 'Max deliveries reached (5)', deliveries: '5', when: '17:41:57', requeueLabel: 'Requeue offset 4,812,118' },
+        { offset: '4,811,904', key: 'pay_Q0d1sWe', reason: 'Max deliveries reached (5)', deliveries: '5', when: '17:40:33', requeueLabel: 'Requeue offset 4,811,904' },
+        { offset: '4,809,215', key: 'pay_kP7yNb2', reason: 'TTL expired (24 h)', deliveries: '0', when: '17:31:08', requeueLabel: 'Requeue offset 4,809,215' },
+        { offset: '4,808,977', key: 'pay_Zt4uHc9', reason: 'Max deliveries reached (5)', deliveries: '5', when: '17:29:46', requeueLabel: 'Requeue offset 4,808,977' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

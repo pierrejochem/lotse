@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nodes and rolling upgrade</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="nodes" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600;">Nodes</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 28px;">
+      <div>
+        <h1 style="margin: 0; font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.01em;">Nodes</h1>
+        <p style="margin: 6px 0 0; font-size: 14px; color: #4F6575;">3 broker nodes in 3 zones · managed by the Lotse operator in namespace <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">messaging</span></p>
+      </div>
+
+      <section aria-labelledby="up-title" style="display: flex; flex-direction: column; gap: 18px; padding: 24px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+        <div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 16px;">
+          <div style="min-width: 0;">
+            <h2 id="up-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Rolling upgrade <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 18px; font-weight: 500;">0.4.0 → 0.4.1</span></h2>
+            <p style="margin: 4px 0 0; font-size: 14px; color: #4F6575;">Started 17:21 by pierre · in place, same node ID and volume · one node at a time</p>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+            <a href="#operator-log" style="font-size: 14px; font-weight: 600;">Operator log</a>
+            <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Pause after this node</button>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div style="display: flex; justify-content: space-between; font-size: 14px;"><span id="up-progress-label" style="font-weight: 600;">1 of 3 nodes upgraded</span><span style="color: #4F6575;">about 20 min left</span></div>
+          <div role="progressbar" aria-labelledby="up-progress-label" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1" style="position: relative; height: 10px; border-radius: 5px; background: #E3EAEF; overflow: hidden;">
+            <span style="position: absolute; left: 0; top: 0; bottom: 0; width: 33.3%; background: #0F2B3D;"></span>
+            <span style="position: absolute; left: 33.3%; top: 0; bottom: 0; width: 22%; background: #8A6416;"></span>
+          </div>
+        </div>
+
+        <ol style="margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px;">
+          <sc-for list="{{steps}}" as="s" hint-placeholder-count="3">
+            <li style="{{s.boxStyle}}">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 500;">{{s.node}}</span>
+                <span style="{{s.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{s.state}}</span>
+              </div>
+              <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 14px;">
+                <sc-for list="{{s.phases}}" as="ph" hint-placeholder-count="4">
+                  <li style="display: flex; align-items: flex-start; gap: 8px;">
+                    <span style="{{ph.markStyle}}" aria-hidden="true"></span>
+                    <span style="{{ph.textStyle}}">{{ph.text}}</span>
+                  </li>
+                </sc-for>
+              </ol>
+              <p style="margin: 0; font-size: 13px; line-height: 18px; color: #4F6575;">{{s.note}}</p>
+            </li>
+          </sc-for>
+        </ol>
+      </section>
+
+      <section aria-labelledby="cards-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <h2 id="cards-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Broker nodes</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
+          <sc-for list="{{nodes}}" as="n" hint-placeholder-count="3">
+            <article style="display: flex; flex-direction: column; gap: 14px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+              <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
+                <div>
+                  <h3 style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 17px; line-height: 24px; font-weight: 500;">{{n.id}}</h3>
+                  <p style="margin: 2px 0 0; font-size: 13px; color: #4F6575;">{{n.role}} · zone {{n.zone}} · up {{n.uptime}}</p>
+                </div>
+                <span style="{{n.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{n.status}}</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; justify-content: space-between; font-size: 14px;"><span>Disk</span><span style="font-variant-numeric: tabular-nums;"><span style="font-weight: 600;">{{n.free}}</span> free of 4 TiB</span></div>
+                <span style="position: relative; display: block; height: 8px; border-radius: 4px; background: #E3EAEF;" aria-hidden="true"><span style="{{n.bar}}"></span><span style="position: absolute; left: 80%; top: -3px; width: 1px; height: 14px; background: #4F6575;"></span><span style="position: absolute; left: 90%; top: -3px; width: 1px; height: 14px; background: #4F6575;"></span></span>
+              </div>
+              <dl style="margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; font-size: 14px; font-variant-numeric: tabular-nums;">
+                <div><dt style="font-size: 13px; color: #4F6575;">Leads / replicas</dt><dd style="margin: 0; font-weight: 600;">{{n.leads}}</dd></div>
+                <div><dt style="font-size: 13px; color: #4F6575;">Version</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{n.version}}</dd></div>
+                <div><dt style="font-size: 13px; color: #4F6575;">Connections</dt><dd style="margin: 0; font-weight: 600;">{{n.conns}}</dd></div>
+                <div><dt style="font-size: 13px; color: #4F6575;">Network in / out</dt><dd style="margin: 0; font-weight: 600;">{{n.net}}</dd></div>
+                <div><dt style="font-size: 13px; color: #4F6575;">CPU</dt><dd style="margin: 0; font-weight: 600;">{{n.cpu}}</dd></div>
+                <div><dt style="font-size: 13px; color: #4F6575;">Memory</dt><dd style="margin: 0; font-weight: 600;">{{n.mem}}</dd></div>
+              </dl>
+              <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                <button type="button" style="height: 36px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Move leaders away</button>
+                <button type="button" aria-haspopup="menu" aria-label="{{n.menuLabel}}" style="display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; cursor: pointer;"><svg width="16" height="16" viewBox="0 0 16 16" fill="#0F2B3D" aria-hidden="true"><circle cx="3.5" cy="8" r="1.25"></circle><circle cx="8" cy="8" r="1.25"></circle><circle cx="12.5" cy="8" r="1.25"></circle></svg></button>
+              </div>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section aria-labelledby="events-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <h2 id="events-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Operator events</h2>
+        <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+            <tbody>
+              <sc-for list="{{events}}" as="e" hint-placeholder-count="5">
+                <tr>
+                  <td style="width: 90px; padding: 10px 16px; border-bottom: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4F6575; white-space: nowrap;">{{e.time}}</td>
+                  <td style="width: 110px; padding: 10px 16px; border-bottom: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; white-space: nowrap;">{{e.node}}</td>
+                  <td style="padding: 10px 16px; border-bottom: 1px solid #D5DEE4;">{{e.text}}</td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      warn: chip + 'background: #FBF0DC; color: #7A4F0E;',
+      info: chip + 'background: #E3EAEF; color: #0F2B3D;'
+    };
+    const box = (current) => 'display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 8px; ' + (current ? 'border: 2px solid #8A6416; background: #FFFFFF;' : 'border: 1px solid #D5DEE4; background: #F6F8F9;');
+    const mark = 'flex: 0 0 auto; width: 12px; height: 12px; margin-top: 5px; border-radius: 6px; box-sizing: border-box; ';
+    const ph = (text, state) => ({
+      text,
+      markStyle: mark + (state === 'done' ? 'background: #0F2B3D;' : state === 'now' ? 'border: 3px solid #8A6416; background: #FFFFFF;' : 'border: 1.5px solid #4F6575;'),
+      textStyle: state === 'later' ? 'color: #4F6575;' : (state === 'now' ? 'font-weight: 600;' : '')
+    });
+    const bar = (used, warn) => 'position: absolute; left: 0; top: 0; height: 8px; border-radius: 4px; width: ' + used + '%; background: ' + (warn ? '#9A6412' : '#0F2B3D') + ';';
+    return {
+      steps: [
+        { node: 'broker-1', state: 'Done', chipStyle: tone.ok, boxStyle: box(false), note: '17:21 to 17:29 · caught up in 3 min 12 s',
+          phases: [ph('Move leaders away', 'done'), ph('Restart on 0.4.1', 'done'), ph('Catch up all Raft groups', 'done'), ph('Hand leaders back', 'done')] },
+        { node: 'broker-3', state: 'Catching up', chipStyle: tone.warn, boxStyle: box(true), note: '37 Raft groups behind; slowest is orders P3 at 3,412 entries. Writes keep their 2-of-3 quorum meanwhile.',
+          phases: [ph('Move leaders away', 'done'), ph('Restart on 0.4.1', 'done'), ph('Catch up all Raft groups', 'now'), ph('Hand leaders back', 'later')] },
+        { node: 'broker-2', state: 'Waiting', chipStyle: tone.info, boxStyle: box(false), note: 'Starts when broker-3 has caught up. Soft disk limit reached; the upgrade does not change that.',
+          phases: [ph('Move leaders away', 'later'), ph('Restart on 0.4.1', 'later'), ph('Catch up all Raft groups', 'later'), ph('Hand leaders back', 'later')] }
+      ],
+      nodes: [
+        { id: 'broker-1', role: 'Metadata leader', zone: 'hh-a', uptime: '24 min', status: 'Healthy', chipStyle: tone.ok, free: '61 %', bar: bar(39, false), leads: '634 / 1,284', version: '0.4.1', conns: '1,731', net: '23.0 / 63.4 MiB/s', cpu: '38 %', mem: '19.2 / 32 GiB', menuLabel: 'More actions for broker-1' },
+        { id: 'broker-2', role: 'Voter', zone: 'hh-b', uptime: '41 d', status: 'Soft disk limit', chipStyle: tone.warn, free: '19 %', bar: bar(81, true), leads: '650 / 1,284', version: '0.4.0', conns: '1,461', net: '25.2 / 68.3 MiB/s', cpu: '46 %', mem: '21.8 / 32 GiB', menuLabel: 'More actions for broker-2' },
+        { id: 'broker-3', role: 'Voter', zone: 'hh-c', uptime: '7 min', status: 'Catching up', chipStyle: tone.warn, free: '58 %', bar: bar(42, false), leads: '0 / 1,284', version: '0.4.1', conns: '0', net: '61.5 / 0.2 MiB/s (replication)', cpu: '71 %', mem: '14.0 / 32 GiB', menuLabel: 'More actions for broker-3' }
+      ],
+      events: [
+        { time: '17:45:02', node: 'broker-3', text: '1,247 of 1,284 Raft groups caught up.' },
+        { time: '17:38:40', node: 'broker-3', text: 'Pod restarted on 0.4.1 with volume data-broker-3; recovered 6 segments with torn tails cut.' },
+        { time: '17:37:55', node: 'broker-3', text: '405 leaderships moved to broker-1 and broker-2.' },
+        { time: '17:33:18', node: 'broker-2', text: 'Soft disk limit: 19 % free. throttle_ms now applied to producers on its leaders.' },
+        { time: '17:29:06', node: 'broker-1', text: 'Leaders handed back; node upgraded.' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

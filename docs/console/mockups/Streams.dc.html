@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stream orders</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="streams" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <a href="#streams" style="color: #4F6575;">Streams</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">orders</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="listbox" style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; cursor: pointer;">All tenants<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 28px;">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px;">
+        <div style="min-width: 0; display: flex; flex-direction: column; gap: 10px;">
+          <span style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Stream · tenant commerce</span>
+          <h1 style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 30px; line-height: 36px; font-weight: 500; letter-spacing: -0.01em;">orders</h1>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">12 partitions</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Replication 3</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Retention 7 days</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Compaction off</span>
+            <span style="padding: 2px 8px; border-radius: 4px; background: #E3EAEF; font-size: 13px; line-height: 20px;">Schema ID header</span>
+          </div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px;">
+          <a href="Messages.dc.html" style="display: inline-flex; align-items: center; height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-size: 14px; font-weight: 600; text-decoration: none;">Browse records</a>
+          <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Edit config</button>
+          <button type="button" aria-haspopup="menu" aria-label="More actions for orders" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; cursor: pointer;"><svg width="16" height="16" viewBox="0 0 16 16" fill="#0F2B3D" aria-hidden="true"><circle cx="3.5" cy="8" r="1.25"></circle><circle cx="8" cy="8" r="1.25"></circle><circle cx="12.5" cy="8" r="1.25"></circle></svg></button>
+        </div>
+      </div>
+
+      <dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; border: 1px solid #D5DEE4; border-radius: 8px; overflow: hidden; background: #D5DEE4;">
+        <sc-for list="{{stats}}" as="s" hint-placeholder-count="5">
+          <div style="display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; background: #FFFFFF;">
+            <dt style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">{{s.label}}</dt>
+            <dd style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700; font-variant-numeric: tabular-nums;">{{s.value}}</dd>
+            <dd style="margin: 0; font-size: 13px; line-height: 18px; color: #4F6575;">{{s.note}}</dd>
+          </div>
+        </sc-for>
+      </dl>
+
+      <div role="tablist" aria-label="Stream sections" style="display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid #D5DEE4;">
+        <button type="button" role="tab" aria-selected="true" style="height: 44px; padding: 0 14px; border: 0; border-bottom: 2px solid #C8322B; margin-bottom: -1px; background: transparent; color: #0F2B3D; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;">Partitions</button>
+        <button type="button" role="tab" aria-selected="false" style="height: 44px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: #4F6575; font: inherit; font-size: 15px; cursor: pointer;">Consumer groups <span style="margin-left: 4px; padding: 0 6px; border-radius: 4px; background: #E3EAEF; color: #0F2B3D; font-size: 12px;">4</span></button>
+        <button type="button" role="tab" aria-selected="false" style="height: 44px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: #4F6575; font: inherit; font-size: 15px; cursor: pointer;">Config</button>
+        <button type="button" role="tab" aria-selected="false" style="height: 44px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: #4F6575; font: inherit; font-size: 15px; cursor: pointer;">Access</button>
+      </div>
+
+      <section aria-label="Partitions" style="display: flex; flex-direction: column; gap: 10px;">
+        <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Partition</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Leader · term</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Replicas</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Log start</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">High watermark</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Last stable</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Size</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Replication</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{partitions}}" as="p" hint-placeholder-count="12">
+                <tr>
+                  <th scope="row" style="padding: 11px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500;">{{p.id}}</th>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{p.leader}}</span> <span style="color: #4F6575;">· {{p.term}}</span></td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;">
+                    <span style="display: inline-flex; gap: 4px;">
+                      <span style="{{p.r1}}">1</span><span style="{{p.r2}}">2</span><span style="{{p.r3}}">3</span>
+                    </span>
+                  </td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{p.start}}</td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{p.hw}}</td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{p.lso}}</td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;">{{p.size}}</td>
+                  <td style="padding: 11px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{p.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{p.status}}</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+        <p style="margin: 0; font-size: 13px; color: #4F6575;">Replica squares: broker-1, broker-2, broker-3. Filled = leader, outlined = in sync, amber = catching up. Last stable sits below the high watermark while a transaction is open; <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;">read_committed</span> consumers stop there.</p>
+      </section>
+
+      <section aria-labelledby="groups-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <h2 id="groups-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Consumer groups reading orders</h2>
+        <div style="display: flex; flex-wrap: wrap; gap: 16px;">
+          <div style="flex: 3 1 560px; min-width: 0; overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+              <thead>
+                <tr>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Group</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Members</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">State</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Epoch</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Lag (records)</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Lag, 1 h</th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{groups}}" as="g" hint-placeholder-count="4">
+                  <tr style="{{g.rowStyle}}">
+                    <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500; white-space: nowrap;">{{g.name}}</th>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{g.members}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{g.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{g.state}}</span></td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{g.epoch}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right; font-weight: 600;">{{g.lag}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4;"><svg width="96" height="24" viewBox="0 0 96 24" role="img" aria-label="{{g.trendLabel}}"><polyline points="{{g.spark}}" fill="none" stroke="{{g.sparkColor}}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></polyline></svg></td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+
+          <aside aria-labelledby="assign-title" style="flex: 2 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <div>
+              <h3 id="assign-title" style="margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;"><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 15px; font-weight: 500;">fraud-scoring</span> assignment</h3>
+              <p style="margin: 4px 0 0; font-size: 13px; line-height: 18px; color: #4F6575;">Cooperative, assigned by the coordinator on <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;">__groups</span>-7 (broker-1). Member m4 joined at epoch 42.</p>
+            </div>
+            <sc-for list="{{members}}" as="m" hint-placeholder-count="4">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="width: 120px; flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{m.id}}</span>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                  <sc-for list="{{m.parts}}" as="pp" hint-placeholder-count="3">
+                    <span style="{{pp.style}}">{{pp.label}}</span>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-for>
+            <p style="margin: 0; padding: 10px 12px; border-radius: 4px; background: #F6F8F9; font-size: 13px; line-height: 18px; color: #4F6575;"><span style="font-weight: 600; color: #0F2B3D;">P5 in handover.</span> m2 stopped reporting it as owned at epoch 41; the coordinator gives it to m4 on m4's next heartbeat. No other partition paused.</p>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1560}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      warn: chip + 'background: #FBF0DC; color: #7A4F0E;',
+      info: chip + 'background: #E3EAEF; color: #0F2B3D;'
+    };
+    const sq = 'display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; box-sizing: border-box; border-radius: 4px; font-family: IBM Plex Mono, ui-monospace, monospace; font-size: 11px; ';
+    const rep = {
+      L: sq + 'background: #0F2B3D; color: #FFFFFF;',
+      F: sq + 'border: 1.5px solid #0F2B3D; color: #0F2B3D;',
+      C: sq + 'background: #FBF0DC; border: 1.5px solid #9A6412; color: #7A4F0E;'
+    };
+    const leaders = ['broker-1', 'broker-2', 'broker-3'];
+    const fmt = (n) => n.toLocaleString('en-US');
+    const behind = { 3: 3412, 7: 1209 };
+    const openTx = { 2: 4, 7: 11, 10: 2 };
+    const partitions = [];
+    for (let i = 0; i < 12; i++) {
+      const leader = i % 2; // broker-3 leads nothing while it upgrades
+      const hw = 18400000 + ((i * 7919) % 90000) * 11;
+      const lso = hw - (openTx[i] ? openTx[i] * 37 : 0);
+      const roles = [0, 1, 2].map((b) => (b === leader ? 'L' : (b === 2 && behind[i] ? 'C' : 'F')));
+      partitions.push({
+        id: 'P' + i,
+        leader: leaders[leader],
+        term: 'term ' + (17 + (i % 3)),
+        r1: rep[roles[0]], r2: rep[roles[1]], r3: rep[roles[2]],
+        start: fmt(hw - 2310000 - i * 4100),
+        hw: fmt(hw),
+        lso: fmt(lso),
+        size: (34 + (i % 5) * 0.6).toFixed(1) + ' GiB',
+        status: behind[i] ? 'broker-3 ' + fmt(behind[i]) + ' behind' : '3 of 3 in sync',
+        chipStyle: behind[i] ? tone.warn : tone.ok
+      });
+    }
+    const part = (label, kind) => ({
+      label,
+      style: 'display: inline-flex; align-items: center; height: 24px; padding: 0 9px; border-radius: 12px; font-family: IBM Plex Mono, ui-monospace, monospace; font-size: 12px; ' +
+        (kind === 'move' ? 'border: 1.5px dashed #8A6416; color: #6B4E10; background: #FFFFFF;' : 'background: #0F2B3D; color: #FFFFFF;')
+    });
+    return {
+      stats: [
+        { label: 'In', value: '14.2 MiB/s', note: '38 k records/s' },
+        { label: 'Out', value: '41.8 MiB/s', note: '4 groups, 15 members' },
+        { label: 'Stored', value: '418 GiB', note: 'all 3 replicas' },
+        { label: 'Oldest record', value: '6 d 22 h', note: 'retention 7 days' },
+        { label: 'Open transactions', value: '17', note: 'in 3 partitions' }
+      ],
+      partitions,
+      groups: [
+        { name: 'billing-ledger', members: '3', state: 'Stable', chipStyle: tone.ok, epoch: '14', lag: '12,480', trendLabel: 'Lag rising over the last hour', spark: '0,20 12,19 24,19 36,17 48,15 60,13 72,10 84,7 96,4', sparkColor: '#9A6412', rowStyle: '' },
+        { name: 'fraud-scoring', members: '4', state: 'Reassigning P5', chipStyle: tone.info, epoch: '42', lag: '1,102', trendLabel: 'Lag flat over the last hour', spark: '0,16 12,15 24,17 36,15 48,16 60,14 72,15 84,13 96,14', sparkColor: '#0F2B3D', rowStyle: 'background: #FDF0EE;' },
+        { name: 'search-indexer', members: '6', state: 'Stable', chipStyle: tone.ok, epoch: '31', lag: '88', trendLabel: 'Lag near zero', spark: '0,21 12,21 24,20 36,21 48,21 60,20 72,21 84,21 96,21', sparkColor: '#0F2B3D', rowStyle: '' },
+        { name: 'analytics-export', members: '2', state: 'Stable', chipStyle: tone.ok, epoch: '9', lag: '240', trendLabel: 'Lag falling', spark: '0,10 12,12 24,13 36,15 48,16 60,18 72,19 84,20 96,20', sparkColor: '#0F2B3D', rowStyle: '' }
+      ],
+      members: [
+        { id: 'm1 · 10.4.2.17', parts: [part('P0'), part('P1'), part('P2')] },
+        { id: 'm2 · 10.4.2.18', parts: [part('P3'), part('P4')] },
+        { id: 'm3 · 10.4.3.9', parts: [part('P6'), part('P7'), part('P8')] },
+        { id: 'm4 · 10.4.3.11', parts: [part('P9'), part('P10'), part('P11'), part('P5 incoming', 'move')] }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

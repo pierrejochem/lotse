@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Create queue</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div aria-hidden="true" style="position: absolute; inset: 0; display: flex;">
+    <div style="width: 240px; background: #0F2B3D;"></div>
+    <div style="flex: 1; display: flex; flex-direction: column;">
+      <div style="height: 64px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;"></div>
+      <div style="padding: 32px; display: flex; flex-direction: column; gap: 16px;">
+        <div style="width: 260px; height: 32px; border-radius: 6px; background: #E3EAEF;"></div>
+        <div style="height: 420px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;"></div>
+      </div>
+    </div>
+  </div>
+  <div aria-hidden="true" style="position: absolute; inset: 0; background: rgba(11, 23, 32, 0.56);"></div>
+
+  <div role="dialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby="dlg-desc" style="position: absolute; left: 50%; top: 40px; width: 600px; margin-left: -300px; box-sizing: border-box; display: flex; flex-direction: column; max-height: 820px; border-radius: 8px; background: #FFFFFF; border: 1px solid #D5DEE4;">
+    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 24px 24px 0;">
+      <div>
+        <h2 id="dlg-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Create queue</h2>
+        <p id="dlg-desc" style="margin: 4px 0 0; font-size: 14px; color: #4F6575;">Replicated to 3 nodes, the cluster default. You can change everything except name and tenant later.</p>
+      </div>
+      <button type="button" aria-label="Close" style="display: flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; cursor: pointer;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#0F2B3D" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+    </div>
+
+    <form style="display: flex; flex-direction: column; gap: 18px; padding: 20px 24px; overflow-y: auto;">
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-name" style="font-size: 14px; font-weight: 600;">Name</label>
+          <input id="q-name" type="text" value="payments.refund" aria-describedby="q-name-help" style="box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid #0F2B3D; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+          <span id="q-name-help" style="font-size: 13px; line-height: 18px; color: #4F6575;">Lowercase letters, digits, dots and hyphens.</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-tenant" style="font-size: 14px; font-weight: 600;">Tenant</label>
+          <button id="q-tenant" type="button" aria-haspopup="listbox" style="display: flex; align-items: center; justify-content: space-between; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; cursor: pointer;">commerce<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+          <span style="font-size: 13px; line-height: 18px; color: #4F6575;">1.31 of 2 TiB quota used</span>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-prio" style="font-size: 14px; font-weight: 600;">Priority levels</label>
+          <input id="q-prio" type="number" min="1" max="10" value="3" aria-describedby="q-prio-help" style="box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+          <span id="q-prio-help" style="font-size: 13px; line-height: 18px; color: #4F6575;">1 to 10. Each level is its own sub-log.</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-ttl" style="font-size: 14px; font-weight: 600;">Message TTL</label>
+          <div style="display: flex; gap: 6px;">
+            <input id="q-ttl" type="number" min="0" value="24" style="box-sizing: border-box; flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+            <button type="button" aria-haspopup="listbox" aria-label="TTL unit, hours" style="display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; cursor: pointer;">hours<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+          </div>
+          <span style="font-size: 13px; line-height: 18px; color: #4F6575;">0 keeps messages until acked.</span>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid #D5DEE4; border-radius: 8px;">
+        <div>
+          <span id="q-sac-label" style="display: block; font-size: 14px; font-weight: 600;">Single active consumer</span>
+          <span id="q-sac-help" style="display: block; font-size: 13px; line-height: 18px; color: #4F6575;">One consumer receives at a time; the others stand by and take over in order.</span>
+        </div>
+        <button type="button" role="switch" aria-checked="true" aria-labelledby="q-sac-label" aria-describedby="q-sac-help" style="position: relative; flex: 0 0 auto; width: 40px; height: 24px; padding: 0; border: 0; border-radius: 12px; background: #0F2B3D; cursor: pointer;"><span style="position: absolute; right: 3px; top: 3px; width: 18px; height: 18px; border-radius: 9px; background: #FFFFFF;"></span></button>
+      </div>
+
+      <fieldset style="margin: 0; padding: 14px 16px 16px; border: 1px solid #D5DEE4; border-radius: 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px;">
+        <legend style="padding: 0 6px; font-size: 14px; font-weight: 600;">Dead letters</legend>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-dlq" style="font-size: 13px; font-weight: 600;">Dead-letter queue</label>
+          <input id="q-dlq" type="text" value="payments.refund.dlq" style="box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label for="q-max" style="font-size: 13px; font-weight: 600;">After this many deliveries</label>
+          <input id="q-max" type="number" min="1" value="5" style="box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+        </div>
+        <label style="grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-size: 14px;"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 0; accent-color: #0F2B3D;">Create the dead-letter queue if it does not exist</label>
+      </fieldset>
+
+      <details open style="border-top: 1px solid #D5DEE4; padding-top: 14px;">
+        <summary style="cursor: pointer; font-size: 14px; font-weight: 600;">Same as CLI command</summary>
+        <pre style="margin: 10px 0 0; padding: 12px 16px; overflow-x: auto; border-radius: 8px; background: #0F2B3D; color: #E8EFF3; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; line-height: 20px; white-space: pre;">lotse-cli queue create payments.refund --tenant commerce \
+  --priorities 3 --single-active --ttl 24h \
+  --dlq payments.refund.dlq --max-deliveries 5 --create-dlq</pre>
+      </details>
+    </form>
+
+    <div style="display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px; border-top: 1px solid #D5DEE4;">
+      <button type="button" style="height: 40px; padding: 0 16px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Cancel</button>
+      <button type="submit" style="height: 40px; padding: 0 18px; border: 0; border-radius: 8px; background: #C8322B; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Create queue</button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

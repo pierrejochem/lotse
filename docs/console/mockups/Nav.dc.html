@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lotse navigation</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<nav aria-label="Main" style="box-sizing: border-box; width: 100%; min-height: 960px; padding: 20px 12px 16px; display: flex; flex-direction: column; gap: 24px; background: #0F2B3D; color: #FFFFFF; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif;">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px;">
+    <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true">
+      <path d="M14 0H32V64H14A14 14 0 0 1 0 50V14A14 14 0 0 1 14 0Z" fill="#2E5F80"></path>
+      <path d="M32 0H50A14 14 0 0 1 64 14V50A14 14 0 0 1 50 64H32Z" fill="#C8322B"></path>
+      <path d="M20 18C27 18 27 32 33 32M20 46C27 46 27 32 33 32M20 32H33" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"></path>
+      <rect x="8" y="14.5" width="14" height="7" rx="3.5" fill="#FFFFFF"></rect>
+      <rect x="8" y="28.5" width="14" height="7" rx="3.5" fill="#FFFFFF"></rect>
+      <rect x="8" y="42.5" width="14" height="7" rx="3.5" fill="#FFFFFF"></rect>
+      <rect x="31" y="27.5" width="25" height="9" rx="4.5" fill="#FFFFFF"></rect>
+    </svg>
+    <span style="font-size: 19px; font-weight: 800; letter-spacing: -0.02em;">Lotse</span>
+    <span style="margin-left: auto; font-size: 12px; color: #9DB0BE;">Console</span>
+  </div>
+
+  <button type="button" aria-haspopup="menu" aria-label="Switch cluster, current prod-hamburg-1" style="display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: #FFFFFF; font: inherit; text-align: left; cursor: pointer;">
+    <span style="width: 8px; height: 8px; border-radius: 4px; background: #E0A84A; flex: 0 0 auto;" aria-hidden="true"></span>
+    <span style="display: flex; flex-direction: column; min-width: 0;">
+      <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500;">prod-hamburg-1</span>
+      <span style="font-size: 12px; color: #9DB0BE;">3 nodes · upgrading to 0.4.1</span>
+    </span>
+    <svg style="margin-left: auto;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#9DB0BE" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg>
+  </button>
+
+  <div style="display: flex; flex-direction: column; gap: 2px;">
+    <span style="padding: 0 12px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #9DB0BE;">Cluster</span>
+    <a href="Main.dc.html" aria-current="{{cur.overview}}" style="{{st.overview}}"><span style="{{ic.overview}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"></rect><rect x="9" y="2" width="5" height="5" rx="1"></rect><rect x="2" y="9" width="5" height="5" rx="1"></rect><rect x="9" y="9" width="5" height="5" rx="1"></rect></svg></span>Overview</a>
+    <a href="Nodes.dc.html" aria-current="{{cur.nodes}}" style="{{st.nodes}}"><span style="{{ic.nodes}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="4.5" rx="1"></rect><rect x="2" y="9" width="12" height="4.5" rx="1"></rect><path d="M5 4.75h.01M5 11.25h.01"></path></svg></span>Nodes<span style="margin-left: auto; padding: 0 6px; border-radius: 4px; background: #E0A84A; color: #1A1206; font-size: 11px; font-weight: 700; line-height: 18px;">1</span></a>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 2px;">
+    <span style="padding: 0 12px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #9DB0BE;">Data</span>
+    <a href="Streams.dc.html" aria-current="{{cur.streams}}" style="{{st.streams}}"><span style="{{ic.streams}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"></path></svg></span>Streams</a>
+    <a href="Queues.dc.html" aria-current="{{cur.queues}}" style="{{st.queues}}"><span style="{{ic.queues}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="3" height="10" rx="1"></rect><rect x="6.5" y="3" width="3" height="10" rx="1"></rect><rect x="11" y="3" width="3" height="10" rx="1"></rect></svg></span>Queues</a>
+    <a href="#exchanges" style="{{st.exchanges}}"><span style="{{ic.exchanges}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4" cy="8" r="2"></circle><circle cx="12" cy="4" r="2"></circle><circle cx="12" cy="12" r="2"></circle><path d="M6 7.2 10 4.8M6 8.8l4 2.4"></path></svg></span>Exchanges</a>
+    <a href="Streams.dc.html" style="{{st.groups}}"><span style="{{ic.groups}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"></circle><path d="M1.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5"></path><path d="M10.5 3.2a2.5 2.5 0 0 1 0 4.6M12 10.2c1.3.5 2.1 1.6 2.5 3.3"></path></svg></span>Consumer groups</a>
+    <a href="Messages.dc.html" aria-current="{{cur.messages}}" style="{{st.messages}}"><span style="{{ic.messages}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg></span>Message browser</a>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 2px;">
+    <span style="padding: 0 12px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #9DB0BE;">Access</span>
+    <a href="Tenants.dc.html" aria-current="{{cur.tenants}}" style="{{st.tenants}}"><span style="{{ic.tenants}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14V3h7v11M10 7h3v7M1.5 14h13M5.5 5.5h2M5.5 8.5h2M5.5 11.5h2"></path></svg></span>Tenants and quotas</a>
+    <a href="Tenants.dc.html" style="{{st.access}}"><span style="{{ic.access}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="10.5" r="2.5"></circle><path d="M7 9l6-6M11 5l1.5 1.5M9.5 6.5 11 8"></path></svg></span>Principals and roles</a>
+    <a href="#audit" style="{{st.audit}}"><span style="{{ic.audit}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h6l3 3v9H4z"></path><path d="M10 2v3h3M6.5 8.5h4M6.5 11h4"></path></svg></span>Audit log</a>
+  </div>
+
+  <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-top: 1px solid rgba(255,255,255,0.12);">
+    <a href="#settings" style="{{st.settings}}"><span style="{{ic.settings}}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10"></path><circle cx="6" cy="4" r="1.5" fill="#0F2B3D"></circle><circle cx="10" cy="8" r="1.5" fill="#0F2B3D"></circle><circle cx="5" cy="12" r="1.5" fill="#0F2B3D"></circle></svg></span>Console settings</a>
+    <span style="padding: 0 12px; font-size: 12px; line-height: 16px; color: #9DB0BE;">lotse-console 0.4.0 on <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;">console-1</span></span>
+  </div>
+</nav>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"current":{"editor":"enum","options":["overview","nodes","streams","queues","messages","tenants"],"default":"overview"},"$preview":{"width":240,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const current = this.props.current ?? 'overview';
+    const keys = ['overview', 'nodes', 'streams', 'queues', 'exchanges', 'groups', 'messages', 'tenants', 'access', 'audit', 'settings'];
+    const base = 'display: flex; align-items: center; gap: 10px; min-height: 36px; box-sizing: border-box; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 20px; text-decoration: none; ';
+    const st = {}, ic = {}, cur = {};
+    for (const k of keys) {
+      const on = k === current;
+      st[k] = base + (on ? 'background: rgba(255,255,255,0.10); color: #FFFFFF; font-weight: 600;' : 'color: #C9D6DF; font-weight: 400;');
+      ic[k] = 'display: flex; color: ' + (on ? '#F0645A' : '#9DB0BE') + ';';
+      cur[k] = on ? 'page' : undefined;
+    }
+    return { st, ic, cur };
+  }
+}
+</script>
+</body>
+</html>

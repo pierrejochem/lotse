@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cluster overview</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="overview" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600;">Overview</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="listbox" style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; cursor: pointer;">All tenants<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+      <button type="button" aria-label="Notifications, 1 warning" style="position: relative; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; cursor: pointer;"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="#0F2B3D" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11z"></path><path d="M6.5 14a1.5 1.5 0 0 0 3 0"></path></svg><span aria-hidden="true" style="position: absolute; top: 7px; right: 8px; width: 8px; height: 8px; border-radius: 4px; background: #9A6412; border: 2px solid #FFFFFF;"></span></button>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 32px;">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px;">
+        <div style="min-width: 0;">
+          <h1 style="margin: 0; font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.01em;">Cluster overview</h1>
+          <p style="margin: 6px 0 0; font-size: 14px; color: #4F6575;">3 broker nodes · 1,284 Raft groups, all with a leader · metadata leader <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">broker-1</span>, term 18 · updated 2 s ago</p>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px;">
+          <div role="group" aria-label="Time range" style="display: flex; gap: 2px; padding: 3px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <button type="button" aria-pressed="false" style="min-width: 48px; height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #4F6575; font: inherit; font-size: 14px; cursor: pointer;">15 m</button>
+            <button type="button" aria-pressed="true" style="min-width: 48px; height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">1 h</button>
+            <button type="button" aria-pressed="false" style="min-width: 48px; height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #4F6575; font: inherit; font-size: 14px; cursor: pointer;">6 h</button>
+            <button type="button" aria-pressed="false" style="min-width: 48px; height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #4F6575; font: inherit; font-size: 14px; cursor: pointer;">24 h</button>
+          </div>
+          <a href="#grafana" style="display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-size: 14px; font-weight: 600; text-decoration: none;">Open in Grafana<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h7v7M13 3 4 12"></path></svg></a>
+        </div>
+      </div>
+
+      <section aria-labelledby="alert-title" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 16px 20px; border: 1px solid #E6CFA6; border-radius: 8px; background: #FBF4E7;">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#9A6412" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2 14.5 13.5h-13z"></path><path d="M8 6.5v3M8 11.5h.01"></path></svg>
+        <div style="flex: 1 1 420px; min-width: 0;">
+          <p id="alert-title" style="margin: 0; font-weight: 600;">Soft disk limit on broker-2: 19 % free</p>
+          <p style="margin: 2px 0 0; font-size: 14px; color: #4F6575;">Producers writing to the 650 partitions and queues it leads are throttled, <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">throttle_ms</span> up to 180. Writes stop at 10 % free. Move leaders away or free space.</p>
+        </div>
+        <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Move leaders</button>
+        <a href="Nodes.dc.html" style="font-size: 14px; font-weight: 600;">View node</a>
+      </section>
+
+      <section aria-label="Key figures, last hour" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;">
+        <sc-for list="{{kpis}}" as="k" hint-placeholder-count="4">
+          <div style="display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <span style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">{{k.label}}</span>
+            <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: 12px;">
+              <span style="font-size: 28px; line-height: 32px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap;">{{k.value}} <span style="font-size: 15px; font-weight: 500; color: #4F6575;">{{k.unit}}</span></span>
+              <svg width="96" height="32" viewBox="0 0 96 32" aria-hidden="true"><polyline points="{{k.spark}}" fill="none" stroke="#0F2B3D" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></polyline></svg>
+            </div>
+            <span style="font-size: 13px; line-height: 18px; color: #4F6575;">{{k.note}}</span>
+          </div>
+        </sc-for>
+      </section>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 16px;">
+        <section aria-labelledby="tp-title" style="flex: 2 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px;">
+            <h2 id="tp-title" style="margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;">Throughput, last hour</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: #4F6575;">
+              <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 14px; height: 8px; border-radius: 4px; background: #0F2B3D;" aria-hidden="true"></span>Out: fetch and deliver</span>
+              <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 14px; height: 8px; border-radius: 4px; background: #8A6416;" aria-hidden="true"></span>In: produce and publish</span>
+            </div>
+          </div>
+          <svg viewBox="0 0 700 226" style="width: 100%; height: auto;" role="img" aria-label="Out rises from 118 to 132 MiB/s, in stays between 42 and 52 MiB/s over the last hour">
+            <g stroke="#D5DEE4" stroke-width="1">
+              <line x1="40" y1="14" x2="690" y2="14"></line>
+              <line x1="40" y1="58" x2="690" y2="58"></line>
+              <line x1="40" y1="102" x2="690" y2="102"></line>
+              <line x1="40" y1="146" x2="690" y2="146"></line>
+              <line x1="40" y1="190" x2="690" y2="190" stroke="#4F6575"></line>
+            </g>
+            <g fill="#4F6575" font-size="12" font-family="IBM Plex Mono, ui-monospace, monospace" text-anchor="end">
+              <text x="32" y="18">160</text>
+              <text x="32" y="62">120</text>
+              <text x="32" y="106">80</text>
+              <text x="32" y="150">40</text>
+              <text x="32" y="194">0</text>
+            </g>
+            <g fill="#4F6575" font-size="12" font-family="IBM Plex Mono, ui-monospace, monospace" text-anchor="middle">
+              <text x="48" y="214">16:45</text>
+              <text x="200" y="214">17:00</text>
+              <text x="360" y="214">17:15</text>
+              <text x="520" y="214">17:30</text>
+              <text x="664" y="214">17:45</text>
+            </g>
+            <path d="M40 60.2 80 56.9 120 59.1 160 51.4 200 53.6 240 49.2 280 45.9 320 48.1 360 41.5 400 43.7 440 49.2 480 47 520 39.3 560 41.6 600 45.9 640 47 680 44.8 680 190 40 190Z" fill="#0F2B3D" fill-opacity="0.08"></path>
+            <polyline points="40,60.2 80,56.9 120,59.1 160,51.4 200,53.6 240,49.2 280,45.9 320,48.1 360,41.5 400,43.7 440,49.2 480,47 520,39.3 560,41.6 600,45.9 640,47 680,44.8" fill="none" stroke="#0F2B3D" stroke-width="2" stroke-linejoin="round"></polyline>
+            <polyline points="40,143.8 80,141.6 120,142.7 160,138.3 200,140.5 240,139.4 280,136.1 320,137.2 360,133.9 400,135 440,138.3 480,136.1 520,132.8 560,135 600,137.2 640,138.3 680,137.2" fill="none" stroke="#8A6416" stroke-width="2" stroke-linejoin="round"></polyline>
+            <circle cx="680" cy="44.8" r="4" fill="#0F2B3D"></circle>
+            <circle cx="680" cy="137.2" r="4" fill="#8A6416"></circle>
+            <text x="12" y="10" fill="#4F6575" font-size="11" font-family="Schibsted Grotesk, sans-serif">MiB/s</text>
+          </svg>
+        </section>
+
+        <section aria-labelledby="health-title" style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <h2 id="health-title" style="margin: 0 0 8px; font-size: 17px; line-height: 24px; font-weight: 600;">Health</h2>
+          <dl style="margin: 0; display: flex; flex-direction: column;">
+            <sc-for list="{{health}}" as="h" hint-placeholder-count="6">
+              <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid #D5DEE4;">
+                <div style="min-width: 0;">
+                  <dt style="font-size: 14px; color: #4F6575;">{{h.label}}</dt>
+                  <dd style="margin: 2px 0 0; font-weight: 600; font-variant-numeric: tabular-nums;">{{h.value}} <span style="font-weight: 400; font-size: 13px; color: #4F6575;">{{h.detail}}</span></dd>
+                </div>
+                <sc-if value="{{h.chip}}" hint-placeholder-val="{{true}}">
+                  <span style="{{h.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{h.chip}}</span>
+                </sc-if>
+              </div>
+            </sc-for>
+          </dl>
+        </section>
+      </div>
+
+      <section aria-labelledby="nodes-title" style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 16px;">
+          <h2 id="nodes-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Nodes</h2>
+          <a href="Nodes.dc.html" style="font-size: 14px; font-weight: 600;">Nodes and upgrade</a>
+        </div>
+        <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Node</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Role</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Leads / replicas</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Disk free</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Produce in</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Version</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{nodes}}" as="n" hint-placeholder-count="3">
+                <tr>
+                  <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500; white-space: nowrap;">{{n.id}}</th>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; color: #4F6575; white-space: nowrap;">{{n.role}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;">{{n.leads}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                      <span style="position: relative; display: block; width: 120px; height: 8px; border-radius: 4px; background: #E3EAEF;" aria-hidden="true"><span style="{{n.bar}}"></span><span style="position: absolute; left: 80%; top: -3px; width: 1px; height: 14px; background: #4F6575;"></span><span style="position: absolute; left: 90%; top: -3px; width: 1px; height: 14px; background: #4F6575;"></span></span>
+                      <span>{{n.free}}</span>
+                    </div>
+                  </td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;">{{n.produce}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; white-space: nowrap;">{{n.version}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{n.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{n.status}}</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+        <p style="margin: 0; font-size: 13px; color: #4F6575;">Tick marks on the disk bar: soft limit at 20 % free (producers throttled), hard limit at 10 % free (writes rejected).</p>
+      </section>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 16px;">
+        <section aria-labelledby="streams-title" style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 16px;">
+            <h2 id="streams-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Busiest streams</h2>
+            <a href="Streams.dc.html" style="font-size: 14px; font-weight: 600;">All 214 streams</a>
+          </div>
+          <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+              <thead>
+                <tr>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Stream</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Parts</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;">In MiB/s</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{streams}}" as="s" hint-placeholder-count="5">
+                  <tr>
+                    <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-weight: 400;"><a href="Streams.dc.html" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500;">{{s.name}}</a> <span style="color: #4F6575; font-size: 13px;">{{s.tenant}}</span></th>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{s.parts}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{s.rate}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right; white-space: nowrap;">{{s.size}}</td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section aria-labelledby="queues-title" style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 16px;">
+            <h2 id="queues-title" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 700;">Queues that need attention</h2>
+            <a href="Queues.dc.html" style="font-size: 14px; font-weight: 600;">All 96 queues</a>
+          </div>
+          <div style="overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+              <thead>
+                <tr>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Queue</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Ready</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">DLQ</th>
+                  <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{queues}}" as="q" hint-placeholder-count="4">
+                  <tr>
+                    <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-weight: 400;"><a href="Queues.dc.html" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500;">{{q.name}}</a> <span style="color: #4F6575; font-size: 13px;">{{q.tenant}}</span></th>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{q.ready}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{q.dlq}}</td>
+                    <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{q.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{q.why}}</span></td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1560}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      warn: chip + 'background: #FBF0DC; color: #7A4F0E;',
+      crit: chip + 'background: #FDF0EE; color: #A8261F;',
+      info: chip + 'background: #E3EAEF; color: #0F2B3D;'
+    };
+    const bar = (used, warn) => 'position: absolute; left: 0; top: 0; height: 8px; border-radius: 4px; width: ' + used + '%; background: ' + (warn ? '#9A6412' : '#0F2B3D') + ';';
+    return {
+      kpis: [
+        { label: 'Produce and publish', value: '48.2', unit: 'MiB/s', note: '+6 % vs previous hour · 212 k records/s', spark: '0,22 12,21 24,22 36,19 48,20 60,19 72,17 84,18 96,15' },
+        { label: 'Fetch and deliver', value: '131.7', unit: 'MiB/s', note: '2.7× fan-out · 1,940 consumers connected', spark: '0,24 12,22 24,23 36,18 48,19 60,16 72,13 84,14 96,11' },
+        { label: 'Commit latency p99', value: '7.8', unit: 'ms', note: 'Produce acknowledged by 2 of 3 replicas', spark: '0,18 12,20 24,17 36,19 48,16 60,18 72,14 84,12 96,10' },
+        { label: 'Stored', value: '3.94', unit: 'TiB', note: 'All replicas · 214 streams, 96 queues', spark: '0,26 12,25 24,24 36,23 48,21 60,20 72,19 84,17 96,16' }
+      ],
+      health: [
+        { label: 'Raft groups', value: '1,284', detail: '37 catching up on broker-3', chip: 'Catching up', chipStyle: tone.warn },
+        { label: 'Rolling upgrade', value: '0.4.0 → 0.4.1', detail: '1 of 3 nodes done', chip: 'Running', chipStyle: tone.info },
+        { label: 'Throttled producers', value: '23', detail: 'soft disk limit on broker-2', chip: 'Throttled', chipStyle: tone.warn },
+        { label: 'Open transactions', value: '52', detail: 'oldest 4.1 s', chip: '', chipStyle: '' },
+        { label: 'Largest consumer lag', value: '12,480 records', detail: 'billing-ledger on orders', chip: '', chipStyle: '' },
+        { label: 'Dead-lettered messages', value: '318', detail: 'in 4 queues', chip: '', chipStyle: '' }
+      ],
+      nodes: [
+        { id: 'broker-1', role: 'Metadata leader', leads: '634 / 1,284', free: '61 %', bar: bar(39, false), produce: '23.0 MiB/s', version: '0.4.1', status: 'Healthy', chipStyle: tone.ok },
+        { id: 'broker-2', role: 'Voter', leads: '650 / 1,284', free: '19 %', bar: bar(81, true), produce: '25.2 MiB/s', version: '0.4.0', status: 'Soft disk limit', chipStyle: tone.warn },
+        { id: 'broker-3', role: 'Voter, upgrading', leads: '0 / 1,284', free: '58 %', bar: bar(42, false), produce: '0 MiB/s', version: '0.4.1', status: 'Catching up', chipStyle: tone.warn }
+      ],
+      streams: [
+        { name: 'orders', tenant: 'commerce', parts: '12', rate: '14.2', size: '418 GiB' },
+        { name: 'clickstream', tenant: 'analytics', parts: '48', rate: '11.6', size: '1.62 TiB' },
+        { name: 'inventory-events', tenant: 'commerce', parts: '6', rate: '4.9', size: '96 GiB' },
+        { name: 'audit.trail', tenant: 'platform', parts: '3', rate: '2.2', size: '310 GiB' },
+        { name: 'ledger.entries', tenant: 'finance', parts: '12', rate: '1.7', size: '188 GiB' }
+      ],
+      queues: [
+        { name: 'email.send', tenant: 'notify', ready: '18,304', dlq: '0', why: 'No consumers', chipStyle: tone.crit },
+        { name: 'payments.capture', tenant: 'commerce', ready: '1,942', dlq: '211', why: 'DLQ growing', chipStyle: tone.warn },
+        { name: 'webhooks.out', tenant: 'platform', ready: '6,120', dlq: '43', why: 'Oldest 12 min', chipStyle: tone.warn },
+        { name: 'refunds', tenant: 'commerce', ready: '12', dlq: '64', why: 'DLQ not empty', chipStyle: tone.info }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

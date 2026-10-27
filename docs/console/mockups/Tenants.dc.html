@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tenants and access</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&amp;family=Schibsted+Grotesk:wght@400;500;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#C8322B}a:hover{color:#9E2620}
+::placeholder{color:#4F6575}
+:focus-visible{outline:2px solid #C8322B;outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 960px; background: #F6F8F9; color: #0F2B3D; font-family: 'Schibsted Grotesk', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 22px;">
+  <div style="flex: 1 1 240px; background: #0F2B3D;">
+    <dc-import name="Nav" current="tenants" hint-size="100%,960px"></dc-import>
+  </div>
+
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column;">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 12px 32px; background: #FFFFFF; border-bottom: 1px solid #D5DEE4;">
+      <nav aria-label="Breadcrumb" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4F6575;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">prod-hamburg-1</span>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" style="color: #0F2B3D; font-weight: 600;">Tenants</span>
+      </nav>
+      <div style="position: relative; flex: 1 1 280px; max-width: 480px; margin-left: auto;">
+        <label for="search" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;">Search the cluster</label>
+        <svg style="position: absolute; left: 12px; top: 12px;" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3.5 3.5"></path></svg>
+        <input id="search" type="search" placeholder="Search streams, queues, groups, principals" style="box-sizing: border-box; width: 100%; height: 40px; padding: 0 56px 0 36px; border: 1px solid #D5DEE4; border-radius: 8px; background: #F6F8F9; color: #0F2B3D; font: inherit; font-size: 14px;">
+        <kbd style="position: absolute; right: 8px; top: 8px; padding: 0 6px; border: 1px solid #D5DEE4; border-radius: 4px; background: #FFFFFF; color: #4F6575; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 22px;">⌘K</kbd>
+      </div>
+      <button type="button" aria-haspopup="menu" aria-label="Account: Pierre, cluster admin" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;">PJ</button>
+    </header>
+
+    <main style="box-sizing: border-box; width: 100%; max-width: 1280px; padding: 32px; display: flex; flex-direction: column; gap: 24px;">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px;">
+        <div style="min-width: 0;">
+          <h1 style="margin: 0; font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.01em;">Tenants and access</h1>
+          <p style="margin: 6px 0 0; font-size: 14px; color: #4F6575;">Storage quotas count every replica. Usage is aggregated every 10 s, so a tenant can overshoot briefly before writes are rejected.</p>
+        </div>
+        <button type="button" aria-haspopup="dialog" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Create tenant</button>
+      </div>
+
+      <section aria-labelledby="quota-alert" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 16px 20px; border: 1px solid #F0C3BE; border-radius: 8px; background: #FDF0EE;">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#A8261F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"></circle><path d="M8 4.75v4M8 11h.01"></path></svg>
+        <div style="flex: 1 1 420px; min-width: 0;">
+          <p id="quota-alert" style="margin: 0; font-weight: 600;">analytics reached its storage quota at 17:20</p>
+          <p style="margin: 2px 0 0; font-size: 14px; color: #4F6575;">Producers get <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">QUOTA_EXCEEDED</span>; consumers keep reading. Raise the quota, or shorten retention on <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">clickstream</span> (1.62 TiB of the 2.03 TiB used).</p>
+        </div>
+        <button type="button" style="height: 40px; padding: 0 14px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Raise quota…</button>
+        <a href="Streams.dc.html" style="font-size: 14px; font-weight: 600;">Edit retention</a>
+      </section>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start;">
+        <section aria-label="Tenants" style="flex: 3 1 560px; min-width: 0; overflow-x: auto; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums;">
+            <thead>
+              <tr>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Tenant</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Storage</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Streams</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Queues</th>
+                <th scope="col" style="padding: 10px 16px; text-align: right; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">Principals</th>
+                <th scope="col" style="padding: 10px 16px; text-align: left; background: #E3EAEF; color: #4F6575; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{tenants}}" as="t" hint-placeholder-count="5">
+                <tr style="{{t.rowStyle}}">
+                  <th scope="row" style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: left; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 500;">{{t.name}}</th>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;">
+                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                      <span>{{t.used}} <span style="color: #4F6575;">of {{t.quota}}</span></span>
+                      <span style="position: relative; display: block; width: 160px; height: 8px; border-radius: 4px; background: #E3EAEF;" aria-hidden="true"><span style="{{t.bar}}"></span><span style="position: absolute; left: 80%; top: -3px; width: 1px; height: 14px; background: #4F6575;"></span></span>
+                    </div>
+                  </td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{t.streams}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{t.queues}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; text-align: right;">{{t.principals}}</td>
+                  <td style="padding: 12px 16px; border-top: 1px solid #D5DEE4; white-space: nowrap;"><span style="{{t.chipStyle}}"><span style="width: 6px; height: 6px; border-radius: 3px; background: currentColor;" aria-hidden="true"></span>{{t.state}}</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </section>
+
+        <aside aria-labelledby="tenant-title" style="flex: 2 1 400px; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 20px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF;">
+          <div>
+            <span style="font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #4F6575;">Tenant</span>
+            <h2 id="tenant-title" style="margin: 2px 0 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 20px; line-height: 28px; font-weight: 500;">commerce</h2>
+          </div>
+
+          <div style="display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;">
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+              <label for="quota" style="font-size: 13px; font-weight: 600;">Storage quota</label>
+              <div style="display: flex; gap: 6px;">
+                <input id="quota" type="text" inputmode="decimal" value="2" style="box-sizing: border-box; width: 88px; height: 40px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">
+                <button type="button" aria-haspopup="listbox" aria-label="Unit, TiB" style="display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; cursor: pointer;">TiB<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#4F6575" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"></path></svg></button>
+              </div>
+            </div>
+            <button type="button" style="height: 40px; padding: 0 14px; border: 0; border-radius: 8px; background: #0F2B3D; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Save quota</button>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+              <h3 style="margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;">Role bindings</h3>
+              <button type="button" aria-haspopup="dialog" style="height: 36px; padding: 0 12px; border: 1px solid #D5DEE4; border-radius: 8px; background: #FFFFFF; color: #0F2B3D; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Add binding</button>
+            </div>
+            <ul style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column;">
+              <sc-for list="{{bindings}}" as="b" hint-placeholder-count="5">
+                <li style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; padding: 10px 0; border-top: 1px solid #D5DEE4;">
+                  <div style="min-width: 0;">
+                    <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px;">{{b.principal}}</span>
+                    <span style="margin-left: 6px; padding: 0 6px; border-radius: 4px; background: #E3EAEF; font-size: 12px; line-height: 18px;">{{b.auth}}</span>
+                    <div style="font-size: 13px; color: #4F6575;">on <span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;">{{b.resources}}</span></div>
+                  </div>
+                  <span style="font-size: 14px; font-weight: 600;">{{b.role}}</span>
+                </li>
+              </sc-for>
+            </ul>
+          </div>
+
+          <p style="margin: 0; padding: 10px 12px; border-radius: 4px; background: #F6F8F9; font-size: 13px; line-height: 18px; color: #4F6575;">Permissions apply per stream or queue, never per record. Console users act with their own OIDC identity, so the console can do nothing their role does not allow.</p>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; ';
+    const tone = {
+      ok: chip + 'background: #E6F2EC; color: #24613F;',
+      warn: chip + 'background: #FBF0DC; color: #7A4F0E;',
+      crit: chip + 'background: #FDF0EE; color: #A8261F;'
+    };
+    const bar = (pct, color) => 'position: absolute; left: 0; top: 0; height: 8px; border-radius: 4px; width: ' + pct + '%; background: ' + color + ';';
+    return {
+      tenants: [
+        { name: 'analytics', used: '2.03 TiB', quota: '2 TiB', bar: bar(100, '#C8322B'), streams: '31', queues: '2', principals: '9', state: 'Quota reached, writes rejected', chipStyle: tone.crit, rowStyle: '' },
+        { name: 'finance', used: '412 GiB', quota: '512 GiB', bar: bar(80, '#9A6412'), streams: '18', queues: '7', principals: '6', state: '80 % used', chipStyle: tone.warn, rowStyle: '' },
+        { name: 'commerce', used: '1.31 TiB', quota: '2 TiB', bar: bar(65, '#0F2B3D'), streams: '64', queues: '41', principals: '23', state: 'Within quota', chipStyle: tone.ok, rowStyle: 'background: #FDF0EE;' },
+        { name: 'platform', used: '380 GiB', quota: '1 TiB', bar: bar(37, '#0F2B3D'), streams: '22', queues: '19', principals: '11', state: 'Within quota', chipStyle: tone.ok, rowStyle: '' },
+        { name: 'notify', used: '22 GiB', quota: '256 GiB', bar: bar(9, '#0F2B3D'), streams: '4', queues: '27', principals: '5', state: 'Within quota', chipStyle: tone.ok, rowStyle: '' }
+      ],
+      bindings: [
+        { principal: 'CN=checkout-svc', auth: 'mTLS', resources: 'orders, payments.*', role: 'Producer' },
+        { principal: 'CN=capture-svc', auth: 'mTLS', resources: 'payments.capture', role: 'Consumer' },
+        { principal: 'CN=billing-ledger', auth: 'mTLS', resources: 'orders, group billing-ledger', role: 'Consumer' },
+        { principal: 'group:commerce-oncall', auth: 'OIDC', resources: '*', role: 'Operator' },
+        { principal: 'pierre', auth: 'OIDC', resources: '*', role: 'Tenant admin' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

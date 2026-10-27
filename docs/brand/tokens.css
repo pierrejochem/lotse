@@ -1,0 +1,72 @@
+/* Lotse design tokens. Generated from tokens.json by tokens.py; do not edit. */
+
+:root {
+  --surface: #F6F8F9;
+  --surface-raised: #FFFFFF;
+  --fog: #E3EAEF;
+  --line: #D5DEE4;
+  --ink: #0F2B3D;
+  --ink-muted: #4F6575;
+  --elbe: #0F2B3D;
+  --on-elbe: #FFFFFF;
+  --signal: #C8322B;
+  --signal-soft: #FDF0EE;
+  --on-signal: #FFFFFF;
+  --brass: #8A6416;
+  --ok: #2C7552;
+  --warn: #9A6412;
+  --critical: #C8322B;
+  --focus-ring: #C8322B;
+  --font-sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #0B1720;
+    --surface-raised: #12212C;
+    --fog: #1A2A36;
+    --line: #263744;
+    --ink: #E8EFF3;
+    --ink-muted: #9DB0BE;
+    --elbe: #2E5F80;
+    --on-elbe: #E8EFF3;
+    --signal: #F0645A;
+    --signal-soft: #3A1513;
+    --on-signal: #1A0B0A;
+    --brass: #D9A84A;
+    --ok: #5CC28F;
+    --warn: #E0A84A;
+    --critical: #F0645A;
+    --focus-ring: #F0645A;
+  }
+}
+
+:root[data-theme="dark"] {
+  --surface: #0B1720;
+  --surface-raised: #12212C;
+  --fog: #1A2A36;
+  --line: #263744;
+  --ink: #E8EFF3;
+  --ink-muted: #9DB0BE;
+  --elbe: #2E5F80;
+  --on-elbe: #E8EFF3;
+  --signal: #F0645A;
+  --signal-soft: #3A1513;
+  --on-signal: #1A0B0A;
+  --brass: #D9A84A;
+  --ok: #5CC28F;
+  --warn: #E0A84A;
+  --critical: #F0645A;
+  --focus-ring: #F0645A;
+}
