@@ -11,7 +11,7 @@ Status: foundation. The runtime seam, the record format, the segmented log, the 
 | `lotse-rt` | The only seam to the outside world: `Clock`, `Disk`, `SegmentFile`, `Spawn`, `Rng` as traits |
 | `lotse-record` | The batch format used on disk, on the wire and in Raft: 65-byte header, ZigZag-varint records, CRC32C, transaction markers |
 | `lotse-log` | Segmented partition log (also the Raft log): append, read, roll, truncate, crash recovery |
-| `lotse-raft` | Sans-I/O Raft core and Multi-Raft: pre-vote, check-quorum, leader stickiness; entries are batches covering offset ranges; messages batched per node pair |
+| `lotse-raft` | Sans-I/O Raft core and Multi-Raft: pre-vote, check-quorum, leader stickiness, snapshots, learners and joint consensus; entries are batches covering offset ranges; messages batched per node pair |
 | `lotse-sim` | Deterministic simulation: seeded executor with virtual time, a disk that loses unsynced data and tears writes on crash |
 | `lotse-console` | Management console for a dedicated node: serves the web app, REST/JSON (OpenAPI) and one WebSocket for live updates |
 
@@ -46,13 +46,13 @@ LOTSE_SIM_SEED=1234 cargo test -p lotse-sim               # one seed, exactly
 
 A failing run prints the seed that reproduces it.
 
-The Raft simulation in `crates/lotse-sim/tests/raft.rs` runs 3- and 5-node groups through lost, delayed, duplicated and reordered messages, partitions, clock drift and crashes (before and after persisting), with fault intensity, pre-vote and check-quorum drawn per seed. It checks vote safety, election safety, state machine safety, durability of committed entries and leader completeness on every step, and liveness after healing. It was mutation-checked: each of these bugs makes it fail — committing older-term entries by counting (Raft's "figure 8"), voting for out-of-date candidates, forgetting a vote on restart, keeping conflicting follower entries, committing past what a follower verified, and committing with one ack too few.
+The Raft simulation in `crates/lotse-sim/tests/raft.rs` runs 3- and 5-node groups through lost, delayed, duplicated and reordered messages, partitions, clock drift and crashes (before and after persisting), with fault intensity and pre-vote drawn per seed. Meanwhile nodes compact their logs at random, followers catch up through snapshots, and the leader is asked to change members at random: add, promote and remove learners, remove voters (itself included), replace several voters or drop two at once in one joint change. It checks vote safety, election safety, state machine safety, durability of committed entries and leader completeness on every step, and liveness after healing. It was mutation-checked: each of these bugs makes it fail — committing older-term entries by counting (Raft's "figure 8"), voting for out-of-date candidates, forgetting a vote on restart, keeping conflicting follower entries, committing past what a follower verified, committing with one ack too few, counting only the new voters in a joint configuration (for commits or for elections), changing voters without a joint configuration, installing a snapshot over a matching log, and never letting a just-dropped voter campaign. Ignoring votes from nodes outside the membership (a liveness bug the random runs reach too rarely) is caught by a unit test in `lotse-raft`.
 
 ## Known gaps
 
 - Compression codecs (zstd, lz4) are declared in the format but not implemented; compressed batches are rejected.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
-- Raft: membership changes, snapshots and `InstallSnapshot`, leader transfer and read leases are not built yet. A leader backing up past a conflict resends a whole term's entries rather than probing.
+- Raft: leader transfer and linearizable reads (ReadIndex, optional leases) are not built yet. Snapshots travel in one message; chunked transfer comes with `lotse-server`. A leader backing up past a conflict resends a whole term's entries rather than probing.
 - `Net` joins `lotse-rt` together with `lotse-server`.
 - There is no Tokio implementation of `lotse-rt` yet; it lands with `lotse-broker`.
 - Console: only the demo cluster exists (`kind = "native"` is refused until `lotse-client` lands), and sign-in is `dev` mode only (OIDC is refused at startup). Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

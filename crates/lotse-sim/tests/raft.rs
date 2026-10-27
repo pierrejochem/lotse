@@ -3,7 +3,11 @@
 //! Each run builds a 3- or 5-node group and, for a few thousand steps,
 //! drops, delays, duplicates and reorders messages, lets clocks drift,
 //! partitions the network and crashes nodes (they restart from what they
-//! persisted). Throughout, it checks the Raft guarantees:
+//! persisted). Meanwhile nodes snapshot and compact their logs at random, and
+//! the leader is asked to change members at random: add and remove learners,
+//! promote them, remove voters (the leader too) and replace several voters in
+//! one joint change. Removed nodes keep running. Throughout, it checks the
+//! Raft guarantees:
 //!
 //! - **Vote safety:** a node grants at most one vote per term, even across
 //!   crashes.
@@ -14,13 +18,13 @@
 //! - **Leader completeness:** a leader holds every committed entry.
 //!
 //! Then it heals everything and checks **liveness**: a leader emerges, a new
-//! proposal commits and every node applies it.
+//! proposal commits and every member applies it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use lotse_raft::testing::MemNode;
-use lotse_raft::{Config, Entry, EntryKind, Message, NodeId, Role};
+use lotse_raft::{Config, Entry, EntryKind, Membership, Message, NodeId, Role};
 use lotse_rt::Rng;
 use lotse_sim::{SimRng, check_seeds};
 
@@ -45,6 +49,9 @@ struct Faults {
 struct World {
     rng: SimRng,
     f: Faults,
+    pre_vote: bool,
+    /// Ids that may ever be members: the initial voters and two spares.
+    pool: Vec<NodeId>,
     now: u64,
     nodes: BTreeMap<NodeId, MemNode>,
     /// Down nodes and the step they come back.
@@ -75,19 +82,13 @@ impl World {
             drop: [1, 5, 20][rng.below(3) as usize],
             delay: [2, 4, 12][rng.below(3) as usize],
         };
-        // Both protections are optional in the core; each guards the other's
-        // gaps, so runs mix them.
-        let (pre_vote, check_quorum) = (rng.chance(1, 2), rng.chance(1, 2));
-        let nodes = ids
-            .iter()
-            .map(|&id| {
-                let cfg = Config { seed: rng.next_u64(), pre_vote, check_quorum, ..Config::new(id, ids.clone()) };
-                let mut node = MemNode::new(cfg);
-                node.max_fill_bytes = 1 + rng.below(250) as usize; // often one entry per append
-                (id, node)
-            })
-            .collect();
+        // Pre-vote is optional in the core and hides bugs in the vote rules,
+        // so runs mix it. (Check-quorum is always on.)
+        let pre_vote = rng.chance(1, 2);
+        let nodes = ids.iter().map(|&id| (id, fresh(&rng, id, ids.clone(), pre_vote))).collect();
         World {
+            pool: (1..=n + 2).collect(),
+            pre_vote,
             rng,
             f,
             now: 0,
@@ -145,6 +146,18 @@ impl World {
             for _ in 0..ticks {
                 self.nodes.get_mut(&id).unwrap().raft.tick();
             }
+        }
+
+        // Nodes snapshot whenever they like.
+        for id in self.up() {
+            if r.chance(1, 40) {
+                self.nodes.get_mut(&id).unwrap().compact();
+            }
+        }
+
+        // An operator changes members now and then.
+        if self.faults && r.chance(1, 60) {
+            self.change_members();
         }
 
         // Clients propose to whichever node they reach.
@@ -238,14 +251,18 @@ impl World {
         }
         // Durability and leader completeness.
         for (id, n) in &self.nodes {
-            let keeps = self.committed.iter().zip(&n.log).take_while(|(c, l)| c == l).count();
+            let keeps = self.committed.iter().zip(n.durable()).take_while(|(c, l)| c == l).count();
             let before = self.kept.insert(*id, keeps).unwrap_or(0);
             assert!(keeps >= before, "node {id} lost committed entries: held {before}, now {keeps}");
             if n.raft.role() == Role::Leader && !self.down.contains_key(id) {
                 // Only leaders of later terms must hold an entry; a deposed
                 // leader that has not noticed yet may lag.
                 let term = n.raft.term();
+                let compacted = n.raft.log().snapshot_index();
                 for (c, _) in self.committed.iter().zip(&self.committed_by).filter(|(_, by)| term > **by) {
+                    if c.last <= compacted {
+                        continue; // in its snapshot
+                    }
                     assert_eq!(
                         n.raft.log().term_at(c.last),
                         Some(c.term),
@@ -256,6 +273,64 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Asks the leader for a random membership change. Most are refused
+    /// (not caught up, a change in progress), which is part of the test.
+    fn change_members(&mut self) {
+        let Some(l) = self.leader() else { return };
+        let r = self.rng.clone();
+        let m = self.nodes[&l].raft.membership().clone();
+        let outside: Vec<NodeId> = self.pool.iter().copied().filter(|id| !m.contains(*id)).collect();
+        let learners: Vec<NodeId> = m.learners.iter().copied().collect();
+        let voters: Vec<NodeId> = m.voters.iter().copied().collect();
+        let pick = |v: &[NodeId]| v[r.below(v.len() as u64) as usize];
+        let (mut new_voters, mut new_learners) = (m.voters.clone(), m.learners.clone());
+        match r.below(6) {
+            0 if !outside.is_empty() => {
+                let id = pick(&outside);
+                // Re-added nodes keep whatever state they had.
+                if !self.nodes.contains_key(&id) {
+                    let node = fresh(&r, id, Vec::new(), self.pre_vote);
+                    self.nodes.insert(id, node);
+                }
+                new_learners.insert(id);
+            }
+            1 if !learners.is_empty() && voters.len() < 5 => {
+                let id = pick(&learners);
+                new_learners.remove(&id);
+                new_voters.insert(id);
+            }
+            2 if voters.len() > 3 => {
+                new_voters.remove(&pick(&voters));
+            }
+            3 if !learners.is_empty() => {
+                // Replace one or two voters at once.
+                for _ in 0..(1 + r.below(2)) {
+                    let (out, inn) = (pick(&voters), pick(&learners));
+                    new_voters.remove(&out);
+                    new_learners.remove(&inn);
+                    new_voters.insert(inn);
+                }
+            }
+            4 if !learners.is_empty() => {
+                new_learners.remove(&pick(&learners));
+            }
+            5 if voters.len() >= 5 => {
+                // Remove two voters at once: the old and the new majorities
+                // need not overlap, only the joint configuration keeps it safe.
+                new_voters.remove(&pick(&voters));
+                let rest: Vec<NodeId> = new_voters.iter().copied().collect();
+                new_voters.remove(&pick(&rest));
+            }
+            _ => return,
+        }
+        let _ = self.nodes.get_mut(&l).unwrap().raft.propose_membership(new_voters, new_learners);
+    }
+
+    /// The members as the leader sees them, if there is one.
+    fn members(&self) -> Option<Membership> {
+        self.leader().map(|l| self.nodes[&l].raft.membership().clone())
     }
 
     fn leader(&self) -> Option<NodeId> {
@@ -271,6 +346,13 @@ impl World {
             self.nodes.get_mut(&id).unwrap().restart();
         }
     }
+}
+
+fn fresh(rng: &SimRng, id: NodeId, voters: Vec<NodeId>, pre_vote: bool) -> MemNode {
+    let cfg = Config { seed: rng.next_u64(), pre_vote, ..Config::new(id, voters) };
+    let mut node = MemNode::new(cfg);
+    node.max_fill_bytes = 1 + rng.below(250) as usize; // often one entry per append
+    node
 }
 
 fn run(seed: u64, steps: u64) {
@@ -292,15 +374,20 @@ fn run(seed: u64, steps: u64) {
                 proposed_to = Some((l, term));
             }
         }
-        if w.nodes.values().all(|n| n.applied_data().contains(&marker)) {
+        let applied = |id: &NodeId| w.nodes[id].applied_data().contains(&marker);
+        if let Some(m) = w.members()
+            && !m.is_joint()
+            && m.all().iter().all(applied)
+        {
             let any_normal = w.committed.iter().filter(|e| e.kind == EntryKind::Normal).count();
             assert!(any_normal > 0);
             return;
         }
     }
     panic!(
-        "no progress after healing (proposed to {proposed_to:?}): leader {:?}, last {:?}, applied {:?}, terms {:?}, commits {:?}",
+        "no progress after healing (proposed to {proposed_to:?}): leader {:?}, members {:?}, last {:?}, applied {:?}, terms {:?}, commits {:?}",
         w.leader(),
+        w.members(),
         w.nodes.values().map(|n| n.raft.last_index()).collect::<Vec<_>>(),
         w.nodes.values().map(|n| n.applied.last().map(|e| (e.last, e.data.clone()))).collect::<Vec<_>>(),
         w.nodes.values().map(|n| n.raft.term()).collect::<Vec<_>>(),

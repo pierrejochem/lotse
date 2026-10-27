@@ -22,6 +22,27 @@ impl Cluster {
         Cluster { nodes, net: VecDeque::new(), cut: BTreeSet::new() }
     }
 
+    /// A node that joins an existing group: no voters of its own.
+    fn add_node(&mut self, id: NodeId) {
+        self.nodes.insert(id, MemNode::new(Config { seed: id * 7919, ..Config::new(id, Vec::new()) }));
+    }
+
+    fn change(&mut self, voters: &[NodeId], learners: &[NodeId]) -> Result<(u64, u64), ChangeError> {
+        let l = self.leader().expect("a leader");
+        let r = self
+            .nodes
+            .get_mut(&l)
+            .unwrap()
+            .raft
+            .propose_membership(voters.iter().copied().collect(), learners.iter().copied().collect());
+        self.pump();
+        r
+    }
+
+    fn membership(&self, id: NodeId) -> Membership {
+        self.nodes[&id].raft.membership().clone()
+    }
+
     fn pump(&mut self) {
         for _ in 0..1000 {
             let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
@@ -190,4 +211,147 @@ fn multi_raft_batches_messages_per_destination() {
     assert_eq!(r.outbound.len(), 2);
     assert_eq!(r.outbound[&2].len(), 50);
     assert!(r.outbound[&2].iter().all(|(_, s)| matches!(s.msg, Message::Vote { pre: true, .. })));
+}
+
+#[test]
+fn a_follower_behind_the_snapshot_catches_up_from_it() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.cut.insert(f);
+    for i in 0..10 {
+        c.nodes.get_mut(&l).unwrap().propose(1 + i % 3, format!("v{i}")).unwrap();
+        c.ticks(1);
+    }
+    let at = c.nodes.get_mut(&l).unwrap().compact();
+    assert!(at > 10 && c.nodes[&l].log.is_empty(), "everything applied is compacted");
+    c.cut.clear();
+    c.ticks(10);
+    assert_eq!(c.nodes[&f].snapshot_index(), at, "caught up through the snapshot");
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    c.nodes.get_mut(&l).unwrap().propose(1, "after").unwrap();
+    c.ticks(3);
+    assert_eq!(c.nodes[&f].applied_data().last(), Some(&Bytes::from("after")));
+}
+
+#[test]
+fn a_follower_with_the_snapshot_entry_keeps_its_log() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(2, "a").unwrap();
+    c.ticks(3);
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    let before = c.nodes[&f].log.clone();
+    let at = c.nodes.get_mut(&l).unwrap().compact();
+    // Force a snapshot to f by pretending it is behind.
+    let meta = c.nodes[&l].raft.snapshot_meta();
+    assert_eq!(meta.index, at);
+    let term = c.nodes[&l].raft.term();
+    c.nodes.get_mut(&f).unwrap().raft.step(l, Message::Snapshot { term, meta, data: Bytes::new() });
+    c.nodes.get_mut(&f).unwrap().process();
+    assert_eq!(c.nodes[&f].log, before, "nothing dropped, nothing installed");
+    assert_eq!(c.nodes[&f].snapshot_index(), 0);
+}
+
+#[test]
+fn a_node_restarts_from_its_snapshot() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(3, "a").unwrap();
+    c.ticks(3);
+    for n in c.nodes.values_mut() {
+        n.compact();
+    }
+    for n in c.nodes.values_mut() {
+        n.restart();
+    }
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(1, "b").unwrap();
+    c.ticks(3);
+    for n in c.nodes.values() {
+        assert_eq!(n.applied_data(), vec![Bytes::from("a"), Bytes::from("b")], "node {}", n.raft.id());
+    }
+}
+
+#[test]
+fn a_learner_is_added_caught_up_and_promoted() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(2, "a").unwrap();
+    c.ticks(2);
+    c.nodes.get_mut(&l).unwrap().compact();
+    c.add_node(4);
+    assert_eq!(c.change(&[1, 2, 3, 4], &[]), Err(ChangeError::NotCaughtUp(4)), "not a learner yet");
+    c.change(&[1, 2, 3], &[4]).unwrap();
+    c.ticks(5);
+    assert_eq!(c.nodes[&4].applied_data(), vec![Bytes::from("a")], "the learner got the log, snapshot included");
+    assert!(!c.membership(4).is_voter(4));
+    c.change(&[1, 2, 3, 4], &[]).unwrap();
+    c.ticks(3);
+    for id in 1..=4 {
+        let m = c.membership(id);
+        assert!(!m.is_joint(), "node {id} left the joint configuration");
+        assert_eq!(m.voters, [1, 2, 3, 4].into());
+    }
+}
+
+#[test]
+fn a_removed_leader_hands_over_after_the_change_commits() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(2);
+    let rest: Vec<NodeId> = c.nodes.keys().copied().filter(|&id| id != l).collect();
+    assert_eq!(c.change(&rest, &[]).map(|_| ()), Ok(()));
+    assert!(c.membership(l).is_joint() || c.nodes[&l].raft.role() != Role::Leader);
+    c.ticks(1);
+    assert_ne!(c.nodes[&l].raft.role(), Role::Leader, "a leader that is no longer a voter steps down");
+    let new = c.elect();
+    assert!(rest.contains(&new));
+    c.nodes.get_mut(&new).unwrap().propose(1, "x").unwrap();
+    c.ticks(3);
+    for id in &rest {
+        assert_eq!(c.nodes[id].applied_data(), vec![Bytes::from("x")]);
+    }
+    // The removed node keeps running and times out, but nobody listens.
+    c.ticks(60);
+    assert_eq!(c.leader(), Some(new), "the removed node does not disrupt the group");
+}
+
+#[test]
+fn two_voters_are_replaced_in_one_joint_change() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.add_node(4);
+    c.add_node(5);
+    c.change(&[1, 2, 3], &[4, 5]).unwrap();
+    c.ticks(4);
+    let keep = l;
+    let voters = [keep, 4, 5];
+    let raft = &mut c.nodes.get_mut(&l).unwrap().raft;
+    raft.propose_membership(voters.into(), [].into()).unwrap();
+    assert_eq!(raft.propose_membership(voters.into(), [].into()), Err(ChangeError::InProgress), "one change at a time");
+    c.pump();
+    c.ticks(4);
+    let m = c.membership(keep);
+    assert_eq!(m.voters, voters.into());
+    assert!(!m.is_joint());
+    let l = c.elect();
+    c.nodes.get_mut(&l).unwrap().propose(1, "y").unwrap();
+    c.ticks(3);
+    for id in voters {
+        assert_eq!(c.nodes[&id].applied_data().last(), Some(&Bytes::from("y")), "node {id}");
+    }
+}
+
+#[test]
+fn a_voter_grants_its_vote_to_a_node_it_does_not_know_yet() {
+    // Node 2 lags: its log predates the promotion of node 4. During the joint
+    // change it may be the vote that decides, so it must not ignore 4.
+    let mut n = MemNode::new(Config::new(2, vec![1, 2, 3]));
+    n.raft.step(4, Message::Vote { term: 1, last_index: 10, last_term: 1, pre: false });
+    let out = n.process();
+    assert!(
+        out.iter().any(|s| s.to == 4 && matches!(s.msg, Message::VoteReply { granted: true, pre: false, .. })),
+        "vote requests are not filtered by membership: {out:?}"
+    );
 }
