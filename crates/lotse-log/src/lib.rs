@@ -13,8 +13,11 @@
 //! - [`Log::open`] recovers by scanning the active segment, cutting a torn or
 //!   corrupt tail, and syncing the result, so recovered data is durable.
 //!
+//! After a snapshot is installed, [`Log::reset`] restarts the log at the
+//! snapshot's end; segments then no longer start at 0.
+//!
 //! Not yet here: persisted `.index`/`.timeindex`/`.txnindex` files (the
-//! sparse index is rebuilt by scanning on open), retention and snapshots.
+//! sparse index is rebuilt by scanning on open) and retention.
 
 #![warn(missing_docs)]
 
@@ -374,6 +377,31 @@ impl<D: Disk> Log<D> {
         seg.index = index;
         seg.bytes_since_index = since;
         seg.next_offset = offset;
+        self.next_offset = offset;
+        Ok(())
+    }
+
+    /// Drops every segment and starts the log afresh at `offset`, as after
+    /// installing a snapshot that ends right before it. Durable on return.
+    pub async fn reset(&mut self, offset: u64) -> Result<(), Error> {
+        // The new, empty segment first (unless it would clash with one we drop).
+        let keep = self.segments.contains_key(&offset);
+        for (base, seg) in std::mem::take(&mut self.segments) {
+            if keep && base == offset {
+                seg.file.truncate(0).await?;
+                seg.file.sync().await?;
+                self.segments.insert(
+                    base,
+                    Segment { size: 0, next_offset: offset, index: Vec::new(), bytes_since_index: 0, ..seg },
+                );
+            } else {
+                self.disk.remove(&seg.path).await?;
+            }
+        }
+        if !keep {
+            self.create_segment(offset).await?;
+        }
+        self.start_offset = offset;
         self.next_offset = offset;
         Ok(())
     }

@@ -120,3 +120,24 @@ fn corruption_in_a_sealed_segment_is_an_error_not_a_silent_cut() {
         assert!(matches!(Log::open(rt, "p0", SMALL).await, Err(Error::Corrupt { .. })));
     });
 }
+
+#[test]
+fn reset_restarts_the_log_at_an_offset_and_survives_a_crash() {
+    Sim::new(9).run(|rt| async move {
+        let mut log = Log::open(rt.clone(), "p0", SMALL).await.unwrap();
+        for i in 0..10u64 {
+            log.append(batch(i * 2, &[b"aaaaaaaaaaaaaaaaaaaa", b"bbbbbbbbbbbbbbbbbbbb"])).await.unwrap();
+        }
+        log.sync().await.unwrap();
+        assert!(log.segment_count() > 1);
+        log.reset(57).await.unwrap();
+        assert_eq!((log.start_offset(), log.next_offset(), log.segment_count()), (57, 57, 1));
+        assert!(matches!(log.read(10, 100).await, Err(Error::OffsetOutOfRange { .. })));
+        log.append(batch(57, &[b"x"])).await.unwrap();
+        log.sync().await.unwrap();
+        drop(log);
+        rt.crash();
+        let log = Log::open(rt, "p0", SMALL).await.unwrap();
+        assert_eq!((log.start_offset(), log.next_offset()), (57, 58));
+    });
+}

@@ -14,6 +14,7 @@ A message broker in Rust: RabbitMQ-style reliable queues and Kafka-style persist
 | `crates/lotse-record` | Batch format: 65-byte header, ZigZag-varint records, CRC32C, transaction and Raft control batches |
 | `crates/lotse-log` | Segmented partition log, which is also the Raft log |
 | `crates/lotse-raft` | Sans-I/O Raft core and Multi-Raft; `testing::MemNode` is the in-memory driver |
+| `crates/lotse-server` | Broker node; so far `Replica`, a Raft group persisted on `lotse-log`; crash simulation in `tests/cluster.rs` |
 | `crates/lotse-sim` | Deterministic simulation: seeded executor, virtual time, crashing disks; Raft fault simulation in `tests/raft.rs` |
 | `crates/lotse-console` | Management console backend (axum), serves `console/web` |
 | `console/web` | Console frontend: React 18, TypeScript, Radix primitives, TanStack Query, generated OpenAPI client |
@@ -26,7 +27,7 @@ A message broker in Rust: RabbitMQ-style reliable queues and Kafka-style persist
 cargo fmt --all                                            # format (max_width 120)
 cargo clippy --workspace --all-targets -- -D warnings      # lint; must be clean
 cargo test --workspace                                     # all unit tests and short simulations
-LOTSE_SIM_SEEDS=5000 cargo test -p lotse-sim --release      # simulations at CI depth
+LOTSE_SIM_SEEDS=5000 cargo test -p lotse-sim -p lotse-server --release   # simulations at CI depth
 LOTSE_SIM_SEED=1234 cargo test -p lotse-sim                # reproduce one failing seed exactly
 
 cd console/web && npm ci && npm run build && cd ../..       # build the web app (needed before the console binary)
@@ -66,4 +67,4 @@ CI (`.github/workflows/ci.yml`) runs format, clippy, tests, the web app build wi
 
 Built and tested: runtime seam, record format, segmented log, the Raft core (elections with optional pre-vote and mandatory check-quorum, snapshots, learners, joint consensus, leader transfer, ReadIndex and optional leases), the simulation harness, and the management console against a built-in demo cluster.
 
-Next: `lotse-server` — durable Raft replicas on `lotse-log`, the Tokio implementation of `lotse-rt`, node-to-node transport with Multi-Raft batching, then the native protocol. Known gaps are listed at the end of [README.md](README.md).
+`lotse-server` has its first piece: `Replica`, a durable Raft group on `lotse-log`, tested in a cluster simulation with power loss. Next: mutation-check the replica's durability rules, the Tokio implementation of `lotse-rt`, node-to-node transport with Multi-Raft batching, then the native protocol. Known gaps are listed at the end of [README.md](README.md).

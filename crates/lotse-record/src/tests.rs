@@ -167,3 +167,20 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn raft_control_batches_round_trip_and_are_not_transaction_markers() {
+    for (kind, payload) in [(RaftControl::Noop, &b""[..]), (RaftControl::Config, &b"members"[..])] {
+        let mut bytes = BytesMut::from(&raft_control_batch(kind, payload).unwrap()[..]);
+        stamp(&mut bytes, 41, 7).unwrap();
+        let (batch, rest) = Batch::parse(&bytes.freeze()).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!((batch.base_offset(), batch.last_offset(), batch.term()), (41, 41, 7), "one index");
+        assert!(batch.attributes().control && !batch.attributes().transactional);
+        assert_eq!(raft_control(&batch).unwrap(), Some((kind, Bytes::copy_from_slice(payload))));
+        assert!(control_marker(&batch).is_err(), "not a transaction marker");
+    }
+    let marker = control_batch(9, 1, ControlType::Commit, 3, 0).unwrap();
+    let (batch, _) = Batch::parse(&marker).unwrap();
+    assert_eq!(raft_control(&batch).unwrap(), None);
+}

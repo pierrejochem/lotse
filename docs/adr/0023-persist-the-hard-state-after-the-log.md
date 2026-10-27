@@ -1,6 +1,6 @@
 # 23. Persist the hard state after the log
 
-- Status: Accepted (lands in code with the `lotse-server` replica, in progress)
+- Status: Accepted
 - Date: 2026-10-27
 
 ## Context

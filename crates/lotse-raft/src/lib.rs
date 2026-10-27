@@ -265,9 +265,15 @@ pub struct Send {
     pub attach_snapshot: bool,
 }
 
-/// Everything the driver has to do, in this order: persist `hard_state`,
-/// install `snapshot`, truncate the log at `truncate_from`, append
-/// `entries`, apply the `committed` range, then send `messages`.
+/// Everything the driver has to do, in this order: install `snapshot`,
+/// truncate the log at `truncate_from`, append `entries`, persist
+/// `hard_state`, apply the `committed` range, then send `messages`.
+///
+/// The hard state comes after the log on purpose: its commit index refers to
+/// the entries of the same ready. Persisted before them, a crash could leave
+/// it pointing into a log that still holds a conflicting suffix. (A driver
+/// that writes the log and the hard state in one atomic write may ignore
+/// this.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ready {
     /// New hard state, if it changed.
@@ -500,12 +506,21 @@ impl RaftGroup {
             None => Membership::of_voters(cfg.voters.iter().copied()),
         };
         let commit = restored.hard_state.commit.max(snap).min(last);
+        // The log is written before the hard state, so a crash can leave
+        // entries of a term the hard state never recorded. The term never
+        // stays below them (no vote in that term was ever sent: messages go
+        // out only after the hard state is durable).
+        let (term, vote) = if restored.log.last_term() > restored.hard_state.term {
+            (restored.log.last_term(), None)
+        } else {
+            (restored.hard_state.term, restored.hard_state.vote)
+        };
         let mut g = RaftGroup {
             rng: cfg.seed ^ 0x9E37_79B9_7F4A_7C15,
             base_membership,
             configs: restored.configs,
-            term: restored.hard_state.term,
-            vote: restored.hard_state.vote,
+            term,
+            vote,
             commit,
             applied: restored.applied.max(snap).min(commit),
             leader: None,

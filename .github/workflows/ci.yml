@@ -53,6 +53,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim --release
+      - run: cargo test -p lotse-sim -p lotse-server --release
         env:
           LOTSE_SIM_SEEDS: "5000"

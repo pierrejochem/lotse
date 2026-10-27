@@ -522,6 +522,56 @@ pub fn control_batch(
     b.finish()
 }
 
+/// Raft's own entries, stored as control batches that readers skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaftControl {
+    /// The empty entry a new leader appends.
+    Noop,
+    /// A membership change; the record value is the encoded membership.
+    Config,
+}
+
+/// Builds a Raft control batch carrying `payload` (empty for a no-op).
+pub fn raft_control_batch(kind: RaftControl, payload: &[u8]) -> Result<Bytes, Error> {
+    let mut b = BatchBuilder::new(BatchOptions {
+        attributes: Attributes {
+            compression: Compression::None,
+            transactional: false,
+            control: true,
+            kind: BatchKind::Data,
+        },
+        producer_id: 0,
+        producer_epoch: 0,
+        base_sequence: -1,
+    });
+    let ty: u16 = match kind {
+        RaftControl::Noop => 2,
+        RaftControl::Config => 3,
+    };
+    let mut key = [0u8; 4]; // version u16 | type u16
+    key[2..].copy_from_slice(&ty.to_le_bytes());
+    b.push(0, Some(&key), Some(payload), &[]);
+    b.finish()
+}
+
+/// If `batch` is a Raft control batch, its kind and payload.
+pub fn raft_control(batch: &Batch) -> Result<Option<(RaftControl, Bytes)>, Error> {
+    if !batch.attributes().control {
+        return Ok(None);
+    }
+    let rec = batch.records()?.into_iter().next().ok_or(Error::Malformed("empty control batch"))?;
+    let key = rec.key.ok_or(Error::Malformed("control record without key"))?;
+    if key.len() != 4 {
+        return Err(Error::Malformed("control record has the wrong size"));
+    }
+    let kind = match u16::from_le_bytes([key[2], key[3]]) {
+        2 => RaftControl::Noop,
+        3 => RaftControl::Config,
+        _ => return Ok(None), // a transaction marker
+    };
+    Ok(Some((kind, rec.value.unwrap_or_default())))
+}
+
 /// Reads the marker of a control batch.
 pub fn control_marker(batch: &Batch) -> Result<(ControlType, u32), Error> {
     if !batch.attributes().control {

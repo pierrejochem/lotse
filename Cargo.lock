@@ -628,6 +628,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-server"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "lotse-log",
+ "lotse-raft",
+ "lotse-record",
+ "lotse-rt",
+ "lotse-sim",
+ "thiserror",
+]
+
+[[package]]
 name = "lotse-sim"
 version = "0.0.1"
 dependencies = [

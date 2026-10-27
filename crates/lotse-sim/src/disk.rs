@@ -29,6 +29,8 @@ struct DiskState {
     dirs: std::collections::BTreeSet<PathBuf>,
     /// Bumped on every crash; handles from an older incarnation are stale.
     incarnation: u64,
+    /// Write operations left before the power goes ([`SimDisk::arm_power_loss`]).
+    power_left: Option<u64>,
 }
 
 /// What a crash destroyed.
@@ -63,9 +65,15 @@ pub struct SimFile {
 }
 
 impl SimDisk {
-    pub(crate) fn new(rng: SimRng) -> Self {
+    /// An empty disk whose crashes draw from `rng`.
+    pub fn new(rng: SimRng) -> Self {
         SimDisk {
-            state: Arc::new(Mutex::new(DiskState { files: BTreeMap::new(), dirs: Default::default(), incarnation: 0 })),
+            state: Arc::new(Mutex::new(DiskState {
+                files: BTreeMap::new(),
+                dirs: Default::default(),
+                incarnation: 0,
+                power_left: None,
+            })),
             rng,
         }
     }
@@ -75,6 +83,7 @@ impl SimDisk {
     pub fn crash(&self) -> CrashReport {
         let mut s = self.state.lock().expect("disk lock");
         s.incarnation += 1;
+        s.power_left = None;
         let mut report = CrashReport::default();
         for (path, f) in s.files.iter_mut() {
             let unsynced = f.data.len() - f.synced;
@@ -98,6 +107,19 @@ impl SimDisk {
         report
     }
 
+    /// The power goes after `ops` more write operations (append, truncate,
+    /// sync, create, rename, remove): from then on every operation fails, as
+    /// if the process had died mid-way. Call [`SimDisk::crash`] afterwards to
+    /// decide what survived.
+    pub fn arm_power_loss(&self, ops: u64) {
+        self.state.lock().expect("disk lock").power_left = Some(ops);
+    }
+
+    /// `true` once an armed power loss has happened.
+    pub fn power_lost(&self) -> bool {
+        self.state.lock().expect("disk lock").power_left == Some(0)
+    }
+
     /// Flips one bit in a file, synced or not: media corruption that the
     /// checksums must catch.
     pub fn flip_bit(&self, path: &Path, byte: usize, bit: u8) -> io::Result<()> {
@@ -116,7 +138,13 @@ impl SimDisk {
     pub(crate) fn open(&self, path: &Path, mode: OpenMode) -> impl Future<Output = io::Result<SimFile>> + Send + use<> {
         let res = (|| {
             let mut s = self.state.lock().expect("disk lock");
+            if s.power_left == Some(0) {
+                return Err(io::Error::other("simulated power loss"));
+            }
             let exists = s.files.contains_key(path);
+            if !exists && mode != OpenMode::Existing {
+                spend(&mut s)?;
+            }
             match (mode, exists) {
                 (OpenMode::Existing, false) => return Err(not_found(path)),
                 (OpenMode::CreateNew, true) => {
@@ -158,6 +186,9 @@ impl SimDisk {
 
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> impl Future<Output = io::Result<()>> + Send + use<> {
         let mut s = self.state.lock().expect("disk lock");
+        if let Err(e) = spend(&mut s) {
+            return ready(Err(e));
+        }
         let res = match s.files.remove(from) {
             Some(f) => {
                 s.files.insert(to.to_owned(), f);
@@ -170,13 +201,26 @@ impl SimDisk {
 
     pub(crate) fn remove(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send + use<> {
         let mut s = self.state.lock().expect("disk lock");
+        if let Err(e) = spend(&mut s) {
+            return ready(Err(e));
+        }
         ready(s.files.remove(path).map(|_| ()).ok_or_else(|| not_found(path)))
     }
 
-    fn with_file<T>(&self, file: &SimFile, f: impl FnOnce(&mut FileState) -> io::Result<T>) -> io::Result<T> {
+    fn with_file<T>(
+        &self,
+        file: &SimFile,
+        write: bool,
+        f: impl FnOnce(&mut FileState) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut s = self.state.lock().expect("disk lock");
         if s.incarnation != file.incarnation {
             return Err(io::Error::other(format!("stale handle to {} after a crash", file.path.display())));
+        }
+        if write {
+            spend(&mut s)?;
+        } else if s.power_left == Some(0) {
+            return Err(io::Error::other("simulated power loss"));
         }
         let state = s.files.get_mut(&file.path).ok_or_else(|| not_found(&file.path))?;
         f(state)
@@ -185,7 +229,7 @@ impl SimDisk {
 
 impl SegmentFile for SimFile {
     fn append(&self, buf: Bytes) -> impl Future<Output = io::Result<u64>> + Send {
-        ready(self.disk.with_file(self, |f| {
+        ready(self.disk.with_file(self, true, |f| {
             let pos = f.data.len() as u64;
             f.data.extend_from_slice(&buf);
             Ok(pos)
@@ -193,7 +237,7 @@ impl SegmentFile for SimFile {
     }
 
     fn read_at(&self, pos: u64, len: usize) -> impl Future<Output = io::Result<Bytes>> + Send {
-        ready(self.disk.with_file(self, |f| {
+        ready(self.disk.with_file(self, false, |f| {
             let start = (pos as usize).min(f.data.len());
             let end = start.saturating_add(len).min(f.data.len());
             Ok(Bytes::copy_from_slice(&f.data[start..end]))
@@ -201,11 +245,11 @@ impl SegmentFile for SimFile {
     }
 
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send {
-        ready(self.disk.with_file(self, |f| Ok(f.data.len() as u64)))
+        ready(self.disk.with_file(self, false, |f| Ok(f.data.len() as u64)))
     }
 
     fn truncate(&self, len: u64) -> impl Future<Output = io::Result<()>> + Send {
-        ready(self.disk.with_file(self, |f| {
+        ready(self.disk.with_file(self, true, |f| {
             let len = len as usize;
             if len < f.data.len() {
                 f.data.truncate(len);
@@ -216,10 +260,22 @@ impl SegmentFile for SimFile {
     }
 
     fn sync(&self) -> impl Future<Output = io::Result<()>> + Send {
-        ready(self.disk.with_file(self, |f| {
+        ready(self.disk.with_file(self, true, |f| {
             f.synced = f.data.len();
             Ok(())
         }))
+    }
+}
+
+/// Counts one write operation against an armed power loss.
+fn spend(s: &mut DiskState) -> io::Result<()> {
+    match &mut s.power_left {
+        Some(0) => Err(io::Error::other("simulated power loss")),
+        Some(n) => {
+            *n -= 1;
+            Ok(())
+        }
+        None => Ok(()),
     }
 }
 
@@ -232,6 +288,23 @@ mod tests {
     use super::*;
     use crate::Sim;
     use lotse_rt::Disk;
+
+    #[test]
+    fn an_armed_power_loss_stops_writes_mid_way() {
+        Sim::new(7).run(|rt| async move {
+            rt.create_dir_all(Path::new("d")).await.unwrap();
+            let f = rt.open(Path::new("d/f"), OpenMode::CreateNew).await.unwrap();
+            rt.disk().arm_power_loss(2);
+            f.append(Bytes::from_static(b"one")).await.unwrap();
+            f.sync().await.unwrap();
+            assert!(f.append(Bytes::from_static(b"two")).await.is_err(), "the power is gone");
+            assert!(f.read_at(0, 3).await.is_err());
+            assert!(rt.disk().power_lost());
+            rt.crash();
+            let f = rt.open(Path::new("d/f"), OpenMode::Existing).await.unwrap();
+            assert_eq!(&f.read_at(0, 10).await.unwrap()[..], b"one");
+        });
+    }
 
     #[test]
     fn synced_data_survives_and_unsynced_data_is_a_prefix_or_torn() {

@@ -1,6 +1,6 @@
 //! An in-memory driver for tests and simulations.
 //!
-//! [`MemNode`] does what `lotse-server` will do with `lotse-log`: persist a
+//! [`MemNode`] does what `lotse-server` does with `lotse-log`: persist a
 //! [`Ready`](crate::Ready) in the documented order, apply committed entries,
 //! fill outgoing appends from its log and attach its snapshot. Its state
 //! machine is simply the list of applied entries, and a snapshot is that
@@ -115,10 +115,6 @@ impl MemNode {
             return Vec::new();
         }
         let ready = self.raft.ready();
-        if let Some(hs) = ready.hard_state {
-            assert!(hs.term >= self.hard_state.term, "term went backwards");
-            self.hard_state = hs;
-        }
         if let Some(snap) = ready.snapshot {
             let entries = decode(&snap.data);
             let applied = self.applied.last().map_or(0, |e| e.last);
@@ -141,6 +137,10 @@ impl MemNode {
             let next = self.log.last().map_or(self.snapshot_index() + 1, |l| l.last + 1);
             assert_eq!(e.first, next, "node {} appended a gap", self.cfg.id);
             self.log.push(e);
+        }
+        if let Some(hs) = ready.hard_state {
+            assert!(hs.term >= self.hard_state.term, "term went backwards");
+            self.hard_state = hs;
         }
         if let Some((first, last)) = ready.committed {
             let start = self.log.partition_point(|e| e.last < first);

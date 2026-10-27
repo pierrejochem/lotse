@@ -73,6 +73,12 @@ impl SimRuntime {
         &self.disk
     }
 
+    /// The same runtime (clock, tasks, randomness) with a disk of its own:
+    /// one per simulated node, so a crash hits only that node.
+    pub fn with_own_disk(&self) -> SimRuntime {
+        SimRuntime { exec: self.exec.clone(), rng: self.rng.clone(), disk: SimDisk::new(self.rng.clone()) }
+    }
+
     /// Simulates a power loss: file handles become stale, and unsynced data
     /// is lost or torn as the seed decides. Reopen files afterwards.
     pub fn crash(&self) -> CrashReport {
