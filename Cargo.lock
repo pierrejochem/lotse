@@ -604,6 +604,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-raft"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "lotse-record"
 version = "0.0.1"
 dependencies = [
@@ -626,6 +633,7 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "lotse-log",
+ "lotse-raft",
  "lotse-record",
  "lotse-rt",
 ]

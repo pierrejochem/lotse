@@ -14,6 +14,7 @@ bytes.workspace = true
 [dev-dependencies]
 lotse-log.workspace = true
 lotse-record.workspace = true
+lotse-raft.workspace = true
 
 [lints]
 workspace = true

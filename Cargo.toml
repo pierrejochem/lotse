@@ -15,6 +15,7 @@ lotse-rt = { path = "crates/lotse-rt" }
 lotse-record = { path = "crates/lotse-record" }
 lotse-log = { path = "crates/lotse-log" }
 lotse-sim = { path = "crates/lotse-sim" }
+lotse-raft = { path = "crates/lotse-raft" }
 
 bytes = "1.7"
 crc32c = "0.6"

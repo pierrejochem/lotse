@@ -1,0 +1,14 @@
+[package]
+name = "lotse-raft"
+description = "Sans-I/O Raft for Lotse: one state machine per partition, batched per node pair"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+
+[lints]
+workspace = true
