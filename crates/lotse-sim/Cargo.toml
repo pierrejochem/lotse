@@ -1,0 +1,19 @@
+[package]
+name = "lotse-sim"
+description = "Deterministic simulation runtime and fault injection for Lotse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lotse-rt.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+lotse-log.workspace = true
+lotse-record.workspace = true
+
+[lints]
+workspace = true

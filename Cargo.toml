@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/pierrejochem/lotse"
+publish = false
+
+[workspace.dependencies]
+lotse-rt = { path = "crates/lotse-rt" }
+lotse-record = { path = "crates/lotse-record" }
+lotse-log = { path = "crates/lotse-log" }
+lotse-sim = { path = "crates/lotse-sim" }
+
+bytes = "1.7"
+crc32c = "0.6"
+thiserror = "2"
+proptest = "1.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# The core is sans-I/O: nothing outside lotse-rt implementations may read the
+# wall clock or the OS RNG, or the simulation stops being deterministic.
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
+[profile.test]
+opt-level = 1

@@ -1,0 +1,11 @@
+# Determinism guard: time, randomness and threads come from lotse-rt only.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "use lotse_rt::Clock::now" },
+    { path = "std::time::SystemTime::now", reason = "use lotse_rt::Clock::now" },
+    { path = "std::thread::spawn", reason = "use lotse_rt::Spawn" },
+    { path = "std::thread::sleep", reason = "use lotse_rt::Clock::sleep" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is random; use BTreeMap or an explicitly seeded hasher" },
+    { path = "std::collections::HashSet", reason = "iteration order is random; use BTreeSet" },
+]
