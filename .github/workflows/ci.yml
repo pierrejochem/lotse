@@ -21,6 +21,30 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  console-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/web/package-lock.json
+      - run: npm ci
+      # The committed OpenAPI file and generated client must match the server.
+      - run: |
+          cargo run -q -p lotse-console -- --print-openapi > openapi.json
+          npx openapi-typescript openapi.json -o src/api/schema.d.ts
+          git diff --exit-code openapi.json src/api/schema.d.ts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   simulation:
     runs-on: ubuntu-latest
     steps:

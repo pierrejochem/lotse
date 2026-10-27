@@ -1,0 +1,2336 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lotse Console API",
+    "description": "HTTP gateway and UI backend of lotse-console.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.0.1"
+  },
+  "paths": {
+    "/api/v1/clusters": {
+      "get": {
+        "tags": [],
+        "summary": "Clusters this console manages.",
+        "operationId": "clusters",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ClusterRef"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/metrics": {
+      "get": {
+        "tags": [],
+        "summary": "Chart history from the console's in-memory buffer (at most 180 points).",
+        "operationId": "metrics",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "series",
+            "in": "query",
+            "description": "`in_bytes_per_sec`, `out_bytes_per_sec`, `records_per_sec` or `commit_p99_ms`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "description": "Time range.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Range"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Series"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/nodes": {
+      "get": {
+        "tags": [],
+        "summary": "Nodes, rolling upgrade and operator events.",
+        "operationId": "nodes",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodesView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/overview": {
+      "get": {
+        "tags": [],
+        "summary": "The overview screen.",
+        "operationId": "overview",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/queues": {
+      "get": {
+        "tags": [],
+        "summary": "All queues.",
+        "operationId": "queues",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/QueueRow"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "summary": "Creates a queue.",
+        "operationId": "create_queue",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateQueue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/queues/{name}": {
+      "get": {
+        "tags": [],
+        "summary": "One queue.",
+        "operationId": "queue",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/streams": {
+      "get": {
+        "tags": [],
+        "summary": "All streams.",
+        "operationId": "streams",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StreamRow"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/streams/{name}": {
+      "get": {
+        "tags": [],
+        "summary": "One stream.",
+        "operationId": "stream",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Stream name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/streams/{name}/records": {
+      "get": {
+        "tags": [],
+        "summary": "Reads records without joining a consumer group.",
+        "operationId": "read_records",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Stream name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "partition",
+            "in": "query",
+            "description": "Partition.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "First offset.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Records to return, 1–500 (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "isolation",
+            "in": "query",
+            "description": "Default `committed`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Isolation"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/tenants": {
+      "get": {
+        "tags": [],
+        "summary": "Tenants, quotas and role bindings.",
+        "operationId": "tenants",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/upgrade/pause": {
+      "post": {
+        "tags": [],
+        "summary": "Stops the rolling upgrade after the node it is on.",
+        "operationId": "pause_upgrade",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [],
+        "summary": "The signed-in user.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Alert": {
+        "type": "object",
+        "description": "A banner that needs attention.",
+        "required": [
+          "id",
+          "tone",
+          "title",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What happened and what to do."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable ID, for dismissing."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Node the alert is about, if any."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short headline."
+          },
+          "tone": {
+            "$ref": "#/components/schemas/Tone",
+            "description": "Severity."
+          }
+        }
+      },
+      "AssignedMember": {
+        "type": "object",
+        "description": "A group member's partitions.",
+        "required": [
+          "id",
+          "owned",
+          "incoming"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Member ID and host."
+          },
+          "incoming": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Partitions on their way to it."
+          },
+          "owned": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Partitions it owns."
+          }
+        }
+      },
+      "Assignment": {
+        "type": "object",
+        "description": "Who owns which partition in a group.",
+        "required": [
+          "group",
+          "coordinator",
+          "members"
+        ],
+        "properties": {
+          "coordinator": {
+            "type": "string",
+            "description": "Coordinator partition and node."
+          },
+          "group": {
+            "type": "string",
+            "description": "Group ID."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssignedMember"
+            },
+            "description": "One entry per member."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explanation of a handover in progress."
+          }
+        }
+      },
+      "Chip": {
+        "type": "object",
+        "description": "A status chip: colour plus word, never colour alone.",
+        "required": [
+          "tone",
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Word shown next to the colour."
+          },
+          "tone": {
+            "$ref": "#/components/schemas/Tone",
+            "description": "Colour."
+          }
+        }
+      },
+      "ClusterRef": {
+        "type": "object",
+        "description": "A cluster this console manages.",
+        "required": [
+          "id",
+          "nodes",
+          "status",
+          "tone",
+          "demo"
+        ],
+        "properties": {
+          "demo": {
+            "type": "boolean",
+            "description": "`true` when served by the built-in demo cluster."
+          },
+          "id": {
+            "type": "string",
+            "description": "Cluster ID from the console config."
+          },
+          "nodes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of broker nodes.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "One-line status, e.g. \"upgrading to 0.4.1\"."
+          },
+          "tone": {
+            "$ref": "#/components/schemas/Tone",
+            "description": "Colour of the status."
+          }
+        }
+      },
+      "CreateQueue": {
+        "type": "object",
+        "description": "Request to create a queue.",
+        "required": [
+          "name",
+          "tenant",
+          "priority_levels",
+          "single_active",
+          "create_dlq"
+        ],
+        "properties": {
+          "create_dlq": {
+            "type": "boolean",
+            "description": "Create the DLQ if missing."
+          },
+          "dlq": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dead-letter queue name."
+          },
+          "max_deliveries": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Deliveries before dead-lettering.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Name: lowercase letters, digits, dots and hyphens."
+          },
+          "priority_levels": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1 to 10.",
+            "minimum": 0
+          },
+          "single_active": {
+            "type": "boolean",
+            "description": "Single active consumer."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          },
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Message TTL, ms; `None` = until acked.",
+            "minimum": 0
+          }
+        }
+      },
+      "DeadLetter": {
+        "type": "object",
+        "description": "A dead-lettered message.",
+        "required": [
+          "offset",
+          "reason",
+          "deliveries",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "Time, RFC 3339."
+          },
+          "deliveries": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Deliveries before it was dead-lettered.",
+            "minimum": 0
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Message key."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Offset in the dead-letter queue.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it was dead-lettered."
+          }
+        }
+      },
+      "DiskLimits": {
+        "type": "object",
+        "description": "Disk thresholds, as fractions of free space.",
+        "required": [
+          "soft_free",
+          "hard_free"
+        ],
+        "properties": {
+          "hard_free": {
+            "type": "number",
+            "format": "double",
+            "description": "Writes are rejected below this free fraction."
+          },
+          "soft_free": {
+            "type": "number",
+            "format": "double",
+            "description": "Producers are throttled below this free fraction."
+          }
+        }
+      },
+      "Done": {
+        "type": "object",
+        "description": "Result of a write, with the CLI command that does the same.",
+        "required": [
+          "message",
+          "cli"
+        ],
+        "properties": {
+          "cli": {
+            "type": "string",
+            "description": "The equivalent `lotse-cli` command."
+          },
+          "message": {
+            "type": "string",
+            "description": "What was done."
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Error body for every failed request.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Machine-readable code, e.g. `NOT_FOUND`."
+          },
+          "message": {
+            "type": "string",
+            "description": "What went wrong and what to do."
+          }
+        }
+      },
+      "Group": {
+        "type": "object",
+        "description": "A consumer group reading a stream.",
+        "required": [
+          "id",
+          "members",
+          "state",
+          "epoch",
+          "lag",
+          "lag_trend"
+        ],
+        "properties": {
+          "epoch": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Assignment epoch.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Group ID."
+          },
+          "lag": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records behind, summed over partitions.",
+            "minimum": 0
+          },
+          "lag_trend": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Lag samples over the last hour, oldest first."
+          },
+          "members": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Members.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/Chip",
+            "description": "State chip."
+          }
+        }
+      },
+      "HandoverEvent": {
+        "type": "object",
+        "description": "An entry in the single-active-consumer handover log.",
+        "required": [
+          "at",
+          "text"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "Time, RFC 3339."
+          },
+          "text": {
+            "type": "string",
+            "description": "What happened."
+          }
+        }
+      },
+      "HealthItem": {
+        "type": "object",
+        "description": "One line of the health list.",
+        "required": [
+          "label",
+          "value",
+          "detail"
+        ],
+        "properties": {
+          "chip": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Chip",
+                "description": "Status chip, if the item has one."
+              }
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "description": "Extra context."
+          },
+          "label": {
+            "type": "string",
+            "description": "What is measured."
+          },
+          "value": {
+            "type": "string",
+            "description": "The value, already in words (\"1,284\")."
+          }
+        }
+      },
+      "Isolation": {
+        "type": "string",
+        "description": "Isolation level for reads.",
+        "enum": [
+          "uncommitted",
+          "committed"
+        ]
+      },
+      "Me": {
+        "type": "object",
+        "description": "The signed-in user, as the cluster sees them.",
+        "required": [
+          "principal",
+          "display_name",
+          "auth_mode"
+        ],
+        "properties": {
+          "auth_mode": {
+            "type": "string",
+            "description": "`dev` or `oidc`."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Name to show."
+          },
+          "principal": {
+            "type": "string",
+            "description": "Principal name the cluster authorises."
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "description": "A broker node.",
+        "required": [
+          "id",
+          "role",
+          "zone",
+          "uptime_secs",
+          "leads",
+          "replicas",
+          "disk_free_bytes",
+          "disk_total_bytes",
+          "produce_bytes_per_sec",
+          "net_in_bytes_per_sec",
+          "net_out_bytes_per_sec",
+          "connections",
+          "cpu",
+          "memory_bytes",
+          "memory_limit_bytes",
+          "version",
+          "status"
+        ],
+        "properties": {
+          "connections": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Open client connections.",
+            "minimum": 0
+          },
+          "cpu": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU use, 0–1."
+          },
+          "disk_free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Free bytes on the log volume.",
+            "minimum": 0
+          },
+          "disk_total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size of the log volume.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Node ID."
+          },
+          "leads": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Raft groups this node leads.",
+            "minimum": 0
+          },
+          "memory_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Resident memory, bytes.",
+            "minimum": 0
+          },
+          "memory_limit_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Memory limit, bytes.",
+            "minimum": 0
+          },
+          "net_in_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Network in, bytes/s (clients and replication)."
+          },
+          "net_out_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Network out, bytes/s."
+          },
+          "produce_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Client produce traffic into this node, bytes/s."
+          },
+          "replicas": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Raft groups with a replica on this node.",
+            "minimum": 0
+          },
+          "role": {
+            "type": "string",
+            "description": "\"Metadata leader\", \"Voter\", …"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Chip",
+            "description": "Status chip."
+          },
+          "uptime_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Uptime in seconds.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string",
+            "description": "Running version."
+          },
+          "zone": {
+            "type": "string",
+            "description": "Availability zone."
+          }
+        }
+      },
+      "NodesView": {
+        "type": "object",
+        "description": "The nodes screen.",
+        "required": [
+          "nodes",
+          "disk_limits",
+          "events"
+        ],
+        "properties": {
+          "disk_limits": {
+            "$ref": "#/components/schemas/DiskLimits",
+            "description": "Disk thresholds."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorEvent"
+            },
+            "description": "Recent operator events, newest first."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "description": "Nodes."
+          },
+          "upgrade": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Upgrade",
+                "description": "Running upgrade, if any."
+              }
+            ]
+          }
+        }
+      },
+      "OperatorEvent": {
+        "type": "object",
+        "description": "Something the operator did.",
+        "required": [
+          "at",
+          "node",
+          "text"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "Time, RFC 3339."
+          },
+          "node": {
+            "type": "string",
+            "description": "Node it concerns."
+          },
+          "text": {
+            "type": "string",
+            "description": "What happened."
+          }
+        }
+      },
+      "Overview": {
+        "type": "object",
+        "description": "The cluster overview screen.",
+        "required": [
+          "cluster",
+          "raft_groups",
+          "metadata_leader",
+          "metadata_term",
+          "alerts",
+          "throughput",
+          "health",
+          "nodes",
+          "disk_limits",
+          "busiest_streams",
+          "attention_queues",
+          "stream_count",
+          "queue_count"
+        ],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Alert"
+            },
+            "description": "Banners."
+          },
+          "attention_queues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueRow"
+            },
+            "description": "Queues that need attention."
+          },
+          "busiest_streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StreamRow"
+            },
+            "description": "Busiest streams by produce rate."
+          },
+          "cluster": {
+            "type": "string",
+            "description": "Cluster ID."
+          },
+          "disk_limits": {
+            "$ref": "#/components/schemas/DiskLimits",
+            "description": "Disk thresholds for the bars."
+          },
+          "health": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthItem"
+            },
+            "description": "Health list."
+          },
+          "metadata_leader": {
+            "type": "string",
+            "description": "Node that leads the metadata group."
+          },
+          "metadata_term": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Term of the metadata group.",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "description": "Nodes."
+          },
+          "queue_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total queues.",
+            "minimum": 0
+          },
+          "raft_groups": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Raft groups in the cluster.",
+            "minimum": 0
+          },
+          "stream_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total streams.",
+            "minimum": 0
+          },
+          "throughput": {
+            "$ref": "#/components/schemas/Throughput",
+            "description": "Headline numbers."
+          }
+        }
+      },
+      "Partition": {
+        "type": "object",
+        "description": "A stream partition.",
+        "required": [
+          "id",
+          "leader",
+          "term",
+          "replicas",
+          "log_start",
+          "high_watermark",
+          "last_stable",
+          "size_bytes"
+        ],
+        "properties": {
+          "high_watermark": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Committed by a quorum.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition number.",
+            "minimum": 0
+          },
+          "last_stable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Below the first open transaction; `read_committed` stops here.",
+            "minimum": 0
+          },
+          "leader": {
+            "type": "string",
+            "description": "Leader node."
+          },
+          "log_start": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First offset still stored.",
+            "minimum": 0
+          },
+          "replicas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Replica"
+            },
+            "description": "Replicas."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes on one replica.",
+            "minimum": 0
+          },
+          "term": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Raft term.",
+            "minimum": 0
+          }
+        }
+      },
+      "PhaseState": {
+        "type": "string",
+        "description": "State of an upgrade phase.",
+        "enum": [
+          "done",
+          "running",
+          "pending"
+        ]
+      },
+      "Point": {
+        "type": "object",
+        "description": "One point of a time series.",
+        "required": [
+          "t",
+          "v"
+        ],
+        "properties": {
+          "t": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix time, ms.",
+            "minimum": 0
+          },
+          "v": {
+            "type": "number",
+            "format": "double",
+            "description": "Value."
+          }
+        }
+      },
+      "PriorityLevel": {
+        "type": "object",
+        "description": "A queue priority level (its own sub-log).",
+        "required": [
+          "level",
+          "leader",
+          "ready",
+          "oldest_ms"
+        ],
+        "properties": {
+          "leader": {
+            "type": "string",
+            "description": "Leader of the sub-log."
+          },
+          "level": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Level number; higher is delivered first.",
+            "minimum": 0
+          },
+          "oldest_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Age of the oldest ready message, ms.",
+            "minimum": 0
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages ready.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueConsumer": {
+        "type": "object",
+        "description": "A queue consumer.",
+        "required": [
+          "tag",
+          "principal",
+          "connection",
+          "in_flight",
+          "credit_messages",
+          "in_flight_bytes",
+          "credit_bytes",
+          "acks_per_sec",
+          "state"
+        ],
+        "properties": {
+          "acks_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Acks per second."
+          },
+          "connection": {
+            "type": "string",
+            "description": "Client address and broker."
+          },
+          "credit_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credit window, bytes.",
+            "minimum": 0
+          },
+          "credit_messages": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Credit window, messages.",
+            "minimum": 0
+          },
+          "in_flight": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Messages in flight.",
+            "minimum": 0
+          },
+          "in_flight_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes in flight.",
+            "minimum": 0
+          },
+          "principal": {
+            "type": "string",
+            "description": "Principal."
+          },
+          "state": {
+            "$ref": "#/components/schemas/Chip",
+            "description": "State chip (\"Active\", \"Standby\")."
+          },
+          "tag": {
+            "type": "string",
+            "description": "Consumer tag."
+          }
+        }
+      },
+      "QueueDetail": {
+        "type": "object",
+        "description": "The queue detail screen.",
+        "required": [
+          "name",
+          "tenant",
+          "single_active",
+          "ready",
+          "in_flight",
+          "in_open_txns",
+          "publish_per_sec",
+          "ack_per_sec",
+          "dead_lettered",
+          "levels",
+          "consumers",
+          "dead_letters",
+          "handover"
+        ],
+        "properties": {
+          "ack_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Ack rate, messages/s."
+          },
+          "binding": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exchange and binding key, if bound."
+          },
+          "consumers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueConsumer"
+            },
+            "description": "Consumers."
+          },
+          "dead_lettered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Dead-lettered.",
+            "minimum": 0
+          },
+          "dead_letters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeadLetter"
+            },
+            "description": "Latest dead letters."
+          },
+          "dlq": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dead-letter queue."
+          },
+          "handover": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandoverEvent"
+            },
+            "description": "Last single-active-consumer handover."
+          },
+          "in_flight": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Delivered and not acked.",
+            "minimum": 0
+          },
+          "in_open_txns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Acks waiting for their transaction to commit.",
+            "minimum": 0
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PriorityLevel"
+            },
+            "description": "Priority levels, highest first."
+          },
+          "max_deliveries": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Deliveries before dead-lettering.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Queue name."
+          },
+          "publish_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Publish rate, messages/s."
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ready, all levels.",
+            "minimum": 0
+          },
+          "single_active": {
+            "type": "boolean",
+            "description": "Single active consumer."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          },
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Message TTL, ms; `None` = until acked.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueRow": {
+        "type": "object",
+        "description": "A row in queue lists.",
+        "required": [
+          "name",
+          "tenant",
+          "ready",
+          "dead_lettered"
+        ],
+        "properties": {
+          "attention": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Chip",
+                "description": "Why the queue needs attention, if it does."
+              }
+            ]
+          },
+          "dead_lettered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages in the dead-letter queue.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Queue name."
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages ready for delivery.",
+            "minimum": 0
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          }
+        }
+      },
+      "Range": {
+        "type": "string",
+        "description": "Chart time range.",
+        "enum": [
+          "15m",
+          "1h",
+          "6h",
+          "24h"
+        ]
+      },
+      "RecordHeader": {
+        "type": "object",
+        "description": "A record header.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Name."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Value as UTF-8, if it is."
+          }
+        }
+      },
+      "RecordPage": {
+        "type": "object",
+        "description": "A page of records.",
+        "required": [
+          "records",
+          "next_offset",
+          "cli"
+        ],
+        "properties": {
+          "cli": {
+            "type": "string",
+            "description": "The equivalent `lotse-cli` command."
+          },
+          "next_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Offset to continue from.",
+            "minimum": 0
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecordView"
+            },
+            "description": "Records in offset order."
+          }
+        }
+      },
+      "RecordView": {
+        "type": "object",
+        "description": "A record read through the browser.",
+        "required": [
+          "offset",
+          "timestamp",
+          "size_bytes",
+          "headers",
+          "txn",
+          "producer_id",
+          "producer_epoch",
+          "sequence",
+          "batch_base",
+          "batch_last",
+          "term"
+        ],
+        "properties": {
+          "batch_base": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First offset of its batch.",
+            "minimum": 0
+          },
+          "batch_last": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last offset of its batch.",
+            "minimum": 0
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecordHeader"
+            },
+            "description": "Headers."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Key as UTF-8."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Offset.",
+            "minimum": 0
+          },
+          "producer_epoch": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Producer epoch.",
+            "minimum": 0
+          },
+          "producer_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Producer ID, 0 if not idempotent.",
+            "minimum": 0
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Sequence of this record."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Value size in bytes.",
+            "minimum": 0
+          },
+          "term": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Raft term of the batch.",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "Timestamp, RFC 3339 with milliseconds."
+          },
+          "txn": {
+            "$ref": "#/components/schemas/TxnState",
+            "description": "Transaction state."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Value as UTF-8, if it is."
+          }
+        }
+      },
+      "Replica": {
+        "type": "object",
+        "description": "A replica of a partition.",
+        "required": [
+          "node",
+          "state",
+          "behind"
+        ],
+        "properties": {
+          "behind": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries behind the leader.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "Node ID."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ReplicaState",
+            "description": "State."
+          }
+        }
+      },
+      "ReplicaState": {
+        "type": "string",
+        "description": "Role of a replica in a Raft group.",
+        "enum": [
+          "leader",
+          "in_sync",
+          "catching_up"
+        ]
+      },
+      "RoleBinding": {
+        "type": "object",
+        "description": "A role binding.",
+        "required": [
+          "principal",
+          "auth",
+          "role",
+          "resources"
+        ],
+        "properties": {
+          "auth": {
+            "type": "string",
+            "description": "`mTLS` or `OIDC`."
+          },
+          "principal": {
+            "type": "string",
+            "description": "Principal."
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Resource patterns."
+          },
+          "role": {
+            "type": "string",
+            "description": "Role."
+          }
+        }
+      },
+      "Series": {
+        "type": "object",
+        "description": "A time series for charts.",
+        "required": [
+          "name",
+          "unit",
+          "points"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Series name."
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Point"
+            },
+            "description": "Points, oldest first."
+          },
+          "unit": {
+            "type": "string",
+            "description": "Unit of `v`."
+          }
+        }
+      },
+      "StreamDetail": {
+        "type": "object",
+        "description": "The stream detail screen.",
+        "required": [
+          "name",
+          "tenant",
+          "replication",
+          "compaction",
+          "in_bytes_per_sec",
+          "out_bytes_per_sec",
+          "records_per_sec",
+          "stored_bytes",
+          "oldest_record_age_ms",
+          "open_transactions",
+          "partitions",
+          "groups"
+        ],
+        "properties": {
+          "assignment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Assignment",
+                "description": "Assignment of the group the UI highlights."
+              }
+            ]
+          },
+          "compaction": {
+            "type": "boolean",
+            "description": "Log compaction on."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "description": "Consumer groups."
+          },
+          "in_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Produce rate, bytes/s."
+          },
+          "name": {
+            "type": "string",
+            "description": "Stream name."
+          },
+          "oldest_record_age_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Age of the oldest record, ms.",
+            "minimum": 0
+          },
+          "open_transactions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Open transactions touching this stream.",
+            "minimum": 0
+          },
+          "out_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Fetch rate, bytes/s."
+          },
+          "partitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Partition"
+            },
+            "description": "Partitions."
+          },
+          "records_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Records in per second."
+          },
+          "replication": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Replication factor.",
+            "minimum": 0
+          },
+          "retention_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Retention in milliseconds, `None` = forever.",
+            "minimum": 0
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes stored, all replicas.",
+            "minimum": 0
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          }
+        }
+      },
+      "StreamRow": {
+        "type": "object",
+        "description": "A row in \"busiest streams\".",
+        "required": [
+          "name",
+          "tenant",
+          "partitions",
+          "in_bytes_per_sec",
+          "stored_bytes"
+        ],
+        "properties": {
+          "in_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Produce rate, bytes/s."
+          },
+          "name": {
+            "type": "string",
+            "description": "Stream name."
+          },
+          "partitions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition count.",
+            "minimum": 0
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored bytes, all replicas.",
+            "minimum": 0
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          }
+        }
+      },
+      "Tenant": {
+        "type": "object",
+        "description": "A tenant.",
+        "required": [
+          "name",
+          "used_bytes",
+          "quota_bytes",
+          "streams",
+          "queues",
+          "principals",
+          "state"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Tenant name."
+          },
+          "principals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Principals with bindings.",
+            "minimum": 0
+          },
+          "queues": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Queues.",
+            "minimum": 0
+          },
+          "quota_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Storage quota, bytes.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/Chip",
+            "description": "State chip."
+          },
+          "streams": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Streams.",
+            "minimum": 0
+          },
+          "used_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes stored, all replicas.",
+            "minimum": 0
+          }
+        }
+      },
+      "TenantBindings": {
+        "type": "object",
+        "description": "Bindings of one tenant.",
+        "required": [
+          "tenant",
+          "bindings"
+        ],
+        "properties": {
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleBinding"
+            },
+            "description": "Bindings."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant."
+          }
+        }
+      },
+      "TenantsView": {
+        "type": "object",
+        "description": "The tenants screen.",
+        "required": [
+          "tenants",
+          "bindings"
+        ],
+        "properties": {
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TenantBindings"
+            },
+            "description": "Role bindings per tenant."
+          },
+          "tenants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tenant"
+            },
+            "description": "Tenants, most critical first."
+          }
+        }
+      },
+      "Throughput": {
+        "type": "object",
+        "description": "Headline numbers for the overview.",
+        "required": [
+          "in_bytes_per_sec",
+          "out_bytes_per_sec",
+          "records_per_sec",
+          "commit_p99_ms",
+          "stored_bytes",
+          "consumers"
+        ],
+        "properties": {
+          "commit_p99_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "p99 time until a produce is acknowledged by a quorum, ms."
+          },
+          "consumers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Connected consumers.",
+            "minimum": 0
+          },
+          "in_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Produce and publish, bytes/s."
+          },
+          "out_bytes_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Fetch and deliver, bytes/s."
+          },
+          "records_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Records in per second."
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes stored, all replicas.",
+            "minimum": 0
+          }
+        }
+      },
+      "Tone": {
+        "type": "string",
+        "description": "Health of something, as the UI colours it.",
+        "enum": [
+          "ok",
+          "warn",
+          "critical",
+          "info"
+        ]
+      },
+      "TxnState": {
+        "type": "string",
+        "description": "Transaction state of a record as a reader sees it.",
+        "enum": [
+          "none",
+          "committed",
+          "aborted",
+          "open",
+          "commit_marker",
+          "abort_marker"
+        ]
+      },
+      "Upgrade": {
+        "type": "object",
+        "description": "A rolling upgrade run by the operator.",
+        "required": [
+          "from",
+          "to",
+          "started_by",
+          "started_at",
+          "nodes_done",
+          "nodes_total",
+          "groups_catching_up",
+          "steps",
+          "paused_after_current"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Version before."
+          },
+          "groups_catching_up": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Raft groups still catching up on the current node.",
+            "minimum": 0
+          },
+          "nodes_done": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Nodes done.",
+            "minimum": 0
+          },
+          "nodes_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Nodes in total.",
+            "minimum": 0
+          },
+          "paused_after_current": {
+            "type": "boolean",
+            "description": "`true` once the operator stops after the current node."
+          },
+          "started_at": {
+            "type": "string",
+            "description": "Start, RFC 3339."
+          },
+          "started_by": {
+            "type": "string",
+            "description": "Who started it."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpgradeStep"
+            },
+            "description": "Steps, one per node in upgrade order."
+          },
+          "to": {
+            "type": "string",
+            "description": "Version after."
+          }
+        }
+      },
+      "UpgradePhase": {
+        "type": "object",
+        "description": "A phase of upgrading one node.",
+        "required": [
+          "name",
+          "state"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What happens."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PhaseState",
+            "description": "`done`, `running` or `pending`."
+          }
+        }
+      },
+      "UpgradeStep": {
+        "type": "object",
+        "description": "One node's progress through a rolling upgrade.",
+        "required": [
+          "node",
+          "status",
+          "phases",
+          "note"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "Node ID."
+          },
+          "note": {
+            "type": "string",
+            "description": "Explanation."
+          },
+          "phases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpgradePhase"
+            },
+            "description": "Phases in order, with their state."
+          },
+          "status": {
+            "$ref": "#/components/schemas/Chip",
+            "description": "Status chip."
+          }
+        }
+      }
+    }
+  }
+}

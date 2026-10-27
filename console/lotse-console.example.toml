@@ -1,0 +1,26 @@
+# Copy to lotse-console.toml and adjust.
+listen = "127.0.0.1:8080"
+
+# Every request acts as this user. Only for a machine only you can reach;
+# OIDC sign-in is not implemented yet.
+[auth]
+mode = "dev"
+user = "pierre"
+
+# The background sampler that feeds the charts uses this read-only identity.
+[metrics]
+principal = "console-metrics"
+sample_secs = 10
+retention_hours = 24
+
+[live]
+interval_ms = 2000
+
+# A built-in cluster with sample data, until lotse-client exists.
+[[clusters]]
+id = "prod-hamburg-1"
+kind = "demo"
+
+[[clusters]]
+id = "staging-hamburg"
+kind = "demo"
