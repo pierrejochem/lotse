@@ -540,3 +540,22 @@ fn a_leader_that_tried_a_transfer_gives_up_its_lease() {
     c.pump();
     assert_eq!(c.nodes[&l].reads.len(), 1, "served through ReadIndex instead");
 }
+
+#[test]
+fn a_restart_never_keeps_a_term_below_the_log() {
+    // The driver writes the log before the hard state, so a crash can leave
+    // entries of term 3 next to a hard state that only knows term 1.
+    let restored = Restored {
+        hard_state: HardState { term: 1, vote: Some(2), commit: 0 },
+        log: TermRuns::from_entries([(1, 1, 1), (2, 4, 3)]),
+        ..Restored::default()
+    };
+    let g = RaftGroup::new(Config::new(1, vec![1, 2, 3]), restored);
+    assert_eq!(g.term(), 3, "currentTerm is never below the last log term");
+    let mut n = MemNode::new(Config::new(1, vec![1, 2, 3]));
+    n.raft = g;
+    // The vote belonged to term 1; in term 3 this node has not voted.
+    n.raft.step(3, Message::Vote { term: 3, last_index: 4, last_term: 3, pre: false, transfer: false });
+    let out = n.process();
+    assert!(out.iter().any(|s| matches!(s.msg, Message::VoteReply { granted: true, term: 3, .. })), "{out:?}");
+}

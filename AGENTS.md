@@ -67,4 +67,4 @@ CI (`.github/workflows/ci.yml`) runs format, clippy, tests, the web app build wi
 
 Built and tested: runtime seam, record format, segmented log, the Raft core (elections with optional pre-vote and mandatory check-quorum, snapshots, learners, joint consensus, leader transfer, ReadIndex and optional leases), the simulation harness, and the management console against a built-in demo cluster.
 
-`lotse-server` has its first piece: `Replica`, a durable Raft group on `lotse-log`, tested in a cluster simulation with power loss. Next: mutation-check the replica's durability rules, the Tokio implementation of `lotse-rt`, node-to-node transport with Multi-Raft batching, then the native protocol. Known gaps are listed at the end of [README.md](README.md).
+`lotse-server` has its first piece: `Replica`, a durable Raft group on `lotse-log`, tested in a cluster simulation with power loss. Its durability rules are mutation-checked. Next: the Tokio implementation of `lotse-rt`, node-to-node transport with Multi-Raft batching, then the native protocol. Known gaps are listed at the end of [README.md](README.md).
