@@ -18,6 +18,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lotse-sim.workspace = true
+lotse-rt-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true

@@ -43,7 +43,7 @@ const FORMAT: u8 = 1;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
-pub trait StateMachine: std::marker::Send + 'static {
+pub trait StateMachine: std::marker::Send + Sync + 'static {
     /// Applies a committed data batch, in log order. Raft's own entries
     /// (no-ops, membership changes) are not passed.
     fn apply(&mut self, batch: &Batch);
@@ -345,7 +345,7 @@ async fn continues<D: Disk>(log: &Log<D>, index: u64, term: u64) -> Result<bool,
     Ok(batch.last_offset() == index - 1 && batch.term() == term)
 }
 
-fn batches(mut bytes: Bytes) -> Result<Vec<Batch>, Error> {
+pub(crate) fn batches(mut bytes: Bytes) -> Result<Vec<Batch>, Error> {
     let mut out = Vec::new();
     while !bytes.is_empty() {
         let (batch, rest) = Batch::parse(&bytes)?;
@@ -356,7 +356,7 @@ fn batches(mut bytes: Bytes) -> Result<Vec<Batch>, Error> {
 }
 
 /// The Raft entry a stored batch is.
-fn to_entry(batch: &Batch) -> Result<Entry, Error> {
+pub(crate) fn to_entry(batch: &Batch) -> Result<Entry, Error> {
     let (kind, data) = match lotse_record::raft_control(batch)? {
         Some((RaftControl::Noop, _)) => (EntryKind::Noop, Bytes::new()),
         Some((RaftControl::Config, payload)) => (EntryKind::Config, payload),
@@ -365,8 +365,19 @@ fn to_entry(batch: &Batch) -> Result<Entry, Error> {
     Ok(Entry { first: batch.base_offset() + 1, last: batch.last_offset() + 1, term: batch.term(), kind, data })
 }
 
-/// The batch a Raft entry is stored as, stamped.
-fn to_batch(e: &Entry) -> Result<Bytes, Error> {
+/// The batch a Raft entry is stored as, stamped. A data batch that already
+/// carries the right offset and term (one read from a log) is returned as
+/// is, without copying.
+pub(crate) fn to_batch(e: &Entry) -> Result<Bytes, Error> {
+    if e.kind == EntryKind::Normal
+        && let Ok((b, rest)) = Batch::parse(&e.data)
+        && rest.is_empty()
+        && b.base_offset() + 1 == e.first
+        && b.last_offset() + 1 == e.last
+        && b.term() == e.term
+    {
+        return Ok(e.data.clone());
+    }
     let raw = match e.kind {
         EntryKind::Normal => e.data.clone(),
         EntryKind::Noop => lotse_record::raft_control_batch(RaftControl::Noop, &[])?,

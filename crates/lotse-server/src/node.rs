@@ -1,0 +1,339 @@
+//! A broker node: many Raft groups, one transport.
+//!
+//! [`Node::start`] opens every group's [`Replica`] and runs the node until
+//! [`NodeHandle::stop`]. Everything goes through `lotse-rt`, so the same code
+//! runs on Tokio and in simulation.
+//!
+//! - The **main loop** ticks every group once per [`NodeConfig::tick`], runs
+//!   the commands from [`NodeHandle`], steps incoming messages into their
+//!   groups, processes every group and bundles all messages for one peer
+//!   into one frame ([`crate::wire`]).
+//! - Per peer, a **sender** task keeps one outgoing connection, reconnects
+//!   with a backoff, and sends queued frames. While a peer is unreachable
+//!   its queue keeps only the newest frames: Raft resends what matters.
+//! - An **accept** task takes incoming connections; each gets a **reader**
+//!   task that decodes frames into the node's inbox.
+//!
+//! On stop (or when a replica fails, e.g. its disk lost power) every task
+//! ends and the listener is closed before [`Node::start`]'s task finishes, so
+//! a restarted node can bind the same address.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bytes::Bytes;
+use lotse_log::LogConfig;
+use lotse_raft::{Config, Message, NodeId, Role};
+use lotse_rt::{Conn, Listener, Runtime, Spawn};
+
+use crate::replica::{Error, ProposeError, Replica, StateMachine};
+use crate::signal::{Signal, race};
+use crate::wire::{self, GroupId};
+
+/// Frames kept per unreachable peer; older ones are dropped.
+const PEER_QUEUE: usize = 256;
+
+/// How one node runs.
+#[derive(Debug, Clone)]
+pub struct NodeConfig {
+    /// This node.
+    pub id: NodeId,
+    /// Where it listens (`host:port`).
+    pub listen: String,
+    /// Every voter of the groups and its address, this node included.
+    pub peers: BTreeMap<NodeId, String>,
+    /// Raft groups hosted here; each lives in `groups/<id>` on the disk.
+    pub groups: Vec<GroupId>,
+    /// Logical Raft tick.
+    pub tick: Duration,
+    /// Pre-vote on or off.
+    pub pre_vote: bool,
+    /// Log segment settings.
+    pub log: LogConfig,
+}
+
+/// What a group looks like from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupStatus {
+    /// Role here.
+    pub role: Role,
+    /// Current term.
+    pub term: u64,
+    /// The leader this node knows of.
+    pub leader: Option<NodeId>,
+    /// Commit index here.
+    pub commit: u64,
+    /// Applied index here.
+    pub applied: u64,
+}
+
+/// A decoded frame: its sender and the messages per group.
+type Incoming = (NodeId, Vec<(GroupId, Message)>);
+
+type Reply = Arc<Mutex<(Option<Result<(u64, u64), String>>, Option<std::task::Waker>)>>;
+
+enum Command {
+    Propose { group: GroupId, batch: Bytes, reply: Reply },
+}
+
+#[derive(Default)]
+struct Shared {
+    inbox: Mutex<VecDeque<Incoming>>,
+    commands: Mutex<VecDeque<Command>>,
+    status: Mutex<BTreeMap<GroupId, GroupStatus>>,
+    work: Signal,
+    stop: Signal,
+}
+
+/// Talks to a running node from other tasks.
+#[derive(Clone)]
+pub struct NodeHandle {
+    shared: Arc<Shared>,
+}
+
+impl fmt::Debug for NodeHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeHandle").field("stopped", &self.shared.stop.is_set()).finish()
+    }
+}
+
+impl NodeHandle {
+    /// Proposes a data batch to `group`; returns its indices once the leader
+    /// has taken it (not once it is committed), or why not.
+    pub async fn propose(&self, group: GroupId, batch: Bytes) -> Result<(u64, u64), String> {
+        let reply: Reply = Arc::new(Mutex::new((None, None)));
+        self.shared.commands.lock().expect("commands lock").push_back(Command::Propose {
+            group,
+            batch,
+            reply: reply.clone(),
+        });
+        self.shared.work.set();
+        let stop = self.shared.stop.clone();
+        let answer = std::future::poll_fn(|cx| {
+            let mut r = reply.lock().expect("reply lock");
+            match r.0.take() {
+                Some(v) => std::task::Poll::Ready(v),
+                None => {
+                    r.1 = Some(cx.waker().clone());
+                    std::task::Poll::Pending
+                }
+            }
+        });
+        race(answer, &[&stop]).await.unwrap_or_else(|| Err("node stopped".into()))
+    }
+
+    /// The last known status of `group`.
+    pub fn status(&self, group: GroupId) -> Option<GroupStatus> {
+        self.shared.status.lock().expect("status lock").get(&group).copied()
+    }
+
+    /// Asks the node to stop; its task finishes once everything is closed.
+    pub fn stop(&self) {
+        self.shared.stop.set();
+    }
+}
+
+struct Peer {
+    queue: Mutex<VecDeque<Bytes>>,
+    ready: Signal,
+}
+
+/// A running node.
+pub struct Node<R: Runtime> {
+    handle: NodeHandle,
+    task: <R as Spawn>::JoinHandle<Result<(), Error>>,
+}
+
+impl<R: Runtime> fmt::Debug for Node<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node").field("handle", &self.handle).finish()
+    }
+}
+
+impl<R: Runtime> Node<R> {
+    /// Opens the groups (recovering from the disk) and starts the node.
+    /// `state_machine` makes a fresh state machine for a group.
+    pub async fn start<S: StateMachine>(
+        rt: R,
+        cfg: NodeConfig,
+        state_machine: impl Fn(GroupId) -> S,
+    ) -> Result<Node<R>, Error> {
+        let voters: Vec<NodeId> = cfg.peers.keys().copied().collect();
+        let mut groups = BTreeMap::new();
+        for &g in &cfg.groups {
+            let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
+            let dir = PathBuf::from("groups").join(g.to_string());
+            groups.insert(g, Replica::open(rt.clone(), dir, raft, state_machine(g), cfg.log).await?);
+        }
+        let listener = rt.listen(&cfg.listen).await?;
+        let shared = Arc::new(Shared::default());
+        let handle = NodeHandle { shared: shared.clone() };
+        let task = rt.clone().spawn(run(rt, cfg, groups, listener, shared));
+        Ok(Node { handle, task })
+    }
+
+    /// A handle to the node.
+    pub fn handle(&self) -> NodeHandle {
+        self.handle.clone()
+    }
+
+    /// Waits until the node has stopped: `Ok` after [`NodeHandle::stop`], the
+    /// error if a replica failed.
+    pub async fn join(self) -> Result<(), Error> {
+        self.task.await
+    }
+}
+
+async fn run<R: Runtime, S: StateMachine>(
+    rt: R,
+    cfg: NodeConfig,
+    mut groups: BTreeMap<GroupId, Replica<R, S>>,
+    listener: R::Listener,
+    shared: Arc<Shared>,
+) -> Result<(), Error> {
+    let mut tasks = Vec::new();
+    tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone())));
+    let mut peers = BTreeMap::new();
+    for (&id, addr) in cfg.peers.iter().filter(|(id, _)| **id != cfg.id) {
+        let peer = Arc::new(Peer { queue: Mutex::new(VecDeque::new()), ready: Signal::default() });
+        tasks.push(rt.spawn(send_to(rt.clone(), addr.clone(), peer.clone(), shared.stop.clone(), cfg.tick)));
+        peers.insert(id, peer);
+    }
+    let result = main_loop(&rt, &cfg, &mut groups, &peers, &shared).await;
+    // Whatever ended the loop, everything else ends with it.
+    shared.stop.set();
+    for p in peers.values() {
+        p.ready.set();
+    }
+    for t in tasks {
+        t.await;
+    }
+    result
+}
+
+async fn main_loop<R: Runtime, S: StateMachine>(
+    rt: &R,
+    cfg: &NodeConfig,
+    groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+    peers: &BTreeMap<NodeId, Arc<Peer>>,
+    shared: &Shared,
+) -> Result<(), Error> {
+    let mut next_tick = rt.now() + cfg.tick;
+    while !shared.stop.is_set() {
+        let wait = next_tick - rt.now();
+        if !wait.is_zero() && !shared.work.take() {
+            race(rt.sleep(wait), &[&shared.work, &shared.stop]).await;
+            shared.work.take();
+        }
+        if rt.now() >= next_tick {
+            next_tick = rt.now() + cfg.tick;
+            groups.values_mut().for_each(|g| g.raft().tick());
+        }
+        let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
+        for Command::Propose { group, batch, reply } in commands {
+            let res = match groups.get_mut(&group) {
+                Some(g) => g.propose(batch).map_err(|e: ProposeError| e.to_string()),
+                None => Err(format!("group {group} is not hosted here")),
+            };
+            let mut r = reply.lock().expect("reply lock");
+            r.0 = Some(res);
+            if let Some(w) = r.1.take() {
+                w.wake();
+            }
+        }
+        let inbox: Vec<_> = shared.inbox.lock().expect("inbox lock").drain(..).collect();
+        for (from, messages) in inbox {
+            for (g, msg) in messages {
+                if let Some(group) = groups.get_mut(&g) {
+                    group.raft().step(from, msg);
+                }
+            }
+        }
+        let mut outbound: BTreeMap<NodeId, Vec<(GroupId, Message)>> = BTreeMap::new();
+        for (&g, group) in groups.iter_mut() {
+            let out = group.process().await?;
+            for s in out.messages {
+                outbound.entry(s.to).or_default().push((g, s.msg));
+            }
+        }
+        for (to, messages) in outbound {
+            let Some(peer) = peers.get(&to) else { continue };
+            let frame = wire::encode(cfg.id, &messages);
+            let mut q = peer.queue.lock().expect("peer queue lock");
+            if q.len() >= PEER_QUEUE {
+                q.pop_front();
+            }
+            q.push_back(frame);
+            drop(q);
+            peer.ready.set();
+        }
+        let mut status = shared.status.lock().expect("status lock");
+        for (&g, group) in groups.iter() {
+            let r = group.raft_ref();
+            status.insert(
+                g,
+                GroupStatus {
+                    role: r.role(),
+                    term: r.term(),
+                    leader: r.leader(),
+                    commit: r.commit(),
+                    applied: group.applied(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
+    let mut readers = Vec::new();
+    while let Some(Ok((conn, _peer))) = race(listener.accept(), &[&shared.stop]).await {
+        readers.push(rt.spawn(read_from(conn, shared.clone())));
+    }
+    drop(listener);
+    for r in readers {
+        r.await;
+    }
+}
+
+async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>) {
+    while let Some(Ok(Some(frame))) = race(conn.recv(), &[&shared.stop]).await {
+        // A frame that does not decode means a broken or foreign peer: drop
+        // the connection, the peer reconnects.
+        let Ok(decoded) = wire::decode(frame) else { return };
+        shared.inbox.lock().expect("inbox lock").push_back(decoded);
+        shared.work.set();
+    }
+}
+
+async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, stop: Signal, tick: Duration) {
+    let mut backoff = tick;
+    while !stop.is_set() {
+        let conn = match race(rt.connect(&addr), &[&stop]).await {
+            Some(Ok(c)) => c,
+            Some(Err(_)) => {
+                race(rt.sleep(backoff), &[&stop]).await;
+                backoff = (backoff * 2).min(tick * 50);
+                continue;
+            }
+            None => return,
+        };
+        backoff = tick;
+        loop {
+            let next = peer.queue.lock().expect("peer queue lock").pop_front();
+            let Some(frame) = next else {
+                if race(peer.ready.wait(), &[&stop]).await.is_none() {
+                    return;
+                }
+                peer.ready.take();
+                continue;
+            };
+            if race(conn.send(frame), &[&stop]).await.is_none_or(|r| r.is_err()) {
+                break; // reconnect; the frame is lost, Raft resends
+            }
+        }
+    }
+}

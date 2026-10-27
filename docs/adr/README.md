@@ -29,5 +29,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0022 | [Brand: Lotse and the Fairway mark](0022-brand-lotse-and-the-fairway-mark.md) | Accepted |
 | 0023 | [Persist the hard state after the log](0023-persist-the-hard-state-after-the-log.md) | Accepted |
 | 0024 | [Tool-independent project memory and agent](0024-tool-independent-project-memory-and-agent.md) | Accepted |
+| 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

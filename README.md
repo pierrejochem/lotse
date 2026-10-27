@@ -4,7 +4,7 @@
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
-Status: foundation. The runtime seam, the record format, the segmented log, the Raft core and the simulation harness exist and are tested, and so does the management console, which runs against a built-in demo cluster. Transactions, queue and stream semantics and the broker server come next.
+Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness and a first broker node (many Raft groups over one transport) exist and are tested, and so does the management console, which runs against a built-in demo cluster. The native protocol, transactions and queue and stream semantics come next.
 
 ## Documentation
 
@@ -22,12 +22,13 @@ Status: foundation. The runtime seam, the record format, the segmented log, the 
 
 | Crate | What it does |
 | --- | --- |
-| `lotse-rt` | The only seam to the outside world: `Clock`, `Disk`, `SegmentFile`, `Spawn`, `Rng` as traits |
+| `lotse-rt` | The only seam to the outside world: `Clock`, `Disk`, `SegmentFile`, `Spawn`, `Rng` and `Net` (connections carrying whole frames) as traits |
+| `lotse-rt-tokio` | The production runtime: Tokio, the file system with directory fsyncs, TCP with length-prefixed frames |
 | `lotse-record` | The batch format used on disk, on the wire and in Raft: 65-byte header, ZigZag-varint records, CRC32C, transaction markers |
 | `lotse-log` | Segmented partition log (also the Raft log): append, read, roll, truncate, crash recovery |
 | `lotse-raft` | Sans-I/O Raft core and Multi-Raft: optional pre-vote, check-quorum with leader stickiness, snapshots, learners, joint consensus, leader transfer, ReadIndex and optional leader leases; entries are batches covering offset ranges; messages batched per node pair |
-| `lotse-server` | Broker node. So far `Replica`: one Raft group persisted on its own log (atomic hard state and snapshot files, fsync before any acknowledgement, recovery on open) |
-| `lotse-sim` | Deterministic simulation: seeded executor with virtual time, a disk that loses unsynced data and tears writes on crash |
+| `lotse-server` | Broker node. `Replica`: one Raft group persisted on its own log (atomic hard state and snapshot files, fsync before any acknowledgement, recovery on open). `Node`: many replicas behind one transport, all messages for a peer bundled into one frame per round (`wire`) |
+| `lotse-sim` | Deterministic simulation: seeded executor with virtual time, a disk that loses unsynced data and tears writes on crash, a network with latency, partitions and broken connections |
 | `lotse-console` | Management console for a dedicated node: serves the web app, REST/JSON (OpenAPI) and one WebSocket for live updates |
 
 ## Management console
@@ -67,11 +68,13 @@ The replica simulation in `crates/lotse-server/tests/cluster.rs` runs 3- and 5-n
 
 Together with the unit tests in `lotse-raft` the Raft simulation was mutation-checked: each of these 18 bugs makes a test fail. Committing older-term entries by counting (Raft's "figure 8"), voting for out-of-date candidates, forgetting a vote on restart, keeping conflicting follower entries, committing past what a follower verified, committing with one ack too few, counting only the new voters of a joint configuration (for commits or for elections), changing voters without a joint configuration, installing a snapshot over a matching log, ignoring votes from nodes outside the membership, never letting a just-dropped voter campaign, serving a read without confirming leadership, before the new leader's first commit or on a round sent before the read, running a lease from an unanswered round, keeping the lease after trying a transfer, and skipping the quiet period after a restart.
 
+The node simulation in `crates/lotse-server/tests/nodes.rs` runs three whole `Node`s, each with its own disk and host name, hosting three Raft groups over the simulated network: the real main loop, senders, readers and wire format. Clients propose through node handles while pairs of hosts are partitioned and nodes lose power, between rounds or in the middle of a write, and restart from their disk. It checks that in every group all nodes apply the same batches in the same order and there is at most one leader per term, and that after healing a new batch commits in every group and reaches every node. Together with the codec's unit tests it catches all nine seeded transport bugs: dropping incoming messages, stepping them into the wrong group, queueing them for the wrong peer, a sender that stops after a failed connect or after a broken connection, a codec that swaps fields, accepts trailing bytes or trusts any message count, and passing on a client batch stamped with a term other than its entry's. `crates/lotse-server/tests/tokio_cluster.rs` runs three nodes for real on localhost TCP: a leader is stopped, the group goes on under a new one, and the old node catches up after its restart.
+
 ## Known gaps
 
 - Compression codecs (zstd, lz4) are declared in the format but not implemented; compressed batches are rejected.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
-- Raft: snapshots travel in one message; chunked transfer comes with `lotse-server`. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
-- `Net` joins `lotse-rt` together with `lotse-server`.
-- There is no Tokio implementation of `lotse-rt` yet; it lands with `lotse-broker`.
+- Raft: snapshots travel in one message and must fit in one 16 MiB frame; chunked transfer comes later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
+- Node-to-node connections have no TLS or authentication yet. Group membership is fixed by the node configuration; there is no API to create groups or change members at runtime.
+- There is no client protocol yet; proposals go through `NodeHandle` inside the process.
 - Console: only the demo cluster exists (`kind = "native"` is refused until `lotse-client` lands), and sign-in is `dev` mode only (OIDC is refused at startup). Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

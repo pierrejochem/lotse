@@ -17,11 +17,13 @@ lotse-log = { path = "crates/lotse-log" }
 lotse-sim = { path = "crates/lotse-sim" }
 lotse-raft = { path = "crates/lotse-raft" }
 lotse-server = { path = "crates/lotse-server" }
+lotse-rt-tokio = { path = "crates/lotse-rt-tokio" }
 
 bytes = "1.7"
 crc32c = "0.6"
 thiserror = "2"
 proptest = "1.5"
+tokio = "1.40"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

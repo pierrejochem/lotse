@@ -10,7 +10,7 @@
 //!   (enforced by `clippy.toml`);
 //! - no ambient Tokio APIs, so the same code runs under simulation.
 //!
-//! Networking (`Net`) joins this crate together with `lotse-server`.
+//! Implementations: `lotse-rt-tokio` in production, `lotse-sim` in tests.
 
 #![warn(missing_docs)]
 
@@ -166,10 +166,55 @@ pub trait Rng: Clone + Send + Sync + 'static {
     }
 }
 
-/// Everything a Lotse node needs from its environment.
-pub trait Runtime: Clock + Disk + Spawn + Rng {}
+/// Largest frame a connection carries (the native protocol's limit too).
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
-impl<T: Clock + Disk + Spawn + Rng> Runtime for T {}
+/// Connections between nodes and to clients.
+///
+/// A connection carries whole frames: each frame arrives complete and in
+/// order, or the connection breaks and both ends see an error. Nothing in
+/// between: a frame is never cut, duplicated or reordered. That is what TCP
+/// with length prefixes gives, and what the simulation reproduces; lost and
+/// reordered *messages* happen across reconnections, which callers handle.
+pub trait Net: Clone + Send + Sync + 'static {
+    /// A connection.
+    type Conn: Conn;
+    /// A listening socket.
+    type Listener: Listener<Conn = Self::Conn>;
+
+    /// Listens on `addr` (`host:port`).
+    fn listen(&self, addr: &str) -> impl Future<Output = io::Result<Self::Listener>> + Send;
+
+    /// Connects to `addr`.
+    fn connect(&self, addr: &str) -> impl Future<Output = io::Result<Self::Conn>> + Send;
+}
+
+/// Accepts connections.
+pub trait Listener: Send + Sync + 'static {
+    /// A connection.
+    type Conn: Conn;
+
+    /// The address actually listened on (with the port, if 0 was asked for).
+    fn local_addr(&self) -> String;
+
+    /// The next incoming connection and the peer's address.
+    fn accept(&self) -> impl Future<Output = io::Result<(Self::Conn, String)>> + Send;
+}
+
+/// One connection. Sending and receiving may run concurrently from two
+/// tasks; two concurrent senders are serialised.
+pub trait Conn: Send + Sync + 'static {
+    /// Sends one frame of at most [`MAX_FRAME`] bytes.
+    fn send(&self, frame: Bytes) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// The next frame; `Ok(None)` once the peer closed the connection cleanly.
+    fn recv(&self) -> impl Future<Output = io::Result<Option<Bytes>>> + Send;
+}
+
+/// Everything a Lotse node needs from its environment.
+pub trait Runtime: Clock + Disk + Spawn + Rng + Net {}
+
+impl<T: Clock + Disk + Spawn + Rng + Net> Runtime for T {}
 
 #[cfg(test)]
 mod tests {

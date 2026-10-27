@@ -21,6 +21,7 @@
 
 mod disk;
 mod executor;
+mod net;
 
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -31,6 +32,7 @@ use lotse_rt::{Clock, Instant, Rng, Spawn};
 
 pub use disk::{CrashReport, SimDisk, SimFile};
 pub use executor::JoinHandle;
+pub use net::{SimConn, SimListener, SimNet};
 
 /// A simulation, configured by its seed.
 #[derive(Debug, Clone)]
@@ -54,7 +56,8 @@ impl Sim {
     {
         let rng = SimRng::new(self.seed);
         let exec = executor::Executor::new(rng.clone());
-        let rt = SimRuntime { exec: exec.clone(), rng: rng.clone(), disk: SimDisk::new(rng) };
+        let net = SimNet::new(exec.clone(), rng.clone());
+        let rt = SimRuntime { exec: exec.clone(), rng: rng.clone(), disk: SimDisk::new(rng), net, host: "sim".into() };
         exec.block_on(test(rt), self.seed)
     }
 }
@@ -65,6 +68,8 @@ pub struct SimRuntime {
     exec: executor::Executor,
     rng: SimRng,
     disk: SimDisk,
+    net: SimNet,
+    host: Arc<str>,
 }
 
 impl SimRuntime {
@@ -76,7 +81,23 @@ impl SimRuntime {
     /// The same runtime (clock, tasks, randomness) with a disk of its own:
     /// one per simulated node, so a crash hits only that node.
     pub fn with_own_disk(&self) -> SimRuntime {
-        SimRuntime { exec: self.exec.clone(), rng: self.rng.clone(), disk: SimDisk::new(self.rng.clone()) }
+        SimRuntime { disk: SimDisk::new(self.rng.clone()), ..self.clone() }
+    }
+
+    /// A simulated node: the same clock, tasks and network, its own disk,
+    /// and `host` as its name on the network (it listens on `host:port`).
+    pub fn node(&self, host: &str) -> SimRuntime {
+        SimRuntime { disk: SimDisk::new(self.rng.clone()), host: host.into(), ..self.clone() }
+    }
+
+    /// The network, for fault injection.
+    pub fn net(&self) -> &SimNet {
+        &self.net
+    }
+
+    /// This node's host name.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     /// Simulates a power loss: file handles become stale, and unsynced data
@@ -135,6 +156,18 @@ impl lotse_rt::Disk for SimRuntime {
     }
     fn remove(&self, path: &std::path::Path) -> impl Future<Output = std::io::Result<()>> + Send {
         self.disk.remove(path)
+    }
+}
+
+impl lotse_rt::Net for SimRuntime {
+    type Conn = SimConn;
+    type Listener = SimListener;
+
+    fn listen(&self, addr: &str) -> impl Future<Output = std::io::Result<SimListener>> + Send {
+        std::future::ready(self.net.listen(&self.host, addr))
+    }
+    fn connect(&self, addr: &str) -> impl Future<Output = std::io::Result<SimConn>> + Send {
+        std::future::ready(self.net.connect(&self.host, addr))
     }
 }
 

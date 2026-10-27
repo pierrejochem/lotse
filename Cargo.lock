@@ -628,6 +628,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-rt-tokio"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "lotse-log",
+ "lotse-record",
+ "lotse-rt",
+ "tokio",
+]
+
+[[package]]
 name = "lotse-server"
 version = "0.0.1"
 dependencies = [
@@ -637,8 +648,10 @@ dependencies = [
  "lotse-raft",
  "lotse-record",
  "lotse-rt",
+ "lotse-rt-tokio",
  "lotse-sim",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
