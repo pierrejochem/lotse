@@ -4,6 +4,7 @@ import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useClusters, useMe } from '../api/queries';
 import { useLiveStatus } from '../api/live';
 import { Icon, Mark } from './ui';
+import { counted } from '../format';
 
 export type Crumb = { label: string; to?: string; mono?: boolean };
 export type Handle = { crumbs: (params: Record<string, string | undefined>) => Crumb[] };
@@ -63,7 +64,7 @@ function Nav({ cluster }: { cluster: string }) {
           <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
             <span className="mono">{cluster}</span>
             <span style={{ fontSize: 12, color: 'var(--nav-muted)' }}>
-              {current ? `${current.nodes} nodes · ${current.status}` : 'loading'}
+              {current ? `${counted(current.nodes, 'node')} · ${current.status}` : 'loading'}
             </span>
           </span>
           <Icon name="chevron" className="muted" />
@@ -95,10 +96,12 @@ function Nav({ cluster }: { cluster: string }) {
         {item(`${base}/queues`, 'queues', 'Queues')}
         {item(`${base}/messages`, 'messages', 'Message browser')}
       </div>
-      <div className="nav-group">
-        <span className="label">Access</span>
-        {item(`${base}/tenants`, 'tenants', 'Tenants and access')}
-      </div>
+      {current?.tenants !== false && (
+        <div className="nav-group">
+          <span className="label">Access</span>
+          {item(`${base}/tenants`, 'tenants', 'Tenants and access')}
+        </div>
+      )}
       <div className="nav-foot">lotse-console 0.0.1</div>
     </nav>
   );

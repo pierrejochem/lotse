@@ -34,13 +34,18 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Disk, Listener, Runtime, Spawn};
 
-use crate::client::{AdminView, ClientRequest, Clients, ClusterView, MarkerJob, QueueConfig, StreamConfig};
+use crate::client::{
+    AdminView, ClientRequest, Clients, ClusterView, MarkerJob, NetStats, NodeView, QueueConfig, StreamConfig,
+};
 use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
 
 /// Frames kept per unreachable peer; older ones are dropped.
 const PEER_QUEUE: usize = 256;
+
+/// How often the node reads its host's state, for metrics.
+const HOST_EVERY: Duration = Duration::from_secs(5);
 
 /// How one node runs.
 #[derive(Debug, Clone)]
@@ -128,6 +133,8 @@ struct Shared {
     status: Mutex<BTreeMap<GroupId, GroupStatus>>,
     /// Resources deleted at runtime, for marker jobs.
     deleted: Mutex<BTreeSet<u64>>,
+    /// Traffic and connections, for metrics.
+    net: Arc<NetStats>,
     work: Signal,
     stop: Signal,
 }
@@ -258,7 +265,14 @@ async fn run<R: Runtime, S: StateMachine>(
     let mut peers = BTreeMap::new();
     for (&id, addr) in cfg.peers.iter().filter(|(id, _)| **id != cfg.id) {
         let peer = Arc::new(Peer { queue: Mutex::new(VecDeque::new()), ready: Signal::default() });
-        tasks.push(rt.spawn(send_to(rt.clone(), addr.clone(), peer.clone(), shared.stop.clone(), cfg.tick)));
+        tasks.push(rt.spawn(send_to(
+            rt.clone(),
+            addr.clone(),
+            peer.clone(),
+            shared.net.clone(),
+            shared.stop.clone(),
+            cfg.tick,
+        )));
         peers.insert(id, peer);
     }
     let jobs = Live::default();
@@ -376,6 +390,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     ));
     let nodes: Vec<NodeId> = cfg.peers.keys().copied().collect();
     let mut known = Known::configured(cfg);
+    let started = rt.now();
+    // The host is read every few seconds, not per request: CPU use is
+    // measured between two reads.
+    let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
@@ -393,6 +411,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             next_tick = rt.now() + cfg.tick;
             groups.values_mut().for_each(|g| g.raft().tick());
         }
+        if rt.now() >= next_host {
+            host = rt.host_stats().await;
+            next_host = rt.now() + HOST_EVERY;
+        }
         let view = ClusterView {
             streams: &known.streams,
             queues: &known.queues,
@@ -408,6 +430,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             },
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
+            node: NodeView { id: cfg.id, started, net: &shared.net, host },
             now: rt.now(),
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
@@ -502,12 +525,15 @@ async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Sh
     // ones instead of keeping a handle per connection, and wait for them at
     // the end.
     let live = Arc::new((Mutex::new(0usize), Signal::default()));
-    while let Some(Ok((conn, _peer))) = race(listener.accept(), &[&shared.stop]).await {
+    while let Some(Ok((conn, peer))) = race(listener.accept(), &[&shared.stop]).await {
         *live.0.lock().expect("live lock") += 1;
         let (rt2, commands, stop, live) = (rt.clone(), commands.clone(), shared.stop.clone(), live.clone());
+        let net = shared.net.clone();
         // Dropping the handle detaches the task; `live` tracks it.
         drop(rt.spawn(async move {
-            crate::client::serve(rt2, conn, commands, stop).await;
+            net.connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::client::serve(rt2, conn, peer, commands, net.clone(), stop).await;
+            net.connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             let mut n = live.0.lock().expect("live lock");
             *n -= 1;
             if *n == 0 {
@@ -527,6 +553,7 @@ async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Sh
 
 async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>) {
     while let Some(Ok(Some(frame))) = race(conn.recv(), &[&shared.stop]).await {
+        NetStats::add(&shared.net.peer_in, frame.len());
         // A frame that does not decode means a broken or foreign peer: drop
         // the connection, the peer reconnects.
         let Ok(decoded) = wire::decode(frame) else { return };
@@ -535,7 +562,7 @@ async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>) {
     }
 }
 
-async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, stop: Signal, tick: Duration) {
+async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, net: Arc<NetStats>, stop: Signal, tick: Duration) {
     let mut backoff = tick;
     while !stop.is_set() {
         let conn = match race(rt.connect(&addr), &[&stop]).await {
@@ -557,6 +584,7 @@ async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, stop: Signal,
                 peer.ready.take();
                 continue;
             };
+            NetStats::add(&net.peer_out, frame.len());
             if race(conn.send(frame), &[&stop]).await.is_none_or(|r| r.is_err()) {
                 break; // reconnect; the frame is lost, Raft resends
             }

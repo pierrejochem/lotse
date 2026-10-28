@@ -16,11 +16,15 @@ retention_hours = 24
 [live]
 interval_ms = 2000
 
-# A built-in cluster with sample data, until the native protocol has its admin API.
-[[clusters]]
-id = "prod-hamburg-1"
-kind = "demo"
+# A real cluster: client addresses of some of its nodes; the others are
+# learnt from them. Lotse has no authentication yet, so the console
+# connects without credentials.
+# [[clusters]]
+# id = "prod-hamburg-1"
+# kind = "native"
+# bootstrap = ["broker-1:9000", "broker-2:9000", "broker-3:9000"]
 
+# A built-in cluster with sample data.
 [[clusters]]
-id = "staging-hamburg"
+id = "demo"
 kind = "demo"

@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use lotse_log::{Log, LogConfig};
 use lotse_record::{BatchBuilder, BatchOptions};
-use lotse_rt::{Clock, Conn, Disk, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn};
+use lotse_rt::{Clock, Conn, Disk, Host, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn};
 use lotse_rt_tokio::TokioRuntime;
 
 /// A fresh directory under the system temp dir, removed when dropped.
@@ -135,4 +135,21 @@ async fn clock_rng_and_tasks_work() {
     })
     .await;
     assert!(panicked.is_err(), "a task's panic reaches whoever awaits it");
+}
+
+/// The host is read for real: memory and the data volume are known, and
+/// CPU use from the second call on (it is measured between two calls).
+#[tokio::test]
+async fn host_stats_are_read_from_the_machine() {
+    let rt = TokioRuntime::new(std::env::temp_dir());
+    let first = rt.host_stats().await;
+    assert_eq!(first.cpu, None, "no CPU use before a second measurement");
+    let second = rt.host_stats().await;
+    if cfg!(target_os = "linux") {
+        assert!(second.cpu.is_some_and(|c| (0.0..=1.0).contains(&c)), "{second:?}");
+        assert!(second.memory_bytes.is_some_and(|m| m > 0), "{second:?}");
+        assert!(second.memory_limit_bytes >= second.memory_bytes, "{second:?}");
+        let (free, total) = (second.disk_free_bytes.unwrap(), second.disk_total_bytes.unwrap());
+        assert!(free <= total && total > 0, "{second:?}");
+    }
 }

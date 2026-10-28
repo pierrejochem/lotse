@@ -51,7 +51,10 @@ pub fn duration_flag(ms: u64) -> String {
 
 /// `lotse-cli queue create …` for a request.
 pub fn create_queue(req: &CreateQueue) -> String {
-    let mut cmd = format!("lotse-cli queue create {} --tenant {}", req.name, req.tenant);
+    let mut cmd = format!("lotse-cli queue create {}", req.name);
+    if let Some(tenant) = &req.tenant {
+        cmd += &format!(" --tenant {tenant}");
+    }
     if req.priority_levels > 1 {
         cmd += &format!(" --priorities {}", req.priority_levels);
     }
@@ -89,7 +92,7 @@ mod tests {
     fn req() -> CreateQueue {
         CreateQueue {
             name: "payments.refund".into(),
-            tenant: "commerce".into(),
+            tenant: Some("commerce".into()),
             priority_levels: 3,
             single_active: true,
             ttl_ms: Some(86_400_000),

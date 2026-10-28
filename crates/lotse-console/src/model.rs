@@ -1,7 +1,9 @@
 //! Everything the console API returns or accepts.
 //!
 //! Numbers are raw (bytes, bytes/s, milliseconds, counts); the frontend
-//! formats them. Every type derives `ToSchema`, so the OpenAPI document and
+//! formats them. A value the cluster does not report (yet) is `null`, and
+//! the UI says so instead of showing a number: a rate needs two samples,
+//! and a real cluster has no tenants, zones or disk limits yet. Every type derives `ToSchema`, so the OpenAPI document and
 //! the generated TypeScript client always match these definitions.
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,11 @@ pub struct ClusterRef {
     pub tone: Tone,
     /// `true` when served by the built-in demo cluster.
     pub demo: bool,
+    /// Whether the cluster has tenants (quotas, role bindings).
+    pub tenants: bool,
+    /// Whether queues can have priorities, single active consumer, a TTL
+    /// and dead-letter queues.
+    pub queue_options: bool,
 }
 
 /// A banner that needs attention.
@@ -66,13 +73,14 @@ pub struct Alert {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Throughput {
     /// Produce and publish, bytes/s.
-    pub in_bytes_per_sec: f64,
+    pub in_bytes_per_sec: Option<f64>,
     /// Fetch and deliver, bytes/s.
-    pub out_bytes_per_sec: f64,
+    pub out_bytes_per_sec: Option<f64>,
     /// Records in per second.
-    pub records_per_sec: f64,
-    /// p99 time until a produce is acknowledged by a quorum, ms.
-    pub commit_p99_ms: f64,
+    pub records_per_sec: Option<f64>,
+    /// p99 time until a produce is acknowledged by a quorum, ms; `null`
+    /// without produces to measure.
+    pub commit_p99_ms: Option<f64>,
     /// Bytes stored, all replicas.
     pub stored_bytes: u64,
     /// Connected consumers.
@@ -109,7 +117,7 @@ pub struct Node {
     /// "Metadata leader", "Voter", …
     pub role: String,
     /// Availability zone.
-    pub zone: String,
+    pub zone: Option<String>,
     /// Uptime in seconds.
     pub uptime_secs: u64,
     /// Raft groups this node leads.
@@ -117,23 +125,23 @@ pub struct Node {
     /// Raft groups with a replica on this node.
     pub replicas: u32,
     /// Free bytes on the log volume.
-    pub disk_free_bytes: u64,
+    pub disk_free_bytes: Option<u64>,
     /// Size of the log volume.
-    pub disk_total_bytes: u64,
+    pub disk_total_bytes: Option<u64>,
     /// Client produce traffic into this node, bytes/s.
-    pub produce_bytes_per_sec: f64,
+    pub produce_bytes_per_sec: Option<f64>,
     /// Network in, bytes/s (clients and replication).
-    pub net_in_bytes_per_sec: f64,
+    pub net_in_bytes_per_sec: Option<f64>,
     /// Network out, bytes/s.
-    pub net_out_bytes_per_sec: f64,
+    pub net_out_bytes_per_sec: Option<f64>,
     /// Open client connections.
     pub connections: u32,
     /// CPU use, 0–1.
-    pub cpu: f64,
+    pub cpu: Option<f64>,
     /// Resident memory, bytes.
-    pub memory_bytes: u64,
+    pub memory_bytes: Option<u64>,
     /// Memory limit, bytes.
-    pub memory_limit_bytes: u64,
+    pub memory_limit_bytes: Option<u64>,
     /// Running version.
     pub version: String,
     /// Status chip.
@@ -155,11 +163,11 @@ pub struct StreamRow {
     /// Stream name.
     pub name: String,
     /// Tenant.
-    pub tenant: String,
+    pub tenant: Option<String>,
     /// Partition count.
     pub partitions: u32,
     /// Produce rate, bytes/s.
-    pub in_bytes_per_sec: f64,
+    pub in_bytes_per_sec: Option<f64>,
     /// Stored bytes, all replicas.
     pub stored_bytes: u64,
 }
@@ -170,11 +178,11 @@ pub struct QueueRow {
     /// Queue name.
     pub name: String,
     /// Tenant.
-    pub tenant: String,
+    pub tenant: Option<String>,
     /// Messages ready for delivery.
     pub ready: u64,
     /// Messages in the dead-letter queue.
-    pub dead_lettered: u64,
+    pub dead_lettered: Option<u64>,
     /// Why the queue needs attention, if it does.
     pub attention: Option<Chip>,
 }
@@ -198,8 +206,8 @@ pub struct Overview {
     pub health: Vec<HealthItem>,
     /// Nodes.
     pub nodes: Vec<Node>,
-    /// Disk thresholds for the bars.
-    pub disk_limits: DiskLimits,
+    /// Disk thresholds for the bars, if the cluster has them.
+    pub disk_limits: Option<DiskLimits>,
     /// Busiest streams by produce rate.
     pub busiest_streams: Vec<StreamRow>,
     /// Queues that need attention.
@@ -283,8 +291,8 @@ pub struct OperatorEvent {
 pub struct NodesView {
     /// Nodes.
     pub nodes: Vec<Node>,
-    /// Disk thresholds.
-    pub disk_limits: DiskLimits,
+    /// Disk thresholds, if the cluster has them.
+    pub disk_limits: Option<DiskLimits>,
     /// Running upgrade, if any.
     pub upgrade: Option<Upgrade>,
     /// Recent operator events, newest first.
@@ -382,7 +390,7 @@ pub struct StreamDetail {
     /// Stream name.
     pub name: String,
     /// Tenant.
-    pub tenant: String,
+    pub tenant: Option<String>,
     /// Replication factor.
     pub replication: u32,
     /// Retention in milliseconds, `None` = forever.
@@ -390,17 +398,17 @@ pub struct StreamDetail {
     /// Log compaction on.
     pub compaction: bool,
     /// Produce rate, bytes/s.
-    pub in_bytes_per_sec: f64,
+    pub in_bytes_per_sec: Option<f64>,
     /// Fetch rate, bytes/s.
-    pub out_bytes_per_sec: f64,
+    pub out_bytes_per_sec: Option<f64>,
     /// Records in per second.
-    pub records_per_sec: f64,
+    pub records_per_sec: Option<f64>,
     /// Bytes stored, all replicas.
     pub stored_bytes: u64,
     /// Age of the oldest record, ms.
-    pub oldest_record_age_ms: u64,
+    pub oldest_record_age_ms: Option<u64>,
     /// Open transactions touching this stream.
-    pub open_transactions: u32,
+    pub open_transactions: Option<u32>,
     /// Partitions.
     pub partitions: Vec<Partition>,
     /// Consumer groups.
@@ -419,7 +427,7 @@ pub struct PriorityLevel {
     /// Messages ready.
     pub ready: u64,
     /// Age of the oldest ready message, ms.
-    pub oldest_ms: u64,
+    pub oldest_ms: Option<u64>,
 }
 
 /// A queue consumer.
@@ -427,8 +435,8 @@ pub struct PriorityLevel {
 pub struct QueueConsumer {
     /// Consumer tag.
     pub tag: String,
-    /// Principal.
-    pub principal: String,
+    /// Principal; `null` while the cluster has no authentication.
+    pub principal: Option<String>,
     /// Client address and broker.
     pub connection: String,
     /// Messages in flight.
@@ -436,11 +444,11 @@ pub struct QueueConsumer {
     /// Credit window, messages.
     pub credit_messages: u32,
     /// Bytes in flight.
-    pub in_flight_bytes: u64,
+    pub in_flight_bytes: Option<u64>,
     /// Credit window, bytes.
-    pub credit_bytes: u64,
+    pub credit_bytes: Option<u64>,
     /// Acks per second.
-    pub acks_per_sec: f64,
+    pub acks_per_sec: Option<f64>,
     /// State chip ("Active", "Standby").
     pub state: Chip,
 }
@@ -475,7 +483,7 @@ pub struct QueueDetail {
     /// Queue name.
     pub name: String,
     /// Tenant.
-    pub tenant: String,
+    pub tenant: Option<String>,
     /// Single active consumer.
     pub single_active: bool,
     /// Message TTL, ms; `None` = until acked.
@@ -493,11 +501,11 @@ pub struct QueueDetail {
     /// Acks waiting for their transaction to commit.
     pub in_open_txns: u64,
     /// Publish rate, messages/s.
-    pub publish_per_sec: f64,
+    pub publish_per_sec: Option<f64>,
     /// Ack rate, messages/s.
-    pub ack_per_sec: f64,
+    pub ack_per_sec: Option<f64>,
     /// Dead-lettered.
-    pub dead_lettered: u64,
+    pub dead_lettered: Option<u64>,
     /// Priority levels, highest first.
     pub levels: Vec<PriorityLevel>,
     /// Consumers.
@@ -513,8 +521,8 @@ pub struct QueueDetail {
 pub struct CreateQueue {
     /// Name: lowercase letters, digits, dots and hyphens.
     pub name: String,
-    /// Tenant.
-    pub tenant: String,
+    /// Tenant; required where the cluster has tenants, absent elsewhere.
+    pub tenant: Option<String>,
     /// 1 to 10.
     pub priority_levels: u8,
     /// Single active consumer.

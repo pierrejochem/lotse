@@ -30,7 +30,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use lotse_rt::{Clock, Conn, Disk, Instant, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn};
+use lotse_rt::{
+    Clock, Conn, Disk, Host, HostStats, Instant, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -41,6 +43,8 @@ pub struct TokioRuntime {
     start: std::time::Instant,
     root: Arc<PathBuf>,
     rng: Arc<AtomicU64>,
+    /// Kept between calls: CPU use is measured since the previous refresh.
+    system: Arc<Mutex<Option<sysinfo::System>>>,
 }
 
 impl TokioRuntime {
@@ -58,7 +62,12 @@ impl TokioRuntime {
             h.write_u32(std::process::id());
             h.finish()
         };
-        TokioRuntime { start, root: Arc::new(root.into()), rng: Arc::new(AtomicU64::new(seed)) }
+        TokioRuntime {
+            start,
+            root: Arc::new(root.into()),
+            rng: Arc::new(AtomicU64::new(seed)),
+            system: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// The directory disk paths are relative to.
@@ -305,6 +314,60 @@ impl TokioConn {
         stream.set_nodelay(true)?;
         let (rd, wr) = stream.into_split();
         Ok(TokioConn { rd: tokio::sync::Mutex::new(rd), wr: tokio::sync::Mutex::new(wr) })
+    }
+}
+
+impl Host for TokioRuntime {
+    fn host_stats(&self) -> impl Future<Output = HostStats> + Send {
+        let (system, root) = (Arc::clone(&self.system), Arc::clone(&self.root));
+        async move {
+            let stats = tokio::task::spawn_blocking(move || {
+                let mut guard = system.lock().unwrap_or_else(|p| p.into_inner());
+                let first = guard.is_none();
+                let sys = guard.get_or_insert_with(sysinfo::System::new);
+                sys.refresh_cpu_usage();
+                sys.refresh_memory();
+                let pid = sysinfo::get_current_pid().ok();
+                if let Some(pid) = pid {
+                    sys.refresh_processes_specifics(
+                        sysinfo::ProcessesToUpdate::Some(&[pid]),
+                        true,
+                        sysinfo::ProcessRefreshKind::nothing().with_memory(),
+                    );
+                }
+                // CPU use is measured between two refreshes: the first has none.
+                let cpu = (!first).then(|| f64::from(sys.global_cpu_usage()) / 100.0);
+                let limit =
+                    sys.cgroup_limits().map(|c| c.total_memory).filter(|m| *m > 0).unwrap_or(sys.total_memory());
+                let memory_bytes = pid.and_then(|p| sys.process(p)).map(|p| p.memory());
+                let (disk_free_bytes, disk_total_bytes) = volume_of(&root);
+                HostStats {
+                    cpu,
+                    memory_bytes,
+                    memory_limit_bytes: (limit > 0).then_some(limit),
+                    disk_free_bytes,
+                    disk_total_bytes,
+                }
+            })
+            .await;
+            stats.unwrap_or_default()
+        }
+    }
+}
+
+/// Free and total bytes of the volume `dir` is on: the mounted disk with the
+/// longest mount point that contains it.
+fn volume_of(dir: &Path) -> (Option<u64>, Option<u64>) {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let best = disks
+        .list()
+        .iter()
+        .filter(|d| dir.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len());
+    match best {
+        Some(d) => (Some(d.available_space()), Some(d.total_space())),
+        None => (None, None),
     }
 }
 

@@ -72,9 +72,9 @@ const DELIVER_PER_ROUND: usize = 1024;
 
 /// The leader's delivery state for one queue in one term.
 pub(super) struct Serving {
-    term: u64,
-    dispatcher: Dispatcher,
-    conns: BTreeMap<ConnId, Arc<Outbox>>,
+    pub(super) term: u64,
+    pub(super) dispatcher: Dispatcher,
+    pub(super) conns: BTreeMap<ConnId, Arc<Outbox>>,
 }
 
 /// An ack or queue-state batch in flight.
@@ -86,6 +86,23 @@ pub(super) struct QueueWrite {
     term: u64,
     /// Messages to deliver again once the batch (their counts) is applied.
     release: Vec<u64>,
+    /// Messages it acknowledges, counted once it is written.
+    acked: u64,
+}
+
+/// An ack or queue-state batch, and what follows once it is applied.
+struct QueueBatch {
+    batch: bytes::Bytes,
+    /// Messages to deliver again.
+    release: Vec<u64>,
+    /// Messages it acknowledges, for metrics.
+    acked: u64,
+}
+
+impl QueueBatch {
+    fn new(batch: bytes::Bytes) -> Self {
+        QueueBatch { batch, release: Vec::new(), acked: 0 }
+    }
 }
 
 fn conn_id(outbox: &Arc<Outbox>) -> ConnId {
@@ -104,7 +121,7 @@ fn ended(subscription_id: u32, error: ErrorCode, leader_hint: Option<LeaderHint>
 
 /// Offsets below this may be delivered and acknowledged: applied, and no
 /// open transaction before them.
-fn deliverable<R: Runtime, S: StateMachine>(replica: &Replica<R, S>) -> u64 {
+pub(super) fn deliverable<R: Runtime, S: StateMachine>(replica: &Replica<R, S>) -> u64 {
     replica.txns().last_stable_offset(replica.applied()).min(replica.raft_ref().commit())
 }
 
@@ -238,7 +255,9 @@ impl Clients {
             return answer(&outbox, correlation_id, ErrorCode::INVALID_REQUEST, None);
         }
         let batch = lotse_record::ack_batch(&req.ranges).expect("ranges fit a batch");
-        self.write_queue(Some((outbox, correlation_id)), g, replica, batch, Vec::new(), view.now);
+        let acked = req.ranges.iter().map(|&(f, t)| t.saturating_sub(f)).sum();
+        let what = QueueBatch { acked, ..QueueBatch::new(batch) };
+        self.write_queue(Some((outbox, correlation_id)), g, replica, what, view.now);
     }
 
     pub(super) fn nack<R: Runtime, S: StateMachine>(
@@ -258,7 +277,7 @@ impl Clients {
         }
         if !req.requeue {
             let batch = lotse_record::ack_batch(&req.ranges).expect("ranges fit a batch");
-            return self.write_queue(Some((outbox, correlation_id)), g, replica, batch, Vec::new(), view.now);
+            return self.write_queue(Some((outbox, correlation_id)), g, replica, QueueBatch::new(batch), view.now);
         }
         // Only this connection's messages in flight go back; nothing else
         // needs doing for the rest (not delivered here, or settled).
@@ -283,24 +302,23 @@ impl Clients {
         let d = &self.queues[&g].dispatcher;
         let counts: Vec<(u64, u16)> = taken.iter().map(|&o| (o, d.count_to_persist(q, o))).collect();
         let batch = lotse_record::queue_state_batch(&counts).expect("counts fit a batch");
-        self.write_queue(Some((outbox, correlation_id)), g, replica, batch, taken, view.now);
+        let what = QueueBatch { release: taken, ..QueueBatch::new(batch) };
+        self.write_queue(Some((outbox, correlation_id)), g, replica, what, view.now);
     }
 
-    /// Proposes an ack or queue-state batch; `release` goes out again once
-    /// it is applied.
+    /// Proposes an ack or queue-state batch; see [`QueueBatch`].
     fn write_queue<R: Runtime, S: StateMachine>(
         &mut self,
         reply: Option<(Arc<Outbox>, u32)>,
         group: GroupId,
         replica: &mut Replica<R, S>,
-        batch: bytes::Bytes,
-        release: Vec<u64>,
+        QueueBatch { batch, release, acked }: QueueBatch,
         now: Instant,
     ) {
         match replica.propose_internal(batch) {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let deadline = now + WRITE_TIMEOUT;
-                self.queue_writes.push(QueueWrite { reply, deadline, group, last, term, release });
+                self.queue_writes.push(QueueWrite { reply, deadline, group, last, term, release, acked });
             }
             Ok(_) => unreachable!("a queue batch is never a duplicate"),
             Err(_) => {
@@ -329,6 +347,9 @@ impl Clients {
             }
             match decided {
                 Some(error) => {
+                    if error == ErrorCode::NONE {
+                        self.stats.group(w.group).acked += w.acked;
+                    }
                     if let Some((outbox, id)) = w.reply.take() {
                         let h = if error == ErrorCode::NOT_LEADER { hint(replica.raft_ref()) } else { None };
                         answer(&outbox, id, error, h);
@@ -404,11 +425,12 @@ impl Clients {
             if !held.is_empty() {
                 let counts: Vec<(u64, u16)> = held.iter().map(|&o| (o, s.dispatcher.count_to_persist(q, o))).collect();
                 let batch = lotse_record::queue_state_batch(&counts).expect("counts fit a batch");
-                self.write_queue(None, g, replica, batch, held, view.now);
+                self.write_queue(None, g, replica, QueueBatch { release: held, ..QueueBatch::new(batch) }, view.now);
             }
 
             let s = self.queues.get_mut(&g).expect("serving");
-            deliver(s, replica, limit, view.now).await?;
+            let delivered = deliver(s, replica, limit, view.now).await?;
+            self.stats.group(g).delivered += delivered;
             let live: Vec<ConnId> = s.dispatcher.subscriptions().map(|(_, c)| c).collect();
             s.conns.retain(|c, _| live.contains(c));
         }
@@ -422,14 +444,15 @@ async fn deliver<R: Runtime, S: StateMachine>(
     replica: &Replica<R, S>,
     limit: u64,
     now: Instant,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     let q: &QueueLog = replica.queue().expect("a queue group");
     let mut budget = DELIVER_PER_ROUND;
+    let mut total = 0;
     while budget > 0 {
         let max = (s.dispatcher.open_credit() as usize).min(budget);
         let offsets = s.dispatcher.candidates(q, limit, max);
         if offsets.is_empty() {
-            return Ok(());
+            return Ok(total);
         }
         let owners: BTreeMap<SubscriptionId, ConnId> = s.dispatcher.subscriptions().collect();
         let mut delivered = 0;
@@ -459,9 +482,10 @@ async fn deliver<R: Runtime, S: StateMachine>(
             }
         }
         if delivered == 0 {
-            return Ok(()); // credit in messages, but none in bytes
+            return Ok(total); // credit in messages, but none in bytes
         }
+        total += delivered as u64;
         budget = budget.saturating_sub(delivered);
     }
-    Ok(())
+    Ok(total)
 }

@@ -1,6 +1,7 @@
 //! The only seam between Lotse and the outside world.
 //!
-//! Every piece of Lotse that needs time, files, tasks or randomness takes a
+//! Every piece of Lotse that needs time, files, tasks, randomness or the
+//! machine's state takes a
 //! [`Runtime`] (or one of its parts) as a generic parameter. Production code
 //! plugs in a Tokio-backed implementation; tests plug in `lotse-sim`, which
 //! runs a whole cluster deterministically from a single seed.
@@ -216,10 +217,34 @@ pub trait Conn: Send + Sync + 'static {
     fn recv(&self) -> impl Future<Output = io::Result<Option<Bytes>>> + Send;
 }
 
-/// Everything a Lotse node needs from its environment.
-pub trait Runtime: Clock + Disk + Spawn + Rng + Net {}
+/// What the machine a node runs on looks like right now, for metrics.
+/// A value the platform cannot tell is `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HostStats {
+    /// CPU use of the machine since the previous call, 0 to 1.
+    pub cpu: Option<f64>,
+    /// Memory this process uses, bytes.
+    pub memory_bytes: Option<u64>,
+    /// Memory available to this process (its cgroup limit, or the
+    /// machine's memory), bytes.
+    pub memory_limit_bytes: Option<u64>,
+    /// Free bytes on the volume that holds the node's data.
+    pub disk_free_bytes: Option<u64>,
+    /// Size of that volume, bytes.
+    pub disk_total_bytes: Option<u64>,
+}
 
-impl<T: Clock + Disk + Spawn + Rng + Net> Runtime for T {}
+/// Reads the state of the machine, for metrics only: nothing may decide
+/// anything that safety depends on from it.
+pub trait Host: Send + Sync + 'static {
+    /// The machine right now.
+    fn host_stats(&self) -> impl Future<Output = HostStats> + Send;
+}
+
+/// Everything a Lotse node needs from its environment.
+pub trait Runtime: Clock + Disk + Spawn + Rng + Net + Host {}
+
+impl<T: Clock + Disk + Spawn + Rng + Net + Host> Runtime for T {}
 
 #[cfg(test)]
 mod tests {

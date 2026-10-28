@@ -2,7 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useQueue, useQueues } from '../api/queries';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
 import { Bar, Chip, Failed, Loading, Stats } from '../components/ui';
-import { bytes, clock, count, duration } from '../format';
+import { NONE, bytes, clock, count, duration } from '../format';
 
 export function QueueList() {
   const { cluster = '' } = useParams();
@@ -34,7 +34,7 @@ export function QueueList() {
               {q.data.map((r) => (
                 <tr key={r.name}>
                   <th scope="row"><Link to={`${base}/queues/${encodeURIComponent(r.name)}`} className="mono">{r.name}</Link></th>
-                  <td>{r.tenant}</td>
+                  <td>{r.tenant ?? NONE}</td>
                   <td className="r">{count(r.ready)}</td>
                   <td className="r">{count(r.dead_lettered)}</td>
                   <td>{r.attention ? <Chip chip={r.attention} /> : <span className="muted">None</span>}</td>
@@ -59,7 +59,7 @@ export function QueueDetail() {
   return (
     <main className="page">
       <div className="stack" style={{ '--gap': '10px' } as React.CSSProperties}>
-        <span className="label">Queue · tenant {d.tenant}</span>
+        <span className="label">Queue{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
         <h1 className="h1 mono">{d.name}</h1>
         <div className="row" style={{ gap: 8 }}>
           <span className="tag">{d.levels.length} priority level{d.levels.length === 1 ? '' : 's'}</span>

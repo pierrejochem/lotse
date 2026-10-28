@@ -277,6 +277,17 @@ impl Dispatcher {
         self.in_flight.contains_key(&offset)
     }
 
+    /// Messages `id` may still be sent.
+    pub fn credit_of(&self, id: SubscriptionId) -> u32 {
+        self.subs.get(&id).map_or(0, |s| s.credit_msgs)
+    }
+
+    /// Messages delivered and not settled or released, over all
+    /// subscriptions.
+    pub fn in_flight_count(&self) -> u64 {
+        self.in_flight.len() as u64
+    }
+
     /// The subscriptions, open or closing.
     pub fn subscriptions(&self) -> impl Iterator<Item = (SubscriptionId, ConnId)> + '_ {
         self.subs.iter().map(|(id, s)| (*id, s.conn))

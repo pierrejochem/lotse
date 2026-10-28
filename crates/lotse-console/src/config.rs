@@ -17,6 +17,11 @@
 //!
 //! [[clusters]]
 //! id = "prod-hamburg-1"
+//! kind = "native"
+//! bootstrap = ["broker-1:9000", "broker-2:9000"]
+//!
+//! [[clusters]]
+//! id = "demo"
 //! kind = "demo"
 //! ```
 
@@ -99,11 +104,12 @@ pub enum ClusterConfig {
         /// Cluster ID.
         id: String,
     },
-    /// A real cluster over the native protocol (needs its admin API keys).
+    /// A real cluster over the native protocol.
     Native {
         /// Cluster ID.
         id: String,
-        /// Broker addresses to bootstrap from.
+        /// Client addresses of some of its nodes (`host:port`); the others
+        /// are learnt from them.
         bootstrap: Vec<String>,
     },
 }
@@ -155,9 +161,11 @@ impl Config {
         if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
             return Err(ConfigError::Invalid(format!("Cluster ID \"{}\" is used twice.", w[0])));
         }
-        if let Some(c) = cfg.clusters.iter().find(|c| matches!(c, ClusterConfig::Native { .. })) {
+        if let Some(c) =
+            cfg.clusters.iter().find(|c| matches!(c, ClusterConfig::Native { bootstrap, .. } if bootstrap.is_empty()))
+        {
             return Err(ConfigError::Invalid(format!(
-                "Cluster \"{}\" uses kind = \"native\", which needs the admin API of the native protocol and is not available yet. Use kind = \"demo\" for now.",
+                "Cluster \"{}\" has no bootstrap addresses. Add the client address of at least one node, e.g. bootstrap = [\"broker-1:9000\"].",
                 c.id()
             )));
         }
@@ -199,8 +207,12 @@ mod tests {
 
     #[test]
     fn refuses_what_does_not_work_yet() {
-        let native = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = [\"b1:9092\"]");
-        assert!(Config::parse(&native).unwrap_err().to_string().contains("admin API"));
+        let native = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = [\"b1:9000\"]");
+        assert!(
+            matches!(&Config::parse(&native).unwrap().clusters[0], ClusterConfig::Native { bootstrap, .. } if bootstrap.len() == 1)
+        );
+        let empty = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = []");
+        assert!(Config::parse(&empty).unwrap_err().to_string().contains("bootstrap"));
         let oidc = OK.replace(
             "mode = \"dev\"\n        user = \"pierre\"",
             "mode = \"oidc\"\nissuer = \"https://id\"\nclient_id = \"c\"",

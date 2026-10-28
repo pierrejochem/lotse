@@ -1920,3 +1920,373 @@ impl DescribeConfigsResponse {
         })
     }
 }
+
+/// Asks one node for its metrics (admin). Every node answers for itself:
+/// its host and traffic, the groups it hosts, and the queues and consumer
+/// groups it leads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeMetricsRequest;
+
+impl DescribeMetricsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeMetricsRequest)
+    }
+}
+
+/// Buckets of the commit latency histogram: bucket `i` counts produces
+/// acknowledged in under `2^i` ms, the last one all slower ones.
+pub const LATENCY_BUCKETS: usize = 17;
+
+/// One node's metrics. Counters run since the node started; rates are the
+/// difference of two answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DescribeMetricsResponse {
+    /// Whether the node answered at all.
+    pub error: ErrorCode,
+    /// The node.
+    pub node_id: u32,
+    /// Its version.
+    pub version: String,
+    /// Milliseconds since it started.
+    pub uptime_ms: u64,
+    /// The metadata group, 0 if there is none.
+    pub metadata_group: u64,
+    /// The coordinator group, 0 if there is none.
+    pub coordinator_group: u64,
+    /// Open client connections.
+    pub connections: u32,
+    /// Bytes received from clients.
+    pub client_in_bytes: u64,
+    /// Bytes sent to clients.
+    pub client_out_bytes: u64,
+    /// Bytes received from other nodes.
+    pub peer_in_bytes: u64,
+    /// Bytes sent to other nodes.
+    pub peer_out_bytes: u64,
+    /// Acknowledged produces by latency: see [`LATENCY_BUCKETS`].
+    pub commit_latency: Vec<u64>,
+    /// The machine.
+    pub host: HostMetrics,
+    /// Every Raft group hosted here.
+    pub partitions: Vec<PartitionMetrics>,
+    /// Queues this node leads.
+    pub queues: Vec<QueueMetrics>,
+    /// Consumer groups, if this node leads the coordinator group.
+    pub groups: Vec<GroupMetrics>,
+}
+
+/// The machine a node runs on; `None` where it cannot tell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostMetrics {
+    /// CPU use, per mille.
+    pub cpu_permille: Option<u16>,
+    /// Memory the node uses, bytes.
+    pub memory_bytes: Option<u64>,
+    /// Memory available to it, bytes.
+    pub memory_limit_bytes: Option<u64>,
+    /// Free bytes on the data volume.
+    pub disk_free_bytes: Option<u64>,
+    /// Size of the data volume, bytes.
+    pub disk_total_bytes: Option<u64>,
+}
+
+/// One Raft group hosted on the node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartitionMetrics {
+    /// The group.
+    pub group: u64,
+    /// The stream or queue it belongs to; 0 for the node's own groups
+    /// (metadata, coordinator).
+    pub resource_id: u64,
+    /// Partition (0 for a queue).
+    pub partition: u32,
+    /// Whether this node leads the group.
+    pub leader: bool,
+    /// Raft term here.
+    pub term: u64,
+    /// Committed offsets end here (the high watermark).
+    pub high_watermark: u64,
+    /// Below the first open transaction.
+    pub last_stable: u64,
+    /// First offset still stored.
+    pub log_start: u64,
+    /// Offset after the last one in the log, committed or not.
+    pub log_end: u64,
+    /// Bytes of the log on this node.
+    pub size_bytes: u64,
+    /// Acknowledged produce bytes, while this node led the group.
+    pub produce_bytes: u64,
+    /// Acknowledged produce records, likewise.
+    pub produce_records: u64,
+    /// Bytes fetched, likewise.
+    pub fetch_bytes: u64,
+    /// On the leader: the last offset each replica holds (plus one).
+    pub replicas: Vec<ReplicaProgress>,
+}
+
+/// How far a replica is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaProgress {
+    /// The replica's node.
+    pub node_id: u32,
+    /// Offset after the last one it holds.
+    pub log_end: u64,
+}
+
+/// A queue the node leads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueMetrics {
+    /// The queue.
+    pub resource_id: u64,
+    /// Messages ready for delivery.
+    pub ready: u64,
+    /// Delivered and not yet acknowledged.
+    pub in_flight: u64,
+    /// Waiting for their transaction to end.
+    pub in_open_txns: u64,
+    /// Messages delivered, while this node led the queue.
+    pub delivered: u64,
+    /// Messages acknowledged, likewise.
+    pub acked: u64,
+    /// Subscriptions.
+    pub consumers: Vec<ConsumerMetrics>,
+}
+
+/// A queue subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerMetrics {
+    /// Subscription id.
+    pub subscription_id: u32,
+    /// The client's address.
+    pub peer: String,
+    /// Messages delivered to it and not acknowledged.
+    pub in_flight: u32,
+    /// Messages it may still be sent.
+    pub credit: u32,
+}
+
+/// A consumer group, from the coordinator's leader.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupMetrics {
+    /// Group id.
+    pub group_id: String,
+    /// Assignment epoch.
+    pub epoch: i32,
+    /// Members and what they own.
+    pub members: Vec<GroupMemberMetrics>,
+    /// Committed offsets.
+    pub offsets: Vec<CommittedOffset>,
+}
+
+/// A member of a consumer group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMemberMetrics {
+    /// Member id.
+    pub member_id: String,
+    /// Partitions it owns.
+    pub owned: Vec<TxnResource>,
+}
+
+/// A group's committed offset for one partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommittedOffset {
+    /// The stream.
+    pub resource_id: u64,
+    /// The partition.
+    pub partition: u32,
+    /// Next offset to read.
+    pub offset: u64,
+}
+
+fn put_opt_u64(w: &mut Writer, v: Option<u64>) {
+    w.u8(u8::from(v.is_some()));
+    if let Some(v) = v {
+        w.u64(v);
+    }
+}
+
+fn get_opt_u64(r: &mut Reader) -> Result<Option<u64>, DecodeError> {
+    Ok(if r.u8()? != 0 { Some(r.u64()?) } else { None })
+}
+
+impl DescribeMetricsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u32(self.node_id);
+        w.string(&self.version);
+        for v in [
+            self.uptime_ms,
+            self.metadata_group,
+            self.coordinator_group,
+            u64::from(self.connections),
+            self.client_in_bytes,
+            self.client_out_bytes,
+            self.peer_in_bytes,
+            self.peer_out_bytes,
+        ] {
+            w.u64(v);
+        }
+        w.array(&self.commit_latency, |w, v| w.u64(*v));
+        let h = &self.host;
+        w.u8(u8::from(h.cpu_permille.is_some()));
+        if let Some(c) = h.cpu_permille {
+            w.u16(c);
+        }
+        for v in [h.memory_bytes, h.memory_limit_bytes, h.disk_free_bytes, h.disk_total_bytes] {
+            put_opt_u64(w, v);
+        }
+        w.array(&self.partitions, |w, p| {
+            w.u64(p.group);
+            w.u64(p.resource_id);
+            w.u32(p.partition);
+            w.u8(u8::from(p.leader));
+            for v in [
+                p.term,
+                p.high_watermark,
+                p.last_stable,
+                p.log_start,
+                p.log_end,
+                p.size_bytes,
+                p.produce_bytes,
+                p.produce_records,
+                p.fetch_bytes,
+            ] {
+                w.u64(v);
+            }
+            w.array(&p.replicas, |w, r| {
+                w.u32(r.node_id);
+                w.u64(r.log_end);
+            });
+        });
+        w.array(&self.queues, |w, q| {
+            for v in [q.resource_id, q.ready, q.in_flight, q.in_open_txns, q.delivered, q.acked] {
+                w.u64(v);
+            }
+            w.array(&q.consumers, |w, c| {
+                w.u32(c.subscription_id);
+                w.string(&c.peer);
+                w.u32(c.in_flight);
+                w.u32(c.credit);
+            });
+        });
+        w.array(&self.groups, |w, g| {
+            w.string(&g.group_id);
+            w.i32(g.epoch);
+            w.array(&g.members, |w, m| {
+                w.string(&m.member_id);
+                put_txn_resources(w, &m.owned);
+            });
+            w.array(&g.offsets, |w, o| {
+                w.u64(o.resource_id);
+                w.u32(o.partition);
+                w.u64(o.offset);
+            });
+        });
+        w.no_tags();
+    }
+
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let (error, node_id, version) = (ErrorCode(r.u16()?), r.u32()?, r.string()?);
+        let (uptime_ms, metadata_group, coordinator_group) = (r.u64()?, r.u64()?, r.u64()?);
+        let connections = u32::try_from(r.u64()?).map_err(|_| DecodeError::Malformed("connections"))?;
+        let (client_in_bytes, client_out_bytes, peer_in_bytes, peer_out_bytes) =
+            (r.u64()?, r.u64()?, r.u64()?, r.u64()?);
+        let commit_latency = r.array(8, Reader::u64)?;
+        let cpu_permille = if r.u8()? != 0 { Some(r.u16()?) } else { None };
+        let host = HostMetrics {
+            cpu_permille,
+            memory_bytes: get_opt_u64(r)?,
+            memory_limit_bytes: get_opt_u64(r)?,
+            disk_free_bytes: get_opt_u64(r)?,
+            disk_total_bytes: get_opt_u64(r)?,
+        };
+        // group, resource, partition, leader, nine counters, an empty array.
+        let partitions = r.array(8 + 8 + 4 + 1 + 9 * 8 + 1, |r| {
+            let (group, resource_id, partition, leader) = (r.u64()?, r.u64()?, r.u32()?, r.u8()? != 0);
+            let mut v = [0u64; 9];
+            for x in &mut v {
+                *x = r.u64()?;
+            }
+            let replicas = r.array(12, |r| Ok(ReplicaProgress { node_id: r.u32()?, log_end: r.u64()? }))?;
+            let [
+                term,
+                high_watermark,
+                last_stable,
+                log_start,
+                log_end,
+                size_bytes,
+                produce_bytes,
+                produce_records,
+                fetch_bytes,
+            ] = v;
+            Ok(PartitionMetrics {
+                group,
+                resource_id,
+                partition,
+                leader,
+                term,
+                high_watermark,
+                last_stable,
+                log_start,
+                log_end,
+                size_bytes,
+                produce_bytes,
+                produce_records,
+                fetch_bytes,
+                replicas,
+            })
+        })?;
+        // six counters and an empty array.
+        let queues = r.array(6 * 8 + 1, |r| {
+            let mut v = [0u64; 6];
+            for x in &mut v {
+                *x = r.u64()?;
+            }
+            // id, an empty peer, in flight, credit.
+            let consumers = r.array(4 + 2 + 4 + 4, |r| {
+                Ok(ConsumerMetrics {
+                    subscription_id: r.u32()?,
+                    peer: r.string()?,
+                    in_flight: r.u32()?,
+                    credit: r.u32()?,
+                })
+            })?;
+            let [resource_id, ready, in_flight, in_open_txns, delivered, acked] = v;
+            Ok(QueueMetrics { resource_id, ready, in_flight, in_open_txns, delivered, acked, consumers })
+        })?;
+        // an empty id, the epoch, two empty arrays.
+        let groups = r.array(2 + 4 + 1 + 1, |r| {
+            let (group_id, epoch) = (r.string()?, r.i32()?);
+            // an empty id and an empty array.
+            let members =
+                r.array(2 + 1, |r| Ok(GroupMemberMetrics { member_id: r.string()?, owned: get_txn_resources(r)? }))?;
+            let offsets = r.array(8 + 4 + 8, |r| {
+                Ok(CommittedOffset { resource_id: r.u64()?, partition: r.u32()?, offset: r.u64()? })
+            })?;
+            Ok(GroupMetrics { group_id, epoch, members, offsets })
+        })?;
+        r.tags()?;
+        Ok(DescribeMetricsResponse {
+            error,
+            node_id,
+            version,
+            uptime_ms,
+            metadata_group,
+            coordinator_group,
+            connections,
+            client_in_bytes,
+            client_out_bytes,
+            peer_in_bytes,
+            peer_out_bytes,
+            commit_latency,
+            host,
+            partitions,
+            queues,
+            groups,
+        })
+    }
+}

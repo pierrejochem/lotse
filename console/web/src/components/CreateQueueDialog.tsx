@@ -4,7 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
 import type { S } from '../api/client';
 import { ApiError } from '../api/client';
-import { useCreateQueue, useTenants } from '../api/queries';
+import { useClusterRef, useCreateQueue, useTenants } from '../api/queries';
 import { bytes } from '../format';
 import { useToast } from './toast';
 import { Icon, Select } from './ui';
@@ -22,7 +22,8 @@ function durationFlag(ms: number) {
 
 /** Mirrors `cli::create_queue` in lotse-console, for the preview before submitting. */
 export function cliPreview(r: S['CreateQueue']) {
-  let c = `lotse-cli queue create ${r.name || '<name>'} --tenant ${r.tenant}`;
+  let c = `lotse-cli queue create ${r.name || '<name>'}`;
+  if (r.tenant) c += ` --tenant ${r.tenant}`;
   if (r.priority_levels > 1) c += ` --priorities ${r.priority_levels}`;
   if (r.single_active) c += ' --single-active';
   if (r.ttl_ms) c += ` --ttl ${durationFlag(r.ttl_ms)}`;
@@ -32,10 +33,14 @@ export function cliPreview(r: S['CreateQueue']) {
   return c;
 }
 
-/** Radix Dialog with every queue option decided in the design. */
+/** Radix Dialog with every queue option decided in the design; a cluster
+ * without tenants or queue options gets a plain queue. */
 export function CreateQueueDialog({ cluster }: { cluster: string }) {
   const [open, setOpen] = useState(false);
-  const tenants = useTenants(cluster);
+  const ref = useClusterRef(cluster);
+  const hasTenants = ref?.tenants !== false;
+  const hasOptions = ref?.queue_options !== false;
+  const tenants = useTenants(cluster, hasTenants);
   const create = useCreateQueue(cluster);
   const toast = useToast();
   const navigate = useNavigate();
@@ -53,16 +58,18 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
   const [touched, setTouched] = useState(false);
 
   const dlqName = dlq || (name ? `${name}.dlq` : '');
-  const req: S['CreateQueue'] = {
-    name,
-    tenant,
-    priority_levels: levels,
-    single_active: sac,
-    ttl_ms: ttl && Number(ttl) > 0 ? Number(ttl) * TTL_UNITS[ttlUnit] : null,
-    dlq: useDlq ? dlqName : null,
-    max_deliveries: useDlq ? maxDeliveries : null,
-    create_dlq: useDlq && createDlq,
-  };
+  const req: S['CreateQueue'] = hasOptions
+    ? {
+        name,
+        tenant: hasTenants ? tenant : null,
+        priority_levels: levels,
+        single_active: sac,
+        ttl_ms: ttl && Number(ttl) > 0 ? Number(ttl) * TTL_UNITS[ttlUnit] : null,
+        dlq: useDlq ? dlqName : null,
+        max_deliveries: useDlq ? maxDeliveries : null,
+        create_dlq: useDlq && createDlq,
+      }
+    : { name, tenant: hasTenants ? tenant : null, priority_levels: 1, single_active: false, ttl_ms: null, dlq: null, max_deliveries: null, create_dlq: false };
   const nameError = touched && !NAME.test(name) ? 'Use lowercase letters, digits, dots and hyphens, starting with a letter or digit.' : null;
   const selected = tenants.data?.tenants.find((t) => t.name === tenant);
   const overQuota = selected ? selected.used_bytes >= selected.quota_bytes : false;
@@ -103,7 +110,9 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
               <div>
                 <Dialog.Title className="h2">Create queue</Dialog.Title>
                 <Dialog.Description id="cq-desc" className="sub" style={{ margin: '4px 0 0' }}>
-                  Replicated to 3 nodes, the cluster default. Name and tenant cannot change later.
+                  {hasOptions
+                    ? 'Replicated to 3 nodes, the cluster default. Name and tenant cannot change later.'
+                    : 'Replicated to up to 3 nodes. The name cannot change later. This cluster has plain queues only: no priorities, single active consumer, TTL or dead-letter queues yet.'}
                 </Dialog.Description>
               </div>
               <Dialog.Close className="btn icon" aria-label="Close">
@@ -137,7 +146,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                     {nameError ?? 'Lowercase letters, digits, dots and hyphens.'}
                   </span>
                 </div>
-                <div className="field">
+                {hasTenants && <div className="field">
                   <span className="field-label" id="cq-tenant-label">Tenant</span>
                   <Select
                     label="Tenant"
@@ -150,9 +159,10 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                       {overQuota ? 'Storage quota reached; new queues are refused.' : `${bytes(selected.used_bytes)} of ${bytes(selected.quota_bytes)} quota used`}
                     </span>
                   )}
-                </div>
+                </div>}
               </div>
 
+              {hasOptions && <>
               <div className="two">
                 <div className="field">
                   <label htmlFor="cq-levels">Priority levels</label>
@@ -204,6 +214,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                   </>
                 )}
               </fieldset>
+              </>}
 
               <div className="stack" style={{ '--gap': '8px' } as React.CSSProperties}>
                 <span className="label">Same as CLI command</span>

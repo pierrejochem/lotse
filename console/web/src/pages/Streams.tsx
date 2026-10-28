@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
 import { Chip, Failed, Hint, Loading, Sparkline, Stats } from '../components/ui';
-import { bytes, count, duration, rate } from '../format';
+import { NONE, bytes, count, duration, rate } from '../format';
 
 export function StreamList() {
   const { cluster = '' } = useParams();
@@ -32,7 +32,7 @@ export function StreamList() {
               {q.data.map((s) => (
                 <tr key={s.name}>
                   <th scope="row"><Link to={`${base}/streams/${encodeURIComponent(s.name)}`} className="mono">{s.name}</Link></th>
-                  <td>{s.tenant}</td>
+                  <td>{s.tenant ?? NONE}</td>
                   <td className="r">{s.partitions}</td>
                   <td className="r">{rate(s.in_bytes_per_sec)}</td>
                   <td className="r">{bytes(s.stored_bytes)}</td>
@@ -179,7 +179,7 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
 
 function Config({ d }: { d: S['StreamDetail'] }) {
   const rows: [string, string][] = [
-    ['Tenant', d.tenant],
+    ['Tenant', d.tenant ?? 'None (the cluster has no tenants)'],
     ['Partitions', String(d.partitions.length)],
     ['Replication', `${d.replication} replicas, quorum ${Math.floor(d.replication / 2) + 1}`],
     ['Retention', d.retention_ms ? duration(d.retention_ms) : 'Forever'],
@@ -212,7 +212,7 @@ export function StreamDetail() {
     <main className="page">
       <div className="between" style={{ alignItems: 'flex-end' }}>
         <div className="stack" style={{ '--gap': '10px' } as React.CSSProperties}>
-          <span className="label">Stream · tenant {d.tenant}</span>
+          <span className="label">Stream{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
           <h1 className="h1 mono">{d.name}</h1>
           <div className="row" style={{ gap: 8 }}>
             <span className="tag">{d.partitions.length} partitions</span>

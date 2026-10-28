@@ -2,7 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useOverview } from '../api/queries';
 import { ThroughputChart } from '../components/ThroughputChart';
 import { Banner, Chip, DiskBar, Failed, Loading } from '../components/ui';
-import { bytes, count, percent, rate } from '../format';
+import { NONE_NOTE, bytes, count, counted, fraction, ms, percent, rate } from '../format';
 
 export function Overview() {
   const { cluster = '' } = useParams();
@@ -12,6 +12,9 @@ export function Overview() {
   const o = q.data;
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   const tp = o.throughput;
+  const fanOut =
+    tp.in_bytes_per_sec && tp.out_bytes_per_sec ? `${(tp.out_bytes_per_sec / tp.in_bytes_per_sec).toFixed(1)}× fan-out · ` : '';
+  const missing = [tp.in_bytes_per_sec, tp.out_bytes_per_sec, tp.records_per_sec, tp.commit_p99_ms].some((v) => v == null);
 
   return (
     <main className="page">
@@ -37,9 +40,9 @@ export function Overview() {
       <dl className="grid-auto" style={{ margin: 0 }}>
         {[
           { label: 'Produce and publish', value: rate(tp.in_bytes_per_sec), note: `${count(tp.records_per_sec)} records/s` },
-          { label: 'Fetch and deliver', value: rate(tp.out_bytes_per_sec), note: `${(tp.out_bytes_per_sec / tp.in_bytes_per_sec).toFixed(1)}× fan-out · ${count(tp.consumers)} consumers` },
-          { label: 'Commit latency p99', value: `${tp.commit_p99_ms.toFixed(1)} ms`, note: 'Produce acknowledged by a quorum' },
-          { label: 'Stored', value: bytes(tp.stored_bytes), note: `All replicas · ${count(o.stream_count)} streams, ${count(o.queue_count)} queues` },
+          { label: 'Fetch and deliver', value: rate(tp.out_bytes_per_sec), note: `${fanOut}${counted(tp.consumers, 'consumer')}` },
+          { label: 'Commit latency p99', value: ms(tp.commit_p99_ms), note: 'Produce acknowledged by a quorum' },
+          { label: 'Stored', value: bytes(tp.stored_bytes), note: `All replicas · ${counted(o.stream_count, 'stream')}, ${counted(o.queue_count, 'queue')}` },
         ].map((k) => (
           <div key={k.label} className="card tight stack" style={{ '--gap': '6px' } as React.CSSProperties}>
             <dt className="label">{k.label}</dt>
@@ -48,6 +51,7 @@ export function Overview() {
           </div>
         ))}
       </dl>
+      {missing && <p className="small muted" style={{ margin: 0 }}>{NONE_NOTE}</p>}
 
       <div className="row" style={{ alignItems: 'flex-start' }}>
         <ThroughputChart cluster={cluster} />
@@ -96,7 +100,7 @@ export function Overview() {
                   <td>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <DiskBar node={n} limits={o.disk_limits} />
-                      {percent(n.disk_free_bytes / n.disk_total_bytes)}
+                      {percent(fraction(n.disk_free_bytes, n.disk_total_bytes))}
                     </span>
                   </td>
                   <td className="r">{rate(n.produce_bytes_per_sec)}</td>
@@ -107,16 +111,18 @@ export function Overview() {
             </tbody>
           </table>
         </div>
-        <p className="small muted" style={{ margin: 0 }}>
-          Ticks on the disk bar: soft limit at {percent(o.disk_limits.soft_free)} free (producers throttled), hard limit at {percent(o.disk_limits.hard_free)} free (writes rejected).
-        </p>
+        {o.disk_limits && (
+          <p className="small muted" style={{ margin: 0 }}>
+            Ticks on the disk bar: soft limit at {percent(o.disk_limits.soft_free)} free (producers throttled), hard limit at {percent(o.disk_limits.hard_free)} free (writes rejected).
+          </p>
+        )}
       </section>
 
       <div className="row">
         <section className="stack" aria-labelledby="streams-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="streams-title" className="h2">Busiest streams</h2>
-            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>All {count(o.stream_count)} streams</Link>
+            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'The one stream' : `All ${count(o.stream_count)} streams`}</Link>
           </div>
           <div className="table-wrap">
             <table>
@@ -148,7 +154,7 @@ export function Overview() {
         <section className="stack" aria-labelledby="queues-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="queues-title" className="h2">Queues that need attention</h2>
-            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>All {count(o.queue_count)} queues</Link>
+            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'The one queue' : `All ${count(o.queue_count)} queues`}</Link>
           </div>
           <div className="table-wrap">
             {o.attention_queues.length === 0 ? (

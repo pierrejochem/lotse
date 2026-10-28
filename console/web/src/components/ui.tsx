@@ -3,6 +3,7 @@ import * as SelectPrimitive from '@radix-ui/react-select';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { S, Tone } from '../api/client';
 import { ApiError } from '../api/client';
+import { fraction } from '../format';
 
 /** Status chip: colour plus word, never colour alone. */
 export function Chip({ chip, tone, children }: { chip?: S['Chip']; tone?: Tone | 'plain'; children?: ReactNode }) {
@@ -35,11 +36,14 @@ export function Bar({
   );
 }
 
-/** Disk use against the soft and hard limits; ticks mark where they start. */
-export function DiskBar({ node, limits, width = 120 }: { node: S['Node']; limits: S['DiskLimits']; width?: number }) {
-  const free = node.disk_free_bytes / node.disk_total_bytes;
-  const tone = free <= limits.hard_free ? 'critical' : free <= limits.soft_free ? 'warn' : undefined;
-  return <Bar value={1 - free} tone={tone} ticks={[1 - limits.soft_free, 1 - limits.hard_free]} width={width} />;
+/** Disk use, against the soft and hard limits where the cluster has them;
+ * ticks mark where they start. Nothing if the node does not report its disk. */
+export function DiskBar({ node, limits, width = 120 }: { node: S['Node']; limits?: S['DiskLimits'] | null; width?: number }) {
+  const free = fraction(node.disk_free_bytes, node.disk_total_bytes);
+  if (free === null) return null;
+  const tone = !limits ? undefined : free <= limits.hard_free ? 'critical' : free <= limits.soft_free ? 'warn' : undefined;
+  const ticks = limits ? [1 - limits.soft_free, 1 - limits.hard_free] : [];
+  return <Bar value={1 - free} tone={tone} ticks={ticks} width={width} />;
 }
 
 /** A small trend line. */

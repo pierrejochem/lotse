@@ -205,3 +205,25 @@ fn a_nack_takes_back_only_the_connections_own_messages() {
     let again = d.assign(&q, &c, 100, at(1));
     assert!(again.iter().flat_map(|(_, x)| x).all(|x| x.delivery_count == 2), "{again:?}");
 }
+
+#[test]
+fn counts_of_settled_and_waiting_messages() {
+    let mut s = RangeSet::new();
+    s.insert(2, 5);
+    s.insert(8, 10);
+    assert_eq!(s.count_in(0, 20), 5);
+    assert_eq!(s.count_in(3, 9), 3, "part of each range");
+    assert_eq!(s.count_in(5, 8), 0, "a gap");
+    assert_eq!(s.count_in(4, 4), 0);
+
+    // Ten messages, three acknowledged, the ack batch itself settled; then
+    // a transaction of four that waits for its marker.
+    let mut q = QueueLog::new();
+    q.apply(&data(0, 10, None)).unwrap();
+    q.apply(&ack(10, &[(0, 2), (5, 6)])).unwrap();
+    q.apply(&data(11, 4, Some(7))).unwrap();
+    assert_eq!(q.unsettled_in(0, 15), 7 + 4);
+    assert_eq!(q.in_open_transactions(), 4);
+    q.apply(&marker(15, 7, false)).unwrap();
+    assert_eq!((q.unsettled_in(0, 16), q.in_open_transactions()), (7, 0), "aborted: settled");
+}

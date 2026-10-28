@@ -70,11 +70,17 @@ export function useQueue(cluster: string, name: string) {
   });
 }
 
-export const useTenants = (cluster: string) =>
+export const useTenants = (cluster: string, enabled = true) =>
   useQuery({
     queryKey: keys.tenants(cluster),
     queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/tenants', path(cluster))),
+    enabled,
   });
+
+/** The cluster's entry from the cluster list: what it has. */
+export function useClusterRef(cluster: string) {
+  return useClusters().data?.find((c) => c.id === cluster);
+}
 
 export const useMetrics = (cluster: string, series: string, range: Range) =>
   useQuery({

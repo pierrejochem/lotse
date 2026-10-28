@@ -586,6 +586,14 @@ impl RaftGroup {
     pub fn log(&self) -> &TermRuns {
         &self.log
     }
+    /// On a leader: the highest index each member is known to hold, this
+    /// node included; `None` elsewhere. For metrics only.
+    pub fn matched(&self) -> Option<BTreeMap<NodeId, u64>> {
+        let State::Leader { progress } = &self.state else { return None };
+        let mut m: BTreeMap<NodeId, u64> = progress.iter().map(|(id, p)| (*id, p.matched)).collect();
+        m.insert(self.cfg.id, self.log.last_index());
+        Some(m)
+    }
     /// The membership in force: the latest in the log, committed or not.
     pub fn membership(&self) -> &Membership {
         self.configs.last().map_or(&self.base_membership, |c| &c.1)

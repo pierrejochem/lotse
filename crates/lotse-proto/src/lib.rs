@@ -89,6 +89,8 @@ impl ApiKey {
     pub const ALTER_CONFIGS: ApiKey = ApiKey(27);
     /// Removes a binding (admin).
     pub const UNBIND: ApiKey = ApiKey(28);
+    /// One node's metrics (admin).
+    pub const DESCRIBE_METRICS: ApiKey = ApiKey(29);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -111,7 +113,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 26] = [
+    pub const SUPPORTED: [ApiVersionRange; 27] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -138,6 +140,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::DESCRIBE_CONFIGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::ALTER_CONFIGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::UNBIND, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_METRICS, min: 0, max: 0 },
     ];
 }
 
@@ -152,8 +155,9 @@ pub struct ApiVersionRange {
     pub max: u16,
 }
 
-/// An error code; every partition in a response carries its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// An error code; every partition in a response carries its own. The
+/// default is [`ErrorCode::NONE`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ErrorCode(pub u16);
 
 impl ErrorCode {
@@ -349,6 +353,8 @@ pub enum Request {
     DescribeConfigs(DescribeConfigsRequest),
     /// [`ApiKey::ALTER_CONFIGS`].
     AlterConfigs(AlterConfigsRequest),
+    /// [`ApiKey::DESCRIBE_METRICS`].
+    DescribeMetrics(DescribeMetricsRequest),
 }
 
 impl Request {
@@ -381,6 +387,7 @@ impl Request {
             Request::DeleteResource(_) => ApiKey::DELETE_RESOURCE,
             Request::DescribeConfigs(_) => ApiKey::DESCRIBE_CONFIGS,
             Request::AlterConfigs(_) => ApiKey::ALTER_CONFIGS,
+            Request::DescribeMetrics(_) => ApiKey::DESCRIBE_METRICS,
         }
     }
 }
@@ -420,6 +427,8 @@ pub enum Response {
     Admin(AdminResponse),
     /// To [`Request::DescribeConfigs`].
     DescribeConfigs(DescribeConfigsResponse),
+    /// To [`Request::DescribeMetrics`].
+    DescribeMetrics(Box<DescribeMetricsResponse>),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -463,6 +472,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::DeleteResource(r) => r.put(&mut w),
         Request::DescribeConfigs(r) => r.put(&mut w),
         Request::AlterConfigs(r) => r.put(&mut w),
+        Request::DescribeMetrics(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -509,6 +519,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::DELETE_RESOURCE => Request::DeleteResource(DeleteResourceRequest::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Request::DescribeConfigs(DescribeConfigsRequest::get(&mut r)?),
         ApiKey::ALTER_CONFIGS => Request::AlterConfigs(AlterConfigsRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_METRICS => Request::DescribeMetrics(DescribeMetricsRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -537,6 +548,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::Create(r) => r.put(&mut w),
         Response::Admin(r) => r.put(&mut w),
         Response::DescribeConfigs(r) => r.put(&mut w),
+        Response::DescribeMetrics(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -616,6 +628,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         }
         ApiKey::DELETE_RESOURCE | ApiKey::ALTER_CONFIGS => Response::Admin(AdminResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_METRICS => Response::DescribeMetrics(Box::new(DescribeMetricsResponse::get(&mut r)?)),
         ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
         ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
             Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)

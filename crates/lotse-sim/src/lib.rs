@@ -162,6 +162,19 @@ impl lotse_rt::Disk for SimRuntime {
     }
 }
 
+impl lotse_rt::Host for SimRuntime {
+    /// A fixed machine: what a simulation checks must not depend on it.
+    fn host_stats(&self) -> impl Future<Output = lotse_rt::HostStats> + Send {
+        std::future::ready(lotse_rt::HostStats {
+            cpu: Some(0.25),
+            memory_bytes: Some(1 << 30),
+            memory_limit_bytes: Some(4 << 30),
+            disk_free_bytes: Some(3 << 40),
+            disk_total_bytes: Some(4 << 40),
+        })
+    }
+}
+
 impl lotse_rt::Net for SimRuntime {
     type Conn = SimConn;
     type Listener = SimListener;

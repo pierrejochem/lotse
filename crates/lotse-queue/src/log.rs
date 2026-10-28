@@ -99,6 +99,18 @@ impl QueueLog {
         self.settled.next_gap(0)
     }
 
+    /// How many offsets in `from..to` are not settled: messages that are
+    /// or will be delivered (or wait for their transaction's marker).
+    pub fn unsettled_in(&self, from: u64, to: u64) -> u64 {
+        to.saturating_sub(from) - self.settled.count_in(from, to)
+    }
+
+    /// Messages waiting for their transaction's marker; until it comes they
+    /// are neither deliverable nor settled.
+    pub fn in_open_transactions(&self) -> u64 {
+        self.pending.values().flatten().map(|&(f, t)| t - f).sum()
+    }
+
     /// The persisted delivery count of `offset`.
     pub fn delivery_count(&self, offset: u64) -> u16 {
         self.counts.get(&offset).copied().unwrap_or(0)

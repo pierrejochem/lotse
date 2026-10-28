@@ -102,57 +102,61 @@ impl DemoCluster {
             Node {
                 id: "broker-1".into(),
                 role: "Metadata leader".into(),
-                zone: "hh-a".into(),
+                zone: Some("hh-a".into()),
                 uptime_secs: 24 * 60 + s as u64,
                 leads: b1_leads,
                 replicas: RAFT_GROUPS,
-                disk_free_bytes: (4.0 * TIB as f64 * 0.61) as u64,
-                disk_total_bytes: 4 * TIB,
-                produce_bytes_per_sec: share(b1_leads),
-                net_in_bytes_per_sec: share(b1_leads) + total_in * 0.5,
-                net_out_bytes_per_sec: share(b1_leads) * 2.76,
+                disk_free_bytes: Some((4.0 * TIB as f64 * 0.61) as u64),
+                disk_total_bytes: Some(4 * TIB),
+                produce_bytes_per_sec: Some(share(b1_leads)),
+                net_in_bytes_per_sec: Some(share(b1_leads) + total_in * 0.5),
+                net_out_bytes_per_sec: Some(share(b1_leads) * 2.76),
                 connections: 1_731,
-                cpu: 0.38 * wave(s, 41.0, 0.08),
-                memory_bytes: (19.2 * GIB as f64) as u64,
-                memory_limit_bytes: 32 * GIB,
+                cpu: Some(0.38 * wave(s, 41.0, 0.08)),
+                memory_bytes: Some((19.2 * GIB as f64) as u64),
+                memory_limit_bytes: Some(32 * GIB),
                 version: "0.4.1".into(),
                 status: chip(Tone::Ok, "Healthy"),
             },
             Node {
                 id: "broker-2".into(),
                 role: "Voter".into(),
-                zone: "hh-b".into(),
+                zone: Some("hh-b".into()),
                 uptime_secs: 41 * 86_400 + s as u64,
                 leads: b2_leads,
                 replicas: RAFT_GROUPS,
-                disk_free_bytes: (4.0 * TIB as f64 * b2_free) as u64,
-                disk_total_bytes: 4 * TIB,
-                produce_bytes_per_sec: share(b2_leads),
-                net_in_bytes_per_sec: share(b2_leads) + total_in * 0.5,
-                net_out_bytes_per_sec: share(b2_leads) * 2.71,
+                disk_free_bytes: Some((4.0 * TIB as f64 * b2_free) as u64),
+                disk_total_bytes: Some(4 * TIB),
+                produce_bytes_per_sec: Some(share(b2_leads)),
+                net_in_bytes_per_sec: Some(share(b2_leads) + total_in * 0.5),
+                net_out_bytes_per_sec: Some(share(b2_leads) * 2.71),
                 connections: 1_461,
-                cpu: 0.46 * wave(s, 37.0, 0.08),
-                memory_bytes: (21.8 * GIB as f64) as u64,
-                memory_limit_bytes: 32 * GIB,
+                cpu: Some(0.46 * wave(s, 37.0, 0.08)),
+                memory_bytes: Some((21.8 * GIB as f64) as u64),
+                memory_limit_bytes: Some(32 * GIB),
                 version: "0.4.0".into(),
                 status: chip(Tone::Warn, "Soft disk limit"),
             },
             Node {
                 id: "broker-3".into(),
                 role: if catching > 0 { "Voter, upgrading".into() } else { "Voter".into() },
-                zone: "hh-c".into(),
+                zone: Some("hh-c".into()),
                 uptime_secs: 7 * 60 + s as u64,
                 leads: b3_leads,
                 replicas: RAFT_GROUPS,
-                disk_free_bytes: (4.0 * TIB as f64 * 0.58) as u64,
-                disk_total_bytes: 4 * TIB,
-                produce_bytes_per_sec: share(b3_leads),
-                net_in_bytes_per_sec: if catching > 0 { 61.5 * MIB } else { share(b3_leads) + total_in * 0.5 },
-                net_out_bytes_per_sec: share(b3_leads) * 2.7 + 0.2 * MIB,
+                disk_free_bytes: Some((4.0 * TIB as f64 * 0.58) as u64),
+                disk_total_bytes: Some(4 * TIB),
+                produce_bytes_per_sec: Some(share(b3_leads)),
+                net_in_bytes_per_sec: if catching > 0 {
+                    Some(61.5 * MIB)
+                } else {
+                    Some(share(b3_leads) + total_in * 0.5)
+                },
+                net_out_bytes_per_sec: Some(share(b3_leads) * 2.7 + 0.2 * MIB),
                 connections: if catching > 0 { 0 } else { 402 },
-                cpu: if catching > 0 { 0.71 } else { 0.33 } * wave(s, 29.0, 0.06),
-                memory_bytes: 14 * GIB,
-                memory_limit_bytes: 32 * GIB,
+                cpu: Some(if catching > 0 { 0.71 } else { 0.33 } * wave(s, 29.0, 0.06)),
+                memory_bytes: Some(14 * GIB),
+                memory_limit_bytes: Some(32 * GIB),
                 version: "0.4.1".into(),
                 status: if catching > 0 { chip(Tone::Warn, "Catching up") } else { chip(Tone::Ok, "Healthy") },
             },
@@ -231,7 +235,7 @@ impl DemoCluster {
                 name: q.name.clone(),
                 tenant: q.tenant.clone(),
                 ready: 0,
-                dead_lettered: 0,
+                dead_lettered: Some(0),
                 attention: None,
             })
             .collect()
@@ -252,6 +256,8 @@ impl Cluster for DemoCluster {
             status: if upgrading { "upgrading to 0.4.1".into() } else { "upgrade paused".into() },
             tone: Tone::Warn,
             demo: true,
+            tenants: true,
+            queue_options: true,
         })
     }
 
@@ -259,7 +265,7 @@ impl Cluster for DemoCluster {
         let nodes = self.node_list();
         let catching = self.catching_up();
         let b2 = &nodes[1];
-        let b2_free = b2.disk_free_bytes as f64 / b2.disk_total_bytes as f64;
+        let b2_free = b2.disk_free_bytes.unwrap_or(0) as f64 / b2.disk_total_bytes.unwrap_or(1) as f64;
         let in_rate = self.in_rate();
         let mut queues = self.queues(who).await?;
         queues.retain(|q| q.attention.is_some());
@@ -282,10 +288,10 @@ impl Cluster for DemoCluster {
                 node: Some("broker-2".into()),
             }],
             throughput: Throughput {
-                in_bytes_per_sec: in_rate,
-                out_bytes_per_sec: in_rate * 2.73,
-                records_per_sec: in_rate / 238.0,
-                commit_p99_ms: 7.8 * wave(self.secs(), 900.0, 0.08),
+                in_bytes_per_sec: Some(in_rate),
+                out_bytes_per_sec: Some(in_rate * 2.73),
+                records_per_sec: Some(in_rate / 238.0),
+                commit_p99_ms: Some(7.8 * wave(self.secs(), 900.0, 0.08)),
                 stored_bytes: (3.94 * TIB as f64) as u64,
                 consumers: 1_940,
             },
@@ -332,7 +338,7 @@ impl Cluster for DemoCluster {
                 },
             ],
             nodes,
-            disk_limits: DISK_LIMITS,
+            disk_limits: Some(DISK_LIMITS),
             busiest_streams: streams,
             attention_queues: queues,
             stream_count: 214,
@@ -379,16 +385,16 @@ impl Cluster for DemoCluster {
                 ),
             },
         );
-        Ok(NodesView { nodes: self.node_list(), disk_limits: DISK_LIMITS, upgrade: Some(self.upgrade()), events })
+        Ok(NodesView { nodes: self.node_list(), disk_limits: Some(DISK_LIMITS), upgrade: Some(self.upgrade()), events })
     }
 
     async fn streams(&self, _who: &Identity) -> ApiResult<Vec<StreamRow>> {
         let s = self.secs();
         let row = |name: &str, tenant: &str, partitions, mib: f64, stored: u64| StreamRow {
             name: name.into(),
-            tenant: tenant.into(),
+            tenant: Some(tenant.into()),
             partitions,
-            in_bytes_per_sec: mib * MIB * wave(s, 61.0 + mib, 0.05),
+            in_bytes_per_sec: Some(mib * MIB * wave(s, 61.0 + mib, 0.05)),
             stored_bytes: stored,
         };
         Ok(vec![
@@ -520,11 +526,11 @@ impl Cluster for DemoCluster {
             retention_ms: Some(7 * 86_400_000),
             compaction: false,
             in_bytes_per_sec: row.in_bytes_per_sec,
-            out_bytes_per_sec: row.in_bytes_per_sec * 2.94,
-            records_per_sec: row.in_bytes_per_sec / 392.0,
+            out_bytes_per_sec: row.in_bytes_per_sec.map(|r| r * 2.94),
+            records_per_sec: row.in_bytes_per_sec.map(|r| r / 392.0),
             stored_bytes: row.stored_bytes,
-            oldest_record_age_ms: (6 * 86_400 + 22 * 3_600) * 1000,
-            open_transactions: if name == "orders" { 17 } else { 0 },
+            oldest_record_age_ms: Some((6 * 86_400 + 22 * 3_600) * 1000),
+            open_transactions: if name == "orders" { Some(17) } else { Some(0) },
             partitions,
             groups,
             assignment,
@@ -534,7 +540,7 @@ impl Cluster for DemoCluster {
     async fn queues(&self, _who: &Identity) -> ApiResult<Vec<QueueRow>> {
         let row = |name: &str, tenant: &str, ready, dlq, attention: Option<Chip>| QueueRow {
             name: name.into(),
-            tenant: tenant.into(),
+            tenant: Some(tenant.into()),
             ready,
             dead_lettered: dlq,
             attention,
@@ -544,14 +550,14 @@ impl Cluster for DemoCluster {
                 "email.send",
                 "notify",
                 18_304 + (self.secs() * 6.0) as u64,
-                0,
+                Some(0),
                 Some(chip(Tone::Critical, "No consumers")),
             ),
-            row("payments.capture", "commerce", 1_942, 211, Some(chip(Tone::Warn, "DLQ growing"))),
-            row("webhooks.out", "platform", 6_120, 43, Some(chip(Tone::Warn, "Oldest 12 min"))),
-            row("refunds", "commerce", 12, 64, Some(chip(Tone::Info, "DLQ not empty"))),
-            row("invoices.render", "finance", 3, 0, None),
-            row("sms.send", "notify", 0, 0, None),
+            row("payments.capture", "commerce", 1_942, Some(211), Some(chip(Tone::Warn, "DLQ growing"))),
+            row("webhooks.out", "platform", 6_120, Some(43), Some(chip(Tone::Warn, "Oldest 12 min"))),
+            row("refunds", "commerce", 12, Some(64), Some(chip(Tone::Info, "DLQ not empty"))),
+            row("invoices.render", "finance", 3, Some(0), None),
+            row("sms.send", "notify", 0, Some(0), None),
         ];
         rows.extend(self.created_rows());
         Ok(rows)
@@ -570,16 +576,16 @@ impl Cluster for DemoCluster {
                 ready: 0,
                 in_flight: 0,
                 in_open_txns: 0,
-                publish_per_sec: 0.0,
-                ack_per_sec: 0.0,
-                dead_lettered: 0,
+                publish_per_sec: Some(0.0),
+                ack_per_sec: Some(0.0),
+                dead_lettered: Some(0),
                 levels: (0..q.priority_levels)
                     .rev()
                     .map(|l| PriorityLevel {
                         level: l,
                         leader: ["broker-1", "broker-2"][usize::from(l % 2)].into(),
                         ready: 0,
-                        oldest_ms: 0,
+                        oldest_ms: Some(0),
                     })
                     .collect(),
                 consumers: vec![],
@@ -599,20 +605,20 @@ impl Cluster for DemoCluster {
                 tenant: row.tenant,
                 single_active: false,
                 ttl_ms: None,
-                dlq: (row.dead_lettered > 0).then(|| format!("{name}.dlq")),
-                max_deliveries: (row.dead_lettered > 0).then_some(5),
+                dlq: (row.dead_lettered > Some(0)).then(|| format!("{name}.dlq")),
+                max_deliveries: (row.dead_lettered > Some(0)).then_some(5),
                 binding: None,
                 ready: row.ready,
                 in_flight: 0,
                 in_open_txns: 0,
-                publish_per_sec: 12.0,
-                ack_per_sec: 12.0,
+                publish_per_sec: Some(12.0),
+                ack_per_sec: Some(12.0),
                 dead_lettered: row.dead_lettered,
                 levels: vec![PriorityLevel {
                     level: 0,
                     leader: "broker-1".into(),
                     ready: row.ready,
-                    oldest_ms: 45_000,
+                    oldest_ms: Some(45_000),
                 }],
                 consumers: vec![],
                 dead_letters: vec![],
@@ -622,13 +628,13 @@ impl Cluster for DemoCluster {
         let now = now_ms();
         let consumer = |tag: &str, conn: &str, active: bool| QueueConsumer {
             tag: tag.into(),
-            principal: "CN=capture-svc".into(),
+            principal: Some("CN=capture-svc".into()),
             connection: conn.into(),
             in_flight: if active { 118 } else { 0 },
             credit_messages: 128,
-            in_flight_bytes: if active { (3.1 * MIB) as u64 } else { 0 },
-            credit_bytes: 4 << 20,
-            acks_per_sec: if active { 805.0 * wave(self.secs(), 19.0, 0.05) } else { 0.0 },
+            in_flight_bytes: if active { Some((3.1 * MIB) as u64) } else { Some(0) },
+            credit_bytes: Some(4 << 20),
+            acks_per_sec: if active { Some(805.0 * wave(self.secs(), 19.0, 0.05)) } else { Some(0.0) },
             state: if active { chip(Tone::Ok, "Active") } else { chip(Tone::Info, "Standby") },
         };
         let dead = |offset, key: &str, reason: &str, deliveries, secs_ago: u64| DeadLetter {
@@ -649,13 +655,13 @@ impl Cluster for DemoCluster {
             ready: row.ready,
             in_flight: 118,
             in_open_txns: 6,
-            publish_per_sec: 820.0 * wave(self.secs(), 17.0, 0.05),
-            ack_per_sec: 805.0 * wave(self.secs(), 19.0, 0.05),
+            publish_per_sec: Some(820.0 * wave(self.secs(), 17.0, 0.05)),
+            ack_per_sec: Some(805.0 * wave(self.secs(), 19.0, 0.05)),
             dead_lettered: row.dead_lettered,
             levels: vec![
-                PriorityLevel { level: 2, leader: "broker-1".into(), ready: 12, oldest_ms: 400 },
-                PriorityLevel { level: 1, leader: "broker-2".into(), ready: 1_880, oldest_ms: 130_000 },
-                PriorityLevel { level: 0, leader: "broker-1".into(), ready: 50, oldest_ms: 581_000 },
+                PriorityLevel { level: 2, leader: "broker-1".into(), ready: 12, oldest_ms: Some(400) },
+                PriorityLevel { level: 1, leader: "broker-2".into(), ready: 1_880, oldest_ms: Some(130_000) },
+                PriorityLevel { level: 0, leader: "broker-1".into(), ready: 50, oldest_ms: Some(581_000) },
             ],
             consumers: vec![
                 consumer("capture-worker-1", "10.4.6.21 → broker-2", true),
@@ -687,12 +693,15 @@ impl Cluster for DemoCluster {
     }
 
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
+        let Some(wanted) = &req.tenant else {
+            return Err(ApiError::BadRequest("Choose the tenant the queue belongs to.".into()));
+        };
         let tenants = self.tenants(who).await?;
         let tenant = tenants
             .tenants
             .iter()
-            .find(|t| t.name == req.tenant)
-            .ok_or_else(|| ApiError::NotFound(format!("There is no tenant \"{}\".", req.tenant)))?;
+            .find(|t| &t.name == wanted)
+            .ok_or_else(|| ApiError::NotFound(format!("There is no tenant \"{wanted}\".")))?;
         if tenant.used_bytes >= tenant.quota_bytes {
             return Err(ApiError::Forbidden(format!(
                 "Tenant {} has reached its storage quota. Raise the quota before adding queues.",
@@ -756,7 +765,9 @@ impl Cluster for DemoCluster {
             };
             Tenant { name: name.into(), used_bytes: used, quota_bytes: quota, streams, queues, principals, state }
         };
-        let created = |tenant: &str| self.lock().created.values().filter(|(q, _)| q.tenant == tenant).count() as u32;
+        let created = |tenant: &str| {
+            self.lock().created.values().filter(|(q, _)| q.tenant.as_deref() == Some(tenant)).count() as u32
+        };
         let b = |principal: &str, auth: &str, role: &str, resources: &[&str]| RoleBinding {
             principal: principal.into(),
             auth: auth.into(),
@@ -920,8 +931,8 @@ mod tests {
         let c = DemoCluster::new("t");
         let o = c.overview(&me()).await.unwrap();
         assert_eq!(o.nodes.iter().map(|n| n.leads).sum::<u32>(), RAFT_GROUPS);
-        let produce: f64 = o.nodes.iter().map(|n| n.produce_bytes_per_sec).sum();
-        assert!((produce - o.throughput.in_bytes_per_sec).abs() < 1.0);
+        let produce: f64 = o.nodes.iter().filter_map(|n| n.produce_bytes_per_sec).sum();
+        assert!((produce - o.throughput.in_bytes_per_sec.unwrap()).abs() < 1.0);
     }
 
     #[tokio::test]
@@ -949,7 +960,7 @@ mod tests {
         let c = DemoCluster::new("t");
         let req = CreateQueue {
             name: "payments.refund".into(),
-            tenant: "commerce".into(),
+            tenant: Some("commerce".into()),
             priority_levels: 3,
             single_active: true,
             ttl_ms: None,
@@ -970,7 +981,7 @@ mod tests {
         let c = DemoCluster::new("t");
         let req = CreateQueue {
             name: "x".into(),
-            tenant: "analytics".into(),
+            tenant: Some("analytics".into()),
             priority_levels: 1,
             single_active: false,
             ttl_ms: None,

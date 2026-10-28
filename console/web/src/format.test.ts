@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bytes, count, duration, percent, rate } from './format';
+import { NONE, bytes, count, counted, duration, fraction, ms, percent, rate } from './format';
 
 describe('format', () => {
   it('groups thousands', () => {
@@ -22,5 +22,16 @@ describe('format', () => {
 
   it('formats fractions as percent', () => {
     expect(percent(0.19)).toBe('19 %');
+  });
+
+  it('shows what is not reported as a dash', () => {
+    for (const v of [null, undefined, Number.NaN]) {
+      expect([count(v), bytes(v), rate(v), percent(v), duration(v), ms(v)]).toEqual(Array(6).fill(NONE));
+    }
+    expect(fraction(19, 100)).toBe(0.19);
+    expect(fraction(null, 100)).toBeNull();
+    expect(fraction(1, 0)).toBeNull();
+    expect(ms(7.84)).toBe('7.8 ms');
+    expect([counted(1, 'stream'), counted(3, 'stream'), counted(2, 'consumer', 'consumers')]).toEqual(['1 stream', '3 streams', '2 consumers']);
   });
 });

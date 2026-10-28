@@ -264,8 +264,13 @@ export interface components {
              * @description Number of broker nodes.
              */
             nodes: number;
+            /** @description Whether queues can have priorities, single active consumer, a TTL
+             *     and dead-letter queues. */
+            queue_options: boolean;
             /** @description One-line status, e.g. "upgrading to 0.4.1". */
             status: string;
+            /** @description Whether the cluster has tenants (quotas, role bindings). */
+            tenants: boolean;
             /** @description Colour of the status. */
             tone: components["schemas"]["Tone"];
         };
@@ -289,8 +294,8 @@ export interface components {
             priority_levels: number;
             /** @description Single active consumer. */
             single_active: boolean;
-            /** @description Tenant. */
-            tenant: string;
+            /** @description Tenant; required where the cluster has tenants, absent elsewhere. */
+            tenant?: string | null;
             /**
              * Format: int64
              * @description Message TTL, ms; `None` = until acked.
@@ -409,17 +414,17 @@ export interface components {
              * Format: double
              * @description CPU use, 0–1.
              */
-            cpu: number;
+            cpu?: number | null;
             /**
              * Format: int64
              * @description Free bytes on the log volume.
              */
-            disk_free_bytes: number;
+            disk_free_bytes?: number | null;
             /**
              * Format: int64
              * @description Size of the log volume.
              */
-            disk_total_bytes: number;
+            disk_total_bytes?: number | null;
             /** @description Node ID. */
             id: string;
             /**
@@ -431,27 +436,27 @@ export interface components {
              * Format: int64
              * @description Resident memory, bytes.
              */
-            memory_bytes: number;
+            memory_bytes?: number | null;
             /**
              * Format: int64
              * @description Memory limit, bytes.
              */
-            memory_limit_bytes: number;
+            memory_limit_bytes?: number | null;
             /**
              * Format: double
              * @description Network in, bytes/s (clients and replication).
              */
-            net_in_bytes_per_sec: number;
+            net_in_bytes_per_sec?: number | null;
             /**
              * Format: double
              * @description Network out, bytes/s.
              */
-            net_out_bytes_per_sec: number;
+            net_out_bytes_per_sec?: number | null;
             /**
              * Format: double
              * @description Client produce traffic into this node, bytes/s.
              */
-            produce_bytes_per_sec: number;
+            produce_bytes_per_sec?: number | null;
             /**
              * Format: int32
              * @description Raft groups with a replica on this node.
@@ -469,12 +474,11 @@ export interface components {
             /** @description Running version. */
             version: string;
             /** @description Availability zone. */
-            zone: string;
+            zone?: string | null;
         };
         /** @description The nodes screen. */
         NodesView: {
-            /** @description Disk thresholds. */
-            disk_limits: components["schemas"]["DiskLimits"];
+            disk_limits?: null | components["schemas"]["DiskLimits"];
             /** @description Recent operator events, newest first. */
             events: components["schemas"]["OperatorEvent"][];
             /** @description Nodes. */
@@ -500,8 +504,7 @@ export interface components {
             busiest_streams: components["schemas"]["StreamRow"][];
             /** @description Cluster ID. */
             cluster: string;
-            /** @description Disk thresholds for the bars. */
-            disk_limits: components["schemas"]["DiskLimits"];
+            disk_limits?: null | components["schemas"]["DiskLimits"];
             /** @description Health list. */
             health: components["schemas"]["HealthItem"][];
             /** @description Node that leads the metadata group. */
@@ -599,7 +602,7 @@ export interface components {
              * Format: int64
              * @description Age of the oldest ready message, ms.
              */
-            oldest_ms: number;
+            oldest_ms?: number | null;
             /**
              * Format: int64
              * @description Messages ready.
@@ -612,14 +615,14 @@ export interface components {
              * Format: double
              * @description Acks per second.
              */
-            acks_per_sec: number;
+            acks_per_sec?: number | null;
             /** @description Client address and broker. */
             connection: string;
             /**
              * Format: int64
              * @description Credit window, bytes.
              */
-            credit_bytes: number;
+            credit_bytes?: number | null;
             /**
              * Format: int32
              * @description Credit window, messages.
@@ -634,9 +637,9 @@ export interface components {
              * Format: int64
              * @description Bytes in flight.
              */
-            in_flight_bytes: number;
-            /** @description Principal. */
-            principal: string;
+            in_flight_bytes?: number | null;
+            /** @description Principal; `null` while the cluster has no authentication. */
+            principal?: string | null;
             /** @description State chip ("Active", "Standby"). */
             state: components["schemas"]["Chip"];
             /** @description Consumer tag. */
@@ -648,7 +651,7 @@ export interface components {
              * Format: double
              * @description Ack rate, messages/s.
              */
-            ack_per_sec: number;
+            ack_per_sec?: number | null;
             /** @description Exchange and binding key, if bound. */
             binding?: string | null;
             /** @description Consumers. */
@@ -657,7 +660,7 @@ export interface components {
              * Format: int64
              * @description Dead-lettered.
              */
-            dead_lettered: number;
+            dead_lettered?: number | null;
             /** @description Latest dead letters. */
             dead_letters: components["schemas"]["DeadLetter"][];
             /** @description Dead-letter queue. */
@@ -687,7 +690,7 @@ export interface components {
              * Format: double
              * @description Publish rate, messages/s.
              */
-            publish_per_sec: number;
+            publish_per_sec?: number | null;
             /**
              * Format: int64
              * @description Ready, all levels.
@@ -696,7 +699,7 @@ export interface components {
             /** @description Single active consumer. */
             single_active: boolean;
             /** @description Tenant. */
-            tenant: string;
+            tenant?: string | null;
             /**
              * Format: int64
              * @description Message TTL, ms; `None` = until acked.
@@ -710,7 +713,7 @@ export interface components {
              * Format: int64
              * @description Messages in the dead-letter queue.
              */
-            dead_lettered: number;
+            dead_lettered?: number | null;
             /** @description Queue name. */
             name: string;
             /**
@@ -719,7 +722,7 @@ export interface components {
              */
             ready: number;
             /** @description Tenant. */
-            tenant: string;
+            tenant?: string | null;
         };
         /**
          * @description Chart time range.
@@ -846,31 +849,31 @@ export interface components {
              * Format: double
              * @description Produce rate, bytes/s.
              */
-            in_bytes_per_sec: number;
+            in_bytes_per_sec?: number | null;
             /** @description Stream name. */
             name: string;
             /**
              * Format: int64
              * @description Age of the oldest record, ms.
              */
-            oldest_record_age_ms: number;
+            oldest_record_age_ms?: number | null;
             /**
              * Format: int32
              * @description Open transactions touching this stream.
              */
-            open_transactions: number;
+            open_transactions?: number | null;
             /**
              * Format: double
              * @description Fetch rate, bytes/s.
              */
-            out_bytes_per_sec: number;
+            out_bytes_per_sec?: number | null;
             /** @description Partitions. */
             partitions: components["schemas"]["Partition"][];
             /**
              * Format: double
              * @description Records in per second.
              */
-            records_per_sec: number;
+            records_per_sec?: number | null;
             /**
              * Format: int32
              * @description Replication factor.
@@ -887,7 +890,7 @@ export interface components {
              */
             stored_bytes: number;
             /** @description Tenant. */
-            tenant: string;
+            tenant?: string | null;
         };
         /** @description A row in "busiest streams". */
         StreamRow: {
@@ -895,7 +898,7 @@ export interface components {
              * Format: double
              * @description Produce rate, bytes/s.
              */
-            in_bytes_per_sec: number;
+            in_bytes_per_sec?: number | null;
             /** @description Stream name. */
             name: string;
             /**
@@ -909,7 +912,7 @@ export interface components {
              */
             stored_bytes: number;
             /** @description Tenant. */
-            tenant: string;
+            tenant?: string | null;
         };
         /** @description A tenant. */
         Tenant: {
@@ -961,9 +964,10 @@ export interface components {
         Throughput: {
             /**
              * Format: double
-             * @description p99 time until a produce is acknowledged by a quorum, ms.
+             * @description p99 time until a produce is acknowledged by a quorum, ms; `null`
+             *     without produces to measure.
              */
-            commit_p99_ms: number;
+            commit_p99_ms?: number | null;
             /**
              * Format: int32
              * @description Connected consumers.
@@ -973,17 +977,17 @@ export interface components {
              * Format: double
              * @description Produce and publish, bytes/s.
              */
-            in_bytes_per_sec: number;
+            in_bytes_per_sec?: number | null;
             /**
              * Format: double
              * @description Fetch and deliver, bytes/s.
              */
-            out_bytes_per_sec: number;
+            out_bytes_per_sec?: number | null;
             /**
              * Format: double
              * @description Records in per second.
              */
-            records_per_sec: number;
+            records_per_sec?: number | null;
             /**
              * Format: int64
              * @description Bytes stored, all replicas.

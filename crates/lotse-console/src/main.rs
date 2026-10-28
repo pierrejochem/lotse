@@ -7,6 +7,7 @@ use clap::Parser;
 use lotse_console::auth::{AuthConfig, Identity};
 use lotse_console::cluster::Cluster;
 use lotse_console::cluster::demo::DemoCluster;
+use lotse_console::cluster::native::NativeCluster;
 use lotse_console::config::{ClusterConfig, Config};
 use lotse_console::metrics::{MetricsStore, run_sampler};
 use lotse_console::{AppState, openapi, router};
@@ -51,7 +52,11 @@ async fn main() -> ExitCode {
                 tracing::info!(cluster = %id, "serving the built-in demo cluster");
                 clusters.push(Arc::new(demo));
             }
-            ClusterConfig::Native { .. } => unreachable!("rejected by Config::parse"),
+            ClusterConfig::Native { id, bootstrap } => {
+                tracing::info!(cluster = %id, ?bootstrap, "serving a cluster over the native protocol");
+                tracing::warn!(cluster = %id, "Lotse has no authentication yet: requests reach the cluster without credentials");
+                clusters.push(Arc::new(NativeCluster::new(id.clone(), bootstrap.clone())));
+            }
         }
     }
 

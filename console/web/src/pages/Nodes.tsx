@@ -6,7 +6,15 @@ import { ApiError } from '../api/client';
 import { useNodes, usePauseUpgrade } from '../api/queries';
 import { useToast } from '../components/toast';
 import { Chip, DiskBar, Failed, Loading } from '../components/ui';
-import { bytes, clock, count, duration, percent, rate } from '../format';
+import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, rate } from '../format';
+
+/** "3 broker nodes in 3 zones · managed by the Lotse operator", from what is known. */
+function nodesLine(v: S['NodesView']) {
+  const zones = new Set(v.nodes.map((n) => n.zone).filter(Boolean));
+  const parts = [counted(v.nodes.length, 'broker node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
+  if (v.upgrade || v.events.length > 0) parts.push('managed by the Lotse operator');
+  return parts.join(' · ');
+}
 
 function PauseButton({ cluster, node }: { cluster: string; node: string }) {
   const pause = usePauseUpgrade(cluster);
@@ -111,7 +119,7 @@ export function Nodes() {
     <main className="page">
       <div>
         <h1 className="h1">Nodes</h1>
-        <p className="sub">{v.nodes.length} broker nodes in {new Set(v.nodes.map((n) => n.zone)).size} zones · managed by the Lotse operator</p>
+        <p className="sub">{nodesLine(v)}</p>
       </div>
 
       {v.upgrade && <Upgrade u={v.upgrade} cluster={cluster} />}
@@ -124,14 +132,14 @@ export function Nodes() {
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
                 <div style={{ minWidth: 0 }}>
                   <h3 className="mono" style={{ fontSize: 17, lineHeight: '24px' }}>{n.id}</h3>
-                  <p className="small muted" style={{ margin: '2px 0 0' }}>{n.role} · zone {n.zone} · up {duration(n.uptime_secs * 1000)}</p>
+                  <p className="small muted" style={{ margin: '2px 0 0' }}>{[n.role, n.zone && `zone ${n.zone}`, n.uptime_secs > 0 && `up ${duration(n.uptime_secs * 1000)}`].filter(Boolean).join(' · ')}</p>
                 </div>
                 <Chip chip={n.status} />
               </div>
               <div className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
                 <div className="between" style={{ fontSize: 14 }}>
                   <span>Disk</span>
-                  <span><strong>{percent(n.disk_free_bytes / n.disk_total_bytes)}</strong> free of {bytes(n.disk_total_bytes)}</span>
+                  <span><strong>{percent(fraction(n.disk_free_bytes, n.disk_total_bytes))}</strong> free of {bytes(n.disk_total_bytes)}</span>
                 </div>
                 <DiskBar node={n} limits={v.disk_limits} width={undefined} />
               </div>
@@ -155,20 +163,28 @@ export function Nodes() {
         </div>
       </section>
 
+      {v.nodes.some((n) => n.cpu == null || n.net_in_bytes_per_sec == null) && (
+        <p className="small muted" style={{ margin: 0 }}>{NONE_NOTE}</p>
+      )}
+
       <section className="stack" aria-labelledby="events-title">
         <h2 id="events-title" className="h2">Operator events</h2>
         <div className="table-wrap">
-          <table>
-            <tbody>
-              {v.events.map((e, i) => (
-                <tr key={i}>
-                  <td className="mono muted" style={{ width: 90 }}>{clock(e.at)}</td>
-                  <td className="mono" style={{ width: 110 }}>{e.node}</td>
-                  <td className="wrap">{e.text}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {v.events.length === 0 ? (
+            <p className="empty">No operator events.</p>
+          ) : (
+            <table>
+              <tbody>
+                {v.events.map((e, i) => (
+                  <tr key={i}>
+                    <td className="mono muted" style={{ width: 90 }}>{clock(e.at)}</td>
+                    <td className="mono" style={{ width: 110 }}>{e.node}</td>
+                    <td className="wrap">{e.text}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </section>
     </main>

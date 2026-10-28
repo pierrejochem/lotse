@@ -253,6 +253,11 @@ impl<D: Disk> Log<D> {
         self.segments.len()
     }
 
+    /// Bytes in all segments, including unsynced appends.
+    pub fn size_bytes(&self) -> u64 {
+        self.segments.values().map(|s| s.size).sum()
+    }
+
     /// Appends a stamped batch whose `base_offset` equals [`Log::next_offset`].
     /// Readable at once; durable after [`Log::sync`].
     pub async fn append(&mut self, batch: Bytes) -> Result<Appended, Error> {

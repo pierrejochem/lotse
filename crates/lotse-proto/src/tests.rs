@@ -624,3 +624,129 @@ fn the_smallest_described_configs_decode() {
         assert_eq!(decode_response(frame, ApiKey::DESCRIBE_CONFIGS).unwrap().1, resp);
     }
 }
+
+fn metrics_round_trip(resp: DescribeMetricsResponse) {
+    let resp = Response::DescribeMetrics(Box::new(resp));
+    let frame = encode_response(3, &resp);
+    assert_eq!(decode_response(frame.clone(), ApiKey::DESCRIBE_METRICS).unwrap().1, resp);
+    for cut in 0..frame.len() {
+        assert!(decode_response(frame.slice(..cut), ApiKey::DESCRIBE_METRICS).is_err(), "cut at {cut}");
+    }
+}
+
+#[test]
+fn metrics_round_trip_in_full() {
+    let req = Request::DescribeMetrics(DescribeMetricsRequest);
+    assert_eq!(decode_request(encode_request(9, &req)).unwrap().1, req);
+    metrics_round_trip(DescribeMetricsResponse {
+        error: ErrorCode::NONE,
+        node_id: 3,
+        version: "0.1.0".into(),
+        uptime_ms: 60_000,
+        metadata_group: 1,
+        coordinator_group: 2,
+        connections: 12,
+        client_in_bytes: 1 << 30,
+        client_out_bytes: 2 << 30,
+        peer_in_bytes: 7,
+        peer_out_bytes: 8,
+        commit_latency: vec![0, 5, 9, 1],
+        host: HostMetrics {
+            cpu_permille: Some(250),
+            memory_bytes: Some(1 << 28),
+            memory_limit_bytes: None,
+            disk_free_bytes: Some(1 << 40),
+            disk_total_bytes: Some(4 << 40),
+        },
+        partitions: vec![PartitionMetrics {
+            group: 1 << 40,
+            resource_id: 7,
+            partition: 2,
+            leader: true,
+            term: 4,
+            high_watermark: 100,
+            last_stable: 98,
+            log_start: 0,
+            log_end: 101,
+            size_bytes: 4096,
+            produce_bytes: 3000,
+            produce_records: 30,
+            fetch_bytes: 9000,
+            replicas: vec![ReplicaProgress { node_id: 1, log_end: 101 }, ReplicaProgress { node_id: 2, log_end: 90 }],
+        }],
+        queues: vec![QueueMetrics {
+            resource_id: 8,
+            ready: 5,
+            in_flight: 2,
+            in_open_txns: 1,
+            delivered: 40,
+            acked: 38,
+            consumers: vec![ConsumerMetrics {
+                subscription_id: 1,
+                peer: "10.0.0.7:51234".into(),
+                in_flight: 2,
+                credit: 8,
+            }],
+        }],
+        groups: vec![GroupMetrics {
+            group_id: "billing".into(),
+            epoch: 5,
+            members: vec![GroupMemberMetrics {
+                member_id: "m1".into(),
+                owned: vec![TxnResource { resource_id: 7, partitions: vec![0, 2] }],
+            }],
+            offsets: vec![CommittedOffset { resource_id: 7, partition: 0, offset: 42 }],
+        }],
+    });
+}
+
+/// Each array of a metrics answer filled with its smallest elements, one
+/// array at a time: every element minimum is checked against a frame of
+/// nothing else.
+#[test]
+fn the_smallest_metrics_decode() {
+    let partition = PartitionMetrics::default();
+    let queue = QueueMetrics::default();
+    let group = GroupMetrics::default();
+    let base = DescribeMetricsResponse::default();
+    let cases = [
+        DescribeMetricsResponse { commit_latency: vec![0; 32], ..base.clone() },
+        DescribeMetricsResponse { partitions: vec![partition.clone(); 32], ..base.clone() },
+        DescribeMetricsResponse {
+            partitions: vec![PartitionMetrics {
+                replicas: vec![ReplicaProgress { node_id: 0, log_end: 0 }; 32],
+                ..partition
+            }],
+            ..base.clone()
+        },
+        DescribeMetricsResponse { queues: vec![queue.clone(); 32], ..base.clone() },
+        DescribeMetricsResponse {
+            queues: vec![QueueMetrics {
+                consumers: vec![
+                    ConsumerMetrics { subscription_id: 0, peer: String::new(), in_flight: 0, credit: 0 };
+                    32
+                ],
+                ..queue
+            }],
+            ..base.clone()
+        },
+        DescribeMetricsResponse { groups: vec![group.clone(); 32], ..base.clone() },
+        DescribeMetricsResponse {
+            groups: vec![GroupMetrics {
+                members: vec![GroupMemberMetrics { member_id: String::new(), owned: vec![] }; 32],
+                ..group.clone()
+            }],
+            ..base.clone()
+        },
+        DescribeMetricsResponse {
+            groups: vec![GroupMetrics {
+                offsets: vec![CommittedOffset { resource_id: 0, partition: 0, offset: 0 }; 32],
+                ..group
+            }],
+            ..base
+        },
+    ];
+    for case in cases {
+        metrics_round_trip(case);
+    }
+}

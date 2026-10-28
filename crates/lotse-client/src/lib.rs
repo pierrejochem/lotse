@@ -99,6 +99,9 @@ pub enum ClientError {
         /// The routing key.
         routing_key: String,
     },
+    /// A node asked directly did not answer.
+    #[error("node {0} did not answer: {1}")]
+    NoAnswer(u32, String),
     /// A resource with that name exists already (perhaps created by an
     /// earlier attempt of this same request).
     #[error("{name} exists already (id {resource_id})")]
@@ -764,7 +767,20 @@ impl<R: Net + Clock + Spawn> Client<R> {
         offset: u64,
         max_wait: Duration,
     ) -> Result<Fetched, ClientError> {
-        self.retrying(|| self.fetch_once(stream, partition, offset, max_wait)).await
+        self.retrying(|| self.fetch_once(stream, partition, offset, max_wait, isolation::COMMITTED)).await
+    }
+
+    /// Like [`Client::fetch`], but also past the last stable offset:
+    /// batches of open and aborted transactions and their markers, up to
+    /// the high watermark. For inspecting a log, not for processing it.
+    pub async fn fetch_uncommitted(
+        &self,
+        stream: &str,
+        partition: u32,
+        offset: u64,
+        max_wait: Duration,
+    ) -> Result<Fetched, ClientError> {
+        self.retrying(|| self.fetch_once(stream, partition, offset, max_wait, isolation::UNCOMMITTED)).await
     }
 
     async fn fetch_once(
@@ -773,13 +789,14 @@ impl<R: Net + Clock + Spawn> Client<R> {
         partition: u32,
         offset: u64,
         max_wait: Duration,
+        isolation: u8,
     ) -> Result<Fetched, Attempt> {
         let (route, addr) = self.route(stream, partition).await?;
         let req = Request::Fetch(FetchRequest {
             max_wait_ms: u32::try_from(max_wait.as_millis()).unwrap_or(u32::MAX),
             min_bytes: 1,
             max_bytes: 4 << 20,
-            isolation: isolation::COMMITTED,
+            isolation,
             resources: vec![FetchResource {
                 resource_id: route.resource_id,
                 partitions: vec![FetchPartition {

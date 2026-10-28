@@ -63,10 +63,12 @@ mod admin;
 mod coord;
 mod groups;
 mod queues;
+mod stats;
 
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
 pub use queues::QueueConfig;
+pub(crate) use stats::{NetStats, NodeView};
 
 /// A stream and the Raft group of each of its partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +88,8 @@ pub(crate) struct Outbox {
     ready: Signal,
     /// The connection is gone (its subscriptions end).
     closed: AtomicBool,
+    /// The client's address, for metrics.
+    peer: String,
 }
 
 impl Outbox {
@@ -110,14 +114,17 @@ pub(crate) struct ClientRequest {
 pub(crate) async fn serve<R: Runtime>(
     rt: R,
     conn: R::Conn,
+    peer: String,
     commands: Arc<dyn Fn(ClientRequest) + std::marker::Send + Sync>,
+    net: Arc<NetStats>,
     stop: Signal,
 ) {
     let conn = Arc::new(conn);
-    let outbox = Arc::new(Outbox::default());
+    let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
     let closed = Signal::default();
-    let writer = rt.spawn(write_to(conn.clone(), outbox.clone(), stop.clone(), closed.clone()));
+    let writer = rt.spawn(write_to(conn.clone(), outbox.clone(), net.clone(), stop.clone(), closed.clone()));
     while let Some(Ok(Some(frame))) = race(conn.recv(), &[&stop]).await {
+        NetStats::add(&net.client_in, frame.len());
         match lotse_proto::decode_request(frame) {
             Ok((header, request)) => commands(ClientRequest { outbox: outbox.clone(), header, request }),
             // The client may retry with a version this node speaks.
@@ -133,11 +140,12 @@ pub(crate) async fn serve<R: Runtime>(
     writer.await;
 }
 
-async fn write_to<C: Conn>(conn: Arc<C>, outbox: Arc<Outbox>, stop: Signal, closed: Signal) {
+async fn write_to<C: Conn>(conn: Arc<C>, outbox: Arc<Outbox>, net: Arc<NetStats>, stop: Signal, closed: Signal) {
     loop {
         let next = outbox.queue.lock().expect("outbox lock").pop_front();
         match next {
             Some(frame) => {
+                NetStats::add(&net.client_out, frame.len());
                 if race(conn.send(frame), &[&stop]).await.is_none_or(|r| r.is_err()) {
                     return;
                 }
@@ -159,11 +167,16 @@ struct Waiting {
     group: GroupId,
     last: u64,
     term: u64,
+    /// The batch's size and records, counted once it is acknowledged.
+    bytes: u64,
+    records: u64,
 }
 
 struct PendingProduce {
     outbox: Arc<Outbox>,
     correlation_id: u32,
+    /// When it arrived, for the commit latency.
+    arrived: Instant,
     deadline: Instant,
     response: ProduceResponse,
     waiting: Vec<Waiting>,
@@ -204,10 +217,20 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) admin: admin::AdminView<'a>,
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
+    /// The node itself, for metrics.
+    pub(crate) node: NodeView<'a>,
     pub(crate) now: Instant,
 }
 
 impl ClusterView<'_> {
+    /// The stream or queue partition a group serves.
+    fn resource_of(&self, g: GroupId) -> Option<(u64, u32)> {
+        if let Some(q) = self.queues.iter().find(|q| q.group == g) {
+            return Some((q.resource_id, 0));
+        }
+        self.streams.iter().find_map(|s| s.partitions.iter().position(|p| *p == g).map(|i| (s.resource_id, i as u32)))
+    }
+
     /// The group of a stream's partition or a queue (partition 0), for
     /// writes.
     fn group_of(&self, resource_id: u64, partition: u32) -> Option<GroupId> {
@@ -277,6 +300,8 @@ pub(crate) struct Clients {
     group_timers: groups::GroupTimers,
     /// Admin records in flight.
     admin_writes: Vec<admin::AdminWrite>,
+    /// Counted for `DescribeMetrics`.
+    stats: stats::Stats,
 }
 
 impl Clients {
@@ -326,10 +351,11 @@ impl Clients {
             Request::DeleteResource(req) => self.delete_resource(outbox, id, req, view, groups),
             Request::AlterConfigs(req) => self.alter_configs(outbox, id, req, view, groups),
             Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, view, groups),
+            Request::DescribeMetrics(_) => self.describe_metrics(&outbox, id, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
-                if let Some(p) = try_fetch(pending, view, groups, false).await? {
+                if let Some(p) = try_fetch(pending, view, groups, false, &mut self.stats).await? {
                     self.fetches.push(p);
                 }
             }
@@ -365,14 +391,24 @@ impl Clients {
                         out.error = ErrorCode::INVALID_TXN_STATE;
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
                     }
-                    Some((g, replica)) => match replica.propose(p.batch) {
+                    Some((g, replica)) => match replica.propose(p.batch.clone()) {
                         Ok(Proposed { first, last, term, .. }) => {
                             out.base_offset = first - 1;
                             // A duplicate of an applied batch is written; anything
                             // else (new, or the original still in flight) is
                             // answered once its entry's commit decides.
                             if let Some(term) = term {
-                                waiting.push(Waiting { resource: ri, partition: pi, group: g, last, term });
+                                let bytes = p.batch.len() as u64;
+                                let records = Batch::parse(&p.batch).map_or(0, |(b, _)| b.record_count() as u64);
+                                waiting.push(Waiting {
+                                    resource: ri,
+                                    partition: pi,
+                                    group: g,
+                                    last,
+                                    term,
+                                    bytes,
+                                    records,
+                                });
                             }
                         }
                         Err(ProposeError::NotLeader(_)) => {
@@ -402,8 +438,8 @@ impl Clients {
             response.resources.push(ProduceResourceResponse { resource_id: res.resource_id, partitions });
         }
         let deadline = view.now + Duration::from_millis(u64::from(req.timeout_ms));
-        let pending = PendingProduce { outbox, correlation_id, deadline, response, waiting };
-        if let Some(p) = settle(pending, view.now, groups) {
+        let pending = PendingProduce { outbox, correlation_id, arrived: view.now, deadline, response, waiting };
+        if let Some(p) = settle(pending, view.now, groups, &mut self.stats) {
             self.produces.push(p);
         }
     }
@@ -492,7 +528,7 @@ impl Clients {
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<Vec<MarkerJob>, Error> {
         let produces = std::mem::take(&mut self.produces);
-        self.produces = produces.into_iter().filter_map(|p| settle(p, view.now, groups)).collect();
+        self.produces = produces.into_iter().filter_map(|p| settle(p, view.now, groups, &mut self.stats)).collect();
         let inits = std::mem::take(&mut self.inits);
         self.inits = inits.into_iter().filter_map(|p| settle_init(p, view.now, groups)).collect();
         let markers = std::mem::take(&mut self.markers);
@@ -510,7 +546,7 @@ impl Clients {
         for f in fetches {
             if committed || view.now >= f.deadline {
                 let final_try = view.now >= f.deadline;
-                if let Some(f) = try_fetch(f, view, groups, final_try).await? {
+                if let Some(f) = try_fetch(f, view, groups, final_try, &mut self.stats).await? {
                     self.fetches.push(f);
                 }
             } else {
@@ -586,6 +622,7 @@ fn settle<R: Runtime, S: StateMachine>(
     mut p: PendingProduce,
     now: Instant,
     groups: &BTreeMap<GroupId, Replica<R, S>>,
+    stats: &mut stats::Stats,
 ) -> Option<PendingProduce> {
     let timed_out = now >= p.deadline;
     p.waiting.retain(|w| {
@@ -600,7 +637,7 @@ fn settle<R: Runtime, S: StateMachine>(
             // Committed here, so final: the entry at `last` is ours exactly
             // if it carries the term we proposed in.
             match raft.log().term_at(w.last) {
-                Some(t) if t == w.term => {}
+                Some(t) if t == w.term => stats.produced(w.group, w.bytes, w.records, now - p.arrived),
                 Some(_) => {
                     out.error = ErrorCode::NOT_LEADER;
                     out.error_msg = Some("leadership changed before the batch was committed".into());
@@ -658,8 +695,11 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
     view: &ClusterView<'_>,
     groups: &BTreeMap<GroupId, Replica<R, S>>,
     final_try: bool,
+    stats: &mut stats::Stats,
 ) -> Result<Option<PendingFetch>, Error> {
     let req = &p.request;
+    // Bytes per group, counted only if this try answers.
+    let mut served: Vec<(GroupId, usize)> = Vec::new();
     let mut budget = req.max_bytes as usize;
     let mut total = 0usize;
     let mut any_error = false;
@@ -705,6 +745,7 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                             let max = (fp.max_bytes as usize).min(budget);
                             let read = replica.log().read(fp.fetch_offset, max).await?;
                             out.records = committed_prefix(read, limit)?;
+                            served.extend(group.map(|g| (g, out.records.len())));
                             let end = fp.fetch_offset.max(next_offset_of(&out.records));
                             out.aborted_txns = replica
                                 .txns()
@@ -726,6 +767,9 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
         response.resources.push(FetchResourceResponse { resource_id: res.resource_id, partitions });
     }
     if total >= (req.min_bytes as usize).max(1) || any_error || final_try || req.max_wait_ms == 0 {
+        for (g, n) in served {
+            stats.group(g).fetch_bytes += n as u64;
+        }
         p.outbox.push(p.correlation_id, &Response::Fetch(response));
         return Ok(None);
     }

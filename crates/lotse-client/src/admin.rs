@@ -15,7 +15,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_proto::{
     AlterConfigsRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateStreamRequest, DeclareExchangeRequest,
-    DeleteResourceRequest, DescribeConfigsRequest, ErrorCode, LeaderHint, Request, Response,
+    DeleteResourceRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, ErrorCode,
+    LeaderHint, Request, Response,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Spawn};
@@ -155,6 +156,26 @@ impl<R: Net + Clock + Spawn> Client<R> {
             }
         })
         .await
+    }
+
+    /// Every node's metrics, asked of each node directly, for every node
+    /// the cluster's metadata names: each with its answer, or why there is
+    /// none. Counters grow from each node's start; see `DescribeMetrics`.
+    pub async fn node_metrics(&self) -> Result<Vec<(u32, Result<DescribeMetricsResponse, ClientError>)>, ClientError> {
+        let m = self.metadata(&[]).await?;
+        let mut out = Vec::with_capacity(m.brokers.len());
+        for b in &m.brokers {
+            let addr = format!("{}:{}", b.host, b.port);
+            let res = match self.call(&addr, &Request::DescribeMetrics(DescribeMetricsRequest)).await {
+                Ok(Response::DescribeMetrics(r)) if r.error == ErrorCode::NONE => Ok(*r),
+                Ok(Response::DescribeMetrics(r)) => Err(ClientError::Broker { code: r.error, message: None }),
+                Ok(Response::Error(code)) => Err(ClientError::Broker { code, message: None }),
+                Ok(other) => Err(ClientError::NoAnswer(b.node_id, format!("unexpected response {other:?}"))),
+                Err(e) => Err(ClientError::NoAnswer(b.node_id, format!("{addr}: {e}"))),
+            };
+            out.push((b.node_id, res));
+        }
+        Ok(out)
     }
 
     /// The id of the resource called `name`, asking every broker before

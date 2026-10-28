@@ -52,6 +52,12 @@ impl RangeSet {
         }
     }
 
+    /// How many offsets in `from..to` are in the set.
+    pub fn count_in(&self, from: u64, to: u64) -> u64 {
+        let first = self.ranges.range(..=from).next_back().map_or(from, |(f, _)| *f);
+        self.ranges.range(first..to).map(|(&f, &t)| t.min(to).saturating_sub(f.max(from))).sum()
+    }
+
     /// The ranges, in order.
     pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.ranges.iter().map(|(f, t)| (*f, *t))

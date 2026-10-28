@@ -119,7 +119,10 @@ pub async fn run_sampler(clusters: Vec<Arc<dyn Cluster>>, store: Arc<MetricsStor
                         ("records_per_sec", tp.records_per_sec),
                         ("commit_p99_ms", tp.commit_p99_ms),
                     ] {
-                        store.record(c.id(), name, Point { t, v });
+                        // A value the cluster cannot give yet leaves a gap.
+                        if let Some(v) = v {
+                            store.record(c.id(), name, Point { t, v });
+                        }
                     }
                 }
                 Err(e) => tracing::warn!(cluster = c.id(), error = %e, "metrics sample failed"),

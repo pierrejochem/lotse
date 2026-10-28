@@ -40,5 +40,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
 | 0034 | [The metadata group: resources created at runtime](0034-metadata-group.md) | Accepted |
 | 0035 | [Deleting resources and changing settings](0035-deleting-resources-and-changing-settings.md) | Accepted |
+| 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

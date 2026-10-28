@@ -722,7 +722,9 @@
           "nodes",
           "status",
           "tone",
-          "demo"
+          "demo",
+          "tenants",
+          "queue_options"
         ],
         "properties": {
           "demo": {
@@ -739,9 +741,17 @@
             "description": "Number of broker nodes.",
             "minimum": 0
           },
+          "queue_options": {
+            "type": "boolean",
+            "description": "Whether queues can have priorities, single active consumer, a TTL\nand dead-letter queues."
+          },
           "status": {
             "type": "string",
             "description": "One-line status, e.g. \"upgrading to 0.4.1\"."
+          },
+          "tenants": {
+            "type": "boolean",
+            "description": "Whether the cluster has tenants (quotas, role bindings)."
           },
           "tone": {
             "$ref": "#/components/schemas/Tone",
@@ -754,7 +764,6 @@
         "description": "Request to create a queue.",
         "required": [
           "name",
-          "tenant",
           "priority_levels",
           "single_active",
           "create_dlq"
@@ -795,8 +804,11 @@
             "description": "Single active consumer."
           },
           "tenant": {
-            "type": "string",
-            "description": "Tenant."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant; required where the cluster has tenants, absent elsewhere."
           },
           "ttl_ms": {
             "type": [
@@ -1042,19 +1054,10 @@
         "required": [
           "id",
           "role",
-          "zone",
           "uptime_secs",
           "leads",
           "replicas",
-          "disk_free_bytes",
-          "disk_total_bytes",
-          "produce_bytes_per_sec",
-          "net_in_bytes_per_sec",
-          "net_out_bytes_per_sec",
           "connections",
-          "cpu",
-          "memory_bytes",
-          "memory_limit_bytes",
           "version",
           "status"
         ],
@@ -1066,18 +1069,27 @@
             "minimum": 0
           },
           "cpu": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "CPU use, 0–1."
           },
           "disk_free_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Free bytes on the log volume.",
             "minimum": 0
           },
           "disk_total_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Size of the log volume.",
             "minimum": 0
@@ -1093,29 +1105,44 @@
             "minimum": 0
           },
           "memory_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Resident memory, bytes.",
             "minimum": 0
           },
           "memory_limit_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Memory limit, bytes.",
             "minimum": 0
           },
           "net_in_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Network in, bytes/s (clients and replication)."
           },
           "net_out_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Network out, bytes/s."
           },
           "produce_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Client produce traffic into this node, bytes/s."
           },
@@ -1144,7 +1171,10 @@
             "description": "Running version."
           },
           "zone": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Availability zone."
           }
         }
@@ -1154,13 +1184,19 @@
         "description": "The nodes screen.",
         "required": [
           "nodes",
-          "disk_limits",
           "events"
         ],
         "properties": {
           "disk_limits": {
-            "$ref": "#/components/schemas/DiskLimits",
-            "description": "Disk thresholds."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DiskLimits",
+                "description": "Disk thresholds, if the cluster has them."
+              }
+            ]
           },
           "events": {
             "type": "array",
@@ -1224,7 +1260,6 @@
           "throughput",
           "health",
           "nodes",
-          "disk_limits",
           "busiest_streams",
           "attention_queues",
           "stream_count",
@@ -1257,8 +1292,15 @@
             "description": "Cluster ID."
           },
           "disk_limits": {
-            "$ref": "#/components/schemas/DiskLimits",
-            "description": "Disk thresholds for the bars."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DiskLimits",
+                "description": "Disk thresholds for the bars, if the cluster has them."
+              }
+            ]
           },
           "health": {
             "type": "array",
@@ -1407,8 +1449,7 @@
         "required": [
           "level",
           "leader",
-          "ready",
-          "oldest_ms"
+          "ready"
         ],
         "properties": {
           "leader": {
@@ -1422,7 +1463,10 @@
             "minimum": 0
           },
           "oldest_ms": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Age of the oldest ready message, ms.",
             "minimum": 0
@@ -1440,18 +1484,17 @@
         "description": "A queue consumer.",
         "required": [
           "tag",
-          "principal",
           "connection",
           "in_flight",
           "credit_messages",
-          "in_flight_bytes",
-          "credit_bytes",
-          "acks_per_sec",
           "state"
         ],
         "properties": {
           "acks_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Acks per second."
           },
@@ -1460,7 +1503,10 @@
             "description": "Client address and broker."
           },
           "credit_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Credit window, bytes.",
             "minimum": 0
@@ -1478,14 +1524,20 @@
             "minimum": 0
           },
           "in_flight_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Bytes in flight.",
             "minimum": 0
           },
           "principal": {
-            "type": "string",
-            "description": "Principal."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Principal; `null` while the cluster has no authentication."
           },
           "state": {
             "$ref": "#/components/schemas/Chip",
@@ -1502,14 +1554,10 @@
         "description": "The queue detail screen.",
         "required": [
           "name",
-          "tenant",
           "single_active",
           "ready",
           "in_flight",
           "in_open_txns",
-          "publish_per_sec",
-          "ack_per_sec",
-          "dead_lettered",
           "levels",
           "consumers",
           "dead_letters",
@@ -1517,7 +1565,10 @@
         ],
         "properties": {
           "ack_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Ack rate, messages/s."
           },
@@ -1536,7 +1587,10 @@
             "description": "Consumers."
           },
           "dead_lettered": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Dead-lettered.",
             "minimum": 0
@@ -1595,7 +1649,10 @@
             "description": "Queue name."
           },
           "publish_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Publish rate, messages/s."
           },
@@ -1610,7 +1667,10 @@
             "description": "Single active consumer."
           },
           "tenant": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Tenant."
           },
           "ttl_ms": {
@@ -1629,9 +1689,7 @@
         "description": "A row in queue lists.",
         "required": [
           "name",
-          "tenant",
-          "ready",
-          "dead_lettered"
+          "ready"
         ],
         "properties": {
           "attention": {
@@ -1646,7 +1704,10 @@
             ]
           },
           "dead_lettered": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Messages in the dead-letter queue.",
             "minimum": 0
@@ -1662,7 +1723,10 @@
             "minimum": 0
           },
           "tenant": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Tenant."
           }
         }
@@ -1916,15 +1980,9 @@
         "description": "The stream detail screen.",
         "required": [
           "name",
-          "tenant",
           "replication",
           "compaction",
-          "in_bytes_per_sec",
-          "out_bytes_per_sec",
-          "records_per_sec",
           "stored_bytes",
-          "oldest_record_age_ms",
-          "open_transactions",
           "partitions",
           "groups"
         ],
@@ -1952,7 +2010,10 @@
             "description": "Consumer groups."
           },
           "in_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Produce rate, bytes/s."
           },
@@ -1961,19 +2022,28 @@
             "description": "Stream name."
           },
           "oldest_record_age_ms": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Age of the oldest record, ms.",
             "minimum": 0
           },
           "open_transactions": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "description": "Open transactions touching this stream.",
             "minimum": 0
           },
           "out_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Fetch rate, bytes/s."
           },
@@ -1985,7 +2055,10 @@
             "description": "Partitions."
           },
           "records_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Records in per second."
           },
@@ -2011,7 +2084,10 @@
             "minimum": 0
           },
           "tenant": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Tenant."
           }
         }
@@ -2021,14 +2097,15 @@
         "description": "A row in \"busiest streams\".",
         "required": [
           "name",
-          "tenant",
           "partitions",
-          "in_bytes_per_sec",
           "stored_bytes"
         ],
         "properties": {
           "in_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Produce rate, bytes/s."
           },
@@ -2049,7 +2126,10 @@
             "minimum": 0
           },
           "tenant": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Tenant."
           }
         }
@@ -2156,18 +2236,17 @@
         "type": "object",
         "description": "Headline numbers for the overview.",
         "required": [
-          "in_bytes_per_sec",
-          "out_bytes_per_sec",
-          "records_per_sec",
-          "commit_p99_ms",
           "stored_bytes",
           "consumers"
         ],
         "properties": {
           "commit_p99_ms": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
-            "description": "p99 time until a produce is acknowledged by a quorum, ms."
+            "description": "p99 time until a produce is acknowledged by a quorum, ms; `null`\nwithout produces to measure."
           },
           "consumers": {
             "type": "integer",
@@ -2176,17 +2255,26 @@
             "minimum": 0
           },
           "in_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Produce and publish, bytes/s."
           },
           "out_bytes_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Fetch and deliver, bytes/s."
           },
           "records_per_sec": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "Records in per second."
           },
