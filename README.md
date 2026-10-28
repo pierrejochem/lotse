@@ -4,7 +4,7 @@
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
-Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery) exist and are tested, and so does the management console, which runs against a built-in demo cluster. Consumer groups for streams, exchanges and the remaining API keys come next.
+Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery) exist and are tested, and so does the management console, which runs against a built-in demo cluster. `Publish` with exchanges comes next, then consumer groups for streams and the remaining API keys.
 
 ## Documentation
 
