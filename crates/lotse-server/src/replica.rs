@@ -54,7 +54,7 @@ use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 8;
+const FORMAT: u8 = 9;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.

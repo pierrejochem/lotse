@@ -8,6 +8,7 @@
 
 #![warn(missing_docs)]
 
+mod access;
 mod auth;
 mod client;
 mod coordinator;
@@ -20,6 +21,7 @@ mod signal;
 mod txns;
 pub mod wire;
 
+pub use access::DEFAULT_TENANT;
 pub use auth::{AuthConfig, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal};
 pub use client::{QueueConfig, StreamConfig};
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};

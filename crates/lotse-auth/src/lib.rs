@@ -4,6 +4,7 @@
 //!   keys, never passwords.
 //! - [`oauth`]: OAUTHBEARER messages and OpenID Connect access tokens,
 //!   checked against the issuer's key set and a time the caller passes in.
+//! - [`roles`]: who may do what, from roles bound per tenant.
 //!
 //! Nothing here reads a clock, a socket or a file: the broker and the client
 //! fetch what is needed through the runtime seam, so the simulation decides
@@ -12,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod oauth;
+pub mod roles;
 pub mod scram;
 #[cfg(feature = "testing")]
 pub mod testing;

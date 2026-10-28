@@ -22,8 +22,10 @@ use lotse_raft::{NodeId, Role};
 use lotse_rt::{HostStats, Instant, Runtime};
 
 use super::{Clients, ClusterView, Outbox, queues};
+use crate::auth::Principal;
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
+use lotse_auth::roles::Operation;
 
 /// Traffic and connections, counted by the tasks that own them.
 #[derive(Debug, Default)]
@@ -112,6 +114,7 @@ impl Clients {
         id: u32,
         view: &ClusterView<'_>,
         groups: &BTreeMap<GroupId, Replica<R, S>>,
+        who: &Principal,
     ) {
         let node = &view.node;
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
@@ -223,6 +226,25 @@ impl Clients {
                 resp.groups.push(GroupMetrics { group_id: group_id.clone(), epoch: g.epoch, members, offsets });
             }
         }
+        // Only what `who` may see: resources by their tenant and role, and
+        // a consumer group only if every resource it touches is visible
+        // (one that touches none, only to cluster admins).
+        // The cluster's own groups (metadata, coordinator) belong to no
+        // resource: only cluster admins see them.
+        let visible = |r: u64| match view.access.resources.get(&r) {
+            Some((name, tenant)) => view.access.may(who, Operation::Describe, tenant, name),
+            None => view.access.cluster_admin(who),
+        };
+        resp.partitions.retain(|p| visible(p.resource_id));
+        resp.queues.retain(|q| visible(q.resource_id));
+        resp.groups.retain(|g| {
+            let owned = g.members.iter().flat_map(|m| m.owned.iter().map(|t| t.resource_id));
+            let mut touched = owned.chain(g.offsets.iter().map(|o| o.resource_id)).peekable();
+            if touched.peek().is_none() {
+                return view.access.cluster_admin(who);
+            }
+            touched.all(visible)
+        });
         outbox.push(id, &Response::DescribeMetrics(Box::new(resp)));
     }
 }

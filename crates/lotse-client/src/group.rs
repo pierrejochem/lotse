@@ -177,7 +177,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             self.lost();
         }
         if now >= self.next_heartbeat || self.member_id.is_empty() {
-            self.heartbeat().await;
+            self.heartbeat().await?;
         }
         self.load_positions().await;
         let ready: Vec<(Part, u64)> = self.owned.iter().filter_map(|(k, v)| v.map(|o| (k.clone(), o))).collect();
@@ -225,7 +225,9 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         self.last_ok = None;
     }
 
-    async fn heartbeat(&mut self) {
+    /// One heartbeat. Only what retrying cannot fix (a refusal, a login
+    /// that fails) is an error; everything else is tried again later.
+    async fn heartbeat(&mut self) -> Result<(), ClientError> {
         let c = self.client;
         let sent = c.rt.now();
         let joining = self.member_id.is_empty();
@@ -249,10 +251,11 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         let retry_soon = sent + c.cfg.backoff;
         let resp = match c.call_coordinator(&self.group, &req).await {
             Ok(Response::GroupHeartbeat(r)) => r,
+            Err(Attempt::Fail(e)) => return Err(e),
             Ok(_) | Err(_) => {
                 c.forget_coordinator();
                 self.next_heartbeat = retry_soon;
-                return;
+                return Ok(());
             }
         };
         match resp.error {
@@ -260,14 +263,14 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             ErrorCode::UNKNOWN_MEMBER_ID | ErrorCode::FENCED_MEMBER_EPOCH => {
                 self.lost();
                 self.next_heartbeat = retry_soon;
-                return;
+                return Ok(());
             }
             code => {
                 if code.retriable() {
                     c.forget_coordinator();
                 }
                 self.next_heartbeat = retry_soon;
-                return;
+                return Ok(());
             }
         }
         self.last_ok = Some(sent);
@@ -275,7 +278,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         self.epoch = resp.member_epoch;
         let interval = Duration::from_millis(u64::from(resp.heartbeat_interval_ms));
         self.next_heartbeat = sent + interval.min(self.cfg.session_timeout / 3);
-        let Some(assignment) = resp.assignment else { return };
+        let Some(assignment) = resp.assignment else { return Ok(()) };
         let target: BTreeSet<Part> = assignment
             .iter()
             .flat_map(|r| {
@@ -300,6 +303,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         for k in target {
             self.owned.entry(k).or_insert(None);
         }
+        Ok(())
     }
 
     /// Learns the committed offsets of partitions whose position is not

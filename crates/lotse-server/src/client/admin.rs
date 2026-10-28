@@ -28,18 +28,22 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lotse_auth::roles::{Role as AccessRole, RoleBinding, Subject, Who};
 use lotse_auth::scram::ScramCredential;
 use lotse_proto::{
-    AdminResponse, AlterConfigsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateResponse,
-    CreateStreamRequest, DeclareExchangeRequest, DeleteResourceRequest, DescribeConfigsRequest,
-    DescribeConfigsResponse, DescribeUsersResponse, ErrorCode, LeaderHint, OutcomeResponse, ResourceConfigs, Response,
-    UserEntry, config_source,
+    AdminResponse, AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry,
+    CreateQueueRequest, CreateResponse, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest,
+    DeleteResourceRequest, DeleteTenantRequest, DescribeConfigsRequest, DescribeConfigsResponse,
+    DescribeRoleBindingsResponse, DescribeTenantsResponse, DescribeUsersResponse, ErrorCode, LeaderHint,
+    OutcomeResponse, ResourceConfigs, Response, RoleBindingData, TenantEntry, UserEntry, WhoAmIResponse, config_source,
+    principal_kind, subject_kind,
 };
 use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
 use lotse_rt::{Instant, Runtime};
 
 use super::{Clients, ClusterView, Outbox, hint, outcome};
+use crate::auth::Principal;
 use crate::metadata::{self, Change, MAX_PARTITIONS};
 use crate::replica::{Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
@@ -75,8 +79,8 @@ impl Default for AdminView<'_> {
 
 /// What to answer once an admin record is applied.
 pub(super) enum AdminThen {
-    /// A create: the name and the id this record gives it.
-    Created { name: String, id: u64 },
+    /// A create: the name, its tenant and the id this record gives it.
+    Created { name: String, tenant: String, id: u64 },
     /// A bind, which holds only if neither side was deleted before it.
     Bound { exchange_id: u64, queue_id: u64 },
     /// An unbind.
@@ -85,8 +89,8 @@ pub(super) enum AdminThen {
     Deleted,
     /// A changed setting of a queue that may have been deleted since.
     Altered { queue_id: u64 },
-    /// A user's credential set or removed.
-    UserSet,
+    /// A user's credential, a tenant or role bindings changed.
+    Changed,
 }
 
 impl AdminThen {
@@ -95,7 +99,7 @@ impl AdminThen {
         match self {
             AdminThen::Created { .. } => created(code, resource_id, None, h),
             AdminThen::Bound { .. } | AdminThen::Unbound => outcome_response(code, h),
-            AdminThen::Deleted | AdminThen::Altered { .. } | AdminThen::UserSet => admin_response(code, None, h),
+            AdminThen::Deleted | AdminThen::Altered { .. } | AdminThen::Changed => admin_response(code, None, h),
         }
     }
 }
@@ -123,6 +127,18 @@ fn admin_response(error: ErrorCode, why: Option<&str>, leader_hint: Option<Leade
 
 /// Why a resource from the configuration cannot be changed at runtime.
 const CONFIGURED: &str = "the resource is in the node configuration; change it there";
+
+/// Longest tenant name, bytes.
+const MAX_TENANT_NAME: usize = 255;
+
+/// A binding as the protocol carries it.
+fn binding_data(b: &RoleBinding) -> RoleBindingData {
+    let (subject_kind, subject) = match &b.subject {
+        Subject::User(u) => (subject_kind::USER, u.clone()),
+        Subject::Group(g) => (subject_kind::GROUP, g.clone()),
+    };
+    RoleBindingData { subject_kind, subject, role: b.role.code(), tenant: b.tenant.clone(), prefix: b.prefix.clone() }
+}
 
 /// Longest user name, bytes.
 const MAX_USER_NAME: usize = 255;
@@ -199,7 +215,9 @@ impl Clients {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let then = match then {
                     // The id is the record's index: known now.
-                    AdminThen::Created { name, .. } => AdminThen::Created { name, id: metadata::resource_id(last) },
+                    AdminThen::Created { name, tenant, .. } => {
+                        AdminThen::Created { name, tenant, id: metadata::resource_id(last) }
+                    }
                     t => t,
                 };
                 self.admin_writes.push(AdminWrite { reply, deadline: now + WRITE_TIMEOUT, last, term, then });
@@ -219,6 +237,7 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
         name: &str,
+        tenant: &str,
         replication: Option<u8>,
     ) -> Option<&'a mut Replica<R, S>> {
         if name.is_empty() {
@@ -239,6 +258,13 @@ impl Clients {
                 return None;
             }
         };
+        // Checked on the leader, whose applied state holds every change it
+        // acknowledged.
+        if !view.access.tenants.contains_key(tenant) {
+            let why = format!("there is no tenant {tenant:?}; a cluster admin creates it first");
+            outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
+            return None;
+        }
         if let Some(existing) = existing(view, name) {
             outbox.push(id, &created(ErrorCode::RESOURCE_EXISTS, existing, None, None));
             return None;
@@ -269,10 +295,13 @@ impl Clients {
             let why = format!("1 to {MAX_PARTITIONS} partitions, and no settings are supported yet");
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
         }
-        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, Some(req.replication)) else { return };
+        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, &req.tenant, Some(req.replication))
+        else {
+            return;
+        };
         let partitions = Self::place(view, replica, req.replication, req.partitions as usize);
-        let change = Change::CreateStream { name: req.name.clone(), partitions };
-        let then = AdminThen::Created { name: req.name, id: 0 };
+        let change = Change::CreateStream { name: req.name.clone(), tenant: req.tenant.clone(), partitions };
+        let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
 
@@ -299,10 +328,13 @@ impl Clients {
         if let Some(why) = refused {
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
         }
-        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, Some(req.replication)) else { return };
+        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, &req.tenant, Some(req.replication))
+        else {
+            return;
+        };
         let voters = Self::place(view, replica, req.replication, 1).remove(0);
-        let change = Change::CreateQueue { name: req.name.clone(), voters, ack_timeout_ms };
-        let then = AdminThen::Created { name: req.name, id: 0 };
+        let change = Change::CreateQueue { name: req.name.clone(), tenant: req.tenant.clone(), voters, ack_timeout_ms };
+        let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
 
@@ -318,9 +350,9 @@ impl Clients {
             let why = "unknown exchange type, or settings (none are supported yet)";
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(why), None));
         };
-        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, None) else { return };
-        let change = Change::DeclareExchange { name: req.name.clone(), kind };
-        let then = AdminThen::Created { name: req.name, id: 0 };
+        let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, &req.tenant, None) else { return };
+        let change = Change::DeclareExchange { name: req.name.clone(), tenant: req.tenant.clone(), kind };
+        let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
 
@@ -459,7 +491,7 @@ impl Clients {
             Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
         };
         let change = Change::SetUser { user: req.user, credential };
-        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::UserSet);
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 
     /// Lists the users with a credential: configured and runtime ones.
@@ -492,6 +524,176 @@ impl Clients {
         let resp =
             DescribeUsersResponse { error: ErrorCode::NONE, leader_hint: None, users: users.into_values().collect() };
         outbox.push(id, &Response::DescribeUsers(resp));
+    }
+
+    /// Creates a tenant.
+    pub(super) fn create_tenant<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: CreateTenantRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        if req.name.is_empty() || req.name.len() > MAX_TENANT_NAME {
+            let why = format!("a tenant name has 1 to {MAX_TENANT_NAME} bytes");
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        if view.access.tenants.contains_key(&req.name) {
+            return outbox.push(id, &admin_response(ErrorCode::RESOURCE_EXISTS, None, None));
+        }
+        let change = Change::CreateTenant { name: req.name };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// Deletes a tenant created at runtime that holds no resources, with
+    /// its role bindings.
+    pub(super) fn delete_tenant<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: DeleteTenantRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let refused = match view.access.tenants.get(&req.name) {
+            None => Some((ErrorCode::UNKNOWN_RESOURCE, None)),
+            Some(&config_source::STATIC) => {
+                Some((ErrorCode::INVALID_REQUEST, Some("the tenant is in the node configuration; change it there")))
+            }
+            Some(_) => None,
+        };
+        if let Some((code, why)) = refused {
+            return outbox.push(id, &admin_response(code, why, None));
+        }
+        let held = replica.metadata().resources_in(&req.name);
+        if held > 0 {
+            let why = format!("the tenant holds {held} resources; delete them first");
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
+        let change = Change::DeleteTenant { name: req.name };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// The tenants `who` has a role in, with how many resources each holds.
+    pub(super) fn describe_tenants(&mut self, outbox: &Outbox, id: u32, view: &ClusterView<'_>, who: &Principal) {
+        let held = |t: &str| view.access.resources.values().filter(|(_, x)| x == t).count() as u32;
+        let tenants = view
+            .access
+            .tenants
+            .iter()
+            .filter(|(t, _)| view.access.knows_tenant(who, t))
+            .map(|(t, &source)| TenantEntry { name: t.clone(), source, resources: held(t) })
+            .collect();
+        let resp = DescribeTenantsResponse { error: ErrorCode::NONE, leader_hint: None, tenants };
+        outbox.push(id, &Response::DescribeTenants(resp));
+    }
+
+    /// Adds and removes role bindings.
+    pub(super) fn alter_role_bindings<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: AlterRoleBindingsRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        // On the leader, whose applied state holds every tenant it
+        // acknowledged.
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let convert = |b: &RoleBindingData| -> Result<RoleBinding, String> {
+            let subject = match b.subject_kind {
+                _ if b.subject.is_empty() => return Err("a binding names a user or group".into()),
+                subject_kind::USER => Subject::User(b.subject.clone()),
+                subject_kind::GROUP => Subject::Group(b.subject.clone()),
+                k => return Err(format!("unknown subject kind {k}")),
+            };
+            let role = AccessRole::from_code(b.role).ok_or_else(|| format!("unknown role {}", b.role))?;
+            // A cluster admin is one everywhere: no tenant, no prefix.
+            let (tenant, prefix) = match role {
+                AccessRole::ClusterAdmin => (String::new(), String::new()),
+                _ => (b.tenant.clone(), b.prefix.clone()),
+            };
+            Ok(RoleBinding { subject, role, tenant, prefix })
+        };
+        let parsed = (|| -> Result<(Vec<RoleBinding>, Vec<RoleBinding>), String> {
+            let add = req.add.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
+            let remove = req.remove.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
+            if let Some(b) =
+                add.iter().find(|b| b.role != AccessRole::ClusterAdmin && !view.access.tenants.contains_key(&b.tenant))
+            {
+                return Err(format!("there is no tenant {:?}", b.tenant));
+            }
+            if let Some(b) = remove.iter().find(|b| view.access.configured.contains(b)) {
+                return Err(format!("{:?} is in the node configuration; change it there", b.subject));
+            }
+            if add.is_empty() && remove.is_empty() {
+                return Err("nothing to change".into());
+            }
+            Ok((add, remove))
+        })();
+        let (add, remove) = match parsed {
+            Ok(x) => x,
+            Err(why) => return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None)),
+        };
+        let change = Change::SetBindings { add, remove };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// Every role binding, configured and made at runtime.
+    pub(super) fn describe_role_bindings(&mut self, outbox: &Outbox, id: u32, view: &ClusterView<'_>) {
+        let bindings = view
+            .access
+            .grants
+            .bindings
+            .iter()
+            .map(|b| {
+                let source =
+                    if view.access.configured.contains(b) { config_source::STATIC } else { config_source::DYNAMIC };
+                (binding_data(b), source)
+            })
+            .collect();
+        let resp = DescribeRoleBindingsResponse { error: ErrorCode::NONE, leader_hint: None, bindings };
+        outbox.push(id, &Response::DescribeRoleBindings(resp));
+    }
+
+    /// Who the connection acts as, and the bindings that apply to it.
+    pub(super) fn who_am_i(&mut self, outbox: &Outbox, id: u32, view: &ClusterView<'_>, who: &Principal) {
+        let resp = match who {
+            Principal::Anonymous => WhoAmIResponse {
+                kind: principal_kind::ANONYMOUS,
+                name: String::new(),
+                groups: Vec::new(),
+                bindings: Vec::new(),
+            },
+            Principal::Node(n) => WhoAmIResponse {
+                kind: principal_kind::NODE,
+                name: n.to_string(),
+                groups: Vec::new(),
+                bindings: Vec::new(),
+            },
+            Principal::User { name, groups } => {
+                let w = Who { name, groups };
+                WhoAmIResponse {
+                    kind: principal_kind::USER,
+                    name: name.clone(),
+                    groups: groups.clone(),
+                    bindings: view.access.grants.of(&w).map(binding_data).collect(),
+                }
+            }
+        };
+        outbox.push(id, &Response::WhoAmI(resp));
     }
 
     pub(super) fn describe_configs<R: Runtime, S: StateMachine>(
@@ -556,9 +758,14 @@ impl Clients {
                 Some(ErrorCode::NONE) if replica.applied() < w.last => self.admin_writes.push(w),
                 Some(ErrorCode::NONE) => {
                     let resp = match &w.then {
-                        AdminThen::Created { name, id: mine } => match state.id_of(name) {
+                        AdminThen::Created { name, tenant, id: mine } => match state.id_of(name) {
                             Some(found) if found == *mine => created(ErrorCode::NONE, found, None, None),
                             Some(found) => created(ErrorCode::RESOURCE_EXISTS, found, None, None),
+                            // The tenant was deleted between proposing and applying.
+                            None if state.deleted_tenants.contains(tenant) => {
+                                let why = format!("tenant {tenant:?} was deleted meanwhile");
+                                created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None)
+                            }
                             None => created(ErrorCode::RESOURCE_EXISTS, existing(view, name).unwrap_or(0), None, None),
                         },
                         AdminThen::Bound { exchange_id, queue_id }

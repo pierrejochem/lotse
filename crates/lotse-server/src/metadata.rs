@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use lotse_auth::roles::{Role, RoleBinding, Subject};
 use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
 use lotse_route::{Binding, ExchangeKind};
@@ -45,11 +46,11 @@ pub(crate) fn group_id(index: u64, p: u32) -> GroupId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Change {
     /// A stream; one voter set per partition.
-    CreateStream { name: String, partitions: Vec<Vec<NodeId>> },
+    CreateStream { name: String, tenant: String, partitions: Vec<Vec<NodeId>> },
     /// A queue and its voters; an ack timeout of 0 is the default.
-    CreateQueue { name: String, voters: Vec<NodeId>, ack_timeout_ms: u64 },
+    CreateQueue { name: String, tenant: String, voters: Vec<NodeId>, ack_timeout_ms: u64 },
     /// An exchange.
-    DeclareExchange { name: String, kind: ExchangeKind },
+    DeclareExchange { name: String, tenant: String, kind: ExchangeKind },
     /// A binding added to an exchange.
     Bind { exchange_id: u64, binding: Binding },
     /// A binding removed from an exchange.
@@ -60,12 +61,19 @@ pub(crate) enum Change {
     AlterQueue { resource_id: u64, ack_timeout_ms: u64 },
     /// A user's SCRAM credential set, or removed with `None`.
     SetUser { user: String, credential: Option<ScramCredential> },
+    /// A tenant created.
+    CreateTenant { name: String },
+    /// An empty tenant deleted, with its role bindings.
+    DeleteTenant { name: String },
+    /// Role bindings removed, then added.
+    SetBindings { add: Vec<RoleBinding>, remove: Vec<RoleBinding> },
 }
 
 /// A stream created at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynStream {
     pub(crate) name: String,
+    pub(crate) tenant: String,
     pub(crate) resource_id: u64,
     /// Per partition: its group and voters.
     pub(crate) partitions: Vec<(GroupId, Vec<NodeId>)>,
@@ -75,6 +83,7 @@ pub(crate) struct DynStream {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynQueue {
     pub(crate) name: String,
+    pub(crate) tenant: String,
     pub(crate) resource_id: u64,
     pub(crate) group: GroupId,
     pub(crate) voters: Vec<NodeId>,
@@ -86,6 +95,7 @@ pub(crate) struct DynQueue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynExchange {
     pub(crate) name: String,
+    pub(crate) tenant: String,
     pub(crate) resource_id: u64,
     pub(crate) kind: ExchangeKind,
 }
@@ -102,6 +112,13 @@ pub(crate) struct MetadataState {
     pub(crate) deleted: BTreeMap<u64, u32>,
     /// Users with a SCRAM credential, set at runtime.
     pub(crate) users: BTreeMap<String, ScramCredential>,
+    /// Tenants created at runtime.
+    pub(crate) tenants: BTreeSet<String>,
+    /// Role bindings made at runtime.
+    pub(crate) bindings_of_roles: BTreeSet<RoleBinding>,
+    /// Tenants deleted at runtime and not created again: nothing may be
+    /// created in them, even by a create proposed before the delete.
+    pub(crate) deleted_tenants: BTreeSet<String>,
 }
 
 const VERSION: u8 = 1;
@@ -116,6 +133,21 @@ impl MetadataState {
             .chain(self.exchanges.values().map(|x| (&x.name, x.resource_id)))
             .find(|(n, _)| n.as_str() == name)
             .map(|(_, id)| id)
+    }
+
+    /// Whether applying a create in `tenant` may go ahead. Whether the
+    /// tenant exists (created here or configured) was checked when the
+    /// create was proposed; applying only refuses a tenant deleted since,
+    /// so that it never depends on a node's configuration.
+    pub(crate) fn tenant_open(&self, tenant: &str) -> bool {
+        !self.deleted_tenants.contains(tenant)
+    }
+
+    /// How many runtime resources `tenant` holds.
+    pub(crate) fn resources_in(&self, tenant: &str) -> usize {
+        self.streams.values().filter(|s| s.tenant == tenant).count()
+            + self.queues.values().filter(|q| q.tenant == tenant).count()
+            + self.exchanges.values().filter(|x| x.tenant == tenant).count()
     }
 
     /// Whether `id` is a deleted resource.
@@ -140,25 +172,26 @@ impl MetadataState {
         let change = decode_change(payload)?;
         let id = resource_id(index);
         match change {
-            Change::CreateStream { name, partitions } => {
-                if self.id_of(&name).is_none() {
+            Change::CreateStream { name, tenant, partitions } => {
+                if self.id_of(&name).is_none() && self.tenant_open(&tenant) {
                     let partitions = partitions
                         .into_iter()
                         .enumerate()
                         .map(|(p, voters)| (group_id(index, p as u32), voters))
                         .collect();
-                    self.streams.insert(id, DynStream { name, resource_id: id, partitions });
+                    self.streams.insert(id, DynStream { name, tenant, resource_id: id, partitions });
                 }
             }
-            Change::CreateQueue { name, voters, ack_timeout_ms } => {
-                if self.id_of(&name).is_none() {
+            Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
+                if self.id_of(&name).is_none() && self.tenant_open(&tenant) {
                     let group = group_id(index, 0);
-                    self.queues.insert(id, DynQueue { name, resource_id: id, group, voters, ack_timeout_ms });
+                    let q = DynQueue { name, tenant, resource_id: id, group, voters, ack_timeout_ms };
+                    self.queues.insert(id, q);
                 }
             }
-            Change::DeclareExchange { name, kind } => {
-                if self.id_of(&name).is_none() {
-                    self.exchanges.insert(id, DynExchange { name, resource_id: id, kind });
+            Change::DeclareExchange { name, tenant, kind } => {
+                if self.id_of(&name).is_none() && self.tenant_open(&tenant) {
+                    self.exchanges.insert(id, DynExchange { name, tenant, resource_id: id, kind });
                 }
             }
             Change::Bind { exchange_id, binding } => {
@@ -205,6 +238,24 @@ impl MetadataState {
             Change::SetUser { user, credential: None } => {
                 self.users.remove(&user);
             }
+            Change::CreateTenant { name } => {
+                self.deleted_tenants.remove(&name);
+                self.tenants.insert(name);
+            }
+            Change::DeleteTenant { name } => {
+                // Checked when proposed; a create may have come in between.
+                if self.resources_in(&name) == 0 {
+                    self.tenants.remove(&name);
+                    self.deleted_tenants.insert(name.clone());
+                    self.bindings_of_roles.retain(|b| b.role == Role::ClusterAdmin || b.tenant != name);
+                }
+            }
+            Change::SetBindings { add, remove } => {
+                for b in &remove {
+                    self.bindings_of_roles.remove(b);
+                }
+                self.bindings_of_roles.extend(add);
+            }
         }
         Ok(())
     }
@@ -215,6 +266,7 @@ impl MetadataState {
         b.put_u32_le(self.streams.len() as u32);
         for s in self.streams.values() {
             put_str(&mut b, &s.name);
+            put_str(&mut b, &s.tenant);
             b.put_u64_le(s.resource_id);
             b.put_u32_le(s.partitions.len() as u32);
             for (g, voters) in &s.partitions {
@@ -225,6 +277,7 @@ impl MetadataState {
         b.put_u32_le(self.queues.len() as u32);
         for q in self.queues.values() {
             put_str(&mut b, &q.name);
+            put_str(&mut b, &q.tenant);
             b.put_u64_le(q.resource_id);
             b.put_u64_le(q.group);
             put_nodes(&mut b, &q.voters);
@@ -233,6 +286,7 @@ impl MetadataState {
         b.put_u32_le(self.exchanges.len() as u32);
         for x in self.exchanges.values() {
             put_str(&mut b, &x.name);
+            put_str(&mut b, &x.tenant);
             b.put_u64_le(x.resource_id);
             b.put_u8(x.kind.code());
         }
@@ -254,6 +308,13 @@ impl MetadataState {
             put_str(&mut b, name);
             put_credential(&mut b, c);
         }
+        for set in [&self.tenants, &self.deleted_tenants] {
+            b.put_u32_le(set.len() as u32);
+            for t in set {
+                put_str(&mut b, t);
+            }
+        }
+        put_role_bindings(&mut b, self.bindings_of_roles.iter());
         b.freeze()
     }
 
@@ -262,7 +323,7 @@ impl MetadataState {
         let b = &mut b;
         let mut s = MetadataState::default();
         for _ in 0..count(b)? {
-            let name = get_str(b)?;
+            let (name, tenant) = (get_str(b)?, get_str(b)?);
             need(b, 12)?;
             let resource_id = b.get_u64_le();
             let mut partitions = Vec::new();
@@ -271,23 +332,23 @@ impl MetadataState {
                 let g = b.get_u64_le();
                 partitions.push((g, get_nodes(b)?));
             }
-            s.streams.insert(resource_id, DynStream { name, resource_id, partitions });
+            s.streams.insert(resource_id, DynStream { name, tenant, resource_id, partitions });
         }
         for _ in 0..count(b)? {
-            let name = get_str(b)?;
+            let (name, tenant) = (get_str(b)?, get_str(b)?);
             need(b, 16)?;
             let (resource_id, group) = (b.get_u64_le(), b.get_u64_le());
             let voters = get_nodes(b)?;
             need(b, 8)?;
             let ack_timeout_ms = b.get_u64_le();
-            s.queues.insert(resource_id, DynQueue { name, resource_id, group, voters, ack_timeout_ms });
+            s.queues.insert(resource_id, DynQueue { name, tenant, resource_id, group, voters, ack_timeout_ms });
         }
         for _ in 0..count(b)? {
-            let name = get_str(b)?;
+            let (name, tenant) = (get_str(b)?, get_str(b)?);
             need(b, 9)?;
             let resource_id = b.get_u64_le();
             let kind = ExchangeKind::from_code(b.get_u8()).ok_or("unknown exchange kind")?;
-            s.exchanges.insert(resource_id, DynExchange { name, resource_id, kind });
+            s.exchanges.insert(resource_id, DynExchange { name, tenant, resource_id, kind });
         }
         for _ in 0..count(b)? {
             need(b, 12)?;
@@ -307,6 +368,13 @@ impl MetadataState {
             let name = get_str(b)?;
             s.users.insert(name, get_credential(b)?);
         }
+        for _ in 0..count(b)? {
+            s.tenants.insert(get_str(b)?);
+        }
+        for _ in 0..count(b)? {
+            s.deleted_tenants.insert(get_str(b)?);
+        }
+        s.bindings_of_roles = get_role_bindings(b)?.into_iter().collect();
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
@@ -319,23 +387,26 @@ pub(crate) fn record(change: &Change) -> Bytes {
     let mut b = BytesMut::new();
     b.put_u8(VERSION);
     match change {
-        Change::CreateStream { name, partitions } => {
+        Change::CreateStream { name, tenant, partitions } => {
             b.put_u8(0);
             put_str(&mut b, name);
+            put_str(&mut b, tenant);
             b.put_u32_le(partitions.len() as u32);
             for voters in partitions {
                 put_nodes(&mut b, voters);
             }
         }
-        Change::CreateQueue { name, voters, ack_timeout_ms } => {
+        Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
             b.put_u8(1);
             put_str(&mut b, name);
+            put_str(&mut b, tenant);
             put_nodes(&mut b, voters);
             b.put_u64_le(*ack_timeout_ms);
         }
-        Change::DeclareExchange { name, kind } => {
+        Change::DeclareExchange { name, tenant, kind } => {
             b.put_u8(2);
             put_str(&mut b, name);
+            put_str(&mut b, tenant);
             b.put_u8(kind.code());
         }
         Change::Bind { exchange_id, binding } | Change::Unbind { exchange_id, binding } => {
@@ -360,6 +431,15 @@ pub(crate) fn record(change: &Change) -> Bytes {
                 put_credential(&mut b, c);
             }
         }
+        Change::CreateTenant { name } | Change::DeleteTenant { name } => {
+            b.put_u8(if matches!(change, Change::CreateTenant { .. }) { 8 } else { 9 });
+            put_str(&mut b, name);
+        }
+        Change::SetBindings { add, remove } => {
+            b.put_u8(10);
+            put_role_bindings(&mut b, add.iter());
+            put_role_bindings(&mut b, remove.iter());
+        }
     }
     lotse_record::internal_control_batch(lotse_record::InternalControl::Metadata, &b).expect("one record")
 }
@@ -372,19 +452,20 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
     }
     let change = match b.get_u8() {
         0 => {
-            let name = get_str(b)?;
+            let (name, tenant) = (get_str(b)?, get_str(b)?);
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
-            Change::CreateStream { name, partitions }
+            Change::CreateStream { name, tenant, partitions }
         }
         1 => {
-            let (name, voters) = (get_str(b)?, get_nodes(b)?);
+            let (name, tenant, voters) = (get_str(b)?, get_str(b)?, get_nodes(b)?);
             need(b, 8)?;
-            Change::CreateQueue { name, voters, ack_timeout_ms: b.get_u64_le() }
+            Change::CreateQueue { name, tenant, voters, ack_timeout_ms: b.get_u64_le() }
         }
         2 => {
-            let name = get_str(b)?;
+            let (name, tenant) = (get_str(b)?, get_str(b)?);
             need(b, 1)?;
-            Change::DeclareExchange { name, kind: ExchangeKind::from_code(b.get_u8()).ok_or("unknown exchange kind")? }
+            let kind = ExchangeKind::from_code(b.get_u8()).ok_or("unknown exchange kind")?;
+            Change::DeclareExchange { name, tenant, kind }
         }
         t @ (3 | 4) => {
             need(b, 8)?;
@@ -410,6 +491,9 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             };
             Change::SetUser { user, credential }
         }
+        8 => Change::CreateTenant { name: get_str(b)? },
+        9 => Change::DeleteTenant { name: get_str(b)? },
+        10 => Change::SetBindings { add: get_role_bindings(b)?, remove: get_role_bindings(b)? },
         _ => return Err("unknown metadata change".into()),
     };
     if b.has_remaining() {
@@ -452,6 +536,39 @@ fn get_bytes(b: &mut &[u8]) -> Result<Bytes, String> {
     let v = Bytes::copy_from_slice(&b[..n]);
     b.advance(n);
     Ok(v)
+}
+
+fn put_role_bindings<'a>(b: &mut BytesMut, list: impl ExactSizeIterator<Item = &'a RoleBinding>) {
+    b.put_u32_le(list.len() as u32);
+    for r in list {
+        let (kind, subject) = match &r.subject {
+            Subject::User(u) => (0, u),
+            Subject::Group(g) => (1, g),
+        };
+        b.put_u8(kind);
+        put_str(b, subject);
+        b.put_u8(r.role.code());
+        put_str(b, &r.tenant);
+        put_str(b, &r.prefix);
+    }
+}
+
+fn get_role_bindings(b: &mut &[u8]) -> Result<Vec<RoleBinding>, String> {
+    (0..count(b)?)
+        .map(|_| {
+            need(b, 1)?;
+            let kind = b.get_u8();
+            let subject = get_str(b)?;
+            let subject = match kind {
+                0 => Subject::User(subject),
+                1 => Subject::Group(subject),
+                _ => return Err("unknown subject kind".to_string()),
+            };
+            need(b, 1)?;
+            let role = Role::from_code(b.get_u8()).ok_or("unknown role")?;
+            Ok(RoleBinding { subject, role, tenant: get_str(b)?, prefix: get_str(b)? })
+        })
+        .collect()
 }
 
 fn put_credential(b: &mut BytesMut, c: &ScramCredential) {

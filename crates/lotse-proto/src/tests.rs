@@ -42,12 +42,14 @@ fn requests() -> Vec<Request> {
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
         Request::CreateStream(CreateStreamRequest {
             name: "orders".into(),
+            tenant: "shop".into(),
             partitions: 6,
             replication: 3,
             configs: vec![("retention.ms".into(), "1000".into())],
         }),
         Request::CreateQueue(CreateQueueRequest {
             name: "jobs".into(),
+            tenant: "default".into(),
             priority_levels: 1,
             single_active: false,
             dlq: None,
@@ -56,6 +58,7 @@ fn requests() -> Vec<Request> {
         }),
         Request::DeclareExchange(DeclareExchangeRequest {
             name: "events".into(),
+            tenant: String::new(),
             exchange_type: exchange_type::TOPIC,
             configs: vec![],
         }),
@@ -162,6 +165,27 @@ fn requests() -> Vec<Request> {
         }),
         Request::AlterUser(AlterUserRequest { user: "bob".into(), credential: None }),
         Request::DescribeUsers(DescribeUsersRequest),
+        Request::CreateTenant(CreateTenantRequest { name: "shop".into() }),
+        Request::DeleteTenant(DeleteTenantRequest { name: "shop".into() }),
+        Request::DescribeTenants(DescribeTenantsRequest),
+        Request::AlterRoleBindings(AlterRoleBindingsRequest {
+            add: vec![RoleBindingData {
+                subject_kind: subject_kind::GROUP,
+                subject: "ops".into(),
+                role: role::CONSUMER,
+                tenant: "shop".into(),
+                prefix: "orders-".into(),
+            }],
+            remove: vec![RoleBindingData {
+                subject_kind: subject_kind::USER,
+                subject: "eve".into(),
+                role: role::CLUSTER_ADMIN,
+                tenant: String::new(),
+                prefix: String::new(),
+            }],
+        }),
+        Request::DescribeRoleBindings(DescribeRoleBindingsRequest),
+        Request::WhoAmI(WhoAmIRequest),
     ]
 }
 
@@ -183,6 +207,7 @@ fn responses() -> Vec<(ApiKey, Response)> {
                     ResourceMetadata {
                         error: ErrorCode::NONE,
                         name: "orders".into(),
+                        tenant: "shop".into(),
                         resource_id: 7,
                         kind: kind::STREAM,
                         partitions: vec![PartitionMetadata {
@@ -196,6 +221,7 @@ fn responses() -> Vec<(ApiKey, Response)> {
                     ResourceMetadata {
                         error: ErrorCode::NONE,
                         name: "events".into(),
+                        tenant: "shop".into(),
                         resource_id: 12,
                         kind: kind::EXCHANGE,
                         partitions: vec![],
@@ -216,6 +242,7 @@ fn responses() -> Vec<(ApiKey, Response)> {
                     ResourceMetadata {
                         error: ErrorCode::NONE,
                         name: "f".into(),
+                        tenant: "shop".into(),
                         resource_id: 13,
                         kind: kind::EXCHANGE,
                         partitions: vec![],
@@ -234,6 +261,7 @@ fn responses() -> Vec<(ApiKey, Response)> {
                     ResourceMetadata {
                         error: ErrorCode::UNKNOWN_RESOURCE,
                         name: "missing".into(),
+                        tenant: "shop".into(),
                         resource_id: 0,
                         kind: kind::STREAM,
                         partitions: vec![],
@@ -495,7 +523,62 @@ fn responses() -> Vec<(ApiKey, Response)> {
                 ],
             }),
         ),
+        (
+            ApiKey::DESCRIBE_TENANTS,
+            Response::DescribeTenants(DescribeTenantsResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                tenants: vec![
+                    TenantEntry { name: "default".into(), source: config_source::STATIC, resources: 3 },
+                    TenantEntry { name: "shop".into(), source: config_source::DYNAMIC, resources: 0 },
+                ],
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_ROLE_BINDINGS,
+            Response::DescribeRoleBindings(DescribeRoleBindingsResponse {
+                error: ErrorCode::NOT_LEADER,
+                leader_hint: Some(LeaderHint { leader: 3, term: 9 }),
+                bindings: vec![(
+                    RoleBindingData {
+                        subject_kind: subject_kind::USER,
+                        subject: "root".into(),
+                        role: role::CLUSTER_ADMIN,
+                        tenant: String::new(),
+                        prefix: String::new(),
+                    },
+                    config_source::STATIC,
+                )],
+            }),
+        ),
+        (
+            ApiKey::WHO_AM_I,
+            Response::WhoAmI(WhoAmIResponse {
+                kind: principal_kind::USER,
+                name: "bob".into(),
+                groups: vec!["ops".into(), "dev".into()],
+                bindings: vec![RoleBindingData {
+                    subject_kind: subject_kind::GROUP,
+                    subject: "ops".into(),
+                    role: role::VIEWER,
+                    tenant: "shop".into(),
+                    prefix: String::new(),
+                }],
+            }),
+        ),
+        (
+            ApiKey::CREATE_TENANT,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::UNAUTHORIZED,
+                error_msg: Some("no".into()),
+                leader_hint: None,
+            }),
+        ),
         (ApiKey::PRODUCE, Response::Error(ErrorCode::UNAUTHORIZED)),
+        (
+            ApiKey::PRODUCE,
+            Response::Refused { code: ErrorCode::UNAUTHORIZED, message: "no producer role for orders in shop".into() },
+        ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
     ]
@@ -651,6 +734,7 @@ fn the_smallest_bindings_decode() {
         resources: vec![ResourceMetadata {
             error: ErrorCode::NONE,
             name: String::new(),
+            tenant: String::new(),
             resource_id: 1,
             kind: kind::EXCHANGE,
             partitions: vec![],
@@ -833,4 +917,54 @@ fn the_smallest_users_and_mechanisms_decode() {
     frame.put_u16(0);
     frame.put_slice(&bad);
     assert!(decode_request(frame.freeze()).is_err(), "a credential flag of 2");
+}
+
+/// The smallest tenants and bindings (empty strings) must decode too.
+#[test]
+fn the_smallest_tenants_and_bindings_decode() {
+    let t = TenantEntry { name: String::new(), source: 0, resources: 0 };
+    let resp = Response::DescribeTenants(DescribeTenantsResponse {
+        error: ErrorCode::NONE,
+        leader_hint: None,
+        tenants: vec![t; 6],
+    });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::DESCRIBE_TENANTS).unwrap().1, resp);
+    let b = RoleBindingData {
+        subject_kind: 0,
+        subject: String::new(),
+        role: 0,
+        tenant: String::new(),
+        prefix: String::new(),
+    };
+    let resp = Response::DescribeRoleBindings(DescribeRoleBindingsResponse {
+        error: ErrorCode::NONE,
+        leader_hint: None,
+        bindings: vec![(b.clone(), 0); 6],
+    });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::DESCRIBE_ROLE_BINDINGS).unwrap().1, resp);
+    let resp = Response::WhoAmI(WhoAmIResponse {
+        kind: 0,
+        name: String::new(),
+        groups: vec![String::new(); 4],
+        bindings: vec![b.clone(); 6],
+    });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::WHO_AM_I).unwrap().1, resp);
+    let req = Request::AlterRoleBindings(AlterRoleBindingsRequest { add: vec![b.clone(); 5], remove: vec![b; 5] });
+    assert_eq!(decode_request(encode_request(1, &req)).unwrap().1, req);
+}
+
+/// Many of the smallest resources (empty names, no partitions) decode.
+#[test]
+fn the_smallest_resources_decode() {
+    let r = ResourceMetadata {
+        error: ErrorCode::UNKNOWN_RESOURCE,
+        name: String::new(),
+        tenant: String::new(),
+        resource_id: 0,
+        kind: kind::STREAM,
+        partitions: vec![],
+        exchange: None,
+    };
+    let resp = Response::Metadata(MetadataResponse { brokers: vec![], resources: vec![r; 7] });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::METADATA).unwrap().1, resp);
 }

@@ -6,6 +6,7 @@ fn resource(name: &str, resource_id: u64) -> ResourceMetadata {
     ResourceMetadata {
         error: ErrorCode::NONE,
         name: name.into(),
+        tenant: "default".into(),
         resource_id,
         kind: kind::STREAM,
         partitions: vec![],

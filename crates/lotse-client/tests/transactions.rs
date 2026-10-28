@@ -27,6 +27,7 @@ async fn broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                         resources: vec![ResourceMetadata {
                             error: ErrorCode::NONE,
                             name: "s".into(),
+                            tenant: "default".into(),
                             resource_id: 7,
                             kind: kind::STREAM,
                             partitions: vec![PartitionMetadata {
@@ -129,6 +130,7 @@ async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                 let queue = |name: &str, id: u64| ResourceMetadata {
                     error: ErrorCode::NONE,
                     name: name.into(),
+                    tenant: "default".into(),
                     resource_id: id,
                     kind: kind::QUEUE,
                     partitions: vec![PartitionMetadata { partition: 0, leader: 1, leader_term: 1, voters: vec![1] }],
@@ -141,6 +143,7 @@ async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                             ResourceMetadata {
                                 error: ErrorCode::NONE,
                                 name: "x".into(),
+                                tenant: "default".into(),
                                 resource_id: 3,
                                 kind: kind::EXCHANGE,
                                 partitions: vec![],

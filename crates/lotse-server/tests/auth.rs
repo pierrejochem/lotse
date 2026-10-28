@@ -24,7 +24,7 @@ use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{Clock, Conn, Link, Net, PeerIdentity};
 use lotse_server::{AuthConfig, Node, NodeConfig, OidcConfig, StateMachine, StreamConfig};
-use lotse_sim::{SIM_EPOCH, Sim, SimRuntime, check_seeds};
+use lotse_sim::{SIM_EPOCH, Sim, SimRuntime};
 
 #[derive(Debug, Default)]
 struct Nothing;
@@ -61,6 +61,8 @@ fn auth() -> AuthConfig {
         oidc: Some(OidcConfig::new(ISSUER, AUDIENCE)),
         max_session: MAX_SESSION,
         users,
+        admins: vec!["admin".into()],
+        ..AuthConfig::none()
     }
 }
 
@@ -109,6 +111,24 @@ async fn cluster_with(rt: &SimRuntime, auth: AuthConfig) -> Vec<Node<SimRuntime>
         let host = rt.node(&format!("n{id}")).with_identity(Some(PeerIdentity::Node(id)));
         nodes.push(Node::start(host, config(id, auth.clone()), |_| Nothing).await.unwrap());
     }
+    // Authenticated is not enough: the users here also get roles.
+    let admin = client(rt, "setup", scram("admin", "admin-pw"));
+    let grant = |kind, who: &str, role| lotse_proto::RoleBindingData {
+        subject_kind: kind,
+        subject: who.into(),
+        role,
+        tenant: lotse_server::DEFAULT_TENANT.into(),
+        prefix: String::new(),
+    };
+    let mut add = Vec::new();
+    for role in [lotse_proto::role::PRODUCER, lotse_proto::role::CONSUMER] {
+        add.push(grant(lotse_proto::subject_kind::GROUP, "ops", role));
+        for user in ["alice", "billing"] {
+            add.push(grant(lotse_proto::subject_kind::USER, user, role));
+        }
+    }
+    admin.alter_role_bindings(add, Vec::new()).await.expect("the bootstrap admin grants roles");
+    rt.sleep(TICK * 50).await;
     nodes
 }
 
@@ -150,7 +170,7 @@ fn denied(r: Result<u64, ClientError>) -> bool {
 
 #[test]
 fn nothing_works_before_authenticating() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let start = rt.now();
@@ -171,7 +191,7 @@ fn nothing_works_before_authenticating() {
 
 #[test]
 fn scram_users_from_the_configuration_and_from_the_metadata_group() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let admin = client(&rt, "c1", scram("admin", "admin-pw"));
@@ -209,7 +229,7 @@ fn scram_users_from_the_configuration_and_from_the_metadata_group() {
 
 #[test]
 fn bearer_tokens_from_the_identity_provider() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let idp = issuer("k1");
@@ -239,7 +259,7 @@ fn bearer_tokens_from_the_identity_provider() {
 
 #[test]
 fn a_client_certificate_names_its_principal() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let svc = Client::new(
@@ -254,7 +274,7 @@ fn a_client_certificate_names_its_principal() {
 
 #[test]
 fn a_certificate_counts_only_when_mtls_is_on() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster_with(&rt, AuthConfig { mtls: false, ..auth() }).await;
             let svc = Client::new(
@@ -269,7 +289,7 @@ fn a_certificate_counts_only_when_mtls_is_on() {
 
 #[test]
 fn clients_renew_their_sessions() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let admin = client(&rt, "c1", scram("admin", "admin-pw"));
@@ -345,7 +365,7 @@ async fn login(rt: &SimRuntime, conn: &lotse_sim::SimConn, user: &str, password:
 
 #[test]
 fn sessions_end_and_keep_their_principal() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let admin = client(&rt, "c1", scram("admin", "admin-pw"));
@@ -405,7 +425,7 @@ fn sessions_end_and_keep_their_principal() {
 
 #[test]
 fn nodes_authenticate_to_each_other_by_certificate() {
-    check_seeds(5, |seed| {
+    lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             // Committing writes markers through other nodes' client ports.

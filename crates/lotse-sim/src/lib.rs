@@ -286,6 +286,22 @@ pub fn seeds(default_count: u64) -> Vec<u64> {
     (0..count).collect()
 }
 
+/// Like [`check_seeds`], but always `count` seeds (or the one in
+/// `LOTSE_SIM_SEED`): for scenario tests, whose value does not grow with
+/// more seeds, so CI's deep runs leave them at their size.
+pub fn check_few_seeds(count: u64, check: impl Fn(u64)) {
+    let seeds: Vec<u64> = match std::env::var("LOTSE_SIM_SEED").ok().and_then(|s| s.parse().ok()) {
+        Some(seed) => vec![seed],
+        None => (0..count).collect(),
+    };
+    for seed in seeds {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| check(seed))) {
+            eprintln!("\nsimulation failed with seed {seed}; reproduce with LOTSE_SIM_SEED={seed}\n");
+            resume_unwind(panic);
+        }
+    }
+}
+
 /// Runs `check` for every seed from [`seeds`]. On the first failure, panics
 /// with the seed and the command that reproduces it.
 pub fn check_seeds(default_count: u64, check: impl Fn(u64)) {

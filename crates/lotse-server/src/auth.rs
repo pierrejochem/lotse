@@ -45,6 +45,15 @@ pub struct AuthConfig {
     /// SCRAM users from the node configuration; they cannot be changed at
     /// runtime and win over runtime users of the same name.
     pub users: BTreeMap<String, ScramCredential>,
+    /// Principals that are cluster admins from the start (by certificate,
+    /// SCRAM user or token): who creates the first tenants and bindings.
+    pub admins: Vec<String>,
+    /// Tenants from the configuration, besides `default`; they cannot be
+    /// deleted at runtime.
+    pub tenants: Vec<String>,
+    /// The tenant of each configured resource, by name; those not named
+    /// here belong to `default`.
+    pub resource_tenants: BTreeMap<String, String>,
 }
 
 impl AuthConfig {
@@ -58,6 +67,9 @@ impl AuthConfig {
             oidc: None,
             max_session: DEFAULT_MAX_SESSION,
             users: BTreeMap::new(),
+            admins: Vec::new(),
+            tenants: Vec::new(),
+            resource_tenants: BTreeMap::new(),
         }
     }
 

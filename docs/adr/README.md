@@ -43,5 +43,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted |
 | 0037 | [TLS and node identity](0037-tls-and-node-identity.md) | Accepted |
 | 0038 | [Authentication](0038-authentication.md) | Accepted |
+| 0039 | [Tenants and roles](0039-tenants-and-roles.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

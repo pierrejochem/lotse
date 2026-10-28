@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    AlterConfigsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateStreamRequest,
-    DeclareExchangeRequest, DeleteResourceRequest, DescribeConfigsRequest, DescribeMetricsRequest,
-    DescribeMetricsResponse, DescribeUsersRequest, ErrorCode, LeaderHint, Request, Response, ScramCredentialData,
-    UserEntry,
+    AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest,
+    CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest, DeleteTenantRequest,
+    DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeRoleBindingsRequest,
+    DescribeTenantsRequest, DescribeUsersRequest, ErrorCode, LeaderHint, Request, Response, RoleBindingData,
+    ScramCredentialData, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
@@ -30,10 +31,11 @@ const SCRAM_ITERATIONS: u32 = lotse_auth::scram::MIN_ITERATIONS;
 
 impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Creates a stream with `partitions` partitions, each replicated by
-    /// `replication` nodes; returns its id.
+    /// `replication` nodes, in [`crate::ClientConfig::tenant`]; returns its id.
     pub async fn create_stream(&self, name: &str, partitions: u32, replication: u8) -> Result<u64, ClientError> {
         let req = Request::CreateStream(CreateStreamRequest {
             name: name.into(),
+            tenant: self.cfg.tenant.clone(),
             partitions,
             replication,
             configs: Vec::new(),
@@ -52,6 +54,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let configs = ack_timeout.map(|t| vec![("ack.timeout.ms".to_string(), t.as_millis().to_string())]);
         let req = Request::CreateQueue(CreateQueueRequest {
             name: name.into(),
+            tenant: self.cfg.tenant.clone(),
             priority_levels: 1,
             single_active: false,
             dlq: None,
@@ -65,6 +68,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn declare_exchange(&self, name: &str, kind: ExchangeKind) -> Result<u64, ClientError> {
         let req = Request::DeclareExchange(DeclareExchangeRequest {
             name: name.into(),
+            tenant: self.cfg.tenant.clone(),
             exchange_type: kind.code(),
             configs: Vec::new(),
         });
@@ -186,6 +190,85 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 
     async fn alter_user(&self, req: AlterUserRequest) -> Result<(), ClientError> {
         let req = Request::AlterUser(req);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
+                    Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                        Err(Attempt::Fail(ClientError::Broker { code, message: a.error_msg.clone() }))
+                    }
+                    other => other,
+                },
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Creates a tenant.
+    pub async fn create_tenant(&self, name: &str) -> Result<(), ClientError> {
+        self.admin_change(Request::CreateTenant(CreateTenantRequest { name: name.into() })).await
+    }
+
+    /// Deletes a tenant that holds no resources, and its role bindings.
+    pub async fn delete_tenant(&self, name: &str) -> Result<(), ClientError> {
+        self.admin_change(Request::DeleteTenant(DeleteTenantRequest { name: name.into() })).await
+    }
+
+    /// The tenants this client has a role in (all of them for a cluster
+    /// admin).
+    pub async fn describe_tenants(&self) -> Result<Vec<TenantEntry>, ClientError> {
+        let req = Request::DescribeTenants(DescribeTenantsRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeTenants(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d.tenants)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Adds and removes role bindings; removals first.
+    pub async fn alter_role_bindings(
+        &self,
+        add: Vec<RoleBindingData>,
+        remove: Vec<RoleBindingData>,
+    ) -> Result<(), ClientError> {
+        self.admin_change(Request::AlterRoleBindings(AlterRoleBindingsRequest { add, remove })).await
+    }
+
+    /// Every role binding, each with where it comes from
+    /// ([`lotse_proto::config_source`]).
+    pub async fn describe_role_bindings(&self) -> Result<Vec<(RoleBindingData, u8)>, ClientError> {
+        let req = Request::DescribeRoleBindings(DescribeRoleBindingsRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeRoleBindings(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d.bindings)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Who this client acts as, and the role bindings that apply.
+    pub async fn who_am_i(&self) -> Result<WhoAmIResponse, ClientError> {
+        let req = Request::WhoAmI(WhoAmIRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::WhoAmI(w) => Ok(w),
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// An admin change answered with `AdminResponse`.
+    async fn admin_change(&self, req: Request) -> Result<(), ClientError> {
         self.retrying(|| async {
             match self.call_admin(&req).await? {
                 Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
@@ -323,7 +406,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         };
         match self.call(&addr, req).await {
             Ok(r) => Ok(r),
-            Err(CallError::Denied(why)) => Err(Attempt::Fail(ClientError::Authentication(why))),
+            Err(e @ (CallError::Denied(_) | CallError::Refused(..))) => Err(e.into()),
             Err(e) => {
                 *self.metadata_leader.lock().expect("leader lock") = None;
                 // The request may have arrived: a retry finds what it did.

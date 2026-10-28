@@ -13,6 +13,11 @@ use lotse_sim::{Sim, SimRuntime};
 
 use super::*;
 
+/// Everyone may do everything: these tests are about other things.
+static OPEN: std::sync::LazyLock<crate::access::Access> = std::sync::LazyLock::new(|| {
+    crate::access::Access::build(&crate::AuthConfig::none(), &[], &crate::metadata::MetadataState::default())
+});
+
 static NOTHING_DELETED: BTreeSet<u64> = BTreeSet::new();
 
 #[derive(Debug, Default)]
@@ -156,6 +161,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
@@ -230,6 +236,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            access: &OPEN,
         };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
@@ -324,6 +331,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
@@ -388,6 +396,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 coordinator: Some(G),
                 node: NodeView::default(),
                 now,
+                access: &OPEN,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -434,6 +443,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             coordinator: Some(G),
             node: NodeView::default(),
             now,
+            access: &OPEN,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
@@ -494,6 +504,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -571,6 +582,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
@@ -667,6 +679,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -757,6 +770,7 @@ fn offsets_for_a_released_partition_are_refused() {
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
+            access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -889,6 +903,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 coordinator: None,
                 node: NodeView::default(),
                 now: rt.now(),
+                access: &OPEN,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -917,6 +932,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             &[],
             vec![
                 Request::CreateQueue(lotse_proto::CreateQueueRequest {
+                    tenant: crate::DEFAULT_TENANT.into(),
                     name: "q".into(),
                     priority_levels: 1,
                     single_active: false,
@@ -925,6 +941,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                     configs: vec![],
                 }),
                 Request::DeclareExchange(lotse_proto::DeclareExchangeRequest {
+                    tenant: crate::DEFAULT_TENANT.into(),
                     name: "x".into(),
                     exchange_type: lotse_proto::exchange_type::FANOUT,
                     configs: vec![],

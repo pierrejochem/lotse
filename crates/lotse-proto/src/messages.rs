@@ -136,6 +136,8 @@ pub struct ResourceMetadata {
     pub error: ErrorCode,
     /// Name.
     pub name: String,
+    /// The tenant it belongs to; empty for a name that does not exist.
+    pub tenant: String,
     /// Id used by data-path requests.
     pub resource_id: u64,
     /// [`kind`].
@@ -201,6 +203,7 @@ impl MetadataResponse {
         w.array(&self.resources, |w, res| {
             w.u16(res.error.0);
             w.string(&res.name);
+            w.string(&res.tenant);
             w.u64(res.resource_id);
             w.u8(res.kind);
             w.array(&res.partitions, |w, p| {
@@ -237,8 +240,10 @@ impl MetadataResponse {
             r.tags()?;
             Ok(b)
         })?;
-        let resources = r.array(16, |r| {
-            let (error, name, resource_id, kind) = (ErrorCode(r.u16()?), r.string()?, r.u64()?, r.u8()?);
+        // error, name, tenant, id, kind, no partitions, no exchange, no tags.
+        let resources = r.array(18, |r| {
+            let (error, name, tenant) = (ErrorCode(r.u16()?), r.string()?, r.string()?);
+            let (resource_id, kind) = (r.u64()?, r.u8()?);
             let partitions = r.array(18, |r| {
                 let p = PartitionMetadata {
                     partition: r.u32()?,
@@ -270,7 +275,7 @@ impl MetadataResponse {
                 }),
             };
             r.tags()?;
-            Ok(ResourceMetadata { error, name, resource_id, kind, partitions, exchange })
+            Ok(ResourceMetadata { error, name, tenant, resource_id, kind, partitions, exchange })
         })?;
         r.tags()?;
         Ok(MetadataResponse { brokers, resources })
@@ -1584,6 +1589,8 @@ fn get_configs(r: &mut Reader) -> Result<Vec<(String, String)>, DecodeError> {
 pub struct CreateStreamRequest {
     /// Its name; unique among all resources.
     pub name: String,
+    /// The tenant it belongs to, which must exist.
+    pub tenant: String,
     /// Number of partitions.
     pub partitions: u32,
     /// Replicas per partition.
@@ -1595,6 +1602,7 @@ pub struct CreateStreamRequest {
 impl CreateStreamRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.string(&self.name);
+        w.string(&self.tenant);
         w.u32(self.partitions);
         w.u8(self.replication);
         put_configs(w, &self.configs);
@@ -1603,6 +1611,7 @@ impl CreateStreamRequest {
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let req = CreateStreamRequest {
             name: r.string()?,
+            tenant: r.string()?,
             partitions: r.u32()?,
             replication: r.u8()?,
             configs: get_configs(r)?,
@@ -1617,6 +1626,8 @@ impl CreateStreamRequest {
 pub struct CreateQueueRequest {
     /// Its name; unique among all resources.
     pub name: String,
+    /// The tenant it belongs to, which must exist.
+    pub tenant: String,
     /// Priority levels, 1-10 (only 1 is supported so far).
     pub priority_levels: u8,
     /// Single active consumer (not supported so far).
@@ -1632,6 +1643,7 @@ pub struct CreateQueueRequest {
 impl CreateQueueRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.string(&self.name);
+        w.string(&self.tenant);
         w.u8(self.priority_levels);
         w.u8(u8::from(self.single_active));
         w.opt_string(self.dlq.as_deref());
@@ -1642,6 +1654,7 @@ impl CreateQueueRequest {
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let req = CreateQueueRequest {
             name: r.string()?,
+            tenant: r.string()?,
             priority_levels: r.u8()?,
             single_active: r.u8()? != 0,
             dlq: r.opt_string()?,
@@ -1658,6 +1671,8 @@ impl CreateQueueRequest {
 pub struct DeclareExchangeRequest {
     /// Its name; unique among all resources.
     pub name: String,
+    /// The tenant it belongs to, which must exist.
+    pub tenant: String,
     /// [`exchange_type`].
     pub exchange_type: u8,
     /// Settings, `key = value`.
@@ -1667,12 +1682,18 @@ pub struct DeclareExchangeRequest {
 impl DeclareExchangeRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.string(&self.name);
+        w.string(&self.tenant);
         w.u8(self.exchange_type);
         put_configs(w, &self.configs);
         w.no_tags();
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = DeclareExchangeRequest { name: r.string()?, exchange_type: r.u8()?, configs: get_configs(r)? };
+        let req = DeclareExchangeRequest {
+            name: r.string()?,
+            tenant: r.string()?,
+            exchange_type: r.u8()?,
+            configs: get_configs(r)?,
+        };
         r.tags()?;
         Ok(req)
     }
@@ -2495,6 +2516,286 @@ impl DescribeUsersResponse {
             users: r.array(9, |r| {
                 Ok(UserEntry { name: r.string()?, mechanism: r.string()?, iterations: r.u32()?, source: r.u8()? })
             })?,
+        })
+    }
+}
+
+/// Creates a tenant (cluster admin). Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTenantRequest {
+    /// Its name.
+    pub name: String,
+}
+
+impl CreateTenantRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CreateTenantRequest { name: r.string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Deletes a tenant that holds no resources (cluster admin), with its role
+/// bindings. Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTenantRequest {
+    /// Its name.
+    pub name: String,
+}
+
+impl DeleteTenantRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DeleteTenantRequest { name: r.string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Lists the tenants the caller has a role in (every tenant for a cluster
+/// admin).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeTenantsRequest;
+
+impl DescribeTenantsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeTenantsRequest)
+    }
+}
+
+/// One tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantEntry {
+    /// The name.
+    pub name: String,
+    /// [`config_source`]: created at runtime, or from the node configuration.
+    pub source: u8,
+    /// How many resources it holds.
+    pub resources: u32,
+}
+
+/// The tenants, sorted by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeTenantsResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The tenants.
+    pub tenants: Vec<TenantEntry>,
+}
+
+impl DescribeTenantsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.array(&self.tenants, |w, t| {
+            w.string(&t.name);
+            w.u8(t.source);
+            w.u32(t.resources);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeTenantsResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            // name, source, resources: 2 + 1 + 4 bytes.
+            tenants: r.array(7, |r| Ok(TenantEntry { name: r.string()?, source: r.u8()?, resources: r.u32()? }))?,
+        })
+    }
+}
+
+/// Kinds of subjects in [`RoleBindingData`].
+pub mod subject_kind {
+    /// A principal by name.
+    pub const USER: u8 = 0;
+    /// A group at the identity provider.
+    pub const GROUP: u8 = 1;
+}
+
+/// Roles in [`RoleBindingData`].
+pub mod role {
+    /// Everything, everywhere.
+    pub const CLUSTER_ADMIN: u8 = 0;
+    /// Creating, changing, deleting and binding resources in a tenant, and
+    /// what the roles below may.
+    pub const TENANT_ADMIN: u8 = 1;
+    /// Writing to resources.
+    pub const PRODUCER: u8 = 2;
+    /// Reading from resources.
+    pub const CONSUMER: u8 = 3;
+    /// Seeing resources.
+    pub const VIEWER: u8 = 4;
+}
+
+/// A role granted to a user or group, in a tenant, for the resources whose
+/// names start with `prefix`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RoleBindingData {
+    /// [`subject_kind`].
+    pub subject_kind: u8,
+    /// The user or group.
+    pub subject: String,
+    /// [`role`].
+    pub role: u8,
+    /// The tenant; empty for [`role::CLUSTER_ADMIN`].
+    pub tenant: String,
+    /// Only resources whose names start with this; empty for all.
+    pub prefix: String,
+}
+
+fn put_binding_data(w: &mut Writer, b: &RoleBindingData) {
+    w.u8(b.subject_kind);
+    w.string(&b.subject);
+    w.u8(b.role);
+    w.string(&b.tenant);
+    w.string(&b.prefix);
+}
+
+fn get_binding_data(r: &mut Reader) -> Result<RoleBindingData, DecodeError> {
+    Ok(RoleBindingData {
+        subject_kind: r.u8()?,
+        subject: r.string()?,
+        role: r.u8()?,
+        tenant: r.string()?,
+        prefix: r.string()?,
+    })
+}
+
+/// The smallest [`RoleBindingData`]: two flags and three empty strings.
+const BINDING_DATA_MIN: usize = 1 + 2 + 1 + 2 + 2;
+
+/// Adds and removes role bindings (cluster admin). Answered with
+/// [`AdminResponse`]. Removals apply before additions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRoleBindingsRequest {
+    /// Bindings to add.
+    pub add: Vec<RoleBindingData>,
+    /// Bindings to remove.
+    pub remove: Vec<RoleBindingData>,
+}
+
+impl AlterRoleBindingsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.add, put_binding_data);
+        w.array(&self.remove, put_binding_data);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AlterRoleBindingsRequest {
+            add: r.array(BINDING_DATA_MIN, get_binding_data)?,
+            remove: r.array(BINDING_DATA_MIN, get_binding_data)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Lists every role binding (cluster admin).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeRoleBindingsRequest;
+
+impl DescribeRoleBindingsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeRoleBindingsRequest)
+    }
+}
+
+/// The role bindings, each with [`config_source`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeRoleBindingsResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The bindings and where each comes from.
+    pub bindings: Vec<(RoleBindingData, u8)>,
+}
+
+impl DescribeRoleBindingsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.array(&self.bindings, |w, (b, source)| {
+            put_binding_data(w, b);
+            w.u8(*source);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeRoleBindingsResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            bindings: r.array(BINDING_DATA_MIN + 1, |r| Ok((get_binding_data(r)?, r.u8()?)))?,
+        })
+    }
+}
+
+/// Asks who the connection acts as, and with which roles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WhoAmIRequest;
+
+impl WhoAmIRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(WhoAmIRequest)
+    }
+}
+
+/// Kinds of principals in [`WhoAmIResponse`].
+pub mod principal_kind {
+    /// Not authenticated, on a node that does not require it: may do
+    /// everything.
+    pub const ANONYMOUS: u8 = 0;
+    /// A broker node.
+    pub const NODE: u8 = 1;
+    /// A user or service.
+    pub const USER: u8 = 2;
+}
+
+/// Who the connection acts as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhoAmIResponse {
+    /// [`principal_kind`].
+    pub kind: u8,
+    /// The name (the node id for a node).
+    pub name: String,
+    /// Groups at the identity provider.
+    pub groups: Vec<String>,
+    /// The bindings that apply, by name or by group.
+    pub bindings: Vec<RoleBindingData>,
+}
+
+impl WhoAmIResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u8(self.kind);
+        w.string(&self.name);
+        w.array(&self.groups, |w, g| w.string(g));
+        w.array(&self.bindings, put_binding_data);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(WhoAmIResponse {
+            kind: r.u8()?,
+            name: r.string()?,
+            groups: r.array(2, Reader::string)?,
+            bindings: r.array(BINDING_DATA_MIN, get_binding_data)?,
         })
     }
 }

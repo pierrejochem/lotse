@@ -55,6 +55,7 @@ use lotse_record::Batch;
 use lotse_route::Exchange;
 use lotse_rt::{Conn, Instant, Runtime};
 
+use crate::access::Access;
 use crate::auth::{Auth, Principal};
 use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::{Signal, race};
@@ -112,7 +113,6 @@ pub(crate) struct ClientRequest {
     header: RequestHeader,
     request: Request,
     /// Who the request acts as.
-    #[allow(dead_code)] // checked once roles exist
     principal: Principal,
 }
 
@@ -249,6 +249,8 @@ pub(crate) struct ClusterView<'a> {
     /// The node itself, for metrics.
     pub(crate) node: NodeView<'a>,
     pub(crate) now: Instant,
+    /// Who may do what.
+    pub(crate) access: &'a Access,
 }
 
 impl ClusterView<'_> {
@@ -341,8 +343,12 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, request, .. } = req;
+        let ClientRequest { outbox, header, request, principal } = req;
         let id = header.correlation_id;
+        if let Err(why) = view.access.check(&principal, &request) {
+            outbox.push(id, &Response::Refused { code: ErrorCode::UNAUTHORIZED, message: why });
+            return Ok(());
+        }
         match request {
             Request::ApiVersions => outbox.push(
                 id,
@@ -351,7 +357,7 @@ impl Clients {
                     features: vec!["streams".into(), "queues".into(), "groups".into()],
                 }),
             ),
-            Request::Metadata(m) => outbox.push(id, &Response::Metadata(metadata(&m, view, groups))),
+            Request::Metadata(m) => outbox.push(id, &Response::Metadata(metadata(&m, view, groups, &principal))),
             Request::Produce(p) => self.produce(outbox, id, p, view, groups),
             Request::FindCoordinator(f) => {
                 outbox.push(id, &Response::FindCoordinator(find_coordinator(&f, view, groups)))
@@ -380,9 +386,15 @@ impl Clients {
             Request::DeleteResource(req) => self.delete_resource(outbox, id, req, view, groups),
             Request::AlterConfigs(req) => self.alter_configs(outbox, id, req, view, groups),
             Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, view, groups),
-            Request::DescribeMetrics(_) => self.describe_metrics(&outbox, id, view, groups),
+            Request::DescribeMetrics(_) => self.describe_metrics(&outbox, id, view, groups, &principal),
             Request::AlterUser(req) => self.alter_user(outbox, id, req, view, groups),
             Request::DescribeUsers(_) => self.describe_users(outbox, id, view, groups),
+            Request::CreateTenant(req) => self.create_tenant(outbox, id, req, view, groups),
+            Request::DeleteTenant(req) => self.delete_tenant(outbox, id, req, view, groups),
+            Request::DescribeTenants(_) => self.describe_tenants(&outbox, id, view, &principal),
+            Request::AlterRoleBindings(req) => self.alter_role_bindings(outbox, id, req, view, groups),
+            Request::DescribeRoleBindings(_) => self.describe_role_bindings(&outbox, id, view),
+            Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::Fetch(f) => {
@@ -869,10 +881,13 @@ fn find_coordinator<R: Runtime, S: StateMachine>(
     }
 }
 
+/// The brokers and the resources asked for, as far as `who` may see them:
+/// a resource it may not see is unknown to it, and left out of a listing.
 fn metadata<R: Runtime, S: StateMachine>(
     req: &MetadataRequest,
     view: &ClusterView<'_>,
     groups: &BTreeMap<GroupId, Replica<R, S>>,
+    who: &Principal,
 ) -> MetadataResponse {
     let brokers = view
         .client_addrs
@@ -882,9 +897,11 @@ fn metadata<R: Runtime, S: StateMachine>(
             Some(Broker { node_id: *id as u32, host: host.into(), port: port.parse().ok()?, rack: String::new() })
         })
         .collect();
+    let tenant_of = |id: u64| view.access.resources.get(&id).map(|(_, t)| t.clone()).unwrap_or_default();
     let describe = |s: &StreamConfig| ResourceMetadata {
         error: ErrorCode::NONE,
         name: s.name.clone(),
+        tenant: tenant_of(s.resource_id),
         resource_id: s.resource_id,
         kind: kind::STREAM,
         partitions: s
@@ -916,6 +933,7 @@ fn metadata<R: Runtime, S: StateMachine>(
     let describe_exchange = |x: &Exchange| ResourceMetadata {
         error: ErrorCode::NONE,
         name: x.name.clone(),
+        tenant: tenant_of(x.resource_id),
         resource_id: x.resource_id,
         kind: kind::EXCHANGE,
         partitions: Vec::new(),
@@ -933,12 +951,16 @@ fn metadata<R: Runtime, S: StateMachine>(
                 .collect(),
         }),
     };
-    let resources = if req.names.is_empty() {
+    let hidden = |r: &ResourceMetadata| {
+        r.error == ErrorCode::NONE && !view.access.may(who, lotse_auth::roles::Operation::Describe, &r.tenant, &r.name)
+    };
+    let resources: Vec<ResourceMetadata> = if req.names.is_empty() {
         view.streams
             .iter()
             .map(describe)
             .chain(view.queues.iter().map(describe_queue))
             .chain(view.exchanges.iter().map(describe_exchange))
+            .filter(|r| !hidden(r))
             .collect()
     } else {
         // An exchange comes with the queues bound to it: a client needs
@@ -962,11 +984,27 @@ fn metadata<R: Runtime, S: StateMachine>(
                 None => ResourceMetadata {
                     error: ErrorCode::UNKNOWN_RESOURCE,
                     name: n.clone(),
+                    tenant: String::new(),
                     resource_id: 0,
                     kind: kind::STREAM,
                     partitions: Vec::new(),
                     exchange: None,
                 },
+            })
+            .map(|r| {
+                if hidden(&r) {
+                    let unknown = ErrorCode::UNKNOWN_RESOURCE;
+                    ResourceMetadata {
+                        error: unknown,
+                        tenant: String::new(),
+                        resource_id: 0,
+                        partitions: Vec::new(),
+                        exchange: None,
+                        ..r
+                    }
+                } else {
+                    r
+                }
             })
             .collect()
     };

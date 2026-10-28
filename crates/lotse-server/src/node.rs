@@ -34,10 +34,12 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Disk, Link, Listener, PeerIdentity, Runtime, Spawn};
 
+use crate::access::Access;
 use crate::auth::{Auth, AuthConfig};
 use crate::client::{
     AdminView, ClientRequest, Clients, ClusterView, MarkerJob, NetStats, NodeView, QueueConfig, StreamConfig,
 };
+use crate::metadata::MetadataState;
 use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
@@ -455,6 +457,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             coordinator: cfg.coordinator,
             node: NodeView { id: cfg.id, started, net: &shared.net, host },
             now: rt.now(),
+            access: &known.access,
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {
@@ -654,6 +657,14 @@ async fn send_to<R: Runtime>(
     }
 }
 
+/// Every configured resource, by id and name.
+fn configured_ids(cfg: &NodeConfig) -> Vec<(u64, String)> {
+    let streams = cfg.streams.iter().map(|s| (s.resource_id, s.name.clone()));
+    let queues = cfg.queues.iter().map(|q| (q.resource_id, q.name.clone()));
+    let exchanges = cfg.exchanges.iter().map(|x| (x.resource_id, x.name.clone()));
+    streams.chain(queues).chain(exchanges).collect()
+}
+
 /// The resources this node knows: configured ones and, once the metadata
 /// group has applied them, those created at runtime.
 struct Known {
@@ -668,6 +679,8 @@ struct Known {
     removed: BTreeSet<GroupId>,
     /// The metadata group's applied index these were built from.
     applied: u64,
+    /// Who may do what.
+    access: Access,
 }
 
 impl Known {
@@ -680,6 +693,7 @@ impl Known {
             deleted: BTreeSet::new(),
             removed: BTreeSet::new(),
             applied: 0,
+            access: Access::build(&cfg.auth, &configured_ids(cfg), &MetadataState::default()),
         }
     }
 
@@ -702,6 +716,7 @@ impl Known {
         let state = meta.metadata().clone();
         auth.set_users(&state.users);
         let mut known = Known::configured(cfg);
+        known.access = Access::build(&cfg.auth, &configured_ids(cfg), &state);
         known.applied = self.applied;
         known.removed = std::mem::take(&mut self.removed);
         known.deleted = state.deleted.keys().copied().collect();

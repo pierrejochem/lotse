@@ -207,3 +207,73 @@ fn oauthbearer_messages() {
     assert!(oauth::jwks_uri(&d, "https://other.example").is_err());
     assert_eq!(oauth::discovery_url("https://idp.example/"), "https://idp.example/.well-known/openid-configuration");
 }
+
+mod roles {
+    use crate::roles::{Grants, Operation, Role, RoleBinding, Subject, Who};
+
+    fn bind(subject: Subject, role: Role, tenant: &str, prefix: &str) -> RoleBinding {
+        RoleBinding { subject, role, tenant: tenant.into(), prefix: prefix.into() }
+    }
+
+    fn user(n: &str) -> Subject {
+        Subject::User(n.into())
+    }
+
+    fn grants() -> Grants {
+        Grants {
+            bindings: [
+                bind(user("root"), Role::ClusterAdmin, "", ""),
+                bind(user("ta"), Role::TenantAdmin, "shop", ""),
+                bind(user("p"), Role::Producer, "shop", "orders-"),
+                bind(user("c"), Role::Consumer, "shop", ""),
+                bind(user("v"), Role::Viewer, "shop", ""),
+                bind(Subject::Group("ops".into()), Role::Consumer, "logs", ""),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn may(name: &str, groups: &[&str], op: Operation, tenant: &str, res: &str) -> bool {
+        let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+        grants().allows(&Who { name, groups: &groups }, op, tenant, res)
+    }
+
+    #[test]
+    fn each_role_does_what_it_says() {
+        use Operation::*;
+        for op in [Describe, Read, Write, Admin, ClusterAdmin] {
+            assert!(may("root", &[], op, "anything", "x"), "{op:?}");
+        }
+        for op in [Describe, Read, Write, Admin] {
+            assert!(may("ta", &[], op, "shop", "x"), "{op:?}");
+        }
+        assert!(!may("ta", &[], ClusterAdmin, "shop", "x"));
+        assert!(!may("ta", &[], Read, "logs", "x"), "only its tenant");
+        assert!(may("p", &[], Write, "shop", "orders-eu") && may("p", &[], Describe, "shop", "orders-eu"));
+        assert!(!may("p", &[], Read, "shop", "orders-eu") && !may("p", &[], Admin, "shop", "orders-eu"));
+        assert!(!may("p", &[], Write, "shop", "payments"), "only names with the prefix");
+        assert!(!may("p", &[], Write, "shop", "orders"), "the prefix is orders-, not orders");
+        assert!(may("c", &[], Read, "shop", "x") && !may("c", &[], Write, "shop", "x"));
+        assert!(may("v", &[], Describe, "shop", "x") && !may("v", &[], Read, "shop", "x"));
+        assert!(may("anyone", &["ops"], Read, "logs", "x"), "through a group");
+        assert!(!may("anyone", &["dev"], Read, "logs", "x"));
+        assert!(!may("ops", &[], Read, "logs", "x"), "a user named like a group is not the group");
+        assert!(!may("eve", &["c"], Read, "shop", "x"), "nor is a group named like a user that user");
+        assert!(!may("nobody", &[], Describe, "shop", "x"));
+    }
+
+    #[test]
+    fn tenants_are_known_through_any_role() {
+        let g = grants();
+        let w = |n: &'static str| Who { name: n, groups: &[] };
+        assert!(g.knows_tenant(&w("v"), "shop") && !g.knows_tenant(&w("v"), "logs"));
+        assert!(g.knows_tenant(&w("root"), "logs"));
+        assert!(g.is_cluster_admin(&w("root")) && !g.is_cluster_admin(&w("ta")));
+        assert_eq!(g.of(&w("p")).count(), 1);
+        for r in Role::ALL {
+            assert_eq!(Role::from_code(r.code()), Some(r));
+        }
+        assert_eq!(Role::from_code(5), None);
+    }
+}

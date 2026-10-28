@@ -99,6 +99,18 @@ impl ApiKey {
     pub const ALTER_USER: ApiKey = ApiKey(32);
     /// Lists the users with a SCRAM credential (admin).
     pub const DESCRIBE_USERS: ApiKey = ApiKey(33);
+    /// Creates a tenant (cluster admin).
+    pub const CREATE_TENANT: ApiKey = ApiKey(34);
+    /// Deletes an empty tenant (cluster admin).
+    pub const DELETE_TENANT: ApiKey = ApiKey(35);
+    /// Lists tenants.
+    pub const DESCRIBE_TENANTS: ApiKey = ApiKey(36);
+    /// Adds and removes role bindings (cluster admin).
+    pub const ALTER_ROLE_BINDINGS: ApiKey = ApiKey(37);
+    /// Lists role bindings (cluster admin).
+    pub const DESCRIBE_ROLE_BINDINGS: ApiKey = ApiKey(38);
+    /// Who the connection acts as.
+    pub const WHO_AM_I: ApiKey = ApiKey(39);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -121,7 +133,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 31] = [
+    pub const SUPPORTED: [ApiVersionRange; 37] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -153,6 +165,12 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::SASL_AUTHENTICATE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::ALTER_USER, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_USERS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREATE_TENANT, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DELETE_TENANT, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_TENANTS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ALTER_ROLE_BINDINGS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_ROLE_BINDINGS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::WHO_AM_I, min: 0, max: 0 },
     ];
 }
 
@@ -296,6 +314,9 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// Tag of the reason in a frame-level error ([`Response::Refused`]).
+const TAG_REASON: u64 = 0;
+
 /// Frame flags.
 pub mod flags {
     /// A push frame (delivery to a queue consumer), not a response.
@@ -383,6 +404,18 @@ pub enum Request {
     AlterUser(AlterUserRequest),
     /// [`ApiKey::DESCRIBE_USERS`].
     DescribeUsers(DescribeUsersRequest),
+    /// [`ApiKey::CREATE_TENANT`].
+    CreateTenant(CreateTenantRequest),
+    /// [`ApiKey::DELETE_TENANT`].
+    DeleteTenant(DeleteTenantRequest),
+    /// [`ApiKey::DESCRIBE_TENANTS`].
+    DescribeTenants(DescribeTenantsRequest),
+    /// [`ApiKey::ALTER_ROLE_BINDINGS`].
+    AlterRoleBindings(AlterRoleBindingsRequest),
+    /// [`ApiKey::DESCRIBE_ROLE_BINDINGS`].
+    DescribeRoleBindings(DescribeRoleBindingsRequest),
+    /// [`ApiKey::WHO_AM_I`].
+    WhoAmI(WhoAmIRequest),
 }
 
 impl Request {
@@ -420,6 +453,12 @@ impl Request {
             Request::SaslAuthenticate(_) => ApiKey::SASL_AUTHENTICATE,
             Request::AlterUser(_) => ApiKey::ALTER_USER,
             Request::DescribeUsers(_) => ApiKey::DESCRIBE_USERS,
+            Request::CreateTenant(_) => ApiKey::CREATE_TENANT,
+            Request::DeleteTenant(_) => ApiKey::DELETE_TENANT,
+            Request::DescribeTenants(_) => ApiKey::DESCRIBE_TENANTS,
+            Request::AlterRoleBindings(_) => ApiKey::ALTER_ROLE_BINDINGS,
+            Request::DescribeRoleBindings(_) => ApiKey::DESCRIBE_ROLE_BINDINGS,
+            Request::WhoAmI(_) => ApiKey::WHO_AM_I,
         }
     }
 }
@@ -467,6 +506,12 @@ pub enum Response {
     SaslAuthenticate(SaslAuthenticateResponse),
     /// To [`Request::DescribeUsers`].
     DescribeUsers(DescribeUsersResponse),
+    /// To [`Request::DescribeTenants`].
+    DescribeTenants(DescribeTenantsResponse),
+    /// To [`Request::DescribeRoleBindings`].
+    DescribeRoleBindings(DescribeRoleBindingsResponse),
+    /// To [`Request::WhoAmI`].
+    WhoAmI(WhoAmIResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -475,6 +520,15 @@ pub enum Response {
     /// ([`ErrorCode::UNSUPPORTED_VERSION`]), or a connection not
     /// authenticated or whose session ended ([`ErrorCode::UNAUTHORIZED`]).
     Error(ErrorCode),
+    /// The request was refused as a whole, with a reason: the principal
+    /// lacks a role for it ([`ErrorCode::UNAUTHORIZED`]). Encoded as
+    /// [`Response::Error`] with the reason in a tagged field.
+    Refused {
+        /// Why, as a code.
+        code: ErrorCode,
+        /// Why, for people.
+        message: String,
+    },
 }
 
 /// Encodes a version-0 request.
@@ -516,6 +570,12 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::SaslAuthenticate(r) => r.put(&mut w),
         Request::AlterUser(r) => r.put(&mut w),
         Request::DescribeUsers(r) => r.put(&mut w),
+        Request::CreateTenant(r) => r.put(&mut w),
+        Request::DeleteTenant(r) => r.put(&mut w),
+        Request::DescribeTenants(r) => r.put(&mut w),
+        Request::AlterRoleBindings(r) => r.put(&mut w),
+        Request::DescribeRoleBindings(r) => r.put(&mut w),
+        Request::WhoAmI(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -567,6 +627,12 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::SASL_AUTHENTICATE => Request::SaslAuthenticate(SaslAuthenticateRequest::get(&mut r)?),
         ApiKey::ALTER_USER => Request::AlterUser(AlterUserRequest::get(&mut r)?),
         ApiKey::DESCRIBE_USERS => Request::DescribeUsers(DescribeUsersRequest::get(&mut r)?),
+        ApiKey::CREATE_TENANT => Request::CreateTenant(CreateTenantRequest::get(&mut r)?),
+        ApiKey::DELETE_TENANT => Request::DeleteTenant(DeleteTenantRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_TENANTS => Request::DescribeTenants(DescribeTenantsRequest::get(&mut r)?),
+        ApiKey::ALTER_ROLE_BINDINGS => Request::AlterRoleBindings(AlterRoleBindingsRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_ROLE_BINDINGS => Request::DescribeRoleBindings(DescribeRoleBindingsRequest::get(&mut r)?),
+        ApiKey::WHO_AM_I => Request::WhoAmI(WhoAmIRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -577,7 +643,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
 pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
     let mut w = Writer::new();
     w.u32(correlation_id);
-    w.u16(if matches!(response, Response::Error(_)) { flags::ERROR } else { 0 });
+    w.u16(if matches!(response, Response::Error(_) | Response::Refused { .. }) { flags::ERROR } else { 0 });
     w.no_tags();
     match response {
         Response::ApiVersions(r) => r.put(&mut w),
@@ -599,11 +665,18 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::SaslHandshake(r) => r.put(&mut w),
         Response::SaslAuthenticate(r) => r.put(&mut w),
         Response::DescribeUsers(r) => r.put(&mut w),
+        Response::DescribeTenants(r) => r.put(&mut w),
+        Response::DescribeRoleBindings(r) => r.put(&mut w),
+        Response::WhoAmI(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
             w.u16(code.0);
             w.no_tags();
+        }
+        Response::Refused { code, message } => {
+            w.u16(code.0);
+            w.tags(&[(TAG_REASON, Bytes::copy_from_slice(message.as_bytes()))]);
         }
     }
     w.finish()
@@ -657,9 +730,16 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
     r.tags()?;
     if flags & flags::ERROR != 0 {
         let code = ErrorCode(r.u16()?);
-        r.tags()?;
+        let reason = r.tags()?.into_iter().find(|(t, _)| *t == TAG_REASON).map(|(_, v)| v);
         r.finish()?;
-        return Ok((correlation_id, Response::Error(code)));
+        let response = match reason {
+            Some(m) => Response::Refused {
+                code,
+                message: String::from_utf8(m.to_vec()).map_err(|_| DecodeError::Malformed("reason is not UTF-8"))?,
+            },
+            None => Response::Error(code),
+        };
+        return Ok((correlation_id, response));
     }
     let response = match api_key {
         ApiKey::API_VERSIONS => Response::ApiVersions(ApiVersionsResponse::get(&mut r)?),
@@ -676,14 +756,20 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {
             Response::Create(CreateResponse::get(&mut r)?)
         }
-        ApiKey::DELETE_RESOURCE | ApiKey::ALTER_CONFIGS | ApiKey::ALTER_USER => {
-            Response::Admin(AdminResponse::get(&mut r)?)
-        }
+        ApiKey::DELETE_RESOURCE
+        | ApiKey::ALTER_CONFIGS
+        | ApiKey::ALTER_USER
+        | ApiKey::CREATE_TENANT
+        | ApiKey::DELETE_TENANT
+        | ApiKey::ALTER_ROLE_BINDINGS => Response::Admin(AdminResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_METRICS => Response::DescribeMetrics(Box::new(DescribeMetricsResponse::get(&mut r)?)),
         ApiKey::SASL_HANDSHAKE => Response::SaslHandshake(SaslHandshakeResponse::get(&mut r)?),
         ApiKey::SASL_AUTHENTICATE => Response::SaslAuthenticate(SaslAuthenticateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_USERS => Response::DescribeUsers(DescribeUsersResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_TENANTS => Response::DescribeTenants(DescribeTenantsResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_ROLE_BINDINGS => Response::DescribeRoleBindings(DescribeRoleBindingsResponse::get(&mut r)?),
+        ApiKey::WHO_AM_I => Response::WhoAmI(WhoAmIResponse::get(&mut r)?),
         ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
         ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
             Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)

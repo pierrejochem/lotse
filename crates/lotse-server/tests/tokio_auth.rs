@@ -70,6 +70,8 @@ async fn every_way_in_on_real_sockets() {
         oidc: Some(OidcConfig::new(&issuer_url, "lotse")),
         max_session: Duration::from_secs(60),
         users,
+        admins: vec!["admin".into()],
+        ..AuthConfig::none()
     };
     let mut nodes = Vec::new();
     for id in 1..=3 {
@@ -115,6 +117,19 @@ async fn every_way_in_on_real_sockets() {
         Some(Credentials::Scram { user: "admin".into(), password: "admin-pw".into() }),
     );
     admin.produce("s", 0, batch("admin")).await.expect("SCRAM");
+    let grant = |kind, who: &str| lotse_proto::RoleBindingData {
+        subject_kind: kind,
+        subject: who.into(),
+        role: lotse_proto::role::PRODUCER,
+        tenant: lotse_server::DEFAULT_TENANT.into(),
+        prefix: String::new(),
+    };
+    let add = vec![
+        grant(lotse_proto::subject_kind::USER, "alice"),
+        grant(lotse_proto::subject_kind::GROUP, "ops"),
+        grant(lotse_proto::subject_kind::USER, "billing"),
+    ];
+    admin.alter_role_bindings(add, Vec::new()).await.expect("grants roles");
     admin.set_user_password("alice", "alice-pw").await.expect("creates a user");
     tokio::time::sleep(Duration::from_millis(500)).await;
     let alice = client(

@@ -129,6 +129,10 @@ pub enum ClientError {
     },
 }
 
+/// The tenant every cluster has, which configured resources belong to
+/// unless the configuration names another.
+pub const DEFAULT_TENANT: &str = "default";
+
 /// How the client behaves.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -157,6 +161,8 @@ pub struct ClientConfig {
     /// How to authenticate each connection; `None` sends no credentials
     /// (the runtime's client certificate, if any, still counts).
     pub credentials: Option<Credentials>,
+    /// The tenant resources created by this client go to.
+    pub tenant: String,
 }
 
 impl ClientConfig {
@@ -173,6 +179,7 @@ impl ClientConfig {
             txn_timeout: Duration::from_secs(60),
             metadata_max_age: Duration::from_secs(30),
             credentials: None,
+            tenant: DEFAULT_TENANT.into(),
         }
     }
 }
@@ -281,8 +288,9 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     metadata_leader: Mutex<Option<u32>>,
     /// Spreads admin requests over brokers while the leader is unknown.
     admin_turn: AtomicU32,
-    /// Why a connection could not authenticate, until a retry loop reports it.
-    denied: Mutex<Option<String>>,
+    /// Why a request failed for good (a connection could not authenticate,
+    /// or the node refused), until a retry loop reports it.
+    fatal: Mutex<Option<ClientError>>,
 }
 
 impl<R: Net + Clock + Spawn + Rng> fmt::Debug for Client<R> {
@@ -329,7 +337,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             exchanges: Mutex::new(BTreeMap::new()),
             metadata_leader: Mutex::new(None),
             admin_turn: AtomicU32::new(0),
-            denied: Mutex::new(None),
+            fatal: Mutex::new(None),
         }
     }
 
@@ -490,11 +498,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             };
             // A connection that could not authenticate: the same credentials
             // will not do better on the next try.
-            if let Some(denied) = self.denied.lock().expect("denied lock").take() {
+            if let Some(fatal) = self.fatal.lock().expect("fatal lock").take() {
                 return Err(if maybe_done {
-                    ClientError::Unknown(format!("an earlier attempt may have been carried out; then {denied}"))
+                    ClientError::Unknown(format!("an earlier attempt may have been carried out; then {fatal}"))
                 } else {
-                    ClientError::Authentication(denied)
+                    fatal
                 });
             }
             if self.rt.now() - start >= self.cfg.retry_for {
@@ -691,6 +699,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 return Err(unknown(why));
             }
             Err(CallError::Denied(why)) => return Err(Attempt::Fail(ClientError::Authentication(why))),
+            Err(CallError::Refused(code, why)) => {
+                return Err(Attempt::Fail(ClientError::Broker { code, message: Some(why) }));
+            }
         };
         let p = resp
             .resources
@@ -871,15 +882,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let conn = match self.connection(addr).await {
             Ok(c) => c,
             Err(e) => {
-                if let CallError::Denied(why) = &e {
-                    *self.denied.lock().expect("denied lock") = Some(why.clone());
-                }
+                self.note_fatal(&e);
                 return Err(e);
             }
         };
         let res = conn.call(req, &self.rt, self.cfg.request_timeout).await;
-        if let Err(CallError::Denied(why)) = &res {
-            *self.denied.lock().expect("denied lock") = Some(why.clone());
+        if let Err(e) = &res {
+            self.note_fatal(e);
         }
         if res.is_err() {
             // A connection that failed once is not trusted again.
@@ -950,6 +959,16 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 }
 
 impl<R: Net + Clock + Spawn + Rng> Client<R> {
+    /// Keeps an error no retry can fix for the retry loop to report.
+    fn note_fatal(&self, e: &CallError) {
+        let fatal = match e {
+            CallError::Denied(why) => ClientError::Authentication(why.clone()),
+            CallError::Refused(code, why) => ClientError::Broker { code: *code, message: Some(why.clone()) },
+            _ => return,
+        };
+        *self.fatal.lock().expect("fatal lock") = Some(fatal);
+    }
+
     fn drop_connection(&self, addr: &str, conn: &Arc<Connection<R::Conn>>) {
         let mut conns = self.conns.lock().expect("conns lock");
         if conns.get(addr).is_some_and(|c| Arc::ptr_eq(c, conn)) {
@@ -977,6 +996,9 @@ enum CallError {
     /// The connection could not authenticate: the request never left, and
     /// trying again will not help.
     Denied(String),
+    /// The node refused the request (it lacks a role): not carried out, and
+    /// trying again will not help.
+    Refused(ErrorCode, String),
 }
 
 impl From<CallError> for Attempt {
@@ -985,6 +1007,7 @@ impl From<CallError> for Attempt {
     fn from(e: CallError) -> Attempt {
         match e {
             CallError::Denied(why) => Attempt::Fail(ClientError::Authentication(why)),
+            CallError::Refused(code, why) => Attempt::Fail(ClientError::Broker { code, message: Some(why) }),
             e => Attempt::Retry(e.to_string()),
         }
     }
@@ -994,6 +1017,7 @@ impl fmt::Display for CallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CallError::NotSent(s) | CallError::Lost(s) | CallError::Denied(s) => f.write_str(s),
+            CallError::Refused(code, s) => write!(f, "{code}: {s}"),
         }
     }
 }
@@ -1198,6 +1222,9 @@ impl<C: Conn> Connection<C> {
                 Err(CallError::Denied("the node requires authentication".into()))
             }
             Ok((_, Response::Error(code))) => Err(CallError::NotSent(format!("refused: {code}"))),
+            // Refused as a whole, with a reason: not carried out, and the
+            // same request would be refused again.
+            Ok((_, Response::Refused { code, message })) => Err(CallError::Refused(code, message)),
             Ok((_, resp)) => Ok(resp),
             Err(e) => Err(CallError::Lost(format!("undecodable response: {e}"))),
         }

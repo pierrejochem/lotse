@@ -14,16 +14,38 @@ fn payload(change: &Change) -> Bytes {
 #[test]
 fn changes_apply_once_per_name_and_round_trip() {
     let mut s = MetadataState::default();
-    let stream = Change::CreateStream { name: "orders".into(), partitions: vec![vec![1, 2, 3], vec![2, 3, 4]] };
+    let stream = Change::CreateStream {
+        name: "orders".into(),
+        tenant: "t".into(),
+        partitions: vec![vec![1, 2, 3], vec![2, 3, 4]],
+    };
     s.apply(10, &payload(&stream)).unwrap();
     assert_eq!(s.id_of("orders"), Some(resource_id(10)));
     assert_eq!(s.streams[&resource_id(10)].partitions[1], (group_id(10, 1), vec![2, 3, 4]));
     // The same name again, from a concurrent create: nothing changes.
-    s.apply(11, &payload(&Change::CreateQueue { name: "orders".into(), voters: vec![1], ack_timeout_ms: 5 })).unwrap();
+    s.apply(
+        11,
+        &payload(&Change::CreateQueue {
+            name: "orders".into(),
+            tenant: "t".into(),
+            voters: vec![1],
+            ack_timeout_ms: 5,
+        }),
+    )
+    .unwrap();
     assert!(s.queues.is_empty());
-    s.apply(12, &payload(&Change::CreateQueue { name: "jobs".into(), voters: vec![1, 4, 5], ack_timeout_ms: 5 }))
+    s.apply(
+        12,
+        &payload(&Change::CreateQueue {
+            name: "jobs".into(),
+            tenant: "t".into(),
+            voters: vec![1, 4, 5],
+            ack_timeout_ms: 5,
+        }),
+    )
+    .unwrap();
+    s.apply(13, &payload(&Change::DeclareExchange { name: "x".into(), tenant: "t".into(), kind: ExchangeKind::Topic }))
         .unwrap();
-    s.apply(13, &payload(&Change::DeclareExchange { name: "x".into(), kind: ExchangeKind::Topic })).unwrap();
     let b = Binding {
         queue_id: resource_id(12),
         key: "a.#".into(),
@@ -68,10 +90,22 @@ fn placement_spreads_groups_over_the_least_loaded_nodes() {
 #[test]
 fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     let mut s = MetadataState::default();
-    s.apply(1, &payload(&Change::CreateStream { name: "s".into(), partitions: vec![vec![1], vec![2], vec![3]] }))
+    s.apply(
+        1,
+        &payload(&Change::CreateStream {
+            name: "s".into(),
+            tenant: "t".into(),
+            partitions: vec![vec![1], vec![2], vec![3]],
+        }),
+    )
+    .unwrap();
+    s.apply(
+        2,
+        &payload(&Change::CreateQueue { name: "q".into(), tenant: "t".into(), voters: vec![1], ack_timeout_ms: 0 }),
+    )
+    .unwrap();
+    s.apply(3, &payload(&Change::DeclareExchange { name: "x".into(), tenant: "t".into(), kind: ExchangeKind::Fanout }))
         .unwrap();
-    s.apply(2, &payload(&Change::CreateQueue { name: "q".into(), voters: vec![1], ack_timeout_ms: 0 })).unwrap();
-    s.apply(3, &payload(&Change::DeclareExchange { name: "x".into(), kind: ExchangeKind::Fanout })).unwrap();
     let to_q = Binding { queue_id: resource_id(2), key: String::new(), headers: vec![], match_all: true };
     // A configured exchange (id 9) holds a runtime binding to the queue too.
     for x in [resource_id(3), 9] {
@@ -100,7 +134,11 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     let gone: Vec<GroupId> = s.deleted_groups().into_iter().collect();
     assert_eq!(gone, vec![group_id(1, 0), group_id(1, 1), group_id(1, 2), group_id(2, 0)]);
     // The name is free again, under a new id.
-    s.apply(13, &payload(&Change::CreateQueue { name: "q".into(), voters: vec![1], ack_timeout_ms: 0 })).unwrap();
+    s.apply(
+        13,
+        &payload(&Change::CreateQueue { name: "q".into(), tenant: "t".into(), voters: vec![1], ack_timeout_ms: 0 }),
+    )
+    .unwrap();
     assert_eq!(s.id_of("q"), Some(resource_id(13)));
 
     let bytes = s.encode();
@@ -108,4 +146,58 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     for cut in 0..bytes.len() {
         assert!(MetadataState::decode(&bytes[..cut]).is_err(), "cut at {cut}");
     }
+}
+
+#[test]
+fn tenants_bindings_and_a_create_racing_a_delete() {
+    use lotse_auth::roles::{Role, RoleBinding, Subject};
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&Change::CreateTenant { name: "shop".into() })).unwrap();
+    let b = |role, tenant: &str| RoleBinding {
+        subject: Subject::User("u".into()),
+        role,
+        tenant: tenant.into(),
+        prefix: String::new(),
+    };
+    let set = Change::SetBindings { add: vec![b(Role::Producer, "shop"), b(Role::ClusterAdmin, "")], remove: vec![] };
+    s.apply(2, &payload(&set)).unwrap();
+    s.apply(3, &payload(&Change::CreateStream { name: "o".into(), tenant: "shop".into(), partitions: vec![vec![1]] }))
+        .unwrap();
+    // Not empty: the delete does nothing.
+    s.apply(4, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
+    assert!(s.tenants.contains("shop") && s.bindings_of_roles.len() == 2);
+    s.apply(5, &payload(&Change::Delete { resource_id: resource_id(3) })).unwrap();
+    s.apply(6, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
+    assert!(!s.tenants.contains("shop"));
+    assert_eq!(
+        s.bindings_of_roles.iter().map(|x| x.role).collect::<Vec<_>>(),
+        vec![Role::ClusterAdmin],
+        "the tenant's bindings go"
+    );
+    // A create proposed before the delete, applied after it: nothing.
+    s.apply(
+        7,
+        &payload(&Change::CreateQueue {
+            name: "late".into(),
+            tenant: "shop".into(),
+            voters: vec![1],
+            ack_timeout_ms: 0,
+        }),
+    )
+    .unwrap();
+    assert_eq!(s.id_of("late"), None);
+    // Created again: open again.
+    s.apply(8, &payload(&Change::CreateTenant { name: "shop".into() })).unwrap();
+    s.apply(
+        9,
+        &payload(&Change::DeclareExchange { name: "x2".into(), tenant: "shop".into(), kind: ExchangeKind::Fanout }),
+    )
+    .unwrap();
+    assert_eq!(s.id_of("x2"), Some(resource_id(9)));
+    // Removing a binding; and everything survives a snapshot.
+    let unset = Change::SetBindings { add: vec![], remove: vec![b(Role::ClusterAdmin, "")] };
+    s.apply(10, &payload(&unset)).unwrap();
+    assert!(s.bindings_of_roles.is_empty());
+    s.apply(11, &payload(&set)).unwrap();
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
