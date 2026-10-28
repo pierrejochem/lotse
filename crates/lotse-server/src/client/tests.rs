@@ -142,8 +142,14 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
         // A produce reaches node 1; its entry (index 2) gets to node 2 only.
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view =
-            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: None,
+            now: rt.now(),
+        };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
         let mut clients = Clients::default();
@@ -200,8 +206,14 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
 
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view =
-            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: None,
+            now: rt.now(),
+        };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
         let outbox = Arc::new(Outbox::default());
@@ -278,8 +290,14 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
         let mut groups: Groups = BTreeMap::from([(G, r)]);
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view =
-            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: None,
+            now: rt.now(),
+        };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
             max_wait_ms: 0,
@@ -327,7 +345,14 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         let mut id = 0;
         let mut ask = async |clients: &mut Clients, groups: &mut Groups, now, request: Request| {
             id += 1;
-            let view = ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: Some(G), now };
+            let view = ClusterView {
+                streams: &streams,
+                queues: &[],
+                exchanges: &[],
+                client_addrs: &addrs,
+                coordinator: Some(G),
+                now,
+            };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
             clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
@@ -354,7 +379,14 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         // The timeout passes: the coordinator proposes the abort, which is not
         // committed yet when the commit arrives.
         now = now + Duration::from_secs(1);
-        let view = ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: Some(G), now };
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: Some(G),
+            now,
+        };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains("t"), "the abort is in flight");
         let end = Request::EndTxn(lotse_proto::EndTxnRequest {
@@ -402,8 +434,14 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
         }];
         let addrs = BTreeMap::new();
-        let view =
-            ClusterView { streams: &[], queues: &queues, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: None,
+            now: rt.now(),
+        };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
         let send = async |clients: &mut Clients, groups: &mut Groups, key, request| {
@@ -461,8 +499,14 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
         }];
         let addrs = BTreeMap::new();
-        let view =
-            ClusterView { streams: &[], queues: &queues, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            client_addrs: &addrs,
+            coordinator: None,
+            now: rt.now(),
+        };
         let outbox = Arc::new(Outbox::default());
         let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
         let mut c1 = Clients::default();

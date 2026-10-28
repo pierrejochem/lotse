@@ -43,15 +43,16 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    AbortedTxn, ApiKey, ApiVersionsResponse, Broker, ErrorCode, FetchPartitionResponse, FetchRequest,
-    FetchResourceResponse, FetchResponse, FindCoordinatorRequest, FindCoordinatorResponse, InitProducerResponse,
-    LeaderHint, MarkerResult, MetadataRequest, MetadataResponse, PartitionMetadata, ProducePartitionResponse,
-    ProduceRequest, ProduceResourceResponse, ProduceResponse, Request, RequestHeader, ResourceMetadata, Response,
-    TxnPartitionResult, TxnResourceResult, WriteTxnMarkersRequest, WriteTxnMarkersResponse, coordinator, isolation,
-    kind,
+    AbortedTxn, ApiKey, ApiVersionsResponse, BindingMetadata, Broker, ErrorCode, ExchangeMetadata,
+    FetchPartitionResponse, FetchRequest, FetchResourceResponse, FetchResponse, FindCoordinatorRequest,
+    FindCoordinatorResponse, InitProducerResponse, LeaderHint, MarkerResult, MetadataRequest, MetadataResponse,
+    PartitionMetadata, ProducePartitionResponse, ProduceRequest, ProduceResourceResponse, ProduceResponse, Request,
+    RequestHeader, ResourceMetadata, Response, TxnPartitionResult, TxnResourceResult, WriteTxnMarkersRequest,
+    WriteTxnMarkersResponse, coordinator, isolation, kind,
 };
 use lotse_raft::{NodeId, RaftGroup, Role};
 use lotse_record::Batch;
+use lotse_route::Exchange;
 use lotse_rt::{Conn, Instant, Runtime};
 
 use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
@@ -189,6 +190,7 @@ struct PendingFetch {
 pub(crate) struct ClusterView<'a> {
     pub(crate) streams: &'a [StreamConfig],
     pub(crate) queues: &'a [QueueConfig],
+    pub(crate) exchanges: &'a [Exchange],
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
     pub(crate) now: Instant,
@@ -765,25 +767,65 @@ fn metadata<R: Runtime, S: StateMachine>(
                 PartitionMetadata { partition: i as u32, leader, leader_term, voters }
             })
             .collect(),
+        exchange: None,
     };
     let describe_queue = |q: &QueueConfig| {
         let as_stream = StreamConfig { name: q.name.clone(), resource_id: q.resource_id, partitions: vec![q.group] };
         ResourceMetadata { kind: kind::QUEUE, ..describe(&as_stream) }
     };
+    let describe_exchange = |x: &Exchange| ResourceMetadata {
+        error: ErrorCode::NONE,
+        name: x.name.clone(),
+        resource_id: x.resource_id,
+        kind: kind::EXCHANGE,
+        partitions: Vec::new(),
+        exchange: Some(ExchangeMetadata {
+            exchange_type: x.kind.code(),
+            bindings: x
+                .bindings
+                .iter()
+                .map(|b| BindingMetadata {
+                    queue_id: b.queue_id,
+                    binding_key: b.key.clone(),
+                    header_match: b.headers.clone(),
+                    match_all: b.match_all,
+                })
+                .collect(),
+        }),
+    };
     let resources = if req.names.is_empty() {
-        view.streams.iter().map(describe).chain(view.queues.iter().map(describe_queue)).collect()
+        view.streams
+            .iter()
+            .map(describe)
+            .chain(view.queues.iter().map(describe_queue))
+            .chain(view.exchanges.iter().map(describe_exchange))
+            .collect()
     } else {
-        req.names
+        // An exchange comes with the queues bound to it: a client needs
+        // their leaders to publish.
+        let mut names: Vec<String> = req.names.clone();
+        for x in view.exchanges.iter().filter(|x| req.names.contains(&x.name)) {
+            for b in &x.bindings {
+                if let Some(q) = view.queues.iter().find(|q| q.resource_id == b.queue_id)
+                    && !names.contains(&q.name)
+                {
+                    names.push(q.name.clone());
+                }
+            }
+        }
+        names
             .iter()
             .map(|n| match view.streams.iter().find(|s| &s.name == n) {
                 Some(s) => describe(s),
                 None if let Some(q) = view.queues.iter().find(|q| &q.name == n) => describe_queue(q),
+                None if let Some(x) = view.exchanges.iter().find(|x| &x.name == n) => describe_exchange(x),
                 None => ResourceMetadata {
                     error: ErrorCode::UNKNOWN_RESOURCE,
                     name: n.clone(),
                     resource_id: 0,
                     kind: kind::STREAM,
                     partitions: Vec::new(),
+                    exchange: None,
                 },
             })
             .collect()

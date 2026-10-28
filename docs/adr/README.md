@@ -36,5 +36,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0029 | [Transactions](0029-transactions.md) | Accepted |
 | 0030 | [Client simulation in its own CI job](0030-client-simulation-in-its-own-ci-job.md) | Accepted |
 | 0031 | [Queues: the first cut](0031-queues-first-cut.md) | Accepted |
+| 0032 | [Publish: exchanges routed by the client](0032-publish-routed-by-the-client.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

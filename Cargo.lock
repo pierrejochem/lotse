@@ -577,6 +577,7 @@ dependencies = [
  "bytes",
  "lotse-proto",
  "lotse-record",
+ "lotse-route",
  "lotse-rt",
  "lotse-sim",
  "thiserror",
@@ -651,6 +652,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-route"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "lotse-rt"
 version = "0.0.1"
 dependencies = [
@@ -680,6 +688,7 @@ dependencies = [
  "lotse-queue",
  "lotse-raft",
  "lotse-record",
+ "lotse-route",
  "lotse-rt",
  "lotse-rt-tokio",
  "lotse-sim",

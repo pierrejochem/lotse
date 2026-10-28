@@ -15,6 +15,7 @@ lotse-raft.workspace = true
 lotse-proto.workspace = true
 lotse-client.workspace = true
 lotse-queue.workspace = true
+lotse-route.workspace = true
 bytes.workspace = true
 crc32c.workspace = true
 thiserror.workspace = true

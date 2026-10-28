@@ -142,6 +142,42 @@ pub struct ResourceMetadata {
     pub kind: u8,
     /// Partitions.
     pub partitions: Vec<PartitionMetadata>,
+    /// For an exchange: its type and bindings.
+    pub exchange: Option<ExchangeMetadata>,
+}
+
+/// Types of exchanges in [`ExchangeMetadata`].
+pub mod exchange_type {
+    /// The binding key equals the routing key.
+    pub const DIRECT: u8 = 0;
+    /// `.`-separated words, `*` one word, `#` zero or more.
+    pub const TOPIC: u8 = 1;
+    /// Every bound queue.
+    pub const FANOUT: u8 = 2;
+    /// By message headers.
+    pub const HEADERS: u8 = 3;
+}
+
+/// An exchange's type and bindings: clients route with them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeMetadata {
+    /// [`exchange_type`].
+    pub exchange_type: u8,
+    /// The bound queues.
+    pub bindings: Vec<BindingMetadata>,
+}
+
+/// A queue bound to an exchange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingMetadata {
+    /// The queue.
+    pub queue_id: u64,
+    /// Matched against the routing key (direct, topic).
+    pub binding_key: String,
+    /// Headers to match (headers exchange); a `None` value is null.
+    pub header_match: Vec<(Bytes, Option<Bytes>)>,
+    /// All headers must match (`true`) or any one.
+    pub match_all: bool,
 }
 
 /// Nodes and resources.
@@ -174,6 +210,23 @@ impl MetadataResponse {
                 w.array(&p.voters, |w, v| w.u32(*v));
                 w.no_tags();
             });
+            w.u8(u8::from(res.exchange.is_some()));
+            if let Some(x) = &res.exchange {
+                w.u8(x.exchange_type);
+                w.array(&x.bindings, |w, b| {
+                    w.u64(b.queue_id);
+                    w.string(&b.binding_key);
+                    w.array(&b.header_match, |w, (k, v)| {
+                        w.bytes(k);
+                        w.u8(u8::from(v.is_some()));
+                        if let Some(v) = v {
+                            w.bytes(v);
+                        }
+                    });
+                    w.u8(u8::from(b.match_all));
+                    w.no_tags();
+                });
+            }
             w.no_tags();
         });
         w.no_tags();
@@ -184,7 +237,7 @@ impl MetadataResponse {
             r.tags()?;
             Ok(b)
         })?;
-        let resources = r.array(15, |r| {
+        let resources = r.array(16, |r| {
             let (error, name, resource_id, kind) = (ErrorCode(r.u16()?), r.string()?, r.u64()?, r.u8()?);
             let partitions = r.array(18, |r| {
                 let p = PartitionMetadata {
@@ -196,8 +249,28 @@ impl MetadataResponse {
                 r.tags()?;
                 Ok(p)
             })?;
+            let exchange = match r.u8()? {
+                0 => None,
+                _ => Some(ExchangeMetadata {
+                    exchange_type: r.u8()?,
+                    bindings: r.array(16, |r| {
+                        let b = BindingMetadata {
+                            queue_id: r.u64()?,
+                            binding_key: r.string()?,
+                            header_match: r.array(5, |r| {
+                                let k = r.bytes()?;
+                                let v = if r.u8()? != 0 { Some(r.bytes()?) } else { None };
+                                Ok((k, v))
+                            })?,
+                            match_all: r.u8()? != 0,
+                        };
+                        r.tags()?;
+                        Ok(b)
+                    })?,
+                }),
+            };
             r.tags()?;
-            Ok(ResourceMetadata { error, name, resource_id, kind, partitions })
+            Ok(ResourceMetadata { error, name, resource_id, kind, partitions, exchange })
         })?;
         r.tags()?;
         Ok(MetadataResponse { brokers, resources })

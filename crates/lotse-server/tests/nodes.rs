@@ -103,6 +103,7 @@ impl World {
                         client_addrs: BTreeMap::new(),
                         streams: Vec::new(),
                         queues: Vec::new(),
+                        exchanges: Vec::new(),
                         coordinator: None,
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },

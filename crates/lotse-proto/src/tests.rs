@@ -88,6 +88,26 @@ fn responses() -> Vec<(ApiKey, Response)> {
                             leader_term: 4,
                             voters: vec![1, 2, 3],
                         }],
+                        exchange: None,
+                    },
+                    ResourceMetadata {
+                        error: ErrorCode::NONE,
+                        name: "events".into(),
+                        resource_id: 12,
+                        kind: kind::EXCHANGE,
+                        partitions: vec![],
+                        exchange: Some(ExchangeMetadata {
+                            exchange_type: exchange_type::HEADERS,
+                            bindings: vec![BindingMetadata {
+                                queue_id: 9,
+                                binding_key: "eu.#".into(),
+                                header_match: vec![
+                                    (Bytes::from_static(b"region"), Some(Bytes::from_static(b"eu"))),
+                                    (Bytes::from_static(b"trace"), None),
+                                ],
+                                match_all: false,
+                            }],
+                        }),
                     },
                     ResourceMetadata {
                         error: ErrorCode::UNKNOWN_RESOURCE,
@@ -95,6 +115,7 @@ fn responses() -> Vec<(ApiKey, Response)> {
                         resource_id: 0,
                         kind: kind::STREAM,
                         partitions: vec![],
+                        exchange: None,
                     },
                 ],
             }),

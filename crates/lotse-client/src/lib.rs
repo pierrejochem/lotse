@@ -37,8 +37,10 @@
 #![warn(missing_docs)]
 
 mod consumer;
+mod publish;
 
 pub use consumer::{Consumer, Message};
+pub use publish::{OutMessage, Published};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -82,9 +84,28 @@ pub enum ClientError {
     /// No broker could serve the request before the retry time ran out.
     #[error("gave up after {0:?}: {1}")]
     GaveUp(Duration, String),
-    /// The stream or queue does not exist, or has no such partition.
+    /// The stream, queue or exchange does not exist, or has no such
+    /// partition.
     #[error("unknown stream {0} or partition {1}")]
     UnknownStream(String, u32),
+    /// A mandatory message matched no binding.
+    #[error("no queue is bound to {exchange} for routing key {routing_key:?}")]
+    Unroutable {
+        /// The exchange.
+        exchange: String,
+        /// The routing key.
+        routing_key: String,
+    },
+    /// A published message was written to some of its queues only. Each
+    /// failure says whether that write is unknown ([`ClientError::Unknown`])
+    /// or did not happen.
+    #[error("published to some queues only: {}", publish::describe_partial(written, failed))]
+    NotAllWritten {
+        /// `(queue, offset)` that hold the message.
+        written: Vec<(String, u64)>,
+        /// Queues that may not, and why.
+        failed: Vec<(String, ClientError)>,
+    },
 }
 
 /// How the client behaves.
@@ -223,6 +244,8 @@ pub struct Client<R: Net + Clock + Spawn> {
     routes: Mutex<BTreeMap<(String, u32), Route>>,
     /// Resource names by id, for requests that address resources by id.
     names: Mutex<BTreeMap<u64, String>>,
+    /// Exchanges by name, for routing published messages.
+    exchanges: Mutex<BTreeMap<String, lotse_route::Exchange>>,
 }
 
 impl<R: Net + Clock + Spawn> fmt::Debug for Client<R> {
@@ -266,6 +289,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
             names: Mutex::new(BTreeMap::new()),
+            exchanges: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -296,6 +320,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
     }
 
     fn learn(&self, m: &MetadataResponse) {
+        self.learn_exchanges(m);
         let mut brokers = self.brokers.lock().expect("brokers lock");
         for b in &m.brokers {
             brokers.insert(b.node_id, format!("{}:{}", b.host, b.port));

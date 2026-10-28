@@ -67,6 +67,8 @@ pub struct NodeConfig {
     pub streams: Vec<StreamConfig>,
     /// Queues and their groups (each one of `groups`).
     pub queues: Vec<QueueConfig>,
+    /// Exchanges and their bindings to `queues`; clients route with them.
+    pub exchanges: Vec<lotse_route::Exchange>,
     /// The group that coordinates producers (hands out producer ids); one
     /// of `groups`. `None`: no idempotent produce.
     pub coordinator: Option<GroupId>,
@@ -363,6 +365,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         let view = ClusterView {
             streams: &cfg.streams,
             queues: &cfg.queues,
+            exchanges: &cfg.exchanges,
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
             now: rt.now(),
