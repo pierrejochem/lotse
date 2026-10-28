@@ -226,3 +226,19 @@ fn a_batch_can_be_made_transactional() {
     set_transactional(&mut raw, false).unwrap();
     assert!(!Batch::parse(&raw.freeze()).unwrap().0.attributes().transactional);
 }
+
+#[test]
+fn ack_and_queue_state_batches_round_trip() {
+    let ranges = vec![(0, 3), (7, 8), (1_000_000, 1_000_512)];
+    let b = ack_batch(&ranges).unwrap();
+    let (batch, _) = Batch::parse(&b).unwrap();
+    assert_eq!(batch.attributes().kind, BatchKind::Ack);
+    assert!(!batch.attributes().control);
+    assert_eq!(ack_ranges(&batch).unwrap(), ranges);
+    assert!(ack_batch(&[(5, 5)]).is_err(), "empty ranges are refused");
+    let counts = vec![(4, 2), (9, 65_535)];
+    let q = queue_state_batch(&counts).unwrap();
+    let (qb, _) = Batch::parse(&q).unwrap();
+    assert_eq!(queue_state_counts(&qb).unwrap(), counts);
+    assert!(ack_ranges(&qb).is_err(), "kinds are not confused");
+}

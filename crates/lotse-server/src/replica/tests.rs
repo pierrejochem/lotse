@@ -221,3 +221,38 @@ fn an_unapplied_batch_is_recognised_from_the_log_tail_after_a_restart() {
         assert_eq!(applied(&r), ["a"]);
     });
 }
+
+#[test]
+fn a_queues_ack_index_survives_a_restart_and_a_snapshot() {
+    Sim::new(11).run(|rt| async move {
+        let open_queue = || async {
+            let cfg = Config::new(1, vec![1]);
+            let options = ReplicaOptions { queue: true, ..ReplicaOptions::default() };
+            let log = LogConfig { segment_bytes: 400, index_interval_bytes: 100 };
+            Replica::open_with(rt.clone(), "q", cfg, Recorder::default(), log, options).await.unwrap()
+        };
+        let mut r = open_queue().await;
+        elect(&mut r).await;
+        for v in ["a", "b", "c"] {
+            commit(&mut r, batch(1, v)).await; // offsets 1, 2, 3 after the no-op
+        }
+        let ack = lotse_record::ack_batch(&[(1, 3)]).unwrap();
+        assert!(
+            matches!(r.propose(ack.clone()), Err(ProposeError::Invalid(_))),
+            "acks are the broker's own, not produced"
+        );
+        r.propose_internal(ack).unwrap();
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        let q = r.queue().unwrap();
+        assert!(q.is_settled(1) && q.is_settled(2) && !q.is_settled(3));
+        let before = q.clone();
+
+        r.compact().await.unwrap();
+        drop(r);
+        rt.crash();
+        let r = open_queue().await;
+        assert_eq!(r.queue(), Some(&before), "restored from the snapshot");
+        assert_eq!(r.queue().unwrap().floor(), 3);
+    });
+}

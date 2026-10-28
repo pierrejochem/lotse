@@ -34,8 +34,8 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Listener, Runtime, Spawn};
 
-use crate::client::{ClientRequest, Clients, ClusterView, MarkerJob, StreamConfig};
-use crate::replica::{Error, ProposeError, Replica, StateMachine};
+use crate::client::{ClientRequest, Clients, ClusterView, MarkerJob, QueueConfig, StreamConfig};
+use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
 
@@ -65,6 +65,8 @@ pub struct NodeConfig {
     pub client_addrs: BTreeMap<NodeId, String>,
     /// Streams and the groups of their partitions.
     pub streams: Vec<StreamConfig>,
+    /// Queues and their groups (each one of `groups`).
+    pub queues: Vec<QueueConfig>,
     /// The group that coordinates producers (hands out producer ids); one
     /// of `groups`. `None`: no idempotent produce.
     pub coordinator: Option<GroupId>,
@@ -194,7 +196,9 @@ impl<R: Runtime> Node<R> {
         for &g in &cfg.groups {
             let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
             let dir = PathBuf::from("groups").join(g.to_string());
-            let replica = Replica::open_with(rt.clone(), dir, raft, state_machine(g), cfg.log, cfg.max_producers);
+            let options =
+                ReplicaOptions { max_producers: cfg.max_producers, queue: cfg.queues.iter().any(|q| q.group == g) };
+            let replica = Replica::open_with(rt.clone(), dir, raft, state_machine(g), cfg.log, options);
             groups.insert(g, replica.await?);
         }
         let listener = rt.listen(&cfg.listen).await?;
@@ -358,6 +362,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         let view = ClusterView {
             streams: &cfg.streams,
+            queues: &cfg.queues,
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
             now: rt.now(),

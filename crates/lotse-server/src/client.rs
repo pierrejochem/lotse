@@ -28,11 +28,16 @@
 //!   answers with its Raft index. Indices are never reused, so neither are
 //!   ids.
 //!
-//! Until the metadata group exists, streams and their partitions' groups
-//! come from the node configuration ([`StreamConfig`]), and so does the
-//! coordinator group.
+//! - Queues ([`queues`]): `Subscribe`, `Credit`, `Ack`, `Nack` and
+//!   `Unsubscribe`; the queue's leader pushes deliveries to subscribers.
+//!   Messages reach a queue by `Produce` to its partition 0.
+//!
+//! Until the metadata group exists, streams and queues and their groups come
+//! from the node configuration ([`StreamConfig`], [`QueueConfig`]), and so
+//! does the coordinator group.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,8 +59,10 @@ use crate::signal::{Signal, race};
 use crate::wire::GroupId;
 
 mod coord;
+mod queues;
 
 pub(crate) use coord::MarkerJob;
+pub use queues::QueueConfig;
 
 /// A stream and the Raft group of each of its partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,16 +75,21 @@ pub struct StreamConfig {
     pub partitions: Vec<GroupId>,
 }
 
-/// Responses waiting to be written to one connection.
+/// Responses and pushes waiting to be written to one connection.
 #[derive(Default)]
 pub(crate) struct Outbox {
     queue: Mutex<VecDeque<Bytes>>,
     ready: Signal,
+    /// The connection is gone (its subscriptions end).
+    closed: AtomicBool,
 }
 
 impl Outbox {
     fn push(&self, correlation_id: u32, response: &Response) {
-        let frame = lotse_proto::encode_response(correlation_id, response);
+        self.push_frame(lotse_proto::encode_response(correlation_id, response));
+    }
+
+    fn push_frame(&self, frame: Bytes) {
         self.queue.lock().expect("outbox lock").push_back(frame);
         self.ready.set();
     }
@@ -113,6 +125,7 @@ pub(crate) async fn serve<R: Runtime>(
         }
     }
     closed.set();
+    outbox.closed.store(true, Ordering::Release);
     writer.await;
 }
 
@@ -175,13 +188,25 @@ struct PendingFetch {
 /// What the main loop knows about the cluster, for answering clients.
 pub(crate) struct ClusterView<'a> {
     pub(crate) streams: &'a [StreamConfig],
+    pub(crate) queues: &'a [QueueConfig],
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
     pub(crate) now: Instant,
 }
 
 impl ClusterView<'_> {
+    /// The group of a stream's partition or a queue (partition 0), for
+    /// writes.
     fn group_of(&self, resource_id: u64, partition: u32) -> Option<GroupId> {
+        if let Some(q) = self.queues.iter().find(|q| q.resource_id == resource_id) {
+            return (partition == 0).then_some(q.group);
+        }
+        self.stream_group_of(resource_id, partition)
+    }
+
+    /// The group of a stream's partition. Queues are not fetched: their
+    /// logs hold acks too, and are read through subscriptions.
+    fn stream_group_of(&self, resource_id: u64, partition: u32) -> Option<GroupId> {
         let s = self.streams.iter().find(|s| s.resource_id == resource_id)?;
         s.partitions.get(partition as usize).copied()
     }
@@ -208,6 +233,13 @@ pub(crate) struct Clients {
     /// Sum of the groups' commit indices when pending fetches were last
     /// tried: they are tried again only after a commit or at their deadline.
     commits_seen: u64,
+    /// Queues this node leads and serves, per group.
+    queues: BTreeMap<GroupId, queues::Serving>,
+    /// The queue group of every subscription here.
+    sub_groups: BTreeMap<u32, GroupId>,
+    next_subscription: u32,
+    /// Acks and delivery counts in flight.
+    queue_writes: Vec<queues::QueueWrite>,
 }
 
 impl Clients {
@@ -225,7 +257,7 @@ impl Clients {
                 id,
                 &Response::ApiVersions(ApiVersionsResponse {
                     versions: ApiKey::SUPPORTED.to_vec(),
-                    features: vec!["streams".into()],
+                    features: vec!["streams".into(), "queues".into()],
                 }),
             ),
             Request::Metadata(m) => outbox.push(id, &Response::Metadata(metadata(&m, view, groups))),
@@ -240,6 +272,11 @@ impl Clients {
             Request::AddPartitionsToTxn(req) => self.add_partitions(outbox, id, req, view, groups),
             Request::EndTxn(req) => self.end_txn(outbox, id, req, view, groups),
             Request::WriteTxnMarkers(req) => self.write_markers(outbox, id, req, view, groups),
+            Request::Subscribe(req) => self.subscribe(outbox, id, req, view, groups),
+            Request::Credit(req) => self.credit(&outbox, req),
+            Request::Ack(req) => self.ack(outbox, id, req, view, groups),
+            Request::Nack(req) => self.nack(outbox, id, req, view, groups),
+            Request::Unsubscribe(req) => self.unsubscribe(outbox, id, req),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -412,6 +449,8 @@ impl Clients {
         let markers = std::mem::take(&mut self.markers);
         self.markers = markers.into_iter().filter_map(|p| settle_markers(p, view.now, groups)).collect();
         let jobs = self.coordinate(view, groups);
+        self.settle_queue_writes(view.now, groups);
+        self.serve_queues(view, groups).await?;
 
         // Commits bring new data, applying moves the last stable offset.
         let commits: u64 = groups.values().map(|g| g.raft_ref().commit() + g.applied()).sum();
@@ -578,7 +617,7 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                 records: Bytes::new(),
                 leader_hint: None,
             };
-            match view.group_of(res.resource_id, fp.partition).and_then(|g| groups.get(&g)) {
+            match view.stream_group_of(res.resource_id, fp.partition).and_then(|g| groups.get(&g)) {
                 None => out.error = ErrorCode::UNKNOWN_RESOURCE,
                 Some(replica) => {
                     let raft = replica.raft_ref();
@@ -727,13 +766,18 @@ fn metadata<R: Runtime, S: StateMachine>(
             })
             .collect(),
     };
+    let describe_queue = |q: &QueueConfig| {
+        let as_stream = StreamConfig { name: q.name.clone(), resource_id: q.resource_id, partitions: vec![q.group] };
+        ResourceMetadata { kind: kind::QUEUE, ..describe(&as_stream) }
+    };
     let resources = if req.names.is_empty() {
-        view.streams.iter().map(describe).collect()
+        view.streams.iter().map(describe).chain(view.queues.iter().map(describe_queue)).collect()
     } else {
         req.names
             .iter()
             .map(|n| match view.streams.iter().find(|s| &s.name == n) {
                 Some(s) => describe(s),
+                None if let Some(q) = view.queues.iter().find(|q| &q.name == n) => describe_queue(q),
                 None => ResourceMetadata {
                     error: ErrorCode::UNKNOWN_RESOURCE,
                     name: n.clone(),

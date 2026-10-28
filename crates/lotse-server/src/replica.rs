@@ -21,10 +21,11 @@
 //! The replica also keeps the state of the partition itself: producers
 //! ([`crate::producers`], for idempotence), transactions ([`crate::txns`],
 //! for the last stable offset and aborted ranges) and, in a coordinator
-//! group, the transaction coordinator's ([`crate::coordinator`]). All three
-//! follow the log the same way: checked on proposal, noted as entries are
-//! appended, cut on truncation, applied in order, and saved in snapshots next
-//! to the state machine's data.
+//! group, the transaction coordinator's ([`crate::coordinator`]); in a queue
+//! group, the queue's settled offsets and delivery counts
+//! ([`lotse_queue::QueueLog`]). They follow the log the same way: checked on
+//! proposal, noted as entries are appended, cut on truncation, applied in
+//! order, and saved in snapshots next to the state machine's data.
 //!
 //! ```text
 //! <dir>/raft.state   term, vote, commit (+ crc)
@@ -38,6 +39,7 @@ use std::path::{Path, PathBuf};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_log::{Log, LogConfig};
+use lotse_queue::QueueLog;
 use lotse_raft::{
     Config, Entry, EntryKind, HardState, Membership, Message, NotLeader, RaftGroup, ReadState, Restored, Send,
     SnapshotMeta, TermRuns,
@@ -51,7 +53,7 @@ use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 3;
+const FORMAT: u8 = 4;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -123,6 +125,23 @@ pub(crate) enum MarkerOutcome {
     StaleCoordinator,
 }
 
+/// How a replica keeps its partition state; every replica of a group must
+/// use the same options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaOptions {
+    /// Producers kept for idempotence; beyond it, the producer with the
+    /// oldest write is evicted.
+    pub max_producers: usize,
+    /// The group is a queue: keep its ack index.
+    pub queue: bool,
+}
+
+impl Default for ReplicaOptions {
+    fn default() -> Self {
+        ReplicaOptions { max_producers: DEFAULT_MAX_PRODUCERS, queue: false }
+    }
+}
+
 /// The partition's own state next to the state machine's (see the module
 /// docs).
 #[derive(Debug)]
@@ -130,6 +149,7 @@ struct PartitionState {
     producers: ProducerState,
     txns: TxnState,
     coordinator: CoordinatorState,
+    queue: Option<QueueLog>,
 }
 
 impl PartitionState {
@@ -146,13 +166,18 @@ impl PartitionState {
     fn applied(&mut self, first: u64, last: u64, batch: &Batch) -> Result<(), Error> {
         self.producers.applied(first, last, batch);
         self.txns.applied(first, last, batch);
+        if let Some(q) = &mut self.queue {
+            q.apply(batch)?;
+        }
         self.coordinator.applied(last, batch).map_err(Error::Corrupt)
     }
 
-    /// Snapshot data: the three states, then the state machine's.
+    /// Snapshot data: the four states (the queue's empty outside a queue
+    /// group), then the state machine's.
     fn snapshot(&self, sm: &[u8]) -> Bytes {
         let mut b = BytesMut::new();
-        for part in [self.producers.encode(), self.txns.encode(), self.coordinator.encode()] {
+        let queue = self.queue.as_ref().map(QueueLog::encode).unwrap_or_default();
+        for part in [self.producers.encode(), self.txns.encode(), self.coordinator.encode(), queue] {
             b.put_u32_le(part.len() as u32);
             b.put_slice(&part);
         }
@@ -160,13 +185,13 @@ impl PartitionState {
         b.freeze()
     }
 
-    /// Restores the three states from snapshot data; returns the state
+    /// Restores the four states from snapshot data; returns the state
     /// machine's part.
     fn restore(&mut self, data: &Bytes) -> Result<Bytes, Error> {
         let short = || Error::Corrupt("snapshot data is truncated".into());
         let mut at = 0;
         let mut parts = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let len = data.get(at..at + 4).ok_or_else(short)?;
             let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
             parts.push(data.get(at + 4..at + 4 + len).ok_or_else(short)?.to_vec());
@@ -175,6 +200,9 @@ impl PartitionState {
         self.producers.restore(&parts[0]).map_err(Error::Corrupt)?;
         self.txns.restore(&parts[1]).map_err(Error::Corrupt)?;
         self.coordinator.restore(&parts[2]).map_err(Error::Corrupt)?;
+        if let Some(q) = &mut self.queue {
+            *q = QueueLog::decode(Bytes::from(parts[3].clone())).map_err(Error::Corrupt)?;
+        }
         Ok(data.slice(at..))
     }
 }
@@ -240,25 +268,26 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         sm: S,
         log_config: LogConfig,
     ) -> Result<Self, Error> {
-        Self::open_with(disk, dir, cfg, sm, log_config, DEFAULT_MAX_PRODUCERS).await
+        Self::open_with(disk, dir, cfg, sm, log_config, ReplicaOptions::default()).await
     }
 
-    /// [`Replica::open`] keeping at most `max_producers` producers. Every
-    /// replica of a group must use the same limit: it decides which
-    /// producers are evicted.
+    /// [`Replica::open`] with [`ReplicaOptions`]. Every replica of a group
+    /// must use the same options: they decide, for example, which producers
+    /// are evicted.
     pub async fn open_with(
         disk: D,
         dir: impl Into<PathBuf>,
         cfg: Config,
         mut sm: S,
         log_config: LogConfig,
-        max_producers: usize,
+        options: ReplicaOptions,
     ) -> Result<Self, Error> {
         let dir = dir.into();
         let mut state = PartitionState {
-            producers: ProducerState::new(max_producers),
+            producers: ProducerState::new(options.max_producers),
             txns: TxnState::default(),
             coordinator: CoordinatorState::default(),
+            queue: options.queue.then(QueueLog::new),
         };
         disk.create_dir_all(&dir).await?;
         let snapshot = match read_file(&disk, &dir.join(SNAPSHOT)).await? {
@@ -357,6 +386,11 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         if parsed.attributes().control {
             return Err(ProposeError::Control);
         }
+        // Acks and queue state are the broker's own (and would settle
+        // messages without anyone having received them).
+        if parsed.attributes().kind != lotse_record::BatchKind::Data {
+            return Err(ProposeError::Invalid(lotse_record::Error::Malformed("only data batches can be produced")));
+        }
         if parsed.producer_id() != 0 && parsed.base_sequence() < 0 {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("idempotent batch without a sequence")));
         }
@@ -422,6 +456,11 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// The partition's transaction state, as applied.
     pub(crate) fn txns(&self) -> &TxnState {
         &self.state.txns
+    }
+
+    /// The queue's ack index, as applied (`None` outside a queue group).
+    pub(crate) fn queue(&self) -> Option<&QueueLog> {
+        self.state.queue.as_ref()
     }
 
     /// The coordinator's state, as applied (empty outside a coordinator

@@ -29,6 +29,17 @@ fn requests() -> Vec<Request> {
             resources: vec![TxnResource { resource_id: 7, partitions: vec![0, 1] }],
         }),
         Request::EndTxn(EndTxnRequest { txn_id: "payments".into(), producer_id: 17, producer_epoch: 2, commit: true }),
+        Request::Subscribe(SubscribeRequest {
+            queue_id: 9,
+            consumer_tag: "worker-1".into(),
+            credit_msgs: 100,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+        }),
+        Request::Credit(CreditRequest { subscription_id: 3, add_msgs: 10, add_bytes: 4096 }),
+        Request::Ack(AckRequest { queue_id: 9, txn_id: None, ranges: vec![(0, 3), (5, 6)] }),
+        Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
+        Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,
@@ -200,6 +211,18 @@ fn responses() -> Vec<(ApiKey, Response)> {
                 }],
             }),
         ),
+        (
+            ApiKey::SUBSCRIBE,
+            Response::Subscribe(SubscribeResponse { error: ErrorCode::NONE, subscription_id: 3, leader_hint: None }),
+        ),
+        (ApiKey::ACK, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
+        (
+            ApiKey::NACK,
+            Response::Outcome(OutcomeResponse {
+                error: ErrorCode::NOT_LEADER,
+                leader_hint: Some(LeaderHint { leader: 2, term: 4 }),
+            }),
+        ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
     ]
@@ -308,7 +331,38 @@ fn error_codes_have_names_and_retry_classes() {
     assert_eq!(ErrorCode::COORDINATOR_NOT_AVAILABLE.name(), "COORDINATOR_NOT_AVAILABLE");
     assert!(ErrorCode::COORDINATOR_NOT_AVAILABLE.retriable() && ErrorCode::CONCURRENT_TRANSACTIONS.retriable());
     assert_eq!(ErrorCode::COORDINATOR_FENCED.name(), "COORDINATOR_FENCED");
+    assert_eq!(ErrorCode::ACK_TIMED_OUT.name(), "ACK_TIMED_OUT");
     assert_eq!(ErrorCode(999).name(), "UNKNOWN");
     assert!(ErrorCode::NOT_LEADER.retriable() && ErrorCode::REQUEST_TIMED_OUT.retriable());
     assert!(!ErrorCode::CORRUPT_BATCH.retriable() && !ErrorCode::UNKNOWN_RESOURCE.retriable());
+}
+
+#[test]
+fn pushes_round_trip_and_are_told_from_responses() {
+    let push = DeliverPush {
+        subscription_id: 3,
+        error: ErrorCode::NONE,
+        batch: Bytes::from_static(b"a batch as stored"),
+        deliveries: vec![
+            DeliveredOffset { offset: 40, delivery_count: 1 },
+            DeliveredOffset { offset: 42, delivery_count: 3 },
+        ],
+        leader_hint: None,
+    };
+    let frame = encode_push(&push);
+    assert!(is_push(&frame));
+    assert_eq!(decode_push(frame.clone()).unwrap(), push);
+    for cut in 0..frame.len() {
+        assert!(decode_push(frame.slice(..cut)).is_err(), "cut at {cut}");
+    }
+    let ended = DeliverPush {
+        subscription_id: 3,
+        error: ErrorCode::NOT_LEADER,
+        batch: Bytes::new(),
+        deliveries: vec![],
+        leader_hint: Some(LeaderHint { leader: 1, term: 7 }),
+    };
+    assert_eq!(decode_push(encode_push(&ended)).unwrap(), ended);
+    let resp = encode_response(5, &Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None }));
+    assert!(!is_push(&resp), "a response is not a push");
 }

@@ -20,6 +20,7 @@ lotse-server = { path = "crates/lotse-server" }
 lotse-rt-tokio = { path = "crates/lotse-rt-tokio" }
 lotse-proto = { path = "crates/lotse-proto" }
 lotse-client = { path = "crates/lotse-client" }
+lotse-queue = { path = "crates/lotse-queue" }
 
 bytes = "1.7"
 crc32c = "0.6"

@@ -621,6 +621,100 @@ pub fn internal_control_batch(kind: InternalControl, payload: &[u8]) -> Result<B
     b.finish()
 }
 
+/// Builds an ACK batch: the offset ranges `[from, to)` a queue's consumers
+/// acknowledged, as ZigZag varints (`from`, then the length) in the value of
+/// one record with an empty key.
+pub fn ack_batch(ranges: &[(u64, u64)]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    varint::put_i64(&mut value, ranges.len() as i64);
+    for (from, to) in ranges {
+        if to <= from {
+            return Err(Error::Malformed("empty ack range"));
+        }
+        varint::put_i64(&mut value, *from as i64);
+        varint::put_i64(&mut value, (to - from) as i64);
+    }
+    queue_batch(BatchKind::Ack, &value)
+}
+
+/// The ranges of an ACK batch.
+pub fn ack_ranges(batch: &Batch) -> Result<Vec<(u64, u64)>, Error> {
+    let value = queue_value(batch, BatchKind::Ack)?;
+    let mut rest = &value[..];
+    let mut next = || -> Result<u64, Error> {
+        let (v, n) = varint::get_i64(rest)?;
+        rest = &rest[n..];
+        u64::try_from(v).map_err(|_| Error::Malformed("negative ack offset"))
+    };
+    let count = next()?;
+    let mut out = Vec::with_capacity(count.min(1024) as usize);
+    for _ in 0..count {
+        let from = next()?;
+        let len = next()?;
+        if len == 0 {
+            return Err(Error::Malformed("empty ack range"));
+        }
+        out.push((from, from.checked_add(len).ok_or(Error::Malformed("ack range overflows"))?));
+    }
+    if !rest.is_empty() {
+        return Err(Error::Malformed("trailing bytes in ack batch"));
+    }
+    Ok(out)
+}
+
+/// Builds a QUEUE_STATE batch: delivery counts `(offset, count)` of a
+/// queue's messages, written on nack or ack timeout.
+pub fn queue_state_batch(counts: &[(u64, u16)]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    varint::put_i64(&mut value, counts.len() as i64);
+    for (offset, count) in counts {
+        varint::put_i64(&mut value, *offset as i64);
+        varint::put_i64(&mut value, i64::from(*count));
+    }
+    queue_batch(BatchKind::QueueState, &value)
+}
+
+/// The delivery counts of a QUEUE_STATE batch.
+pub fn queue_state_counts(batch: &Batch) -> Result<Vec<(u64, u16)>, Error> {
+    let value = queue_value(batch, BatchKind::QueueState)?;
+    let mut rest = &value[..];
+    let mut next = || -> Result<i64, Error> {
+        let (v, n) = varint::get_i64(rest)?;
+        rest = &rest[n..];
+        Ok(v)
+    };
+    let count = next()?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let offset = u64::try_from(next()?).map_err(|_| Error::Malformed("negative offset"))?;
+        let n = u16::try_from(next()?).map_err(|_| Error::Malformed("delivery count out of range"))?;
+        out.push((offset, n));
+    }
+    if !rest.is_empty() {
+        return Err(Error::Malformed("trailing bytes in queue state batch"));
+    }
+    Ok(out)
+}
+
+fn queue_batch(kind: BatchKind, value: &[u8]) -> Result<Bytes, Error> {
+    let mut b = BatchBuilder::new(BatchOptions {
+        attributes: Attributes { compression: Compression::None, transactional: false, control: false, kind },
+        producer_id: 0,
+        producer_epoch: 0,
+        base_sequence: -1,
+    });
+    b.push(0, None, Some(value), &[]);
+    b.finish()
+}
+
+fn queue_value(batch: &Batch, kind: BatchKind) -> Result<Bytes, Error> {
+    if batch.attributes().kind != kind {
+        return Err(Error::Malformed("not a batch of this kind"));
+    }
+    let rec = batch.records()?.into_iter().next().ok_or(Error::Malformed("empty queue batch"))?;
+    rec.value.ok_or(Error::Malformed("queue batch without value"))
+}
+
 /// What a control batch is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {

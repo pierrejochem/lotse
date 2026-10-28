@@ -905,3 +905,239 @@ impl WriteTxnMarkersResponse {
         Ok(WriteTxnMarkersResponse { markers })
     }
 }
+
+/// Subscribes to a queue; deliveries follow as pushes on this connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeRequest {
+    /// The queue.
+    pub queue_id: u64,
+    /// The consumer's name for itself.
+    pub consumer_tag: String,
+    /// Initial credit in messages.
+    pub credit_msgs: u32,
+    /// Initial credit in bytes.
+    pub credit_bytes: u32,
+    /// Single active consumer (not yet supported: refused).
+    pub exclusive: bool,
+}
+
+impl SubscribeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.queue_id);
+        w.string(&self.consumer_tag);
+        w.u32(self.credit_msgs);
+        w.u32(self.credit_bytes);
+        w.u8(u8::from(self.exclusive));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = SubscribeRequest {
+            queue_id: r.u64()?,
+            consumer_tag: r.string()?,
+            credit_msgs: r.u32()?,
+            credit_bytes: r.u32()?,
+            exclusive: r.u8()? != 0,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The subscription, or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Names the subscription in pushes, `Credit` and `Unsubscribe`.
+    pub subscription_id: u32,
+    /// The queue's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl SubscribeResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u32(self.subscription_id);
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(SubscribeResponse { error: ErrorCode(r.u16()?), subscription_id: r.u32()?, leader_hint: get_hint(r)? })
+    }
+}
+
+/// One message of a delivered batch, for this subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveredOffset {
+    /// The message's offset.
+    pub offset: u64,
+    /// How often it has been delivered, this time included.
+    pub delivery_count: u16,
+}
+
+/// A push to a subscription: a batch as stored and the messages in it that
+/// are this subscription's. With an error, the subscription has ended
+/// (e.g. `NOT_LEADER` after a leader change) and carries no batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliverPush {
+    /// The subscription.
+    pub subscription_id: u32,
+    /// `NONE` for a delivery; otherwise why the subscription ended.
+    pub error: ErrorCode,
+    /// One record batch from the log, unchanged.
+    pub batch: Bytes,
+    /// The offsets in `batch` delivered to this subscription.
+    pub deliveries: Vec<DeliveredOffset>,
+    /// The queue's leader, after `NOT_LEADER`.
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl DeliverPush {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.subscription_id);
+        w.u16(self.error.0);
+        w.bytes(&self.batch);
+        w.array(&self.deliveries, |w, d| {
+            w.u64(d.offset);
+            w.u16(d.delivery_count);
+        });
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DeliverPush {
+            subscription_id: r.u32()?,
+            error: ErrorCode(r.u16()?),
+            batch: r.bytes()?,
+            deliveries: r.array(10, |r| Ok(DeliveredOffset { offset: r.u64()?, delivery_count: r.u16()? }))?,
+            leader_hint: get_hint(r)?,
+        })
+    }
+}
+
+/// Adds credit to a subscription. Never answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreditRequest {
+    /// The subscription.
+    pub subscription_id: u32,
+    /// Messages to add.
+    pub add_msgs: u32,
+    /// Bytes to add.
+    pub add_bytes: u32,
+}
+
+impl CreditRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.subscription_id);
+        w.u32(self.add_msgs);
+        w.u32(self.add_bytes);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CreditRequest { subscription_id: r.u32()?, add_msgs: r.u32()?, add_bytes: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+fn put_ranges(w: &mut Writer, ranges: &[(u64, u64)]) {
+    w.array(ranges, |w, (f, t)| {
+        w.u64(*f);
+        w.u64(*t);
+    });
+}
+
+fn get_ranges(r: &mut Reader) -> Result<Vec<(u64, u64)>, DecodeError> {
+    r.array(16, |r| Ok((r.u64()?, r.u64()?)))
+}
+
+/// Acknowledges messages `[from, to)` of a queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckRequest {
+    /// The queue.
+    pub queue_id: u64,
+    /// Transaction, for an ack that takes effect with its commit (not yet
+    /// supported: refused).
+    pub txn_id: Option<String>,
+    /// Offset ranges `[from, to)`.
+    pub ranges: Vec<(u64, u64)>,
+}
+
+impl AckRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.queue_id);
+        w.opt_string(self.txn_id.as_deref());
+        put_ranges(w, &self.ranges);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AckRequest { queue_id: r.u64()?, txn_id: r.opt_string()?, ranges: get_ranges(r)? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Rejects messages `[from, to)`: back to the queue, or discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NackRequest {
+    /// The queue.
+    pub queue_id: u64,
+    /// Offset ranges `[from, to)`.
+    pub ranges: Vec<(u64, u64)>,
+    /// Deliver again (`true`) or discard.
+    pub requeue: bool,
+    /// Wait before delivering again (not yet supported: must be 0).
+    pub delay_ms: u32,
+}
+
+impl NackRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.queue_id);
+        put_ranges(w, &self.ranges);
+        w.u8(u8::from(self.requeue));
+        w.u32(self.delay_ms);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = NackRequest { queue_id: r.u64()?, ranges: get_ranges(r)?, requeue: r.u8()? != 0, delay_ms: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Ends a subscription; its messages in flight stay with it until acked or
+/// the connection closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsubscribeRequest {
+    /// The subscription.
+    pub subscription_id: u32,
+}
+
+impl UnsubscribeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.subscription_id);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = UnsubscribeRequest { subscription_id: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Only an outcome (for `Ack`, `Nack`, `Unsubscribe`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The queue's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl OutcomeResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(OutcomeResponse { error: ErrorCode(r.u16()?), leader_hint: get_hint(r)? })
+    }
+}

@@ -15,7 +15,12 @@
 //!
 //! Implemented so far: `ApiVersions`, `Metadata`, `FindCoordinator`,
 //! `Produce`, `Fetch`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn` and
-//! the internal `WriteTxnMarkers`, all at version 0.
+//! the internal `WriteTxnMarkers`, and for queues `Subscribe`, `Deliver`
+//! (a push), `Credit`, `Ack`, `Nack` and `Unsubscribe`, all at version 0.
+//!
+//! A push frame (a delivery to a queue consumer) uses the response layout
+//! with correlation id 0 and flag [`flags::PUSH`], followed by its API key
+//! and version: see [`encode_push`].
 
 #![warn(missing_docs)]
 
@@ -60,6 +65,18 @@ impl ApiKey {
     /// A producer id and epoch for idempotent (and later transactional)
     /// produce. Keys 5 to 15 are the stream and queue keys of the design.
     pub const INIT_PRODUCER: ApiKey = ApiKey(16);
+    /// Subscribes to a queue.
+    pub const SUBSCRIBE: ApiKey = ApiKey(10);
+    /// Pushes messages to a subscription (never a request).
+    pub const DELIVER: ApiKey = ApiKey(11);
+    /// Adds credit to a subscription; never answered.
+    pub const CREDIT: ApiKey = ApiKey(12);
+    /// Acknowledges queue messages.
+    pub const ACK: ApiKey = ApiKey(13);
+    /// Rejects queue messages: back to the queue, or discarded.
+    pub const NACK: ApiKey = ApiKey(14);
+    /// Ends a subscription.
+    pub const UNSUBSCRIBE: ApiKey = ApiKey(15);
     /// Adds partitions to a transaction.
     pub const ADD_PARTITIONS_TO_TXN: ApiKey = ApiKey(17);
     /// Commits or aborts a transaction. Keys 18 and 19 are `AddAcksToTxn`
@@ -70,7 +87,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 9] = [
+    pub const SUPPORTED: [ApiVersionRange; 14] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -80,6 +97,11 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::ADD_PARTITIONS_TO_TXN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::END_TXN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::WRITE_TXN_MARKERS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::SUBSCRIBE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREDIT, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ACK, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::NACK, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::UNSUBSCRIBE, min: 0, max: 0 },
     ];
 }
 
@@ -142,10 +164,18 @@ impl ErrorCode {
     pub const CONCURRENT_TRANSACTIONS: ErrorCode = ErrorCode(19);
     /// A newer coordinator has taken over this producer's markers.
     pub const COORDINATOR_FENCED: ErrorCode = ErrorCode(20);
+    /// The request is not valid (e.g. acknowledges offsets that were never
+    /// delivered); retrying it unchanged will not help.
+    pub const INVALID_REQUEST: ErrorCode = ErrorCode(21);
+    /// The subscription does not exist (any more) on this connection.
+    pub const UNKNOWN_SUBSCRIPTION: ErrorCode = ErrorCode(22);
+    /// The subscription held a message unacknowledged longer than the queue's
+    /// ack timeout; it has ended and its messages go to other consumers.
+    pub const ACK_TIMED_OUT: ErrorCode = ErrorCode(23);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 21] = [
+        const NAMES: [&str; 24] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -167,6 +197,9 @@ impl ErrorCode {
             "COORDINATOR_NOT_AVAILABLE",
             "CONCURRENT_TRANSACTIONS",
             "COORDINATOR_FENCED",
+            "INVALID_REQUEST",
+            "UNKNOWN_SUBSCRIPTION",
+            "ACK_TIMED_OUT",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -234,6 +267,16 @@ pub enum Request {
     EndTxn(EndTxnRequest),
     /// [`ApiKey::WRITE_TXN_MARKERS`].
     WriteTxnMarkers(WriteTxnMarkersRequest),
+    /// [`ApiKey::SUBSCRIBE`].
+    Subscribe(SubscribeRequest),
+    /// [`ApiKey::CREDIT`]; never answered.
+    Credit(CreditRequest),
+    /// [`ApiKey::ACK`].
+    Ack(AckRequest),
+    /// [`ApiKey::NACK`].
+    Nack(NackRequest),
+    /// [`ApiKey::UNSUBSCRIBE`].
+    Unsubscribe(UnsubscribeRequest),
 }
 
 impl Request {
@@ -249,6 +292,11 @@ impl Request {
             Request::AddPartitionsToTxn(_) => ApiKey::ADD_PARTITIONS_TO_TXN,
             Request::EndTxn(_) => ApiKey::END_TXN,
             Request::WriteTxnMarkers(_) => ApiKey::WRITE_TXN_MARKERS,
+            Request::Subscribe(_) => ApiKey::SUBSCRIBE,
+            Request::Credit(_) => ApiKey::CREDIT,
+            Request::Ack(_) => ApiKey::ACK,
+            Request::Nack(_) => ApiKey::NACK,
+            Request::Unsubscribe(_) => ApiKey::UNSUBSCRIBE,
         }
     }
 }
@@ -270,6 +318,11 @@ pub enum Response {
     EndTxn(EndTxnResponse),
     /// To [`Request::WriteTxnMarkers`].
     WriteTxnMarkers(WriteTxnMarkersResponse),
+    /// To [`Request::Subscribe`].
+    Subscribe(SubscribeResponse),
+    /// To [`Request::Ack`], [`Request::Nack`] and [`Request::Unsubscribe`]:
+    /// only an outcome.
+    Outcome(OutcomeResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -297,6 +350,11 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::AddPartitionsToTxn(r) => r.put(&mut w),
         Request::EndTxn(r) => r.put(&mut w),
         Request::WriteTxnMarkers(r) => r.put(&mut w),
+        Request::Subscribe(r) => r.put(&mut w),
+        Request::Credit(r) => r.put(&mut w),
+        Request::Ack(r) => r.put(&mut w),
+        Request::Nack(r) => r.put(&mut w),
+        Request::Unsubscribe(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -326,6 +384,11 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::ADD_PARTITIONS_TO_TXN => Request::AddPartitionsToTxn(AddPartitionsToTxnRequest::get(&mut r)?),
         ApiKey::END_TXN => Request::EndTxn(EndTxnRequest::get(&mut r)?),
         ApiKey::WRITE_TXN_MARKERS => Request::WriteTxnMarkers(WriteTxnMarkersRequest::get(&mut r)?),
+        ApiKey::SUBSCRIBE => Request::Subscribe(SubscribeRequest::get(&mut r)?),
+        ApiKey::CREDIT => Request::Credit(CreditRequest::get(&mut r)?),
+        ApiKey::ACK => Request::Ack(AckRequest::get(&mut r)?),
+        ApiKey::NACK => Request::Nack(NackRequest::get(&mut r)?),
+        ApiKey::UNSUBSCRIBE => Request::Unsubscribe(UnsubscribeRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -346,6 +409,8 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::AddPartitionsToTxn(r) => r.put(&mut w),
         Response::EndTxn(r) => r.put(&mut w),
         Response::WriteTxnMarkers(r) => r.put(&mut w),
+        Response::Subscribe(r) => r.put(&mut w),
+        Response::Outcome(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -354,6 +419,40 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         }
     }
     w.finish()
+}
+
+/// Encodes a push frame: correlation id 0, flag [`flags::PUSH`], then the
+/// API key and version and the body.
+pub fn encode_push(push: &DeliverPush) -> Bytes {
+    let mut w = Writer::new();
+    w.u32(0);
+    w.u16(flags::PUSH);
+    w.no_tags();
+    w.u16(ApiKey::DELIVER.0);
+    w.u16(0);
+    push.put(&mut w);
+    w.finish()
+}
+
+/// Whether a frame from the broker is a push rather than a response.
+pub fn is_push(frame: &[u8]) -> bool {
+    frame.len() >= 6 && frame[..4] == [0, 0, 0, 0] && u16::from_le_bytes([frame[4], frame[5]]) & flags::PUSH != 0
+}
+
+/// Decodes a push frame.
+pub fn decode_push(frame: Bytes) -> Result<DeliverPush, DecodeError> {
+    let mut r = Reader::new(frame);
+    let (correlation_id, flags) = (r.u32()?, r.u16()?);
+    if correlation_id != 0 || flags & flags::PUSH == 0 {
+        return Err(DecodeError::Malformed("not a push frame"));
+    }
+    r.tags()?;
+    if ApiKey(r.u16()?) != ApiKey::DELIVER || r.u16()? != 0 {
+        return Err(DecodeError::Malformed("unknown push"));
+    }
+    let push = DeliverPush::get(&mut r)?;
+    r.finish()?;
+    Ok(push)
 }
 
 /// The correlation id of a response frame, to find the request it answers.
@@ -382,6 +481,8 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::ADD_PARTITIONS_TO_TXN => Response::AddPartitionsToTxn(AddPartitionsToTxnResponse::get(&mut r)?),
         ApiKey::END_TXN => Response::EndTxn(EndTxnResponse::get(&mut r)?),
         ApiKey::WRITE_TXN_MARKERS => Response::WriteTxnMarkers(WriteTxnMarkersResponse::get(&mut r)?),
+        ApiKey::SUBSCRIBE => Response::Subscribe(SubscribeResponse::get(&mut r)?),
+        ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE => Response::Outcome(OutcomeResponse::get(&mut r)?),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),

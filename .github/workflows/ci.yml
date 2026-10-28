@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly: the client simulation at full depth (ADR 0027).
+  # Nightly: the client and queue simulations at full depth (ADRs 0027, 0031).
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
@@ -57,7 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing
         env:
           LOTSE_SIM_SEEDS: "5000"
 
@@ -71,5 +71,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p lotse-server --release --test clients
+        env:
+          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
+
+  # The queue simulation, in a job of its own like the client simulation
+  # (ADR 0031): 2,000 seeds on pushes and pull requests, 5,000 nightly.
+  queue-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p lotse-server --release --test queues
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}

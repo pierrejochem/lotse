@@ -37,11 +37,15 @@ struct Five {
 
 impl Five {
     async fn new(rt: &SimRuntime) -> Five {
+        Five::with(rt, crate::ReplicaOptions::default()).await
+    }
+
+    async fn with(rt: &SimRuntime, options: crate::ReplicaOptions) -> Five {
         let mut nodes = BTreeMap::new();
         for id in 1..=5 {
             let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2, 3, 4, 5]) };
             let disk = rt.node(&format!("n{id}"));
-            let r = Replica::open(disk, "g", cfg, Nothing, LogConfig::default()).await.unwrap();
+            let r = Replica::open_with(disk, "g", cfg, Nothing, LogConfig::default(), options).await.unwrap();
             nodes.insert(id, BTreeMap::from([(G, r)]));
         }
         Five { nodes, queue: Vec::new() }
@@ -138,7 +142,8 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
         // A produce reaches node 1; its entry (index 2) gets to node 2 only.
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view =
+            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
         let mut clients = Clients::default();
@@ -195,7 +200,8 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
 
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view =
+            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
         let outbox = Arc::new(Outbox::default());
@@ -272,7 +278,8 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
         let mut groups: Groups = BTreeMap::from([(G, r)]);
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let view =
+            ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: None, now: rt.now() };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
             max_wait_ms: 0,
@@ -320,7 +327,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         let mut id = 0;
         let mut ask = async |clients: &mut Clients, groups: &mut Groups, now, request: Request| {
             id += 1;
-            let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: Some(G), now };
+            let view = ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: Some(G), now };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
             clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
@@ -347,7 +354,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         // The timeout passes: the coordinator proposes the abort, which is not
         // committed yet when the commit arrives.
         now = now + Duration::from_secs(1);
-        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: Some(G), now };
+        let view = ClusterView { streams: &streams, queues: &[], client_addrs: &addrs, coordinator: Some(G), now };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains("t"), "the abort is in flight");
         let end = Request::EndTxn(lotse_proto::EndTxnRequest {
@@ -360,5 +367,148 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         assert_eq!(e.error, ErrorCode::CONCURRENT_TRANSACTIONS, "not a second decision");
         let phase = groups[&G].coordinator().get("t").unwrap().phase;
         assert!(matches!(phase, crate::coordinator::Phase::PrepareAbort | crate::coordinator::Phase::CompleteAbort));
+    });
+}
+
+/// Responses (not pushes) in `outbox`, decoded as answers to `key`; pushes
+/// are returned separately.
+fn drain(outbox: &Outbox, key: ApiKey) -> (Vec<Response>, Vec<lotse_proto::DeliverPush>) {
+    let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+    let (pushes, responses): (Vec<Bytes>, Vec<Bytes>) = frames.into_iter().partition(|f| lotse_proto::is_push(f));
+    (
+        responses.into_iter().map(|f| lotse_proto::decode_response(f, key).unwrap().1).collect(),
+        pushes.into_iter().map(|f| lotse_proto::decode_push(f).unwrap()).collect(),
+    )
+}
+
+/// Acks for offsets the queue's log does not hold yet are refused: they
+/// would settle messages nobody has received.
+#[test]
+fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig {
+            name: "jobs".into(),
+            resource_id: 7,
+            group: G,
+            ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+        }];
+        let addrs = BTreeMap::new();
+        let view =
+            ClusterView { streams: &[], queues: &queues, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let send = async |clients: &mut Clients, groups: &mut Groups, key, request| {
+            let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+            clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            drain(&outbox, key)
+        };
+        for v in ["a", "b"] {
+            send(&mut clients, &mut groups, ApiKey::PRODUCE, produce_request(v)).await; // offsets 1, 2
+        }
+        let ack = |ranges| Request::Ack(lotse_proto::AckRequest { queue_id: 7, txn_id: None, ranges });
+        let outcome = |r: &[Response]| match r {
+            [Response::Outcome(o)] => o.error,
+            other => panic!("expected one outcome, got {other:?}"),
+        };
+        let (r, _) = send(&mut clients, &mut groups, ApiKey::ACK, ack(vec![(2, 10)])).await;
+        assert_eq!(outcome(&r), ErrorCode::INVALID_REQUEST, "offsets 3..10 are not in the log");
+        let (r, _) = send(&mut clients, &mut groups, ApiKey::ACK, ack(vec![(1, 2)])).await;
+        assert_eq!(outcome(&r), ErrorCode::NONE);
+
+        let sub = Request::Subscribe(lotse_proto::SubscribeRequest {
+            queue_id: 7,
+            consumer_tag: "w".into(),
+            credit_msgs: 10,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+        });
+        let (r, pushes) = send(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
+        assert!(matches!(&r[..], [Response::Subscribe(s)] if s.error == ErrorCode::NONE), "{r:?}");
+        let delivered: Vec<u64> = pushes.iter().flat_map(|p| p.deliveries.iter().map(|d| d.offset)).collect();
+        assert_eq!(delivered, vec![2], "only the message that was not acknowledged");
+    });
+}
+
+/// A new leader may hold an ack that its predecessor committed without
+/// knowing it is committed: it must not deliver until it has applied an
+/// entry of its own term, or the acknowledged message goes out again.
+#[test]
+fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
+    Sim::new(5).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let mut five = Five::with(&rt, options).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+        let queues = [QueueConfig {
+            name: "jobs".into(),
+            resource_id: 7,
+            group: G,
+            ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+        }];
+        let addrs = BTreeMap::new();
+        let view =
+            ClusterView { streams: &[], queues: &queues, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let outbox = Arc::new(Outbox::default());
+        let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
+        let mut c1 = Clients::default();
+
+        // Message "a" at offset 1, committed and known committed everywhere.
+        let req =
+            ClientRequest { outbox: outbox.clone(), header: header(ApiKey::PRODUCE), request: produce_request("a") };
+        c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(2).commit(), 2);
+
+        // Its ack reaches nodes 2 and 3 and commits on node 1; nobody else
+        // learns that it is committed.
+        let ack = Request::Ack(lotse_proto::AckRequest { queue_id: 7, txn_id: None, ranges: vec![(1, 2)] });
+        let req = ClientRequest { outbox: outbox.clone(), header: header(ApiKey::ACK), request: ack };
+        c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+        let near = |f: NodeId, t: NodeId| (f == 1 && (t == 2 || t == 3)) || ((f == 2 || f == 3) && t == 1);
+        five.run(2, &all, None, near).await;
+        assert_eq!(five.get(1).commit(), 3, "the ack is committed on node 1");
+        assert_eq!((five.get(2).last_index(), five.get(2).commit()), (3, 2), "node 2 holds it, not known committed");
+
+        // Node 2 wins with 3 and 4 and has a consumer before its no-op commits.
+        five.campaign(2);
+        five.run(1, &all, None, |f, t| f == 2 && (t == 3 || t == 4)).await;
+        five.run(1, &all, None, |f, t| t == 2 && (f == 3 || f == 4)).await;
+        assert_eq!(five.get(2).role(), Role::Leader);
+        let mut c2 = Clients::default();
+        let sub = Request::Subscribe(lotse_proto::SubscribeRequest {
+            queue_id: 7,
+            consumer_tag: "w".into(),
+            credit_msgs: 10,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+        });
+        let req = ClientRequest { outbox: outbox.clone(), header: header(ApiKey::SUBSCRIBE), request: sub };
+        let groups = five.nodes.get_mut(&2).unwrap();
+        c2.handle(req, &view, groups).await.unwrap();
+        groups.get_mut(&G).unwrap().process().await.unwrap();
+        c2.after_round(&view, groups).await.unwrap();
+        let (_, pushes) = drain(&outbox, ApiKey::SUBSCRIBE);
+        assert!(pushes.is_empty(), "delivered before its own term is applied: {pushes:?}");
+
+        // Once its no-op commits, the ack is applied and nothing is left.
+        five.run(6, &[1, 2, 3, 4, 5], Some(2), |_, _| true).await;
+        c2.after_round(&view, five.nodes.get_mut(&2).unwrap()).await.unwrap();
+        let (_, pushes) = drain(&outbox, ApiKey::SUBSCRIBE);
+        assert!(pushes.is_empty(), "the acknowledged message came back: {pushes:?}");
     });
 }

@@ -140,6 +140,7 @@ impl World {
                         client_listen: Some(client_addrs[&id].clone()),
                         client_addrs: client_addrs.clone(),
                         streams: streams.clone(),
+                        queues: Vec::new(),
                         coordinator: Some(3),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },

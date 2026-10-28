@@ -17,7 +17,7 @@ mod signal;
 mod txns;
 pub mod wire;
 
-pub use client::StreamConfig;
+pub use client::{QueueConfig, StreamConfig};
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle};
 pub use producers::DEFAULT_MAX_PRODUCERS;
-pub use replica::{Error, Output, ProposeError, Proposed, Replica, StateMachine};
+pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, StateMachine};

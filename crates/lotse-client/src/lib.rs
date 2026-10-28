@@ -22,6 +22,12 @@
 //! read_committed consumers see all of a committed transaction and nothing of
 //! an aborted one. [`Fetched::committed_batches`] drops what they must not see.
 //!
+//! Queues are consumed through a [`Consumer`] ([`Client::subscribe`]): the
+//! queue's leader pushes messages within the consumer's credit, the consumer
+//! acknowledges each one, and after a leader change or a broken connection
+//! it subscribes again on its own. Messages not acknowledged by then are
+//! delivered again, possibly to another consumer.
+//!
 //! Only when retrying runs out of time with the outcome still unknown does
 //! the caller get [`ClientError::Unknown`]; the client then starts over with
 //! a new producer id, so later batches do not wait for a gap that may never
@@ -29,6 +35,10 @@
 //! retry could write the batch twice.
 
 #![warn(missing_docs)]
+
+mod consumer;
+
+pub use consumer::{Consumer, Message};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -72,7 +82,7 @@ pub enum ClientError {
     /// No broker could serve the request before the retry time ran out.
     #[error("gave up after {0:?}: {1}")]
     GaveUp(Duration, String),
-    /// The stream does not exist, or has no such partition.
+    /// The stream or queue does not exist, or has no such partition.
     #[error("unknown stream {0} or partition {1}")]
     UnknownStream(String, u32),
 }
@@ -772,9 +782,22 @@ impl fmt::Display for CallError {
 /// A response slot and whoever waits on it.
 type Slot = Arc<Mutex<(Option<Result<Bytes, String>>, Option<Waker>)>>;
 
+/// Pushes for one subscription (`Err`: the connection broke), and whoever
+/// waits on them.
+type PushQueue = Arc<Mutex<(std::collections::VecDeque<Result<lotse_proto::DeliverPush, String>>, Option<Waker>)>>;
+
+/// Subscriptions whose pushes arrived before anyone registered for them
+/// (the reader can be faster than the subscriber) are kept for this many
+/// subscriptions at most.
+const ORPHANS: usize = 64;
+
 #[derive(Default)]
 struct Waiting {
     slots: BTreeMap<u32, (ApiKey, Slot)>,
+    /// Registered subscriptions.
+    subs: BTreeMap<u32, PushQueue>,
+    /// Pushes for subscriptions not registered yet.
+    orphans: BTreeMap<u32, Vec<lotse_proto::DeliverPush>>,
     /// Set once the connection broke or was closed; no new requests.
     broken: Option<String>,
     /// Wakes the reader when the connection is closed.
@@ -785,6 +808,14 @@ struct Connection<C: Conn> {
     conn: C,
     waiting: Mutex<Waiting>,
     next_id: AtomicU32,
+}
+
+fn deliver_push(queue: &PushQueue, push: Result<lotse_proto::DeliverPush, String>) {
+    let mut q = queue.lock().expect("push lock");
+    q.0.push_back(push);
+    if let Some(w) = q.1.take() {
+        w.wake();
+    }
 }
 
 fn fill(slot: &Slot, value: Result<Bytes, String>) {
@@ -812,6 +843,9 @@ impl<C: Conn> Connection<C> {
         for (_, (_, slot)) in std::mem::take(&mut w.slots) {
             fill(&slot, Err(why.clone()));
         }
+        for (_, queue) in std::mem::take(&mut w.subs) {
+            deliver_push(&queue, Err(why.clone()));
+        }
         if let Some(r) = w.reader.take() {
             r.wake();
         }
@@ -834,6 +868,13 @@ impl<C: Conn> Connection<C> {
                 Some(Err(e)) => return self.fail(format!("connection broke: {e}")),
                 None => return,
             };
+            if lotse_proto::is_push(&frame) {
+                let Ok(push) = lotse_proto::decode_push(frame) else {
+                    return self.fail("undecodable push".into());
+                };
+                self.route_push(push);
+                continue;
+            }
             let Ok(id) = lotse_proto::response_correlation_id(&frame) else {
                 return self.fail("undecodable response".into());
             };
@@ -842,6 +883,50 @@ impl<C: Conn> Connection<C> {
                 fill(&slot, Ok(frame));
             }
         }
+    }
+
+    fn route_push(&self, push: lotse_proto::DeliverPush) {
+        let mut w = self.waiting.lock().expect("waiting lock");
+        match w.subs.get(&push.subscription_id) {
+            Some(queue) => deliver_push(queue, Ok(push)),
+            None => {
+                if !w.orphans.contains_key(&push.subscription_id) && w.orphans.len() >= ORPHANS {
+                    w.orphans.pop_first();
+                }
+                w.orphans.entry(push.subscription_id).or_default().push(push);
+            }
+        }
+    }
+
+    /// Receives the pushes for subscription `id` from now on, and those
+    /// that arrived before. `None` if the connection is broken.
+    fn register(&self, id: u32) -> Option<PushQueue> {
+        let mut w = self.waiting.lock().expect("waiting lock");
+        if w.broken.is_some() {
+            return None;
+        }
+        let queue: PushQueue = Arc::default();
+        for push in w.orphans.remove(&id).unwrap_or_default() {
+            deliver_push(&queue, Ok(push));
+        }
+        w.subs.insert(id, queue.clone());
+        Some(queue)
+    }
+
+    fn unregister(&self, id: u32) {
+        let mut w = self.waiting.lock().expect("waiting lock");
+        w.subs.remove(&id);
+        w.orphans.remove(&id);
+    }
+
+    /// Sends a request nobody waits for an answer to (`Credit`, or cleanup
+    /// on drop); an answer that comes anyway is dropped.
+    async fn send_only(&self, req: &Request) -> Result<(), String> {
+        if let Some(why) = &self.waiting.lock().expect("waiting lock").broken {
+            return Err(why.clone());
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
+        self.conn.send(lotse_proto::encode_request(id, req)).await.map_err(|e| e.to_string())
     }
 
     async fn call<T: Clock>(&self, req: &Request, clock: &T, timeout: Duration) -> Result<Response, CallError> {

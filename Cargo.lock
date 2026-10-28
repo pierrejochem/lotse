@@ -625,6 +625,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-queue"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "lotse-record",
+ "lotse-rt",
+]
+
+[[package]]
 name = "lotse-raft"
 version = "0.0.1"
 dependencies = [
@@ -668,6 +677,7 @@ dependencies = [
  "lotse-client",
  "lotse-log",
  "lotse-proto",
+ "lotse-queue",
  "lotse-raft",
  "lotse-record",
  "lotse-rt",
