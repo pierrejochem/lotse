@@ -292,8 +292,12 @@ async fn consumer(rt: SimRuntime, partition: u32, out: Arc<Mutex<Outcomes>>, sto
                     offset = b.next_offset();
                     records = rest;
                 }
-                assert!(offset <= f.high_watermark, "read past the high watermark");
+                // Only a response with records says something: a new leader's
+                // high watermark lags what its predecessor served until an
+                // entry of its own term commits, so an empty answer may come
+                // with one below `offset`.
                 if !f.records.is_empty() {
+                    assert!(offset <= f.high_watermark, "read past the high watermark");
                     assert!(offset <= f.last_stable_offset, "read past the last stable offset");
                 }
                 out.lock().unwrap().read.entry(partition).or_default().extend(committed(&f));
