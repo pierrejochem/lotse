@@ -31,8 +31,9 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0024 | [Tool-independent project memory and agent](0024-tool-independent-project-memory-and-agent.md) | Accepted |
 | 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted |
 | 0026 | [Native protocol: the first cut](0026-native-protocol-first-cut.md) | Accepted |
-| 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted |
+| 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted; job layout amended by 0030 |
 | 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted |
 | 0029 | [Transactions](0029-transactions.md) | Accepted |
+| 0030 | [Client simulation in its own CI job](0030-client-simulation-in-its-own-ci-job.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
