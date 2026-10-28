@@ -588,6 +588,91 @@ pub fn raft_control(batch: &Batch) -> Result<Option<(RaftControl, Bytes)>, Error
     Ok(Some((kind, rec.value.unwrap_or_default())))
 }
 
+/// The broker's own records in a coordinator group, stored as control
+/// batches so that no user state machine or consumer takes them for data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalControl {
+    /// A producer id allocation; the entry's Raft index is the id.
+    ProducerId,
+    /// The state of one transactional id; the value is its encoding.
+    TxnState,
+}
+
+/// Builds an internal control batch carrying `payload`.
+pub fn internal_control_batch(kind: InternalControl, payload: &[u8]) -> Result<Bytes, Error> {
+    let mut b = BatchBuilder::new(BatchOptions {
+        attributes: Attributes {
+            compression: Compression::None,
+            transactional: false,
+            control: true,
+            kind: BatchKind::Data,
+        },
+        producer_id: 0,
+        producer_epoch: 0,
+        base_sequence: -1,
+    });
+    let ty: u16 = match kind {
+        InternalControl::ProducerId => 4,
+        InternalControl::TxnState => 5,
+    };
+    let mut key = [0u8; 4]; // version u16 | type u16
+    key[2..].copy_from_slice(&ty.to_le_bytes());
+    b.push(0, Some(&key), Some(payload), &[]);
+    b.finish()
+}
+
+/// What a control batch is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Control {
+    /// A transaction marker and its coordinator epoch.
+    Marker(ControlType, u32),
+    /// Raft's own entry and its payload.
+    Raft(RaftControl, Bytes),
+    /// A coordinator record and its payload.
+    Internal(InternalControl, Bytes),
+}
+
+/// Classifies a control batch; `None` for data batches.
+pub fn control(batch: &Batch) -> Result<Option<Control>, Error> {
+    if !batch.attributes().control {
+        return Ok(None);
+    }
+    let rec = batch.records()?.into_iter().next().ok_or(Error::Malformed("empty control batch"))?;
+    let key = rec.key.ok_or(Error::Malformed("control record without key"))?;
+    if key.len() != 4 {
+        return Err(Error::Malformed("control record has the wrong size"));
+    }
+    let value = rec.value.unwrap_or_default();
+    Ok(Some(match u16::from_le_bytes([key[2], key[3]]) {
+        ty @ (0 | 1) => {
+            let epoch: [u8; 4] =
+                value[..].try_into().map_err(|_| Error::Malformed("marker value has the wrong size"))?;
+            let marker = if ty == 0 { ControlType::Abort } else { ControlType::Commit };
+            Control::Marker(marker, u32::from_le_bytes(epoch))
+        }
+        2 => Control::Raft(RaftControl::Noop, value),
+        3 => Control::Raft(RaftControl::Config, value),
+        4 => Control::Internal(InternalControl::ProducerId, value),
+        5 => Control::Internal(InternalControl::TxnState, value),
+        _ => return Err(Error::Malformed("unknown control type")),
+    }))
+}
+
+/// Marks an encoded batch as transactional (or not) and recomputes its
+/// checksum. A transactional client sets this on the batches it is given.
+pub fn set_transactional(batch: &mut [u8], transactional: bool) -> Result<(), Error> {
+    let len = peek_len(batch).ok_or(Error::Truncated)?;
+    if len < HEADER_LEN || batch.len() < len {
+        return Err(Error::Truncated);
+    }
+    let bits = u16::from_le_bytes([batch[25], batch[26]]);
+    let bits = if transactional { bits | 1 << 3 } else { bits & !(1 << 3) };
+    put_u16(batch, 25, bits);
+    let crc = crc32c::crc32c(&batch[CRC_START..len]);
+    put_u32(batch, 21, crc);
+    Ok(())
+}
+
 /// Reads the marker of a control batch.
 pub fn control_marker(batch: &Batch) -> Result<(ControlType, u32), Error> {
     if !batch.attributes().control {

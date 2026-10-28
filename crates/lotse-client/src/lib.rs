@@ -17,6 +17,11 @@
 //! Produces to one partition go out one at a time, in call order, so
 //! sequences arrive in order.
 //!
+//! Transactions ([`Client::begin_transaction`], with
+//! [`ClientConfig::transactional_id`]) write to several partitions atomically:
+//! read_committed consumers see all of a committed transaction and nothing of
+//! an aborted one. [`Fetched::committed_batches`] drops what they must not see.
+//!
 //! Only when retrying runs out of time with the outcome still unknown does
 //! the caller get [`ClientError::Unknown`]; the client then starts over with
 //! a new producer id, so later batches do not wait for a gap that may never
@@ -57,6 +62,13 @@ pub enum ClientError {
     /// find out, or produce again and accept a possible duplicate.
     #[error("outcome unknown: {0}")]
     Unknown(String),
+    /// The transaction can no longer be committed (a write's outcome is
+    /// unknown, or the producer was fenced): abort it.
+    #[error("the transaction must be aborted: {0}")]
+    MustAbort(String),
+    /// No transactional id is configured.
+    #[error("no transactional id is configured")]
+    NotTransactional,
     /// No broker could serve the request before the retry time ran out.
     #[error("gave up after {0:?}: {1}")]
     GaveUp(Duration, String),
@@ -82,6 +94,11 @@ pub struct ClientConfig {
     /// Produce idempotently (on by default). Needs a coordinator group in
     /// the cluster.
     pub idempotent: bool,
+    /// Transactional id, for [`Client::begin_transaction`]. One client
+    /// instance per id: a new instance fences the old one.
+    pub transactional_id: Option<String>,
+    /// How long a transaction may stay open before the coordinator aborts it.
+    pub txn_timeout: Duration,
 }
 
 impl ClientConfig {
@@ -94,6 +111,8 @@ impl ClientConfig {
             backoff: Duration::from_millis(50),
             produce_timeout: Duration::from_secs(5),
             idempotent: true,
+            transactional_id: None,
+            txn_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -101,12 +120,73 @@ impl ClientConfig {
 /// Records read from one partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
-    /// Whole record batches, control batches included; may be empty.
+    /// Whole record batches, control batches and aborted ones included; may
+    /// be empty. See [`Fetched::committed_batches`].
     pub records: Bytes,
     /// Offsets below this are committed.
     pub high_watermark: u64,
+    /// Offsets below this are committed and in no open transaction; reads
+    /// stop here.
+    pub last_stable_offset: u64,
     /// First offset still in the partition.
     pub log_start_offset: u64,
+    /// Aborted transactions with data in `records`: `(producer id, first
+    /// offset)`.
+    pub aborted: Vec<(u64, u64)>,
+}
+
+impl Fetched {
+    /// The offset to fetch next: after the last batch, or `from` if there
+    /// is none.
+    pub fn next_offset(&self, from: u64) -> u64 {
+        let mut rest = self.records.clone();
+        let mut next = from;
+        while let Ok((b, r)) = lotse_record::Batch::parse(&rest) {
+            next = b.next_offset();
+            rest = r;
+            if rest.is_empty() {
+                break;
+            }
+        }
+        next
+    }
+
+    /// The data batches a read_committed consumer sees: control batches and
+    /// batches of aborted transactions left out. An aborted transaction's
+    /// batches are those of its producer from its first offset up to the
+    /// producer's ABORT marker.
+    pub fn committed_batches(&self) -> Result<Vec<lotse_record::Batch>, ClientError> {
+        let corrupt = |e: lotse_record::Error| ClientError::Broker {
+            code: ErrorCode::CORRUPT_BATCH,
+            message: Some(e.to_string()),
+        };
+        let mut aborted = self.aborted.clone();
+        aborted.sort_by_key(|(_, first)| *first);
+        let mut pending = aborted.into_iter().peekable();
+        let mut skipping = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let mut rest = self.records.clone();
+        while !rest.is_empty() {
+            let (b, r) = lotse_record::Batch::parse(&rest).map_err(corrupt)?;
+            rest = r;
+            while let Some((producer, _)) = pending.next_if(|(_, first)| *first <= b.base_offset()) {
+                skipping.insert(producer);
+            }
+            if b.attributes().control {
+                if let Ok(Some(lotse_record::Control::Marker(lotse_record::ControlType::Abort, _))) =
+                    lotse_record::control(&b)
+                {
+                    skipping.remove(&b.producer_id());
+                }
+                continue;
+            }
+            if b.attributes().transactional && skipping.contains(&b.producer_id()) {
+                continue;
+            }
+            out.push(b);
+        }
+        Ok(out)
+    }
 }
 
 /// One partition's place in the cluster, as metadata last said.
@@ -122,10 +202,17 @@ pub struct Client<R: Net + Clock + Spawn> {
     rt: R,
     cfg: ClientConfig,
     session: Mutex<Option<Session>>,
+    /// Producer id and epoch for the transactional id, once initialised.
+    txn_producer: Mutex<Option<(u64, u16)>>,
+    /// One transaction at a time.
+    txn_lock: AsyncLock,
+    coordinator_addr: Mutex<Option<String>>,
     partition_locks: Mutex<BTreeMap<(String, u32), Arc<AsyncLock>>>,
     conns: Mutex<BTreeMap<String, Arc<Connection<R::Conn>>>>,
     brokers: Mutex<BTreeMap<u32, String>>,
     routes: Mutex<BTreeMap<(String, u32), Route>>,
+    /// Resource names by id, for requests that address resources by id.
+    names: Mutex<BTreeMap<u64, String>>,
 }
 
 impl<R: Net + Clock + Spawn> fmt::Debug for Client<R> {
@@ -161,10 +248,14 @@ impl<R: Net + Clock + Spawn> Client<R> {
             rt,
             cfg,
             session: Mutex::new(None),
+            txn_producer: Mutex::new(None),
+            txn_lock: AsyncLock::default(),
+            coordinator_addr: Mutex::new(None),
             partition_locks: Mutex::new(BTreeMap::new()),
             conns: Mutex::new(BTreeMap::new()),
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
+            names: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -199,6 +290,11 @@ impl<R: Net + Clock + Spawn> Client<R> {
         for b in &m.brokers {
             brokers.insert(b.node_id, format!("{}:{}", b.host, b.port));
         }
+        let mut names = self.names.lock().expect("names lock");
+        for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
+            names.insert(r.resource_id, r.name.clone());
+        }
+        drop(names);
         let mut routes = self.routes.lock().expect("routes lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             for p in &r.partitions {
@@ -289,7 +385,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
     /// committed.
     pub async fn produce(&self, stream: &str, partition: u32, batch: Bytes) -> Result<u64, ClientError> {
         if !self.cfg.idempotent {
-            return self.retrying(|| self.produce_once(stream, partition, batch.clone(), false)).await;
+            return self.retrying(|| self.produce_once(stream, partition, batch.clone(), false, None)).await;
         }
         let records = lotse_record::Batch::parse(&batch)
             .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?
@@ -303,7 +399,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
         lotse_record::set_producer(&mut stamped, producer_id, epoch, seq)
             .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?;
         let stamped = stamped.freeze();
-        let res = self.retrying(|| self.produce_once(stream, partition, stamped.clone(), true)).await;
+        let res = self.retrying(|| self.produce_once(stream, partition, stamped.clone(), true, None)).await;
         let mut session = self.session.lock().expect("session lock");
         match &res {
             Ok(_) => {
@@ -333,25 +429,29 @@ impl<R: Net + Clock + Spawn> Client<R> {
         if let Some(s) = self.session.lock().expect("session lock").as_ref() {
             return Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)));
         }
-        let (producer_id, epoch) = self.retrying(|| self.init_producer_once()).await?;
+        let (producer_id, epoch) = self.retrying(|| self.init_producer_once(None)).await?;
         let mut session = self.session.lock().expect("session lock");
         // Another partition's produce may have started a session meanwhile.
         let s = session.get_or_insert(Session { producer_id, epoch, next: BTreeMap::new() });
         Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)))
     }
 
-    async fn init_producer_once(&self) -> Result<(u64, u16), Attempt> {
+    /// The coordinator's address, asking any broker for it if needed.
+    async fn coordinator(&self, key: &str) -> Result<String, Attempt> {
+        if let Some(a) = self.coordinator_addr.lock().expect("coordinator lock").clone() {
+            return Ok(a);
+        }
         let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
         addrs.extend(self.cfg.bootstrap.iter().cloned());
         let find =
-            Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: String::new() });
-        let mut coordinator = None;
+            Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: key.into() });
         let mut why = String::from("no broker answered");
         for addr in addrs {
             match self.call(&addr, &find).await {
                 Ok(Response::FindCoordinator(f)) if f.error == ErrorCode::NONE => {
-                    coordinator = Some(format!("{}:{}", f.host, f.port));
-                    break;
+                    let a = format!("{}:{}", f.host, f.port);
+                    *self.coordinator_addr.lock().expect("coordinator lock") = Some(a.clone());
+                    return Ok(a);
                 }
                 Ok(Response::FindCoordinator(f)) => {
                     why = f.error_msg.unwrap_or_else(|| f.error.to_string());
@@ -363,26 +463,87 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 Err(e) => why = e.to_string(),
             }
         }
-        let Some(addr) = coordinator else { return Err(Attempt::Retry(why)) };
-        let init = Request::InitProducer(InitProducerRequest { txn_id: None, txn_timeout_ms: 0 });
-        match self.call(&addr, &init).await {
-            Ok(Response::InitProducer(r)) if r.error == ErrorCode::NONE => Ok((r.producer_id, r.producer_epoch)),
-            // An id that was handed out but never received is just unused.
-            Ok(Response::InitProducer(r)) if r.error.retriable() => Err(Attempt::Retry(r.error.to_string())),
-            Ok(Response::InitProducer(r)) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
-            Ok(other) => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
-            Err(e) => Err(Attempt::Retry(e.to_string())),
+        Err(Attempt::Retry(why))
+    }
+
+    /// Asks the coordinator again next time.
+    fn forget_coordinator(&self) {
+        *self.coordinator_addr.lock().expect("coordinator lock") = None;
+    }
+
+    /// One request to the coordinator; retriable failures and lost requests
+    /// become `Retry` (every coordinator request may be repeated).
+    async fn call_coordinator(&self, key: &str, req: &Request) -> Result<Response, Attempt> {
+        let addr = self.coordinator(key).await?;
+        match self.call(&addr, req).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.forget_coordinator();
+                Err(Attempt::Retry(e.to_string()))
+            }
         }
     }
 
-    async fn produce_once(&self, stream: &str, partition: u32, batch: Bytes, idempotent: bool) -> Result<u64, Attempt> {
+    async fn init_producer_once(&self, txn: Option<&str>) -> Result<(u64, u16), Attempt> {
+        let init = Request::InitProducer(InitProducerRequest {
+            txn_id: txn.map(str::to_string),
+            txn_timeout_ms: u32::try_from(self.cfg.txn_timeout.as_millis()).unwrap_or(u32::MAX),
+        });
+        match self.call_coordinator(txn.unwrap_or(""), &init).await? {
+            Response::InitProducer(r) if r.error == ErrorCode::NONE => Ok((r.producer_id, r.producer_epoch)),
+            // An id that was handed out but never received is just unused.
+            Response::InitProducer(r) if r.error.retriable() => {
+                self.forget_coordinator();
+                Err(Attempt::Retry(r.error.to_string()))
+            }
+            Response::InitProducer(r) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
+            other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+        }
+    }
+
+    /// Starts a transaction for the configured transactional id, getting
+    /// its producer id first (which fences any older instance). One at a
+    /// time per client; a second call waits for the first to end.
+    pub async fn begin_transaction(&self) -> Result<Transaction<'_, R>, ClientError> {
+        let txn_id = self.cfg.transactional_id.clone().ok_or(ClientError::NotTransactional)?;
+        let turn = self.txn_lock.lock().await;
+        let known = *self.txn_producer.lock().expect("txn lock");
+        let (producer_id, epoch) = match known {
+            Some(p) => p,
+            None => {
+                let p = self.retrying(|| self.init_producer_once(Some(&txn_id))).await?;
+                *self.txn_producer.lock().expect("txn lock") = Some(p);
+                p
+            }
+        };
+        Ok(Transaction {
+            client: self,
+            _turn: turn,
+            txn_id,
+            producer_id,
+            epoch,
+            next: BTreeMap::new(),
+            added: std::collections::BTreeSet::new(),
+            poisoned: None,
+            ended: false,
+        })
+    }
+
+    async fn produce_once(
+        &self,
+        stream: &str,
+        partition: u32,
+        batch: Bytes,
+        idempotent: bool,
+        txn_id: Option<String>,
+    ) -> Result<u64, Attempt> {
         // An idempotent batch may be sent again whatever happened to it.
         let unknown = |why: String| {
             if idempotent { Attempt::RetryMaybeDone(why) } else { Attempt::Fail(ClientError::Unknown(why)) }
         };
         let (route, addr) = self.route(stream, partition).await?;
         let req = Request::Produce(ProduceRequest {
-            txn_id: None,
+            txn_id,
             timeout_ms: u32::try_from(self.cfg.produce_timeout.as_millis()).unwrap_or(u32::MAX),
             resources: vec![ProduceResource {
                 resource_id: route.resource_id,
@@ -419,6 +580,70 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 Err(unknown(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
             }
             code => Err(Attempt::Fail(ClientError::Broker { code, message: p.error_msg.clone() })),
+        }
+    }
+
+    /// Internal, used by a node's transaction coordinator: writes a marker
+    /// into one partition, retrying until its leader answers. Returns
+    /// [`ErrorCode::NONE`] once the marker is written (or not needed), or
+    /// [`ErrorCode::COORDINATOR_FENCED`] if a newer coordinator took over.
+    pub async fn write_txn_marker(
+        &self,
+        resource_id: u64,
+        partition: u32,
+        marker: lotse_proto::TxnMarker,
+    ) -> Result<ErrorCode, ClientError> {
+        let known = self.names.lock().expect("names lock").get(&resource_id).cloned();
+        let name = match known {
+            Some(n) => n,
+            None => {
+                self.metadata(&[]).await?;
+                self.names
+                    .lock()
+                    .expect("names lock")
+                    .get(&resource_id)
+                    .cloned()
+                    .ok_or_else(|| ClientError::UnknownStream(format!("#{resource_id}"), partition))?
+            }
+        };
+        let marker = lotse_proto::TxnMarker {
+            resources: vec![lotse_proto::TxnResource { resource_id, partitions: vec![partition] }],
+            ..marker
+        };
+        self.retrying(|| self.write_txn_marker_once(&name, partition, marker.clone())).await
+    }
+
+    async fn write_txn_marker_once(
+        &self,
+        stream: &str,
+        partition: u32,
+        marker: lotse_proto::TxnMarker,
+    ) -> Result<ErrorCode, Attempt> {
+        let (_, addr) = self.route(stream, partition).await?;
+        let req = Request::WriteTxnMarkers(lotse_proto::WriteTxnMarkersRequest { markers: vec![marker] });
+        let resp = match self.call(&addr, &req).await {
+            Ok(Response::WriteTxnMarkers(r)) => r,
+            Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            // Markers are idempotent: whatever happened, sending again is safe.
+            Err(e) => {
+                self.forget(stream, partition);
+                return Err(Attempt::Retry(e.to_string()));
+            }
+        };
+        let error = resp
+            .markers
+            .first()
+            .and_then(|m| m.resources.first())
+            .and_then(|r| r.partitions.first())
+            .map(|p| p.error)
+            .ok_or_else(|| Attempt::Retry("empty marker response".into()))?;
+        match error {
+            ErrorCode::NONE | ErrorCode::COORDINATOR_FENCED => Ok(error),
+            code if code.retriable() => {
+                self.forget(stream, partition);
+                Err(Attempt::Retry(code.to_string()))
+            }
+            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
         }
     }
 
@@ -475,7 +700,9 @@ impl<R: Net + Clock + Spawn> Client<R> {
             ErrorCode::NONE => Ok(Fetched {
                 records: p.records,
                 high_watermark: p.high_watermark,
+                last_stable_offset: p.last_stable_offset,
                 log_start_offset: p.log_start_offset,
+                aborted: p.aborted_txns.iter().map(|a| (a.producer_id, a.first_offset)).collect(),
             }),
             code if code.retriable() => {
                 self.redirect(stream, partition, p.leader_hint);
@@ -655,6 +882,165 @@ impl<C: Conn> Connection<C> {
             Ok((_, resp)) => Ok(resp),
             Err(e) => Err(CallError::Lost(format!("undecodable response: {e}"))),
         }
+    }
+}
+
+/// An open transaction, from [`Client::begin_transaction`]. End it with
+/// [`Transaction::commit`] or [`Transaction::abort`]; dropped without either,
+/// the coordinator aborts it after the transaction timeout.
+pub struct Transaction<'a, R: Net + Clock + Spawn> {
+    client: &'a Client<R>,
+    _turn: AsyncGuard<'a>,
+    txn_id: String,
+    producer_id: u64,
+    epoch: u16,
+    next: BTreeMap<(String, u32), i32>,
+    added: std::collections::BTreeSet<(String, u32)>,
+    /// Why only an abort is left.
+    poisoned: Option<String>,
+    ended: bool,
+}
+
+impl<R: Net + Clock + Spawn> Drop for Transaction<'_, R> {
+    fn drop(&mut self) {
+        // Left open: the next transaction must not continue this one. A
+        // fresh producer id makes the coordinator abort it first.
+        if !self.ended {
+            *self.client.txn_producer.lock().expect("txn lock") = None;
+        }
+    }
+}
+
+impl<R: Net + Clock + Spawn> fmt::Debug for Transaction<'_, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transaction")
+            .field("txn_id", &self.txn_id)
+            .field("producer_id", &self.producer_id)
+            .field("epoch", &self.epoch)
+            .finish()
+    }
+}
+
+impl<R: Net + Clock + Spawn> Transaction<'_, R> {
+    /// Appends a batch to a partition within the transaction; returns the
+    /// offset of its first record. Read_committed consumers see it only once
+    /// the transaction commits.
+    pub async fn produce(&mut self, stream: &str, partition: u32, batch: Bytes) -> Result<u64, ClientError> {
+        if let Some(why) = &self.poisoned {
+            return Err(ClientError::MustAbort(why.clone()));
+        }
+        let c = self.client;
+        let key = (stream.to_string(), partition);
+        if !self.added.contains(&key) {
+            let res = c.retrying(|| self.add_partition_once(stream, partition)).await;
+            if let Err(e) = res {
+                self.poison(&e);
+                return Err(e);
+            }
+            self.added.insert(key.clone());
+        }
+        let corrupt = |e: lotse_record::Error| ClientError::Broker {
+            code: ErrorCode::CORRUPT_BATCH,
+            message: Some(e.to_string()),
+        };
+        let records = lotse_record::Batch::parse(&batch).map_err(corrupt)?.0.record_count();
+        let seq = self.next.get(&key).copied().unwrap_or(0);
+        let mut stamped = bytes::BytesMut::from(&batch[..]);
+        lotse_record::set_producer(&mut stamped, self.producer_id, self.epoch, seq).map_err(corrupt)?;
+        lotse_record::set_transactional(&mut stamped, true).map_err(corrupt)?;
+        let stamped = stamped.freeze();
+        let txn_id = self.txn_id.clone();
+        let res = c.retrying(|| c.produce_once(stream, partition, stamped.clone(), true, Some(txn_id.clone()))).await;
+        match &res {
+            Ok(_) => {
+                self.next.insert(key, seq.wrapping_add(records as i32));
+            }
+            Err(e) => self.poison(e),
+        }
+        res
+    }
+
+    /// After an error, the transaction can only be aborted, except when the
+    /// batch was definitely not written and nothing else went wrong.
+    fn poison(&mut self, e: &ClientError) {
+        if !matches!(e, ClientError::GaveUp(..) | ClientError::UnknownStream(..)) {
+            self.poisoned = Some(e.to_string());
+        }
+    }
+
+    async fn add_partition_once(&self, stream: &str, partition: u32) -> Result<(), Attempt> {
+        let c = self.client;
+        let (route, _) = c.route(stream, partition).await?;
+        let req = Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+            txn_id: self.txn_id.clone(),
+            producer_id: self.producer_id,
+            producer_epoch: self.epoch,
+            resources: vec![lotse_proto::TxnResource { resource_id: route.resource_id, partitions: vec![partition] }],
+        });
+        let Response::AddPartitionsToTxn(r) = c.call_coordinator(&self.txn_id, &req).await? else {
+            return Err(Attempt::Retry("unexpected response".into()));
+        };
+        let error = r.resources.first().and_then(|r| r.partitions.first()).map_or(ErrorCode::NONE, |p| p.error);
+        match error {
+            ErrorCode::NONE => Ok(()),
+            code if code.retriable() => {
+                c.forget_coordinator();
+                Err(Attempt::Retry(code.to_string()))
+            }
+            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+        }
+    }
+
+    /// Commits: once this returns, the decision is durable and every
+    /// partition will show the transaction to read_committed consumers.
+    pub async fn commit(self) -> Result<(), ClientError> {
+        if let Some(why) = &self.poisoned {
+            return Err(ClientError::MustAbort(why.clone()));
+        }
+        self.end(true).await
+    }
+
+    /// Aborts: none of the transaction's batches will be visible to
+    /// read_committed consumers.
+    pub async fn abort(self) -> Result<(), ClientError> {
+        self.end(false).await
+    }
+
+    async fn end(mut self, commit: bool) -> Result<(), ClientError> {
+        let c = self.client;
+        self.ended = true;
+        if self.added.is_empty() {
+            return Ok(());
+        }
+        let req = Request::EndTxn(lotse_proto::EndTxnRequest {
+            txn_id: self.txn_id.clone(),
+            producer_id: self.producer_id,
+            producer_epoch: self.epoch,
+            commit,
+        });
+        let res = c
+            .retrying(|| async {
+                let resp = match c.call_coordinator(&self.txn_id, &req).await {
+                    // A lost request may have been decided: retry as maybe done.
+                    Err(Attempt::Retry(why)) => return Err(Attempt::RetryMaybeDone(why)),
+                    other => other?,
+                };
+                match resp {
+                    Response::EndTxn(r) if r.error == ErrorCode::NONE => Ok((r.producer_id, r.producer_epoch)),
+                    Response::EndTxn(r) if r.error.retriable() => {
+                        c.forget_coordinator();
+                        // The coordinator may have decided before the answer was lost.
+                        Err(Attempt::RetryMaybeDone(r.error.to_string()))
+                    }
+                    Response::EndTxn(r) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
+                    other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+                }
+            })
+            .await;
+        // The next transaction uses the raised epoch; after a failure, get a
+        // fresh one (which also aborts whatever is left open).
+        *c.txn_producer.lock().expect("txn lock") = res.as_ref().ok().copied();
+        res.map(|_| ())
     }
 }
 

@@ -12,8 +12,15 @@
 //!   another node may still hold it and commit it later, so the request runs
 //!   into its timeout and the outcome is unknown (`REQUEST_TIMED_OUT`).
 //! - `Fetch` reads from the leader's log and never returns a batch at or
-//!   beyond the commit index (the high watermark). Without enough data it
-//!   waits until a commit brings more or `max_wait_ms` runs out.
+//!   beyond the commit index (the high watermark), and with `read_committed`
+//!   none at or beyond the last stable offset; it lists the aborted
+//!   transactions in what it returns. Without enough data it waits until a
+//!   commit brings more or `max_wait_ms` runs out.
+//! - Transactions ([`coord`]): `InitProducer` with a transactional id,
+//!   `AddPartitionsToTxn` and `EndTxn` change the coordinator group's state;
+//!   the node then writes the markers with the internal `WriteTxnMarkers`,
+//!   which a partition leader answers once the marker is committed (or is
+//!   not needed).
 //!
 //! - `FindCoordinator` names the leader of the coordinator group, and
 //!   `InitProducer` hands out producer ids there: it proposes an allocation
@@ -31,18 +38,24 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    ApiKey, ApiVersionsResponse, Broker, ErrorCode, FetchPartitionResponse, FetchRequest, FetchResourceResponse,
-    FetchResponse, FindCoordinatorRequest, FindCoordinatorResponse, InitProducerRequest, InitProducerResponse,
-    LeaderHint, MetadataRequest, MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceRequest,
-    ProduceResourceResponse, ProduceResponse, Request, RequestHeader, ResourceMetadata, Response, coordinator, kind,
+    AbortedTxn, ApiKey, ApiVersionsResponse, Broker, ErrorCode, FetchPartitionResponse, FetchRequest,
+    FetchResourceResponse, FetchResponse, FindCoordinatorRequest, FindCoordinatorResponse, InitProducerResponse,
+    LeaderHint, MarkerResult, MetadataRequest, MetadataResponse, PartitionMetadata, ProducePartitionResponse,
+    ProduceRequest, ProduceResourceResponse, ProduceResponse, Request, RequestHeader, ResourceMetadata, Response,
+    TxnPartitionResult, TxnResourceResult, WriteTxnMarkersRequest, WriteTxnMarkersResponse, coordinator, isolation,
+    kind,
 };
 use lotse_raft::{NodeId, RaftGroup, Role};
-use lotse_record::{Batch, BatchBuilder, BatchOptions};
+use lotse_record::Batch;
 use lotse_rt::{Conn, Instant, Runtime};
 
-use crate::replica::{Error, ProposeError, Proposed, Replica, StateMachine};
+use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::GroupId;
+
+mod coord;
+
+pub(crate) use coord::MarkerJob;
 
 /// A stream and the Raft group of each of its partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +197,14 @@ pub(crate) struct Clients {
     produces: Vec<PendingProduce>,
     inits: Vec<PendingInit>,
     fetches: Vec<PendingFetch>,
+    markers: Vec<PendingMarkers>,
+    /// Coordinator records in flight, and the transactional ids they change.
+    writes: Vec<coord::PendingWrite>,
+    busy: std::collections::BTreeSet<String>,
+    /// Marker jobs running for this coordinator term, per transactional id.
+    jobs: BTreeMap<String, (u64, Signal)>,
+    /// When this leader first saw each transaction ongoing, for timeouts.
+    ongoing_since: BTreeMap<String, Instant>,
     /// Sum of the groups' commit indices when pending fetches were last
     /// tried: they are tried again only after a commit or at their deadline.
     commits_seen: u64,
@@ -212,7 +233,13 @@ impl Clients {
             Request::FindCoordinator(f) => {
                 outbox.push(id, &Response::FindCoordinator(find_coordinator(&f, view, groups)))
             }
-            Request::InitProducer(req) => self.init_producer(outbox, id, req, view, groups),
+            Request::InitProducer(req) => match req.txn_id.clone() {
+                Some(txn_id) => self.init_transactional(outbox, id, req, txn_id, view, groups),
+                None => self.init_producer(outbox, id, view, groups),
+            },
+            Request::AddPartitionsToTxn(req) => self.add_partitions(outbox, id, req, view, groups),
+            Request::EndTxn(req) => self.end_txn(outbox, id, req, view, groups),
+            Request::WriteTxnMarkers(req) => self.write_markers(outbox, id, req, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -248,9 +275,9 @@ impl Clients {
                 let group = view.group_of(res.resource_id, p.partition);
                 match group.and_then(|g| groups.get_mut(&g).map(|r| (g, r))) {
                     None => out.error = ErrorCode::UNKNOWN_RESOURCE,
-                    Some(_) if req.txn_id.is_some() => {
+                    Some(_) if req.txn_id.is_some() != transactional(&p.batch) => {
                         out.error = ErrorCode::INVALID_TXN_STATE;
-                        out.error_msg = Some("transactions are not supported yet".into());
+                        out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
                     }
                     Some((g, replica)) => match replica.propose(p.batch) {
                         Ok(Proposed { first, last, term, .. }) => {
@@ -274,6 +301,10 @@ impl Clients {
                             out.error = ErrorCode::PRODUCER_FENCED;
                             out.error_msg = Some(e.to_string());
                         }
+                        Err(e @ ProposeError::InvalidTxnState(_)) => {
+                            out.error = ErrorCode::INVALID_TXN_STATE;
+                            out.error_msg = Some(e.to_string());
+                        }
                         Err(e) => {
                             out.error = ErrorCode::CORRUPT_BATCH;
                             out.error_msg = Some(e.to_string());
@@ -295,23 +326,21 @@ impl Clients {
         &mut self,
         outbox: Arc<Outbox>,
         correlation_id: u32,
-        req: InitProducerRequest,
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) {
         let fail = |error, leader_hint| {
             Response::InitProducer(InitProducerResponse { error, producer_id: 0, producer_epoch: 0, leader_hint })
         };
-        if req.txn_id.is_some() {
-            return outbox.push(correlation_id, &fail(ErrorCode::INVALID_TXN_STATE, None));
-        }
         let Some((group, replica)) = view.coordinator.and_then(|g| groups.get_mut(&g).map(|r| (g, r))) else {
             return outbox.push(correlation_id, &fail(ErrorCode::COORDINATOR_NOT_AVAILABLE, None));
         };
-        let mut b = BatchBuilder::new(BatchOptions::default());
-        b.push(0, Some(b"producer-id"), None, &[]);
-        let batch = b.finish().expect("one record");
-        match replica.propose(batch) {
+        let batch =
+            lotse_record::internal_control_batch(lotse_record::InternalControl::ProducerId, &[]).expect("one record");
+        if replica.raft_ref().role() != Role::Leader {
+            return outbox.push(correlation_id, &fail(ErrorCode::NOT_LEADER, hint(replica.raft_ref())));
+        }
+        match replica.propose_internal(batch) {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let deadline = view.now + INIT_TIMEOUT;
                 self.inits.push(PendingInit { outbox, correlation_id, deadline, group, last, term });
@@ -324,19 +353,68 @@ impl Clients {
         }
     }
 
+    fn write_markers<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        correlation_id: u32,
+        req: WriteTxnMarkersRequest,
+        view: &ClusterView<'_>,
+        groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+    ) {
+        let mut response = WriteTxnMarkersResponse { markers: Vec::new() };
+        let mut waiting = Vec::new();
+        for (mi, m) in req.markers.iter().enumerate() {
+            let mut resources = Vec::new();
+            for (ri, r) in m.resources.iter().enumerate() {
+                let mut partitions = Vec::new();
+                for (pi, p) in r.partitions.iter().enumerate() {
+                    let error = match view.group_of(r.resource_id, *p).and_then(|g| groups.get_mut(&g).map(|x| (g, x)))
+                    {
+                        None => ErrorCode::UNKNOWN_RESOURCE,
+                        Some((g, replica)) => {
+                            match replica.propose_marker(m.producer_id, m.producer_epoch, m.commit, m.coordinator_epoch)
+                            {
+                                Ok(MarkerOutcome::Proposed { last, term }) => {
+                                    waiting.push((mi, ri, pi, g, last, term));
+                                    ErrorCode::NONE
+                                }
+                                Ok(MarkerOutcome::Done) => ErrorCode::NONE,
+                                Ok(MarkerOutcome::StaleCoordinator) => ErrorCode::COORDINATOR_FENCED,
+                                Err(ProposeError::NotLeader(_)) => ErrorCode::NOT_LEADER,
+                                Err(_) => ErrorCode::CORRUPT_BATCH,
+                            }
+                        }
+                    };
+                    partitions.push(TxnPartitionResult { partition: *p, error });
+                }
+                resources.push(TxnResourceResult { resource_id: r.resource_id, partitions });
+            }
+            response.markers.push(MarkerResult { producer_id: m.producer_id, resources });
+        }
+        let deadline = view.now + MARKER_TIMEOUT;
+        let pending = PendingMarkers { outbox, correlation_id, deadline, response, waiting };
+        if let Some(p) = settle_markers(pending, view.now, groups) {
+            self.markers.push(p);
+        }
+    }
+
     /// Answers whatever the last round decided, and requests that ran out
-    /// of time.
+    /// of time; returns marker jobs for the node to start.
     pub(crate) async fn after_round<R: Runtime, S: StateMachine>(
         &mut self,
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<MarkerJob>, Error> {
         let produces = std::mem::take(&mut self.produces);
         self.produces = produces.into_iter().filter_map(|p| settle(p, view.now, groups)).collect();
         let inits = std::mem::take(&mut self.inits);
         self.inits = inits.into_iter().filter_map(|p| settle_init(p, view.now, groups)).collect();
+        let markers = std::mem::take(&mut self.markers);
+        self.markers = markers.into_iter().filter_map(|p| settle_markers(p, view.now, groups)).collect();
+        let jobs = self.coordinate(view, groups);
 
-        let commits: u64 = groups.values().map(|g| g.raft_ref().commit()).sum();
+        // Commits bring new data, applying moves the last stable offset.
+        let commits: u64 = groups.values().map(|g| g.raft_ref().commit() + g.applied()).sum();
         let committed = std::mem::replace(&mut self.commits_seen, commits) != commits;
         let fetches = std::mem::take(&mut self.fetches);
         for f in fetches {
@@ -349,8 +427,63 @@ impl Clients {
                 self.fetches.push(f);
             }
         }
-        Ok(())
+        Ok(jobs)
     }
+}
+
+/// How long a partition leader waits for a marker to commit.
+const MARKER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A `WriteTxnMarkers` waiting for its markers to commit.
+struct PendingMarkers {
+    outbox: Arc<Outbox>,
+    correlation_id: u32,
+    deadline: Instant,
+    response: WriteTxnMarkersResponse,
+    /// `(marker, resource, partition, group, last, term)`.
+    waiting: Vec<(usize, usize, usize, GroupId, u64, u64)>,
+}
+
+fn settle_markers<R: Runtime, S: StateMachine>(
+    mut p: PendingMarkers,
+    now: Instant,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+) -> Option<PendingMarkers> {
+    let timed_out = now >= p.deadline;
+    p.waiting.retain(|&(mi, ri, pi, g, last, term)| {
+        let error = match outcome(groups[&g].raft_ref(), last, term) {
+            Some(code) => code,
+            None if timed_out => ErrorCode::REQUEST_TIMED_OUT,
+            None => return true,
+        };
+        p.response.markers[mi].resources[ri].partitions[pi].error = error;
+        false
+    });
+    if p.waiting.is_empty() {
+        p.outbox.push(p.correlation_id, &Response::WriteTxnMarkers(p.response));
+        return None;
+    }
+    Some(p)
+}
+
+/// The fate of the entry proposed at `last` in `term`, once this node knows
+/// it: `NONE` (written), `NOT_LEADER` (replaced, not written), or
+/// `REQUEST_TIMED_OUT` (unknown: compacted). `None` while undecided here.
+fn outcome(raft: &RaftGroup, last: u64, term: u64) -> Option<ErrorCode> {
+    if raft.commit() < last {
+        return None;
+    }
+    Some(match raft.log().term_at(last) {
+        Some(t) if t == term => ErrorCode::NONE,
+        Some(_) => ErrorCode::NOT_LEADER,
+        None => ErrorCode::REQUEST_TIMED_OUT,
+    })
+}
+
+/// Whether a produced batch is marked transactional (an unparsable batch is
+/// refused later anyway).
+fn transactional(batch: &Bytes) -> bool {
+    Batch::parse(batch).is_ok_and(|(b, _)| b.attributes().transactional)
 }
 
 /// Decides what can be decided; answers and returns `None` once nothing is
@@ -464,12 +597,25 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                         // watermark lags offsets a client already read. Those are in
                         // its log (they are committed); the client waits for them.
                         out.error = ErrorCode::OFFSET_OUT_OF_RANGE;
-                    } else if fp.fetch_offset < hw && budget > 0 {
-                        let max = (fp.max_bytes as usize).min(budget);
-                        let read = replica.log().read(fp.fetch_offset, max).await?;
-                        out.records = committed_prefix(read, hw)?;
+                    } else {
+                        // Below the last stable offset every transaction is decided.
+                        let lso = replica.txns().last_stable_offset(replica.applied()).min(hw);
+                        let limit = if req.isolation == isolation::COMMITTED { lso } else { hw };
+                        if fp.fetch_offset < limit && budget > 0 {
+                            let max = (fp.max_bytes as usize).min(budget);
+                            let read = replica.log().read(fp.fetch_offset, max).await?;
+                            out.records = committed_prefix(read, limit)?;
+                            let end = fp.fetch_offset.max(next_offset_of(&out.records));
+                            out.aborted_txns = replica
+                                .txns()
+                                .aborted_between(fp.fetch_offset, end)
+                                .into_iter()
+                                .map(|(producer_id, first_offset)| AbortedTxn { producer_id, first_offset })
+                                .collect();
+                        }
+                        out.last_stable_offset = lso;
                     }
-                    (out.high_watermark, out.last_stable_offset, out.log_start_offset) = (hw, hw, start);
+                    (out.high_watermark, out.log_start_offset) = (hw, start);
                 }
             }
             any_error |= out.error != ErrorCode::NONE;
@@ -484,6 +630,20 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
         return Ok(None);
     }
     Ok(Some(p))
+}
+
+/// The offset after the last batch in `records`, or 0 if there is none.
+fn next_offset_of(records: &Bytes) -> u64 {
+    let mut rest = records.clone();
+    let mut next = 0;
+    while let Ok((b, r)) = Batch::parse(&rest) {
+        next = b.next_offset();
+        rest = r;
+        if rest.is_empty() {
+            break;
+        }
+    }
+    next
 }
 
 /// The whole batches of `read` that end below `hw`: nothing uncommitted

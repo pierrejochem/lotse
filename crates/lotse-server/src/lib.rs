@@ -9,10 +9,12 @@
 #![warn(missing_docs)]
 
 mod client;
+mod coordinator;
 mod node;
 mod producers;
 mod replica;
 mod signal;
+mod txns;
 pub mod wire;
 
 pub use client::StreamConfig;

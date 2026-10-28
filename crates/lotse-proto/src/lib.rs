@@ -14,7 +14,8 @@
 //! Field conventions are in [`codec`].
 //!
 //! Implemented so far: `ApiVersions`, `Metadata`, `FindCoordinator`,
-//! `Produce`, `Fetch` and `InitProducer`, all at version 0.
+//! `Produce`, `Fetch`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn` and
+//! the internal `WriteTxnMarkers`, all at version 0.
 
 #![warn(missing_docs)]
 
@@ -59,15 +60,26 @@ impl ApiKey {
     /// A producer id and epoch for idempotent (and later transactional)
     /// produce. Keys 5 to 15 are the stream and queue keys of the design.
     pub const INIT_PRODUCER: ApiKey = ApiKey(16);
+    /// Adds partitions to a transaction.
+    pub const ADD_PARTITIONS_TO_TXN: ApiKey = ApiKey(17);
+    /// Commits or aborts a transaction. Keys 18 and 19 are `AddAcksToTxn`
+    /// and `AddOffsetsToTxn`.
+    pub const END_TXN: ApiKey = ApiKey(20);
+    /// Internal, between nodes: the coordinator asks a partition leader to
+    /// write a transaction marker. Internal keys start at 1000.
+    pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 6] = [
+    pub const SUPPORTED: [ApiVersionRange; 9] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PRODUCE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FETCH, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::INIT_PRODUCER, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ADD_PARTITIONS_TO_TXN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::END_TXN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::WRITE_TXN_MARKERS, min: 0, max: 0 },
     ];
 }
 
@@ -126,10 +138,14 @@ impl ErrorCode {
     pub const FRAME_TOO_LARGE: ErrorCode = ErrorCode(17);
     /// No coordinator is configured, or it has no leader right now.
     pub const COORDINATOR_NOT_AVAILABLE: ErrorCode = ErrorCode(18);
+    /// Another change to the same transaction is in progress: retry.
+    pub const CONCURRENT_TRANSACTIONS: ErrorCode = ErrorCode(19);
+    /// A newer coordinator has taken over this producer's markers.
+    pub const COORDINATOR_FENCED: ErrorCode = ErrorCode(20);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 19] = [
+        const NAMES: [&str; 21] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -149,6 +165,8 @@ impl ErrorCode {
             "UNKNOWN_MEMBER_ID",
             "FRAME_TOO_LARGE",
             "COORDINATOR_NOT_AVAILABLE",
+            "CONCURRENT_TRANSACTIONS",
+            "COORDINATOR_FENCED",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -162,6 +180,7 @@ impl ErrorCode {
                 | ErrorCode::NOT_ENOUGH_REPLICAS
                 | ErrorCode::REQUEST_TIMED_OUT
                 | ErrorCode::COORDINATOR_NOT_AVAILABLE
+                | ErrorCode::CONCURRENT_TRANSACTIONS
         )
     }
 }
@@ -209,6 +228,12 @@ pub enum Request {
     Fetch(FetchRequest),
     /// [`ApiKey::INIT_PRODUCER`].
     InitProducer(InitProducerRequest),
+    /// [`ApiKey::ADD_PARTITIONS_TO_TXN`].
+    AddPartitionsToTxn(AddPartitionsToTxnRequest),
+    /// [`ApiKey::END_TXN`].
+    EndTxn(EndTxnRequest),
+    /// [`ApiKey::WRITE_TXN_MARKERS`].
+    WriteTxnMarkers(WriteTxnMarkersRequest),
 }
 
 impl Request {
@@ -221,6 +246,9 @@ impl Request {
             Request::Produce(_) => ApiKey::PRODUCE,
             Request::Fetch(_) => ApiKey::FETCH,
             Request::InitProducer(_) => ApiKey::INIT_PRODUCER,
+            Request::AddPartitionsToTxn(_) => ApiKey::ADD_PARTITIONS_TO_TXN,
+            Request::EndTxn(_) => ApiKey::END_TXN,
+            Request::WriteTxnMarkers(_) => ApiKey::WRITE_TXN_MARKERS,
         }
     }
 }
@@ -236,6 +264,12 @@ pub enum Response {
     FindCoordinator(FindCoordinatorResponse),
     /// To [`Request::InitProducer`].
     InitProducer(InitProducerResponse),
+    /// To [`Request::AddPartitionsToTxn`].
+    AddPartitionsToTxn(AddPartitionsToTxnResponse),
+    /// To [`Request::EndTxn`].
+    EndTxn(EndTxnResponse),
+    /// To [`Request::WriteTxnMarkers`].
+    WriteTxnMarkers(WriteTxnMarkersResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -260,6 +294,9 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::Produce(r) => r.put(&mut w),
         Request::Fetch(r) => r.put(&mut w),
         Request::InitProducer(r) => r.put(&mut w),
+        Request::AddPartitionsToTxn(r) => r.put(&mut w),
+        Request::EndTxn(r) => r.put(&mut w),
+        Request::WriteTxnMarkers(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -286,6 +323,9 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::PRODUCE => Request::Produce(ProduceRequest::get(&mut r)?),
         ApiKey::FETCH => Request::Fetch(FetchRequest::get(&mut r)?),
         ApiKey::INIT_PRODUCER => Request::InitProducer(InitProducerRequest::get(&mut r)?),
+        ApiKey::ADD_PARTITIONS_TO_TXN => Request::AddPartitionsToTxn(AddPartitionsToTxnRequest::get(&mut r)?),
+        ApiKey::END_TXN => Request::EndTxn(EndTxnRequest::get(&mut r)?),
+        ApiKey::WRITE_TXN_MARKERS => Request::WriteTxnMarkers(WriteTxnMarkersRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -303,6 +343,9 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::Metadata(r) => r.put(&mut w),
         Response::FindCoordinator(r) => r.put(&mut w),
         Response::InitProducer(r) => r.put(&mut w),
+        Response::AddPartitionsToTxn(r) => r.put(&mut w),
+        Response::EndTxn(r) => r.put(&mut w),
+        Response::WriteTxnMarkers(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -336,6 +379,9 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::METADATA => Response::Metadata(MetadataResponse::get(&mut r)?),
         ApiKey::FIND_COORDINATOR => Response::FindCoordinator(FindCoordinatorResponse::get(&mut r)?),
         ApiKey::INIT_PRODUCER => Response::InitProducer(InitProducerResponse::get(&mut r)?),
+        ApiKey::ADD_PARTITIONS_TO_TXN => Response::AddPartitionsToTxn(AddPartitionsToTxnResponse::get(&mut r)?),
+        ApiKey::END_TXN => Response::EndTxn(EndTxnResponse::get(&mut r)?),
+        ApiKey::WRITE_TXN_MARKERS => Response::WriteTxnMarkers(WriteTxnMarkersResponse::get(&mut r)?),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),

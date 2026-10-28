@@ -18,10 +18,13 @@
 //! snapshot, the term runs and configurations from the log; committed
 //! entries after the snapshot are applied again.
 //!
-//! The replica also keeps the producer state that makes produce idempotent
-//! ([`crate::producers`]): checked on [`Replica::propose`], updated as the
-//! log grows, is truncated and is applied, and saved in snapshots next to the
-//! state machine's data.
+//! The replica also keeps the state of the partition itself: producers
+//! ([`crate::producers`], for idempotence), transactions ([`crate::txns`],
+//! for the last stable offset and aborted ranges) and, in a coordinator
+//! group, the transaction coordinator's ([`crate::coordinator`]). All three
+//! follow the log the same way: checked on proposal, noted as entries are
+//! appended, cut on truncation, applied in order, and saved in snapshots next
+//! to the state machine's data.
 //!
 //! ```text
 //! <dir>/raft.state   term, vote, commit (+ crc)
@@ -42,11 +45,13 @@ use lotse_raft::{
 use lotse_record::{Batch, RaftControl};
 use lotse_rt::{Disk, OpenMode, SegmentFile};
 
+use crate::coordinator::CoordinatorState;
 use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, ProducerState};
+use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 2;
+const FORMAT: u8 = 3;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -101,6 +106,77 @@ pub enum ProposeError {
         /// The current epoch.
         current: u16,
     },
+    /// A non-transactional batch from a producer with a transaction open in
+    /// this partition, or a transactional batch without a producer id.
+    #[error("invalid transaction state: {0}")]
+    InvalidTxnState(&'static str),
+}
+
+/// What became of a marker the coordinator asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkerOutcome {
+    /// Proposed at `last` in `term`; written once that commits.
+    Proposed { last: u64, term: u64 },
+    /// Nothing to write: closed already, or superseded by a newer epoch.
+    Done,
+    /// A newer coordinator already wrote markers for this producer.
+    StaleCoordinator,
+}
+
+/// The partition's own state next to the state machine's (see the module
+/// docs).
+#[derive(Debug)]
+struct PartitionState {
+    producers: ProducerState,
+    txns: TxnState,
+    coordinator: CoordinatorState,
+}
+
+impl PartitionState {
+    fn appended(&mut self, first: u64, last: u64, term: u64, batch: &Batch) {
+        self.producers.appended(first, last, term, batch);
+        self.txns.appended(first, batch);
+    }
+
+    fn truncated(&mut self, from: u64) {
+        self.producers.truncated(from);
+        self.txns.truncated(from);
+    }
+
+    fn applied(&mut self, first: u64, last: u64, batch: &Batch) -> Result<(), Error> {
+        self.producers.applied(first, last, batch);
+        self.txns.applied(first, last, batch);
+        self.coordinator.applied(last, batch).map_err(Error::Corrupt)
+    }
+
+    /// Snapshot data: the three states, then the state machine's.
+    fn snapshot(&self, sm: &[u8]) -> Bytes {
+        let mut b = BytesMut::new();
+        for part in [self.producers.encode(), self.txns.encode(), self.coordinator.encode()] {
+            b.put_u32_le(part.len() as u32);
+            b.put_slice(&part);
+        }
+        b.put_slice(sm);
+        b.freeze()
+    }
+
+    /// Restores the three states from snapshot data; returns the state
+    /// machine's part.
+    fn restore(&mut self, data: &Bytes) -> Result<Bytes, Error> {
+        let short = || Error::Corrupt("snapshot data is truncated".into());
+        let mut at = 0;
+        let mut parts = Vec::new();
+        for _ in 0..3 {
+            let len = data.get(at..at + 4).ok_or_else(short)?;
+            let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
+            parts.push(data.get(at + 4..at + 4 + len).ok_or_else(short)?.to_vec());
+            at += 4 + len;
+        }
+        self.producers.restore(&parts[0]).map_err(Error::Corrupt)?;
+        self.txns.restore(&parts[1]).map_err(Error::Corrupt)?;
+        self.coordinator.restore(&parts[2]).map_err(Error::Corrupt)?;
+        Ok(data.slice(at..))
+    }
 }
 
 /// Where a proposed batch is in the log.
@@ -138,7 +214,7 @@ pub struct Replica<D: Disk, S> {
     sm: S,
     applied: u64,
     snapshot: Option<(SnapshotMeta, Bytes)>,
-    producers: ProducerState,
+    state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
 }
@@ -179,15 +255,18 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         max_producers: usize,
     ) -> Result<Self, Error> {
         let dir = dir.into();
-        let mut producers = ProducerState::new(max_producers);
+        let mut state = PartitionState {
+            producers: ProducerState::new(max_producers),
+            txns: TxnState::default(),
+            coordinator: CoordinatorState::default(),
+        };
         disk.create_dir_all(&dir).await?;
         let snapshot = match read_file(&disk, &dir.join(SNAPSHOT)).await? {
             Some(bytes) => Some(decode_snapshot(bytes)?),
             None => None,
         };
         if let Some((_, data)) = &snapshot {
-            let (p, d) = split_snapshot_data(data)?;
-            producers.restore(&p).map_err(Error::Corrupt)?;
+            let d = state.restore(data)?;
             sm.restore(&d).map_err(Error::Corrupt)?;
         }
         let hard_state = match read_file(&disk, &dir.join(HARD_STATE)).await? {
@@ -214,7 +293,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                 // Applied entries are applied again below; until then, and
                 // for the uncommitted rest, the producer state sees them as
                 // the tail of the log.
-                producers.appended(e.first, e.last, e.term, &batch);
+                state.appended(e.first, e.last, e.term, &batch);
                 if e.kind == EntryKind::Config {
                     let m = Membership::decode(&e.data).ok_or_else(|| Error::Corrupt("bad membership".into()))?;
                     configs.push((e.last, m));
@@ -237,7 +316,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             sm,
             applied: snap_index,
             snapshot,
-            producers,
+            state,
             max_fill_bytes: 1 << 20,
         })
     }
@@ -281,11 +360,18 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         if parsed.producer_id() != 0 && parsed.base_sequence() < 0 {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("idempotent batch without a sequence")));
         }
+        if parsed.attributes().transactional && parsed.producer_id() == 0 {
+            return Err(ProposeError::InvalidTxnState("a transactional batch needs a producer id"));
+        }
         // Only a leader answers for the log, duplicates included.
         if self.raft.role() != lotse_raft::Role::Leader {
             return Err(ProposeError::NotLeader(NotLeader { leader: self.raft.leader() }));
         }
-        match self.producers.check(&parsed) {
+        let open = parsed.producer_id() != 0 && self.state.txns.has_open(parsed.producer_id());
+        if open && !parsed.attributes().transactional {
+            return Err(ProposeError::InvalidTxnState("the producer has a transaction open here"));
+        }
+        match self.state.producers.check(&parsed) {
             Check::New => {}
             Check::Duplicate { first, last, term } => return Ok(Proposed { first, last, term, duplicate: true }),
             Check::OutOfOrder { expected } => return Err(ProposeError::OutOfOrderSequence { expected }),
@@ -294,8 +380,54 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let (first, last) =
             self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
         let term = self.raft.term();
-        self.producers.appended(first, last, term, &parsed);
+        self.state.appended(first, last, term, &parsed);
         Ok(Proposed { first, last, term: Some(term), duplicate: false })
+    }
+
+    /// Proposes the marker the coordinator asks for, if it is still needed.
+    pub(crate) fn propose_marker(
+        &mut self,
+        producer_id: u64,
+        epoch: u16,
+        commit: bool,
+        coordinator_epoch: u32,
+    ) -> Result<MarkerOutcome, ProposeError> {
+        if self.raft.role() != lotse_raft::Role::Leader {
+            return Err(ProposeError::NotLeader(NotLeader { leader: self.raft.leader() }));
+        }
+        match self.state.txns.check_marker(producer_id, epoch, coordinator_epoch) {
+            MarkerCheck::Append => {}
+            MarkerCheck::Done => return Ok(MarkerOutcome::Done),
+            MarkerCheck::StaleCoordinator => return Ok(MarkerOutcome::StaleCoordinator),
+        }
+        let ty = if commit { lotse_record::ControlType::Commit } else { lotse_record::ControlType::Abort };
+        let batch = lotse_record::control_batch(producer_id, epoch, ty, coordinator_epoch, 0)?;
+        let parsed = Batch::parse(&batch)?.0;
+        let (first, last) = self.raft.propose(1, batch).map_err(ProposeError::NotLeader)?;
+        let term = self.raft.term();
+        self.state.appended(first, last, term, &parsed);
+        Ok(MarkerOutcome::Proposed { last, term })
+    }
+
+    /// Proposes one of the broker's own records (a coordinator record or a
+    /// producer id allocation) as the leader.
+    pub(crate) fn propose_internal(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {
+        let parsed = Batch::parse(&batch)?.0;
+        let (first, last) = self.raft.propose(1, batch).map_err(ProposeError::NotLeader)?;
+        let term = self.raft.term();
+        self.state.appended(first, last, term, &parsed);
+        Ok(Proposed { first, last, term: Some(term), duplicate: false })
+    }
+
+    /// The partition's transaction state, as applied.
+    pub(crate) fn txns(&self) -> &TxnState {
+        &self.state.txns
+    }
+
+    /// The coordinator's state, as applied (empty outside a coordinator
+    /// group).
+    pub(crate) fn coordinator(&self) -> &CoordinatorState {
+        &self.state.coordinator
     }
 
     /// Persists, applies and sends whatever the group has ready.
@@ -306,8 +438,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let ready = self.raft.ready();
         if let Some(snap) = ready.snapshot {
             write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&snap.meta, &snap.data)).await?;
-            let (p, d) = split_snapshot_data(&snap.data)?;
-            self.producers.restore(&p).map_err(Error::Corrupt)?;
+            let d = self.state.restore(&snap.data)?;
             self.sm.restore(&d).map_err(Error::Corrupt)?;
             self.log.reset(snap.meta.index).await?;
             self.applied = snap.meta.index;
@@ -315,13 +446,13 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         }
         if let Some(from) = ready.truncate_from {
             self.log.truncate_from(from - 1).await?;
-            self.producers.truncated(from);
+            self.state.truncated(from);
         }
         if !ready.entries.is_empty() {
             for e in &ready.entries {
                 let batch = to_batch(e)?;
                 if e.kind == EntryKind::Normal {
-                    self.producers.appended(e.first, e.last, e.term, &Batch::parse(&batch)?.0);
+                    self.state.appended(e.first, e.last, e.term, &Batch::parse(&batch)?.0);
                 }
                 self.log.append(batch).await?;
             }
@@ -360,7 +491,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                         batch.base_offset()
                     )));
                 }
-                self.producers.applied(batch.base_offset() + 1, batch.next_offset(), &batch);
+                self.state.applied(batch.base_offset() + 1, batch.next_offset(), &batch)?;
                 // Control batches (Raft's own, transaction markers) are not data.
                 if !batch.attributes().control {
                     self.sm.apply(&batch);
@@ -408,7 +539,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         }
         self.raft.compact(index);
         let meta = self.raft.snapshot_meta();
-        let data = snapshot_data(&self.producers.encode(), &self.sm.snapshot());
+        let data = self.state.snapshot(&self.sm.snapshot());
         write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
         self.snapshot = Some((meta, data));
         Ok(index)
@@ -537,24 +668,6 @@ fn decode_hard_state(bytes: Bytes) -> Result<HardState, Error> {
     let vote = b.get_u64_le();
     let commit = b.get_u64_le();
     Ok(HardState { term, vote: has_vote.then_some(vote), commit })
-}
-
-/// A snapshot's data: the producer state, then the state machine's.
-fn snapshot_data(producers: &[u8], sm: &[u8]) -> Bytes {
-    let mut b = BytesMut::with_capacity(4 + producers.len() + sm.len());
-    b.put_u32_le(producers.len() as u32);
-    b.put_slice(producers);
-    b.put_slice(sm);
-    b.freeze()
-}
-
-fn split_snapshot_data(data: &Bytes) -> Result<(Bytes, Bytes), Error> {
-    let short = || Error::Corrupt("snapshot data is truncated".into());
-    let len = u32::from_le_bytes(data.get(..4).ok_or_else(short)?.try_into().expect("four bytes")) as usize;
-    if data.len() < 4 + len {
-        return Err(short());
-    }
-    Ok((data.slice(4..4 + len), data.slice(4 + len..)))
 }
 
 fn encode_snapshot(meta: &SnapshotMeta, data: &[u8]) -> Bytes {

@@ -223,3 +223,142 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
         }
     });
 }
+
+/// One replica of group `G` that is its own quorum.
+async fn single(rt: &SimRuntime) -> Replica<SimRuntime, Nothing> {
+    let cfg = Config { pre_vote: false, ..Config::new(1, vec![1]) };
+    Replica::open(rt.clone(), "g", cfg, Nothing, LogConfig::default()).await.unwrap()
+}
+
+/// Leads and applies an entry of its own term.
+async fn lead(r: &mut Replica<SimRuntime, Nothing>) {
+    for _ in 0..50 {
+        r.raft().tick();
+        r.process().await.unwrap();
+        let raft = r.raft_ref();
+        if raft.role() == Role::Leader && raft.log().term_at(r.applied()) == Some(raft.term()) {
+            return;
+        }
+    }
+    panic!("no leader");
+}
+
+fn transactional_batch(producer_id: u64, epoch: u16, seq: i32) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(b"in a transaction"), &[]);
+    let mut raw = bytes::BytesMut::from(&b.finish().unwrap()[..]);
+    lotse_record::set_producer(&mut raw, producer_id, epoch, seq).unwrap();
+    lotse_record::set_transactional(&mut raw, true).unwrap();
+    raw.freeze()
+}
+
+/// Right after a restart the commit index is known but nothing is applied
+/// yet: the last stable offset must not run ahead of what is applied, or an
+/// open transaction's data would reach read_committed consumers.
+#[test]
+fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
+    Sim::new(3).run(|rt| async move {
+        let mut r = single(&rt).await;
+        lead(&mut r).await;
+        r.propose(transactional_batch(5, 0, 0)).unwrap();
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        drop(r);
+        let mut r = single(&rt).await;
+        while r.raft_ref().role() != Role::Leader {
+            r.raft().tick();
+        }
+        assert!(r.raft_ref().commit() >= 2 && r.applied() == 0, "committed, not applied yet");
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let outbox = Arc::new(Outbox::default());
+        let fetch = Request::Fetch(lotse_proto::FetchRequest {
+            max_wait_ms: 0,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            isolation: lotse_proto::isolation::COMMITTED,
+            resources: vec![lotse_proto::FetchResource {
+                resource_id: 7,
+                partitions: vec![lotse_proto::FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    leader_term: 0,
+                    max_bytes: 1 << 20,
+                }],
+            }],
+        });
+        let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
+        let mut clients = Clients::default();
+        clients
+            .handle(ClientRequest { outbox: outbox.clone(), header, request: fetch }, &view, &mut groups)
+            .await
+            .unwrap();
+        let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
+        let Response::Fetch(f) = lotse_proto::decode_response(frame, ApiKey::FETCH).unwrap().1 else { panic!() };
+        let p = &f.resources[0].partitions[0];
+        assert_eq!(p.error, ErrorCode::NONE);
+        assert!(p.records.is_empty(), "nothing is stable before it is applied");
+        assert_eq!(p.last_stable_offset, 0);
+    });
+}
+
+/// A commit racing a timeout abort: while the abort's record is in flight,
+/// the commit must be told to wait, not written as a second decision.
+#[test]
+fn a_commit_racing_a_timeout_abort_is_refused() {
+    Sim::new(4).run(|rt| async move {
+        let mut r = single(&rt).await;
+        lead(&mut r).await;
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let mut now = rt.now();
+        let mut clients = Clients::default();
+        let outbox = Arc::new(Outbox::default());
+        let mut id = 0;
+        let mut ask = async |clients: &mut Clients, groups: &mut Groups, now, request: Request| {
+            id += 1;
+            let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: Some(G), now };
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
+            let api_key = request.api_key();
+            clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered");
+            lotse_proto::decode_response(frame, api_key).unwrap().1
+        };
+        let init =
+            Request::InitProducer(lotse_proto::InitProducerRequest { txn_id: Some("t".into()), txn_timeout_ms: 100 });
+        let Response::InitProducer(p) = ask(&mut clients, &mut groups, now, init).await else { panic!() };
+        assert_eq!(p.error, ErrorCode::NONE);
+        let add = Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+            txn_id: "t".into(),
+            producer_id: p.producer_id,
+            producer_epoch: p.producer_epoch,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let Response::AddPartitionsToTxn(a) = ask(&mut clients, &mut groups, now, add).await else { panic!() };
+        assert_eq!(a.resources[0].partitions[0].error, ErrorCode::NONE);
+
+        // The timeout passes: the coordinator proposes the abort, which is not
+        // committed yet when the commit arrives.
+        now = now + Duration::from_secs(1);
+        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: Some(G), now };
+        clients.after_round(&view, &mut groups).await.unwrap();
+        assert!(clients.busy.contains("t"), "the abort is in flight");
+        let end = Request::EndTxn(lotse_proto::EndTxnRequest {
+            txn_id: "t".into(),
+            producer_id: p.producer_id,
+            producer_epoch: p.producer_epoch,
+            commit: true,
+        });
+        let Response::EndTxn(e) = ask(&mut clients, &mut groups, now, end).await else { panic!() };
+        assert_eq!(e.error, ErrorCode::CONCURRENT_TRANSACTIONS, "not a second decision");
+        let phase = groups[&G].coordinator().get("t").unwrap().phase;
+        assert!(matches!(phase, crate::coordinator::Phase::PrepareAbort | crate::coordinator::Phase::CompleteAbort));
+    });
+}

@@ -22,6 +22,22 @@ fn requests() -> Vec<Request> {
         Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: String::new() }),
         Request::InitProducer(InitProducerRequest { txn_id: None, txn_timeout_ms: 60_000 }),
         Request::InitProducer(InitProducerRequest { txn_id: Some("payments".into()), txn_timeout_ms: 0 }),
+        Request::AddPartitionsToTxn(AddPartitionsToTxnRequest {
+            txn_id: "payments".into(),
+            producer_id: 17,
+            producer_epoch: 2,
+            resources: vec![TxnResource { resource_id: 7, partitions: vec![0, 1] }],
+        }),
+        Request::EndTxn(EndTxnRequest { txn_id: "payments".into(), producer_id: 17, producer_epoch: 2, commit: true }),
+        Request::WriteTxnMarkers(WriteTxnMarkersRequest {
+            markers: vec![TxnMarker {
+                producer_id: 17,
+                producer_epoch: 3,
+                commit: false,
+                coordinator_epoch: 9,
+                resources: vec![TxnResource { resource_id: 7, partitions: vec![1] }],
+            }],
+        }),
         Request::Fetch(FetchRequest {
             max_wait_ms: 500,
             min_bytes: 1,
@@ -156,6 +172,34 @@ fn responses() -> Vec<(ApiKey, Response)> {
                 leader_hint: Some(LeaderHint { leader: 3, term: 2 }),
             }),
         ),
+        (
+            ApiKey::ADD_PARTITIONS_TO_TXN,
+            Response::AddPartitionsToTxn(AddPartitionsToTxnResponse {
+                resources: vec![TxnResourceResult {
+                    resource_id: 7,
+                    partitions: vec![
+                        TxnPartitionResult { partition: 0, error: ErrorCode::NONE },
+                        TxnPartitionResult { partition: 1, error: ErrorCode::CONCURRENT_TRANSACTIONS },
+                    ],
+                }],
+            }),
+        ),
+        (
+            ApiKey::END_TXN,
+            Response::EndTxn(EndTxnResponse { error: ErrorCode::NONE, producer_id: 17, producer_epoch: 3 }),
+        ),
+        (
+            ApiKey::WRITE_TXN_MARKERS,
+            Response::WriteTxnMarkers(WriteTxnMarkersResponse {
+                markers: vec![MarkerResult {
+                    producer_id: 17,
+                    resources: vec![TxnResourceResult {
+                        resource_id: 7,
+                        partitions: vec![TxnPartitionResult { partition: 1, error: ErrorCode::COORDINATOR_FENCED }],
+                    }],
+                }],
+            }),
+        ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
     ]
@@ -262,7 +306,8 @@ fn error_codes_have_names_and_retry_classes() {
     assert_eq!(ErrorCode::NOT_LEADER.name(), "NOT_LEADER");
     assert_eq!(ErrorCode::UNSUPPORTED_VERSION.name(), "UNSUPPORTED_VERSION");
     assert_eq!(ErrorCode::COORDINATOR_NOT_AVAILABLE.name(), "COORDINATOR_NOT_AVAILABLE");
-    assert!(ErrorCode::COORDINATOR_NOT_AVAILABLE.retriable());
+    assert!(ErrorCode::COORDINATOR_NOT_AVAILABLE.retriable() && ErrorCode::CONCURRENT_TRANSACTIONS.retriable());
+    assert_eq!(ErrorCode::COORDINATOR_FENCED.name(), "COORDINATOR_FENCED");
     assert_eq!(ErrorCode(999).name(), "UNKNOWN");
     assert!(ErrorCode::NOT_LEADER.retriable() && ErrorCode::REQUEST_TIMED_OUT.retriable());
     assert!(!ErrorCode::CORRUPT_BATCH.retriable() && !ErrorCode::UNKNOWN_RESOURCE.retriable());

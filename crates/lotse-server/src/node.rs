@@ -15,6 +15,9 @@
 //!   task that decodes frames into the node's inbox.
 //! - With [`NodeConfig::client_listen`] set, a second accept task serves
 //!   clients over the native protocol ([`crate::client`]).
+//! - While this node coordinates transactions, a **marker job** per decided
+//!   transaction writes its markers into the partitions through an internal
+//!   client, then reports back so the main loop can complete it.
 //!
 //! On stop (or when a replica fails, e.g. its disk lost power) every task
 //! ends and the listener is closed before [`Node::start`]'s task finishes, so
@@ -31,7 +34,7 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Listener, Runtime, Spawn};
 
-use crate::client::{ClientRequest, Clients, ClusterView, StreamConfig};
+use crate::client::{ClientRequest, Clients, ClusterView, MarkerJob, StreamConfig};
 use crate::replica::{Error, ProposeError, Replica, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
@@ -91,8 +94,17 @@ type Incoming = (NodeId, Vec<(GroupId, Message)>);
 type Reply = Arc<Mutex<(Option<Result<(u64, u64), String>>, Option<std::task::Waker>)>>;
 
 enum Command {
-    Propose { group: GroupId, batch: Bytes, reply: Reply },
+    Propose {
+        group: GroupId,
+        batch: Bytes,
+        reply: Reply,
+    },
     Client(ClientRequest),
+    /// Every marker of a transaction's decision is written.
+    MarkersWritten {
+        txn_id: String,
+        term: u64,
+    },
 }
 
 #[derive(Default)]
@@ -227,7 +239,8 @@ async fn run<R: Runtime, S: StateMachine>(
         tasks.push(rt.spawn(send_to(rt.clone(), addr.clone(), peer.clone(), shared.stop.clone(), cfg.tick)));
         peers.insert(id, peer);
     }
-    let result = main_loop(&rt, &cfg, &mut groups, &peers, &shared).await;
+    let jobs = Live::default();
+    let result = main_loop(&rt, &cfg, &mut groups, &peers, &shared, &jobs).await;
     // Whatever ended the loop, everything else ends with it.
     shared.stop.set();
     for p in peers.values() {
@@ -236,7 +249,80 @@ async fn run<R: Runtime, S: StateMachine>(
     for t in tasks {
         t.await;
     }
+    jobs.wait().await;
     result
+}
+
+/// Tasks that come and go (marker jobs), counted so that the node can wait
+/// for them at the end without keeping a handle per task.
+#[derive(Clone, Default)]
+struct Live(Arc<(Mutex<usize>, Signal)>);
+
+impl Live {
+    fn spawn<R: Runtime>(&self, rt: &R, task: impl std::future::Future<Output = ()> + std::marker::Send + 'static) {
+        *self.0.0.lock().expect("live lock") += 1;
+        let live = self.clone();
+        // Dropping the handle detaches the task; the count tracks it.
+        drop(rt.spawn(async move {
+            task.await;
+            let mut n = live.0.0.lock().expect("live lock");
+            *n -= 1;
+            if *n == 0 {
+                live.0.1.set();
+            }
+        }));
+    }
+
+    async fn wait(&self) {
+        loop {
+            self.0.1.take();
+            if *self.0.0.lock().expect("live lock") == 0 {
+                return;
+            }
+            self.0.1.wait().await;
+        }
+    }
+}
+
+/// Writes one decided transaction's markers, one partition after another,
+/// until each is written (or found not needed). Stops if the coordinator is
+/// fenced, the job is cancelled or the node stops.
+async fn write_markers<R: Runtime>(
+    rt: R,
+    client: Arc<lotse_client::Client<R>>,
+    job: MarkerJob,
+    shared: Arc<Shared>,
+    backoff: Duration,
+) {
+    let stop = [&job.cancel, &shared.stop];
+    for &(resource_id, partition) in &job.partitions {
+        loop {
+            let marker = lotse_proto::TxnMarker {
+                producer_id: job.producer_id,
+                producer_epoch: job.epoch,
+                commit: job.commit,
+                coordinator_epoch: job.term as u32,
+                resources: Vec::new(),
+            };
+            match race(client.write_txn_marker(resource_id, partition, marker), &stop).await {
+                None => return,
+                Some(Ok(lotse_proto::ErrorCode::NONE)) => break,
+                // A newer coordinator took over this producer's markers.
+                Some(Ok(_)) => return,
+                Some(Err(_)) => {
+                    if race(rt.sleep(backoff), &stop).await.is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    shared
+        .commands
+        .lock()
+        .expect("commands lock")
+        .push_back(Command::MarkersWritten { txn_id: job.txn_id, term: job.term });
+    shared.work.set();
 }
 
 async fn main_loop<R: Runtime, S: StateMachine>(
@@ -244,10 +330,22 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     cfg: &NodeConfig,
     groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     peers: &BTreeMap<NodeId, Arc<Peer>>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
+    jobs: &Live,
 ) -> Result<(), Error> {
     let mut next_tick = rt.now() + cfg.tick;
     let mut clients = Clients::default();
+    // The coordinator writes markers through the native protocol, like a client.
+    let marker_client = Arc::new(lotse_client::Client::new(
+        rt.clone(),
+        lotse_client::ClientConfig {
+            request_timeout: cfg.tick * 100,
+            retry_for: cfg.tick * 100,
+            backoff: cfg.tick * 5,
+            idempotent: false,
+            ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
+        },
+    ));
     while !shared.stop.is_set() {
         let wait = next_tick - rt.now();
         if !wait.is_zero() && !shared.work.take() {
@@ -270,6 +368,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 Command::Propose { group, batch, reply } => (group, batch, reply),
                 Command::Client(req) => {
                     clients.handle(req, &view, groups).await?;
+                    continue;
+                }
+                Command::MarkersWritten { txn_id, term } => {
+                    clients.markers_written(&txn_id, term, &view, groups);
                     continue;
                 }
             };
@@ -298,7 +400,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 outbound.entry(s.to).or_default().push((g, s.msg));
             }
         }
-        clients.after_round(&view, groups).await?;
+        for job in clients.after_round(&view, groups).await? {
+            let task = write_markers(rt.clone(), marker_client.clone(), job, shared.clone(), cfg.tick * 5);
+            jobs.spawn(rt, task);
+        }
         for (to, messages) in outbound {
             let Some(peer) = peers.get(&to) else { continue };
             let frame = wire::encode(cfg.id, &messages);

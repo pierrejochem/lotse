@@ -13,6 +13,7 @@ lotse-record.workspace = true
 lotse-log.workspace = true
 lotse-raft.workspace = true
 lotse-proto.workspace = true
+lotse-client.workspace = true
 bytes.workspace = true
 crc32c.workspace = true
 thiserror.workspace = true

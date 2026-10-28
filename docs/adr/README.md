@@ -33,5 +33,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0026 | [Native protocol: the first cut](0026-native-protocol-first-cut.md) | Accepted |
 | 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted |
 | 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted |
+| 0029 | [Transactions](0029-transactions.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

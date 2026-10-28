@@ -40,9 +40,8 @@ partition-0007/
   00000000000000000000.log        # Record-Batches (Raft-Entries)
   00000000000000000000.index      # sparse: offset -> byte pos
   00000000000000000000.timeindex  # sparse: timestamp -> offset
-  00000000000000000000.txnindex   # abgebrochene Txns: (pid, first, last)
-  00000000000000000000.pstate     # Producer-State-Snapshot beim Segment-Roll
-  raft.meta                       # term, voted_for, commit_index
+  raft.state                      # term, voted_for, commit_index
+  snapshot                        # Raft-Snapshot: Producer-, Txn- und Koordinator-State, State Machine
 ```
 
 Geschlossene Segmente sind unveränderlich. Das ist die Grundlage für Snapshots per Referenz und für den Segment-Rewrite.
@@ -125,7 +124,7 @@ Producer-IDs vergibt die Koordinator-Gruppe: `InitProducer` schlägt dort einen 
 
 - **High Watermark (HW)** = Raft-Commit-Index, von der Mehrheit bestätigt.
 - **Last Stable Offset (LSO)** = min(HW, `first_offset` aller offenen Txns).
-- `read_committed`-Consumer lesen bis LSO und überspringen abgebrochene Batches über `.txnindex`, ohne das Log zu scannen.
+- `read_committed`-Consumer lesen bis LSO und überspringen abgebrochene Batches anhand der Liste, die `Fetch` mitliefert, ohne das Log zu scannen. Die Replica hält offene Transaktionen und abgebrochene Bereiche im Speicher und im Raft-Snapshot (ADR 0029). Der LSO liegt nie hinter dem angewendeten Index: Darüber ist das Schicksal einer Transaktion hier noch nicht bekannt.
 
 ### Transaktions-Koordinator
 
@@ -138,6 +137,12 @@ Der Koordinator führt die interne Partition `__txn_state` als eigene Raft-Grupp
 5. `COMPLETE_COMMIT` schließt die Transaktion ab.
 
 Fällt der Koordinator nach `PREPARE_COMMIT` aus, schreibt der neue Leader die Marker zu Ende. Ein Timeout ohne `EndTxn` führt zu ABORT.
+
+`__txn_state` ist die Koordinator-Gruppe aus ADR 0028. Jede Änderung einer transaktionalen ID ist ein Record mit ihrem ganzen neuen Zustand (Producer-ID, Epoch, Phase, Timeout, Partitionen), gespeichert als interner Control-Batch. Der Koordinator handelt erst, wenn sein Leader einen Entry seines eigenen Terms angewendet hat, und ändert pro transaktionaler ID immer nur eins; eine zweite Anfrage bekommt so lange `CONCURRENT_TRANSACTIONS`. Ist bei `InitProducer` noch eine Transaktion offen, bricht der Koordinator sie mit erhöhter Epoch ab und antwortet `CONCURRENT_TRANSACTIONS`; der Client versucht es erneut. Der Timeout läuft auf der Uhr des Koordinator-Leaders und beginnt bei einem Leaderwechsel neu.
+
+**Das Ende einer Transaktion erhöht die Epoch.** `PREPARE_COMMIT` und `PREPARE_ABORT` tragen die Epoch plus eins, die Marker werden damit geschrieben, und `EndTxn` gibt sie zurück: Die nächste Transaktion läuft mit der neuen Epoch. Eine Partition schließt eine offene Transaktion nur mit einem Marker höherer Epoch als ihre Daten. So kann ein verspätet wiederholter Marker nie die nächste Transaktion schließen (die Lücke, die Kafka mit KIP-890 geschlossen hat). Jeder Marker trägt außerdem die Koordinator-Epoch (den Raft-Term der Koordinator-Gruppe); ältere als eine schon gesehene weist die Partition mit `COORDINATOR_FENCED` ab.
+
+Die Marker schreibt der Koordinator-Node über den internen API-Key `WriteTxnMarkers`, mit demselben Client-Code wie jeder andere: Leader-Routing, `NOT_LEADER` und die Commit-Regel gelten unverändert. Ein Partition-Leader hängt einen Marker nur an, wenn er eine offene Transaktion schließt oder die Epoch des Producers erhöht; sonst ist nichts mehr zu tun. Das erhöhte Epoch-Fencing trifft so auch Partitionen, in die ein Zombie-Producer nie geschrieben hat. `COMPLETE_COMMIT` bzw. `COMPLETE_ABORT` schreibt der Koordinator erst, wenn jede Partition geantwortet hat.
 
 ## Queue-Semantik auf dem Log
 
@@ -250,11 +255,11 @@ Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frame
 
 `Publish` routet über Exchanges und schreibt in die Ziel-Queues. `Produce` schreibt direkt in eine Partition. Beide nutzen dasselbe Batch-Format und dieselben Idempotenzregeln.
 
-Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `Metadata` 1, `FindCoordinator` 2, `Produce` 3, `Fetch` 4 und so weiter bis `InitProducer` 16. Alle beginnen bei Version 0. Umgesetzt sind bisher `ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch` und `InitProducer` (ADR 0026, ADR 0028).
+Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `Metadata` 1, `FindCoordinator` 2, `Produce` 3, `Fetch` 4 und so weiter bis `InitProducer` 16, `AddPartitionsToTxn` 17 und `EndTxn` 20. Interne Keys zwischen Nodes beginnen bei 1000 (`WriteTxnMarkers` 1000). Alle beginnen bei Version 0. Umgesetzt sind bisher `ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn` und `WriteTxnMarkers` (ADR 0026, 0028, 0029).
 
 ### Zero-copy
 
-`Fetch` sendet Segmentbytes ohne Umkodierung. Ohne TLS über `sendfile`, mit TLS über kTLS (Linux), sonst über einen gepufferten Pfad. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste aus `.txnindex`.
+`Fetch` sendet Segmentbytes ohne Umkodierung. Ohne TLS über `sendfile`, mit TLS über kTLS (Linux), sonst über einen gepufferten Pfad. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste.
 
 ## Flow Control & Quotas
 
@@ -406,7 +411,13 @@ AddAcksToTxn       <- txn_id string, producer_id u64, producer_epoch u16, queue_
                    -> queues: array{queue_id u64, error u16}
 
 EndTxn             <- txn_id string, producer_id u64, producer_epoch u16, commit u8
-                   -> error u16
+                   -> error u16, producer_id u64, producer_epoch u16   // Epoch für die nächste Transaktion
+
+WriteTxnMarkers    <- markers: array{producer_id u64, producer_epoch u16, commit u8,       // intern, Key 1000
+                                     coordinator_epoch u32,
+                                     resources: array{resource_id u64, partitions array<u32>}}
+                   -> markers: array{producer_id u64,
+                                     resources: array{resource_id u64, partitions: array{partition u32, error u16}}}
 ```
 
 ### Admin
@@ -453,6 +464,8 @@ AlterConfigs    <- resource_id u64, set: array{key string, value string}, delete
 | 13 | `UNAUTHORIZED` | nein | RBAC verweigert |
 | 14 | `UNSUPPORTED_VERSION` | nein | API-Version außerhalb min/max |
 | 18 | `COORDINATOR_NOT_AVAILABLE` | ja | Keine Koordinator-Gruppe konfiguriert oder gerade ohne Leader |
+| 19 | `CONCURRENT_TRANSACTIONS` | ja | Eine andere Änderung derselben Transaktion läuft |
+| 20 | `COORDINATOR_FENCED` | nein | Ein neuerer Koordinator hat die Marker dieses Producers übernommen |
 
 ## Weitere Entscheidungen
 
@@ -642,4 +655,4 @@ Die Designentscheidungen für Broker und Console sind getroffen. Offen für die 
 - [ ] Admin-APIs für Purge, Requeue und Leader verschieben, danach die Buttons in der UI
 - [ ] Einklappbares Menü auf dem Telefon
 
-Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-proto`, `lotse-sim`, `lotse-server`, `lotse-client` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt und Clients über das native Protokoll bedient (`ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `InitProducer`). `Produce` ist idempotent: Producer-IDs aus der Koordinator-Gruppe, Sequenzen geprüft gegen das ganze Log, Producer-State in den Snapshots (ADR 0028); `lotse-client` nutzt das standardmäßig. Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Vier Simulationen prüfen das, die CI fährt jede mit 5.000 Seeds, die Client-Simulation pro Push mit 2.000 und nächtlich mit 5.000 (ADR 0027): die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready`, die Node-Simulation mit drei ganzen Nodes und drei Gruppen über das simulierte Netz und die Client-Simulation mit drei oder fünf Nodes, einem idempotenten und einem einfachen Producer und zwei Consumern über `lotse-client`. Sie prüft, dass kein bestätigter Batch verloren geht oder wandert, dass Consumer nur Committetes lesen, dass ein als nicht geschrieben gemeldeter Batch tatsächlich fehlt und dass nichts doppelt im Log steht, obwohl der idempotente Producer unbekannte Ausgänge wiederholt. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und schreibt und liest über `lotse-client` weiter. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 eingebauten Durability-Fehler der Replica, alle 9 eingebauten Transportfehler, alle 8 eingebauten Protokollfehler und alle 11 eingebauten Idempotenzfehler (Prüfung ohne Log-Ende, keine Duplikaterkennung, Log-Ende nicht gekürzt oder nicht neu aufgebaut, Producer-State nicht im Snapshot, kein Fencing, Lücken akzeptiert, falsche Verdrängung, Duplikat eines laufenden Batches sofort beantwortet, Client mit wiederverwendeter Sequenz oder alter Producer-ID nach unbekanntem Ausgang). Die heikelsten fängt nur ein deterministischer Test mit fünf Replicas, weil die Simulation die nötige Geschichte zu selten trifft. Zwei echte Fehler wurden so gefunden: der Hard State vor dem Log (ADR 0023) und ein zu enges `OFFSET_OUT_OF_RANGE` nach einem Leaderwechsel (ADR 0026). Die Console läuft gegen einen eingebauten Demo-Cluster, bis das native Protokoll Admin-API-Keys hat. Nächster Schritt: Transaktionen (`__txn_state`, Marker, LSO).
+Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-proto`, `lotse-sim`, `lotse-server`, `lotse-client` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt und Clients über das native Protokoll bedient (`ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn`, intern `WriteTxnMarkers`). `Produce` ist idempotent (ADR 0028) und transaktional über mehrere Partitionen (ADR 0029): Koordinator-Records in der Koordinator-Gruppe, Marker über das Protokoll, eine erhöhte Epoch pro Transaktion, LSO und abgebrochene Bereiche in der Replica, `read_committed` im Client. Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Vier Simulationen prüfen das, die CI fährt jede mit 5.000 Seeds, die Client-Simulation pro Push mit 2.000 und nächtlich mit 5.000 (ADR 0027): die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready`, die Node-Simulation mit drei ganzen Nodes und drei Gruppen über das simulierte Netz und die Client-Simulation mit drei oder fünf Nodes, einem idempotenten, einem einfachen und einem transaktionalen Producer und zwei `read_committed`-Consumern über `lotse-client`. Sie prüft, dass kein bestätigter Batch verloren geht oder wandert, dass Consumer nur Committetes lesen, dass ein als nicht geschrieben gemeldeter Batch tatsächlich fehlt, dass nichts doppelt im Log steht und dass jede committete Transaktion ganz, jede abgebrochene gar nicht und eine mit unbekanntem Ende ganz oder gar nicht sichtbar ist. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und schreibt und liest über `lotse-client` weiter. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 Durability-Fehler der Replica, alle 9 Transportfehler, alle 8 Protokollfehler, alle 11 Idempotenzfehler und alle 15 Transaktionsfehler (unter anderem ein LSO, der offene Transaktionen übersieht oder dem Anwenden vorausläuft, Marker, die eine Transaktion gleicher Epoch schließen, ein Ende ohne Epoch-Erhöhung, ein Koordinator, der zwei Änderungen gleichzeitig zulässt, `COMPLETE` vor allen Markern, ein Client, der nach unbekanntem Schreibvorgang committet). Die heikelsten fängt nur ein deterministischer Test, weil die Simulation die nötige Geschichte zu selten trifft. Zwei echte Fehler wurden so gefunden: der Hard State vor dem Log (ADR 0023) und ein zu enges `OFFSET_OUT_OF_RANGE` nach einem Leaderwechsel (ADR 0026). Die Console läuft gegen einen eingebauten Demo-Cluster, bis das native Protokoll Admin-API-Keys hat. Nächster Schritt: Queue-Semantik auf dem Log (Acks, Credits, Wiederzustellung).

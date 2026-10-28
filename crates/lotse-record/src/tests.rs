@@ -197,3 +197,32 @@ fn producer_fields_can_be_set_after_building() {
     assert_eq!(batch.records().unwrap().len(), 2);
     assert!(set_producer(&mut raw[..20], 1, 0, 0).is_err(), "a cut batch is refused");
 }
+
+#[test]
+fn control_batches_are_classified() {
+    let marker = control_batch(9, 2, ControlType::Commit, 7, 0).unwrap();
+    let (m, _) = Batch::parse(&marker).unwrap();
+    assert_eq!(control(&m).unwrap(), Some(Control::Marker(ControlType::Commit, 7)));
+    let noop = raft_control_batch(RaftControl::Noop, &[]).unwrap();
+    assert_eq!(control(&Batch::parse(&noop).unwrap().0).unwrap(), Some(Control::Raft(RaftControl::Noop, Bytes::new())));
+    let txn = internal_control_batch(InternalControl::TxnState, b"state").unwrap();
+    let (t, _) = Batch::parse(&txn).unwrap();
+    assert_eq!(control(&t).unwrap(), Some(Control::Internal(InternalControl::TxnState, Bytes::from_static(b"state"))));
+    assert_eq!(raft_control(&t).unwrap(), None, "a coordinator record is a normal Raft entry");
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(b"v"), &[]);
+    let data = b.finish().unwrap();
+    assert_eq!(control(&Batch::parse(&data).unwrap().0).unwrap(), None);
+}
+
+#[test]
+fn a_batch_can_be_made_transactional() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(b"v"), &[]);
+    let mut raw = bytes::BytesMut::from(&b.finish().unwrap()[..]);
+    set_transactional(&mut raw, true).unwrap();
+    let (batch, _) = Batch::parse(&raw.clone().freeze()).expect("checksum recomputed");
+    assert!(batch.attributes().transactional && !batch.attributes().control);
+    set_transactional(&mut raw, false).unwrap();
+    assert!(!Batch::parse(&raw.freeze()).unwrap().0.attributes().transactional);
+}

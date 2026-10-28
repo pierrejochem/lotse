@@ -111,3 +111,20 @@ fn the_committed_state_round_trips_and_damage_is_refused() {
     assert!(ProducerState::new(10).restore(&longer).is_err());
     assert!(ProducerState::new(10).restore(&Bytes::from_static(&[0, 0, 0, 0])).is_ok(), "empty");
 }
+
+#[test]
+fn a_marker_raises_the_epoch_and_restarts_the_sequence() {
+    let mut s = ProducerState::new(10);
+    let next = commit(&mut s, 1, &batch(7, 0, 0, 2));
+    let m =
+        Batch::parse(&lotse_record::control_batch(7, 1, lotse_record::ControlType::Commit, 1, 0).unwrap()).unwrap().0;
+    s.appended(next, next, 1, &m);
+    assert_eq!(s.check(&batch(7, 0, 2, 1)), Check::Fenced { current: 1 }, "the old epoch is over");
+    assert_eq!(s.check(&batch(7, 1, 0, 1)), Check::New, "the new epoch starts at 0");
+    s.applied(next, next, &m);
+    assert_eq!(s.check(&batch(7, 1, 2, 1)), Check::OutOfOrder { expected: 0 });
+    let bytes = s.encode();
+    let mut back = ProducerState::new(10);
+    back.restore(&bytes).unwrap();
+    assert_eq!(back.committed, s.committed);
+}

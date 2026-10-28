@@ -639,3 +639,269 @@ impl InitProducerResponse {
         })
     }
 }
+
+/// Partitions of one resource in a transaction request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnResource {
+    /// Resource id.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<u32>,
+}
+
+fn put_txn_resources(w: &mut Writer, resources: &[TxnResource]) {
+    w.array(resources, |w, r| {
+        w.u64(r.resource_id);
+        w.array(&r.partitions, |w, p| w.u32(*p));
+        w.no_tags();
+    });
+}
+
+fn get_txn_resources(r: &mut Reader) -> Result<Vec<TxnResource>, DecodeError> {
+    r.array(10, |r| {
+        let res = TxnResource { resource_id: r.u64()?, partitions: r.array(4, Reader::u32)? };
+        r.tags()?;
+        Ok(res)
+    })
+}
+
+/// The outcome for one partition of a transaction request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxnPartitionResult {
+    /// Partition number.
+    pub partition: u32,
+    /// Outcome.
+    pub error: ErrorCode,
+}
+
+/// Outcomes for one resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnResourceResult {
+    /// Resource id.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<TxnPartitionResult>,
+}
+
+fn put_txn_results(w: &mut Writer, resources: &[TxnResourceResult]) {
+    w.array(resources, |w, r| {
+        w.u64(r.resource_id);
+        w.array(&r.partitions, |w, p| {
+            w.u32(p.partition);
+            w.u16(p.error.0);
+            w.no_tags();
+        });
+        w.no_tags();
+    });
+}
+
+fn get_txn_results(r: &mut Reader) -> Result<Vec<TxnResourceResult>, DecodeError> {
+    r.array(10, |r| {
+        let resource_id = r.u64()?;
+        let partitions = r.array(7, |r| {
+            let p = TxnPartitionResult { partition: r.u32()?, error: ErrorCode(r.u16()?) };
+            r.tags()?;
+            Ok(p)
+        })?;
+        r.tags()?;
+        Ok(TxnResourceResult { resource_id, partitions })
+    })
+}
+
+/// Adds partitions to the producer's transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPartitionsToTxnRequest {
+    /// Transactional id.
+    pub txn_id: String,
+    /// Producer id from `InitProducer`.
+    pub producer_id: u64,
+    /// Its epoch.
+    pub producer_epoch: u16,
+    /// The partitions.
+    pub resources: Vec<TxnResource>,
+}
+
+impl AddPartitionsToTxnRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.txn_id);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        put_txn_resources(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AddPartitionsToTxnRequest {
+            txn_id: r.string()?,
+            producer_id: r.u64()?,
+            producer_epoch: r.u16()?,
+            resources: get_txn_resources(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Per partition, whether it was added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPartitionsToTxnResponse {
+    /// Per resource.
+    pub resources: Vec<TxnResourceResult>,
+}
+
+impl AddPartitionsToTxnResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        put_txn_results(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resp = AddPartitionsToTxnResponse { resources: get_txn_results(r)? };
+        r.tags()?;
+        Ok(resp)
+    }
+}
+
+/// Commits or aborts the producer's transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndTxnRequest {
+    /// Transactional id.
+    pub txn_id: String,
+    /// Producer id.
+    pub producer_id: u64,
+    /// Its epoch.
+    pub producer_epoch: u16,
+    /// Commit (`true`) or abort.
+    pub commit: bool,
+}
+
+impl EndTxnRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.txn_id);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        w.u8(u8::from(self.commit));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = EndTxnRequest {
+            txn_id: r.string()?,
+            producer_id: r.u64()?,
+            producer_epoch: r.u16()?,
+            commit: r.u8()? != 0,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The decision is durable; markers follow. Ending a transaction raises the
+/// producer epoch: the producer's next transaction uses the one returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndTxnResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Producer id for the next transaction.
+    pub producer_id: u64,
+    /// Epoch for the next transaction.
+    pub producer_epoch: u16,
+}
+
+impl EndTxnResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resp = EndTxnResponse { error: ErrorCode(r.u16()?), producer_id: r.u64()?, producer_epoch: r.u16()? };
+        r.tags()?;
+        Ok(resp)
+    }
+}
+
+/// One marker to write, in some partitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnMarker {
+    /// Producer id.
+    pub producer_id: u64,
+    /// The epoch the transaction ended with.
+    pub producer_epoch: u16,
+    /// Commit (`true`) or abort.
+    pub commit: bool,
+    /// The coordinator's epoch (its group's Raft term).
+    pub coordinator_epoch: u32,
+    /// Where.
+    pub resources: Vec<TxnResource>,
+}
+
+/// Internal: writes transaction markers into partitions led by this node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteTxnMarkersRequest {
+    /// The markers.
+    pub markers: Vec<TxnMarker>,
+}
+
+impl WriteTxnMarkersRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.markers, |w, m| {
+            w.u64(m.producer_id);
+            w.u16(m.producer_epoch);
+            w.u8(u8::from(m.commit));
+            w.u32(m.coordinator_epoch);
+            put_txn_resources(w, &m.resources);
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let markers = r.array(17, |r| {
+            let m = TxnMarker {
+                producer_id: r.u64()?,
+                producer_epoch: r.u16()?,
+                commit: r.u8()? != 0,
+                coordinator_epoch: r.u32()?,
+                resources: get_txn_resources(r)?,
+            };
+            r.tags()?;
+            Ok(m)
+        })?;
+        r.tags()?;
+        Ok(WriteTxnMarkersRequest { markers })
+    }
+}
+
+/// Per marker and partition, whether it is written (or not needed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerResult {
+    /// Producer id of the marker.
+    pub producer_id: u64,
+    /// Per resource.
+    pub resources: Vec<TxnResourceResult>,
+}
+
+/// The partition leaders' answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteTxnMarkersResponse {
+    /// In request order.
+    pub markers: Vec<MarkerResult>,
+}
+
+impl WriteTxnMarkersResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.markers, |w, m| {
+            w.u64(m.producer_id);
+            put_txn_results(w, &m.resources);
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let markers = r.array(10, |r| {
+            let m = MarkerResult { producer_id: r.u64()?, resources: get_txn_results(r)? };
+            r.tags()?;
+            Ok(m)
+        })?;
+        r.tags()?;
+        Ok(WriteTxnMarkersResponse { markers })
+    }
+}

@@ -578,6 +578,7 @@ dependencies = [
  "lotse-proto",
  "lotse-record",
  "lotse-rt",
+ "lotse-sim",
  "thiserror",
 ]
 

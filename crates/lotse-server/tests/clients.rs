@@ -60,18 +60,17 @@ fn batch(value: &str, records: u64) -> Bytes {
     b.finish().unwrap()
 }
 
-/// Data batches in `records` as `(base_offset, value)`; control batches skipped.
-fn data_batches(mut records: Bytes) -> Vec<(u64, String)> {
-    let mut out = Vec::new();
-    while !records.is_empty() {
-        let (b, rest) = Batch::parse(&records).expect("whole valid batches");
-        if !b.attributes().control {
+/// What a read_committed consumer sees in `f`, as `(base_offset, value)`:
+/// no control batches, no aborted transactions.
+fn committed(f: &lotse_client::Fetched) -> Vec<(u64, String)> {
+    f.committed_batches()
+        .expect("whole valid batches")
+        .into_iter()
+        .map(|b| {
             let v = b.records().unwrap()[0].value.clone().unwrap();
-            out.push((b.base_offset(), String::from_utf8(v.to_vec()).unwrap()));
-        }
-        records = rest;
-    }
-    out
+            (b.base_offset(), String::from_utf8(v.to_vec()).unwrap())
+        })
+        .collect()
 }
 
 fn client_config() -> ClientConfig {
@@ -93,6 +92,18 @@ struct Outcomes {
     /// Per partition: what consumers read, `(offset, value)`.
     read: BTreeMap<u32, Vec<(u64, String)>>,
     unknown: u64,
+    /// Transactions: their values and how they ended.
+    txns: Vec<(Vec<String>, TxnEnd)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnEnd {
+    /// `commit` returned: all of it is visible.
+    Committed,
+    /// Aborted, or left open (the coordinator aborts it): none of it.
+    Aborted,
+    /// Unknown: all of it or none.
+    Unknown,
 }
 
 struct World {
@@ -198,6 +209,71 @@ async fn producer(rt: SimRuntime, name: String, out: Arc<Mutex<Outcomes>>, stop:
     }
 }
 
+/// Writes transactions of one to three batches across the partitions and
+/// commits, aborts or abandons each.
+async fn transactional(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(
+        rt.clone(),
+        ClientConfig {
+            transactional_id: Some("tx".into()),
+            txn_timeout: Duration::from_millis(800),
+            ..client_config()
+        },
+    );
+    let mut n = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        let mut txn = match client.begin_transaction().await {
+            Ok(t) => t,
+            Err(ClientError::GaveUp(..)) => continue,
+            Err(e) => panic!("unexpected error beginning a transaction: {e}"),
+        };
+        n += 1;
+        let mut values = Vec::new();
+        let mut failed = false;
+        for i in 0..1 + rt.below(3) {
+            let partition = rt.below(u64::from(PARTITIONS)) as u32;
+            let value = format!("tx{n}-{i}");
+            match txn.produce(STREAM, partition, batch(&value, 1)).await {
+                Ok(_) => values.push(value),
+                // Definitely not written.
+                Err(ClientError::GaveUp(..)) => {}
+                // Maybe written: it counts with the transaction, which must abort.
+                Err(_) => {
+                    values.push(value);
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        let end = match rt.below(6) {
+            // Abandoned: the next begin, or the timeout, aborts it.
+            0 => {
+                drop(txn);
+                TxnEnd::Aborted
+            }
+            1 => {
+                let _ = txn.abort().await;
+                TxnEnd::Aborted
+            }
+            _ if failed => {
+                let _ = txn.abort().await;
+                TxnEnd::Aborted
+            }
+            _ => match txn.commit().await {
+                Ok(()) => TxnEnd::Committed,
+                Err(ClientError::Unknown(_)) => TxnEnd::Unknown,
+                // Not decided (it stays open and is aborted later), or fenced
+                // because the coordinator timed it out and aborted it.
+                Err(ClientError::GaveUp(..)) => TxnEnd::Aborted,
+                Err(ClientError::Broker { code: lotse_proto::ErrorCode::PRODUCER_FENCED, .. }) => TxnEnd::Aborted,
+                Err(e) => panic!("unexpected error committing: {e}"),
+            },
+        };
+        out.lock().unwrap().txns.push((values, end));
+        rt.sleep(TICK * (1 + rt.below(5) as u32)).await;
+    }
+}
+
 async fn consumer(rt: SimRuntime, partition: u32, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
     let client = Client::new(rt.clone(), client_config());
     let mut offset = 0u64;
@@ -212,7 +288,10 @@ async fn consumer(rt: SimRuntime, partition: u32, out: Arc<Mutex<Outcomes>>, sto
                     records = rest;
                 }
                 assert!(offset <= f.high_watermark, "read past the high watermark");
-                out.lock().unwrap().read.entry(partition).or_default().extend(data_batches(f.records));
+                if !f.records.is_empty() {
+                    assert!(offset <= f.last_stable_offset, "read past the last stable offset");
+                }
+                out.lock().unwrap().read.entry(partition).or_default().extend(committed(&f));
             }
             Err(ClientError::GaveUp(..)) => {}
             Err(e) => panic!("unexpected fetch error: {e}"),
@@ -230,9 +309,10 @@ async fn run(rt: SimRuntime) {
         tasks.push(rt.spawn(producer(host.clone(), format!("c{c}"), out.clone(), stop.clone())));
         tasks.push(rt.spawn(consumer(host, c - 1, out.clone(), stop.clone())));
     }
+    tasks.push(rt.spawn(transactional(rt.node("t1"), out.clone(), stop.clone())));
     let n = w.cfgs.len() as u64;
     let mut hosts: Vec<String> = (1..=n).map(|i| format!("n{i}")).collect();
-    hosts.extend(["c1".to_string(), "c2".to_string()]);
+    hosts.extend(["c1".to_string(), "c2".to_string(), "t1".to_string()]);
     let end = rt.now() + Duration::from_secs(6);
     let mut partition_until = None;
     while rt.now() < end {
@@ -275,6 +355,8 @@ async fn run(rt: SimRuntime) {
         Client::new(rt.node("checker"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
     let out = std::mem::take(&mut *out.lock().unwrap());
     assert!(!out.acked.is_empty(), "no batch was acknowledged: the run checked nothing");
+    // Every committed value, across partitions.
+    let mut visible: BTreeMap<String, u32> = BTreeMap::new();
     for p in 0..PARTITIONS {
         let marker = format!("after-heal-{p}");
         let mut marker_at = None;
@@ -291,15 +373,14 @@ async fn run(rt: SimRuntime) {
         let marker_at = marker_at.unwrap_or_else(|| panic!("partition {p}: no produce settled after healing"));
         let mut log: BTreeMap<u64, String> = BTreeMap::new();
         let mut offset = 0;
+        // Leftover transactions are aborted by their timeout, so the last
+        // stable offset catches up with the marker.
+        let deadline = rt.now() + Duration::from_secs(30);
         while offset <= marker_at {
+            assert!(rt.now() < deadline, "partition {p}: the last stable offset is stuck below {marker_at}");
             let f = reader.fetch(STREAM, p, offset, TICK * 10).await.expect("the healed cluster serves reads");
-            let mut records = f.records.clone();
-            while !records.is_empty() {
-                let (b, rest) = Batch::parse(&records).unwrap();
-                offset = b.next_offset();
-                records = rest;
-            }
-            log.extend(data_batches(f.records));
+            offset = f.next_offset(offset);
+            log.extend(committed(&f));
         }
         assert_eq!(log.get(&marker_at), Some(&marker), "partition {p}: the marker is where it was acknowledged");
 
@@ -318,7 +399,19 @@ async fn run(rt: SimRuntime) {
         for v in &out.not_written {
             assert!(!seen.contains_key(v), "partition {p}: {v} was reported as not written but is there");
         }
+        for v in log.into_values() {
+            assert!(visible.insert(v.clone(), p).is_none(), "{v} is visible in two partitions");
+        }
     }
+    for (values, end) in &out.txns {
+        let shown = values.iter().filter(|v| visible.contains_key(*v)).count();
+        match end {
+            TxnEnd::Committed => assert_eq!(shown, values.len(), "committed {values:?}, but only {shown} visible"),
+            TxnEnd::Aborted => assert_eq!(shown, 0, "aborted {values:?}, but {shown} visible"),
+            TxnEnd::Unknown => assert!(shown == 0 || shown == values.len(), "{values:?} is half visible"),
+        }
+    }
+    assert!(out.txns.iter().any(|(_, e)| *e == TxnEnd::Committed), "no transaction committed: checked nothing");
     drop(out);
     drop(reader);
     for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {

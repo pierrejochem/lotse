@@ -14,5 +14,8 @@ lotse-record.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+lotse-sim.workspace = true
+
 [lints]
 workspace = true
