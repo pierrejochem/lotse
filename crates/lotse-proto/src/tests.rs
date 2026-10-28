@@ -40,6 +40,54 @@ fn requests() -> Vec<Request> {
         Request::Ack(AckRequest { queue_id: 9, txn_id: None, ranges: vec![(0, 3), (5, 6)] }),
         Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
+        Request::GroupHeartbeat(GroupHeartbeatRequest {
+            group_id: "billing".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            rebalance_timeout_ms: 30_000,
+            subscribed: Some(vec![7, 8]),
+            owned: None,
+        }),
+        Request::GroupHeartbeat(GroupHeartbeatRequest {
+            group_id: "billing".into(),
+            member_id: "m1.2".into(),
+            member_epoch: -1,
+            rebalance_timeout_ms: 30_000,
+            subscribed: None,
+            owned: Some(vec![TxnResource { resource_id: 7, partitions: vec![0, 2] }]),
+        }),
+        Request::CommitOffsets(CommitOffsetsRequest {
+            group_id: "billing".into(),
+            member_id: "m1.2".into(),
+            member_epoch: 4,
+            resources: vec![OffsetCommitResource {
+                resource_id: 7,
+                partitions: vec![
+                    OffsetCommitPartition { partition: 0, offset: 42, leader_term: 3, metadata: Some("m".into()) },
+                    OffsetCommitPartition { partition: 1, offset: 0, leader_term: 0, metadata: None },
+                ],
+            }],
+        }),
+        Request::OffsetFetch(OffsetFetchRequest {
+            group_id: "billing".into(),
+            require_stable: true,
+            resources: vec![TxnResource { resource_id: 7, partitions: vec![0] }],
+        }),
+        Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
+            txn_id: "t".into(),
+            producer_id: 9,
+            producer_epoch: 2,
+            group_id: "billing".into(),
+            member_id: "m1.2".into(),
+            member_epoch: 4,
+            resources: vec![OffsetCommitResource {
+                resource_id: 7,
+                partitions: vec![
+                    OffsetCommitPartition { partition: 0, offset: 42, leader_term: 3, metadata: Some("m".into()) },
+                    OffsetCommitPartition { partition: 1, offset: 0, leader_term: 0, metadata: None },
+                ],
+            }],
+        }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,
@@ -237,6 +285,50 @@ fn responses() -> Vec<(ApiKey, Response)> {
             Response::Subscribe(SubscribeResponse { error: ErrorCode::NONE, subscription_id: 3, leader_hint: None }),
         ),
         (ApiKey::ACK, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
+        (
+            ApiKey::GROUP_HEARTBEAT,
+            Response::GroupHeartbeat(GroupHeartbeatResponse {
+                throttle_ms: 0,
+                error: ErrorCode::NONE,
+                member_id: "m1.2".into(),
+                member_epoch: 5,
+                heartbeat_interval_ms: 3_000,
+                assignment: Some(vec![TxnResource { resource_id: 7, partitions: vec![1] }]),
+            }),
+        ),
+        (
+            ApiKey::ADD_OFFSETS_TO_TXN,
+            Response::CommitOffsets(CommitOffsetsResponse {
+                resources: vec![TxnResourceResult {
+                    resource_id: 7,
+                    partitions: vec![TxnPartitionResult { partition: 0, error: ErrorCode::UNKNOWN_MEMBER_ID }],
+                }],
+            }),
+        ),
+        (
+            ApiKey::OFFSET_FETCH,
+            Response::OffsetFetch(OffsetFetchResponse {
+                resources: vec![OffsetFetchResource {
+                    resource_id: 7,
+                    partitions: vec![
+                        OffsetFetchPartition {
+                            partition: 0,
+                            error: ErrorCode::NONE,
+                            offset: 42,
+                            leader_term: 3,
+                            metadata: Some("m".into()),
+                        },
+                        OffsetFetchPartition {
+                            partition: 1,
+                            error: ErrorCode::UNSTABLE_OFFSET_COMMIT,
+                            offset: NO_OFFSET,
+                            leader_term: 0,
+                            metadata: None,
+                        },
+                    ],
+                }],
+            }),
+        ),
         (
             ApiKey::NACK,
             Response::Outcome(OutcomeResponse {

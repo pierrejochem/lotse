@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lotse_proto::{
-    AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnRequest, EndTxnResponse, ErrorCode,
-    InitProducerRequest, InitProducerResponse, Response, TxnPartitionResult, TxnResourceResult,
+    AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, CommitOffsetsResponse, EndTxnRequest, EndTxnResponse,
+    ErrorCode, GroupHeartbeatResponse, InitProducerRequest, InitProducerResponse, Response, TxnPartitionResult,
+    TxnResourceResult,
 };
 use lotse_rt::{Instant, Runtime};
 
@@ -46,15 +47,30 @@ pub(super) enum Then {
     Add(AddPartitionsToTxnResponse),
     /// `EndTxn`: the producer's id and new epoch.
     End { producer_id: u64, epoch: u16 },
+    /// `GroupHeartbeat`: the answer once the group's record is written.
+    Heartbeat(GroupHeartbeatResponse),
+    /// `CommitOffsets` or `AddOffsetsToTxn`: the answer, `NONE` once written.
+    Offsets(CommitOffsetsResponse),
     /// The coordinator's own record (completion, timeout): nobody waits.
     Nothing,
+}
+
+/// What a record in flight changes, so that one change at a time runs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Busy {
+    /// A transactional id.
+    Txn(String),
+    /// A consumer group.
+    Group(String),
+    /// Nothing that needs serialising (committed offsets).
+    Free,
 }
 
 /// A coordinator record in flight.
 pub(super) struct PendingWrite {
     reply: Option<(Arc<Outbox>, u32)>,
     deadline: Instant,
-    txn_id: String,
+    key: Busy,
     last: u64,
     term: u64,
     then: Then,
@@ -85,6 +101,17 @@ fn error_response(then: &Then, error: ErrorCode, leader_hint: Option<lotse_proto
             Response::AddPartitionsToTxn(resp)
         }
         Then::End { .. } => Response::EndTxn(EndTxnResponse { error, producer_id: 0, producer_epoch: 0 }),
+        Then::Heartbeat(resp) => Response::GroupHeartbeat(GroupHeartbeatResponse {
+            error,
+            assignment: None,
+            member_epoch: 0,
+            ..resp.clone()
+        }),
+        Then::Offsets(resp) => {
+            let mut resp = resp.clone();
+            resp.resources.iter_mut().flat_map(|r| r.partitions.iter_mut()).for_each(|p| p.error = error);
+            Response::CommitOffsets(resp)
+        }
         Then::Nothing => return None,
     })
 }
@@ -92,7 +119,7 @@ fn error_response(then: &Then, error: ErrorCode, leader_hint: Option<lotse_proto
 impl Clients {
     /// The coordinator group's replica, if this node leads it and has applied
     /// an entry of its own term; otherwise the error to answer with.
-    fn coordinator<'a, R: Runtime, S: StateMachine>(
+    pub(super) fn coordinator<'a, R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
     ) -> Result<(GroupId, &'a mut Replica<R, S>), Refusal> {
@@ -118,11 +145,28 @@ impl Clients {
         reply: Option<(Arc<Outbox>, u32)>,
         then: Then,
     ) {
-        match replica.propose_internal(crate::coordinator::record(txn_id, meta)) {
+        let record = crate::coordinator::record(txn_id, meta);
+        self.propose_record(replica, now, record, Busy::Txn(txn_id.into()), reply, then);
+    }
+
+    /// Proposes a coordinator record that changes `key`, answered by `then`
+    /// once committed.
+    pub(super) fn propose_record<R: Runtime, S: StateMachine>(
+        &mut self,
+        replica: &mut Replica<R, S>,
+        now: Instant,
+        record: bytes::Bytes,
+        key: Busy,
+        reply: Option<(Arc<Outbox>, u32)>,
+        then: Then,
+    ) {
+        match replica.propose_internal(record) {
             Ok(Proposed { last, term: Some(term), .. }) => {
-                self.busy.insert(txn_id.to_string());
+                if key != Busy::Free {
+                    self.busy.insert(key.clone());
+                }
                 let deadline = now + WRITE_TIMEOUT;
-                self.writes.push(PendingWrite { reply, deadline, txn_id: txn_id.into(), last, term, then });
+                self.writes.push(PendingWrite { reply, deadline, key, last, term, then });
             }
             Ok(_) => unreachable!("a coordinator record is never a duplicate"),
             Err(e) => {
@@ -155,7 +199,7 @@ impl Clients {
             Ok(c) => c,
             Err((code, h)) => return outbox.push(id, &fail(code, h)),
         };
-        if self.busy.contains(&txn_id) {
+        if self.busy.contains(&Busy::Txn(txn_id.clone())) {
             return outbox.push(id, &fail(ErrorCode::CONCURRENT_TRANSACTIONS, None));
         }
         let current = replica.coordinator().get(&txn_id).cloned();
@@ -166,6 +210,7 @@ impl Clients {
             phase: Phase::Empty,
             timeout_ms,
             partitions: BTreeSet::new(),
+            offsets: Default::default(),
         };
         match current {
             None => {
@@ -240,7 +285,7 @@ impl Clients {
         };
         let current = replica.coordinator().get(&req.txn_id).cloned();
         let error = match &current {
-            _ if self.busy.contains(&req.txn_id) => Some(ErrorCode::CONCURRENT_TRANSACTIONS),
+            _ if self.busy.contains(&Busy::Txn(req.txn_id.clone())) => Some(ErrorCode::CONCURRENT_TRANSACTIONS),
             None => Some(ErrorCode::INVALID_TXN_STATE),
             Some(m) if m.producer_id != req.producer_id || m.epoch != req.producer_epoch => {
                 Some(ErrorCode::PRODUCER_FENCED)
@@ -261,7 +306,8 @@ impl Clients {
         if m.phase == Phase::Ongoing && partitions.len() == before {
             return outbox.push(id, &Response::AddPartitionsToTxn(resp));
         }
-        let meta = TxnMeta { phase: Phase::Ongoing, partitions, ..m };
+        let offsets = if m.phase == Phase::Ongoing { m.offsets.clone() } else { Default::default() };
+        let meta = TxnMeta { phase: Phase::Ongoing, partitions, offsets, ..m };
         self.write(replica, view.now, &req.txn_id, &meta, Some((outbox, id)), Then::Add(resp));
     }
 
@@ -280,7 +326,7 @@ impl Clients {
             Ok(c) => c,
             Err((code, _)) => return outbox.push(id, &answer(code, 0, 0)),
         };
-        if self.busy.contains(&req.txn_id) {
+        if self.busy.contains(&Busy::Txn(req.txn_id.clone())) {
             return outbox.push(id, &answer(ErrorCode::CONCURRENT_TRANSACTIONS, 0, 0));
         }
         let Some(m) = replica.coordinator().get(&req.txn_id).cloned() else {
@@ -340,7 +386,7 @@ impl Clients {
                     continue;
                 }
             };
-            self.busy.remove(&w.txn_id);
+            self.busy.remove(&w.key);
             let Some((outbox, id)) = w.reply else { continue };
             let resp = if code == ErrorCode::NONE {
                 match w.then {
@@ -354,6 +400,8 @@ impl Clients {
                     Then::End { producer_id, epoch } => {
                         Response::EndTxn(EndTxnResponse { error: ErrorCode::NONE, producer_id, producer_epoch: epoch })
                     }
+                    Then::Heartbeat(resp) => Response::GroupHeartbeat(resp),
+                    Then::Offsets(resp) => Response::CommitOffsets(resp),
                     Then::Nothing => continue,
                 }
             } else {
@@ -392,14 +440,14 @@ impl Clients {
                     // Measured from when this leader saw it ongoing.
                     let since = *self.ongoing_since.entry(txn_id.clone()).or_insert(view.now);
                     if view.now - since >= Duration::from_millis(u64::from(m.timeout_ms))
-                        && !self.busy.contains(&txn_id)
+                        && !self.busy.contains(&Busy::Txn(txn_id.clone()))
                     {
                         timed_out.push((txn_id, m));
                     }
                 }
                 phase => {
                     let Some(commit) = phase.preparing() else { continue };
-                    if self.jobs.contains_key(&txn_id) || self.busy.contains(&txn_id) {
+                    if self.jobs.contains_key(&txn_id) || self.busy.contains(&Busy::Txn(txn_id.clone())) {
                         continue;
                     }
                     let cancel = Signal::default();
@@ -438,7 +486,7 @@ impl Clients {
             self.jobs.remove(txn_id);
         }
         let Ok((_, replica)) = Self::coordinator(view, groups) else { return };
-        if replica.raft_ref().term() != term || self.busy.contains(txn_id) {
+        if replica.raft_ref().term() != term || self.busy.contains(&Busy::Txn(txn_id.into())) {
             return;
         }
         let Some(m) = replica.coordinator().get(txn_id).cloned() else { return };
@@ -447,7 +495,7 @@ impl Clients {
             Phase::PrepareAbort => Phase::CompleteAbort,
             _ => return,
         };
-        let meta = TxnMeta { phase, partitions: BTreeSet::new(), ..m };
+        let meta = TxnMeta { phase, partitions: BTreeSet::new(), offsets: Default::default(), ..m };
         self.write(replica, view.now, txn_id, &meta, None, Then::Nothing);
     }
 }

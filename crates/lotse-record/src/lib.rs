@@ -596,6 +596,10 @@ pub enum InternalControl {
     ProducerId,
     /// The state of one transactional id; the value is its encoding.
     TxnState,
+    /// The membership and assignment of one consumer group.
+    GroupState,
+    /// Offsets committed for a consumer group.
+    GroupOffsets,
 }
 
 /// Builds an internal control batch carrying `payload`.
@@ -614,6 +618,8 @@ pub fn internal_control_batch(kind: InternalControl, payload: &[u8]) -> Result<B
     let ty: u16 = match kind {
         InternalControl::ProducerId => 4,
         InternalControl::TxnState => 5,
+        InternalControl::GroupState => 6,
+        InternalControl::GroupOffsets => 7,
     };
     let mut key = [0u8; 4]; // version u16 | type u16
     key[2..].copy_from_slice(&ty.to_le_bytes());
@@ -748,6 +754,8 @@ pub fn control(batch: &Batch) -> Result<Option<Control>, Error> {
         3 => Control::Raft(RaftControl::Config, value),
         4 => Control::Internal(InternalControl::ProducerId, value),
         5 => Control::Internal(InternalControl::TxnState, value),
+        6 => Control::Internal(InternalControl::GroupState, value),
+        7 => Control::Internal(InternalControl::GroupOffsets, value),
         _ => return Err(Error::Malformed("unknown control type")),
     }))
 }

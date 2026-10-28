@@ -60,6 +60,7 @@ use crate::signal::{Signal, race};
 use crate::wire::GroupId;
 
 mod coord;
+mod groups;
 mod queues;
 
 pub(crate) use coord::MarkerJob;
@@ -191,6 +192,10 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) streams: &'a [StreamConfig],
     pub(crate) queues: &'a [QueueConfig],
     pub(crate) exchanges: &'a [Exchange],
+    /// How long a group member may go without a heartbeat.
+    pub(crate) group_session: Duration,
+    /// How often group members send heartbeats.
+    pub(crate) group_heartbeat: Duration,
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
     pub(crate) now: Instant,
@@ -227,7 +232,7 @@ pub(crate) struct Clients {
     markers: Vec<PendingMarkers>,
     /// Coordinator records in flight, and the transactional ids they change.
     writes: Vec<coord::PendingWrite>,
-    busy: std::collections::BTreeSet<String>,
+    busy: std::collections::BTreeSet<coord::Busy>,
     /// Marker jobs running for this coordinator term, per transactional id.
     jobs: BTreeMap<String, (u64, Signal)>,
     /// When this leader first saw each transaction ongoing, for timeouts.
@@ -242,6 +247,8 @@ pub(crate) struct Clients {
     next_subscription: u32,
     /// Acks and delivery counts in flight.
     queue_writes: Vec<queues::QueueWrite>,
+    /// The group coordinator's clocks.
+    group_timers: groups::GroupTimers,
 }
 
 impl Clients {
@@ -259,7 +266,7 @@ impl Clients {
                 id,
                 &Response::ApiVersions(ApiVersionsResponse {
                     versions: ApiKey::SUPPORTED.to_vec(),
-                    features: vec!["streams".into(), "queues".into()],
+                    features: vec!["streams".into(), "queues".into(), "groups".into()],
                 }),
             ),
             Request::Metadata(m) => outbox.push(id, &Response::Metadata(metadata(&m, view, groups))),
@@ -279,6 +286,10 @@ impl Clients {
             Request::Ack(req) => self.ack(outbox, id, req, view, groups),
             Request::Nack(req) => self.nack(outbox, id, req, view, groups),
             Request::Unsubscribe(req) => self.unsubscribe(outbox, id, req),
+            Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, view, groups),
+            Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
+            Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
+            Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -451,6 +462,7 @@ impl Clients {
         let markers = std::mem::take(&mut self.markers);
         self.markers = markers.into_iter().filter_map(|p| settle_markers(p, view.now, groups)).collect();
         let jobs = self.coordinate(view, groups);
+        self.expire_members(view, groups);
         self.settle_queue_writes(view.now, groups);
         self.serve_queues(view, groups).await?;
 
@@ -715,8 +727,8 @@ fn find_coordinator<R: Runtime, S: StateMachine>(
         port: 0,
         error_msg: Some(why.into()),
     };
-    if req.key_type != coordinator::PRODUCER {
-        return unavailable("only producer coordination is supported so far");
+    if req.key_type != coordinator::PRODUCER && req.key_type != coordinator::GROUP {
+        return unavailable("unknown coordinator type");
     }
     let Some(g) = view.coordinator else { return unavailable("no coordinator group is configured") };
     let leader = groups.get(&g).and_then(|r| r.raft_ref().leader());

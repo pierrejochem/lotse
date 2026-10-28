@@ -65,6 +65,14 @@ impl ApiKey {
     /// A producer id and epoch for idempotent (and later transactional)
     /// produce. Keys 5 to 15 are the stream and queue keys of the design.
     pub const INIT_PRODUCER: ApiKey = ApiKey(16);
+    /// Joins, stays in or leaves a consumer group.
+    pub const GROUP_HEARTBEAT: ApiKey = ApiKey(6);
+    /// Commits a group's offsets.
+    pub const COMMIT_OFFSETS: ApiKey = ApiKey(7);
+    /// Reads a group's committed offsets.
+    pub const OFFSET_FETCH: ApiKey = ApiKey(8);
+    /// Commits a group's offsets within a transaction.
+    pub const ADD_OFFSETS_TO_TXN: ApiKey = ApiKey(19);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -87,7 +95,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 14] = [
+    pub const SUPPORTED: [ApiVersionRange; 18] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -102,6 +110,10 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::ACK, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::NACK, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::UNSUBSCRIBE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::GROUP_HEARTBEAT, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::COMMIT_OFFSETS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::OFFSET_FETCH, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ADD_OFFSETS_TO_TXN, min: 0, max: 0 },
     ];
 }
 
@@ -172,10 +184,15 @@ impl ErrorCode {
     /// The subscription held a message unacknowledged longer than the queue's
     /// ack timeout; it has ended and its messages go to other consumers.
     pub const ACK_TIMED_OUT: ErrorCode = ErrorCode(23);
+    /// A transaction holds an uncommitted offset for the partition: retry
+    /// once it ends.
+    pub const UNSTABLE_OFFSET_COMMIT: ErrorCode = ErrorCode(24);
+    /// Another change to the same consumer group is in progress: retry.
+    pub const CONCURRENT_GROUP_CHANGE: ErrorCode = ErrorCode(25);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 24] = [
+        const NAMES: [&str; 26] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -200,6 +217,8 @@ impl ErrorCode {
             "INVALID_REQUEST",
             "UNKNOWN_SUBSCRIPTION",
             "ACK_TIMED_OUT",
+            "UNSTABLE_OFFSET_COMMIT",
+            "CONCURRENT_GROUP_CHANGE",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -214,6 +233,8 @@ impl ErrorCode {
                 | ErrorCode::REQUEST_TIMED_OUT
                 | ErrorCode::COORDINATOR_NOT_AVAILABLE
                 | ErrorCode::CONCURRENT_TRANSACTIONS
+                | ErrorCode::UNSTABLE_OFFSET_COMMIT
+                | ErrorCode::CONCURRENT_GROUP_CHANGE
         )
     }
 }
@@ -277,6 +298,14 @@ pub enum Request {
     Nack(NackRequest),
     /// [`ApiKey::UNSUBSCRIBE`].
     Unsubscribe(UnsubscribeRequest),
+    /// [`ApiKey::GROUP_HEARTBEAT`].
+    GroupHeartbeat(GroupHeartbeatRequest),
+    /// [`ApiKey::COMMIT_OFFSETS`].
+    CommitOffsets(CommitOffsetsRequest),
+    /// [`ApiKey::OFFSET_FETCH`].
+    OffsetFetch(OffsetFetchRequest),
+    /// [`ApiKey::ADD_OFFSETS_TO_TXN`].
+    AddOffsetsToTxn(AddOffsetsToTxnRequest),
 }
 
 impl Request {
@@ -297,6 +326,10 @@ impl Request {
             Request::Ack(_) => ApiKey::ACK,
             Request::Nack(_) => ApiKey::NACK,
             Request::Unsubscribe(_) => ApiKey::UNSUBSCRIBE,
+            Request::GroupHeartbeat(_) => ApiKey::GROUP_HEARTBEAT,
+            Request::CommitOffsets(_) => ApiKey::COMMIT_OFFSETS,
+            Request::OffsetFetch(_) => ApiKey::OFFSET_FETCH,
+            Request::AddOffsetsToTxn(_) => ApiKey::ADD_OFFSETS_TO_TXN,
         }
     }
 }
@@ -323,6 +356,12 @@ pub enum Response {
     /// To [`Request::Ack`], [`Request::Nack`] and [`Request::Unsubscribe`]:
     /// only an outcome.
     Outcome(OutcomeResponse),
+    /// To [`Request::GroupHeartbeat`].
+    GroupHeartbeat(GroupHeartbeatResponse),
+    /// To [`Request::CommitOffsets`] and [`Request::AddOffsetsToTxn`].
+    CommitOffsets(CommitOffsetsResponse),
+    /// To [`Request::OffsetFetch`].
+    OffsetFetch(OffsetFetchResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -355,6 +394,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::Ack(r) => r.put(&mut w),
         Request::Nack(r) => r.put(&mut w),
         Request::Unsubscribe(r) => r.put(&mut w),
+        Request::GroupHeartbeat(r) => r.put(&mut w),
+        Request::CommitOffsets(r) => r.put(&mut w),
+        Request::OffsetFetch(r) => r.put(&mut w),
+        Request::AddOffsetsToTxn(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -389,6 +432,10 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::ACK => Request::Ack(AckRequest::get(&mut r)?),
         ApiKey::NACK => Request::Nack(NackRequest::get(&mut r)?),
         ApiKey::UNSUBSCRIBE => Request::Unsubscribe(UnsubscribeRequest::get(&mut r)?),
+        ApiKey::GROUP_HEARTBEAT => Request::GroupHeartbeat(GroupHeartbeatRequest::get(&mut r)?),
+        ApiKey::COMMIT_OFFSETS => Request::CommitOffsets(CommitOffsetsRequest::get(&mut r)?),
+        ApiKey::OFFSET_FETCH => Request::OffsetFetch(OffsetFetchRequest::get(&mut r)?),
+        ApiKey::ADD_OFFSETS_TO_TXN => Request::AddOffsetsToTxn(AddOffsetsToTxnRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -411,6 +458,9 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::WriteTxnMarkers(r) => r.put(&mut w),
         Response::Subscribe(r) => r.put(&mut w),
         Response::Outcome(r) => r.put(&mut w),
+        Response::GroupHeartbeat(r) => r.put(&mut w),
+        Response::CommitOffsets(r) => r.put(&mut w),
+        Response::OffsetFetch(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -483,6 +533,11 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::WRITE_TXN_MARKERS => Response::WriteTxnMarkers(WriteTxnMarkersResponse::get(&mut r)?),
         ApiKey::SUBSCRIBE => Response::Subscribe(SubscribeResponse::get(&mut r)?),
         ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE => Response::Outcome(OutcomeResponse::get(&mut r)?),
+        ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
+        ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
+            Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)
+        }
+        ApiKey::OFFSET_FETCH => Response::OffsetFetch(OffsetFetchResponse::get(&mut r)?),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),

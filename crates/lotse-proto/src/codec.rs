@@ -45,6 +45,10 @@ impl Writer {
     pub fn u64(&mut self, v: u64) {
         self.0.put_u64_le(v);
     }
+    /// An `i32`.
+    pub fn i32(&mut self, v: i32) {
+        self.0.put_i32_le(v);
+    }
     /// An `i64`.
     pub fn i64(&mut self, v: i64) {
         self.0.put_i64_le(v);
@@ -133,6 +137,11 @@ impl Reader {
     pub fn u64(&mut self) -> Result<u64, DecodeError> {
         self.need(8)?;
         Ok(self.0.get_u64_le())
+    }
+    /// An `i32`.
+    pub fn i32(&mut self) -> Result<i32, DecodeError> {
+        self.need(4)?;
+        Ok(self.0.get_i32_le())
     }
     /// An `i64`.
     pub fn i64(&mut self) -> Result<i64, DecodeError> {

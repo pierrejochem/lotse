@@ -17,7 +17,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0010 | [Deterministic simulation and mutation checking](0010-deterministic-simulation-and-mutation-checking.md) | Accepted; seed count amended by 0027 |
 | 0011 | [Flow control: throttle, never drop](0011-flow-control-throttle-never-drop.md) | Accepted |
 | 0012 | [Priorities as sub-logs; single active consumer on the leader](0012-priorities-as-sub-logs-single-active-consumer-on-the-leader.md) | Accepted |
-| 0013 | [Cooperative, broker-side consumer group rebalancing](0013-cooperative-broker-side-consumer-group-rebalancing.md) | Accepted |
+| 0013 | [Cooperative, broker-side consumer group rebalancing](0013-cooperative-broker-side-consumer-group-rebalancing.md) | Accepted; coordinator placement amended by 0033 |
 | 0014 | [Permissions per queue and stream, never per record](0014-permissions-per-queue-and-stream-never-per-record.md) | Accepted |
 | 0015 | [Membership changes through learners and joint consensus](0015-membership-changes-through-learners-and-joint-consensus.md) | Accepted |
 | 0016 | [Elections: check-quorum always on, pre-vote optional](0016-elections-check-quorum-always-on-pre-vote-optional.md) | Accepted |
@@ -37,5 +37,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0030 | [Client simulation in its own CI job](0030-client-simulation-in-its-own-ci-job.md) | Accepted |
 | 0031 | [Queues: the first cut](0031-queues-first-cut.md) | Accepted |
 | 0032 | [Publish: exchanges routed by the client](0032-publish-routed-by-the-client.md) | Accepted |
+| 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

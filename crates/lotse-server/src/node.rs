@@ -69,6 +69,12 @@ pub struct NodeConfig {
     pub queues: Vec<QueueConfig>,
     /// Exchanges and their bindings to `queues`; clients route with them.
     pub exchanges: Vec<lotse_route::Exchange>,
+    /// Consumer groups: how long a member may go without a heartbeat
+    /// ([`crate::DEFAULT_GROUP_SESSION_TIMEOUT`] by default).
+    pub group_session_timeout: Duration,
+    /// Consumer groups: how often members send heartbeats
+    /// ([`crate::DEFAULT_GROUP_HEARTBEAT_INTERVAL`] by default).
+    pub group_heartbeat_interval: Duration,
     /// The group that coordinates producers (hands out producer ids); one
     /// of `groups`. `None`: no idempotent produce.
     pub coordinator: Option<GroupId>,
@@ -366,6 +372,8 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             streams: &cfg.streams,
             queues: &cfg.queues,
             exchanges: &cfg.exchanges,
+            group_session: cfg.group_session_timeout,
+            group_heartbeat: cfg.group_heartbeat_interval,
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
             now: rt.now(),

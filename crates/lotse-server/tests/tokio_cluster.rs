@@ -110,6 +110,8 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     streams: streams.clone(),
                     queues: Vec::new(),
                     exchanges: Vec::new(),
+                    group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
+                    group_heartbeat_interval: lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL,
                     coordinator: Some(3),
                     max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                 },

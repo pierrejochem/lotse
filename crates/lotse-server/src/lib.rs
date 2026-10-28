@@ -10,6 +10,7 @@
 
 mod client;
 mod coordinator;
+mod groups;
 mod node;
 mod producers;
 mod replica;
@@ -20,4 +21,9 @@ pub mod wire;
 pub use client::{QueueConfig, StreamConfig};
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle};
 pub use producers::DEFAULT_MAX_PRODUCERS;
+
+/// How long a group member may go without a heartbeat (Kafka's default).
+pub const DEFAULT_GROUP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// How often group members send heartbeats (Kafka's default).
+pub const DEFAULT_GROUP_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, StateMachine};

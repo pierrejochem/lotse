@@ -146,6 +146,8 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: None,
             now: rt.now(),
@@ -210,6 +212,8 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: None,
             now: rt.now(),
@@ -294,6 +298,8 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: None,
             now: rt.now(),
@@ -349,6 +355,8 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 streams: &streams,
                 queues: &[],
                 exchanges: &[],
+                group_session: Duration::from_secs(45),
+                group_heartbeat: Duration::from_secs(5),
                 client_addrs: &addrs,
                 coordinator: Some(G),
                 now,
@@ -383,12 +391,14 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: Some(G),
             now,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
-        assert!(clients.busy.contains("t"), "the abort is in flight");
+        assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
         let end = Request::EndTxn(lotse_proto::EndTxnRequest {
             txn_id: "t".into(),
             producer_id: p.producer_id,
@@ -438,6 +448,8 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             streams: &[],
             queues: &queues,
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: None,
             now: rt.now(),
@@ -503,6 +515,8 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             streams: &[],
             queues: &queues,
             exchanges: &[],
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
             client_addrs: &addrs,
             coordinator: None,
             now: rt.now(),
@@ -554,5 +568,193 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
         c2.after_round(&view, five.nodes.get_mut(&2).unwrap()).await.unwrap();
         let (_, pushes) = drain(&outbox, ApiKey::SUBSCRIBE);
         assert!(pushes.is_empty(), "the acknowledged message came back: {pushes:?}");
+    });
+}
+
+/// A member that has not released a revoked partition within its
+/// rebalance timeout is removed, but never sooner than the session timeout
+/// after the revocation: it may not have heard of the revocation yet, and
+/// only after a session without a successful heartbeat is it sure to have
+/// stopped reading.
+#[test]
+fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
+    Sim::new(6).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "c", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![2, 3] }];
+        let addrs = BTreeMap::new();
+        let start = rt.now();
+        let view_at = |ms: u64| ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            client_addrs: &addrs,
+            coordinator: Some(G),
+            now: start + Duration::from_millis(ms),
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let heartbeat =
+            async |clients: &mut Clients, groups: &mut Groups, ms, member: &str, epoch, owned: Option<Vec<u32>>| {
+                let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: member.into(),
+                    member_epoch: epoch,
+                    rebalance_timeout_ms: 100,
+                    subscribed: (epoch == 0).then(|| vec![7]),
+                    owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                });
+                let header =
+                    RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
+                let view = view_at(ms);
+                clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+                for _ in 0..3 {
+                    groups.get_mut(&G).unwrap().process().await.unwrap();
+                    clients.after_round(&view, groups).await.unwrap();
+                }
+                match &drain(&outbox, ApiKey::GROUP_HEARTBEAT).0[..] {
+                    [Response::GroupHeartbeat(h)] => h.clone(),
+                    other => panic!("expected one heartbeat answer, got {other:?}"),
+                }
+            };
+        let a = heartbeat(&mut clients, &mut groups, 0, "", 0, None).await;
+        assert_eq!(a.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2), "alone, it gets both");
+        let b = heartbeat(&mut clients, &mut groups, 10, "", 0, None).await;
+        assert_eq!(b.assignment.as_ref().map(|r| r.len()), Some(0), "nothing free yet");
+        // A learns that one partition is revoked, and keeps reading it.
+        let a2 = heartbeat(&mut clients, &mut groups, 20, &a.member_id, a.member_epoch, Some(vec![0, 1])).await;
+        assert_eq!(a2.assignment.as_ref().map(|r| r[0].partitions.len()), Some(1));
+        let members = |groups: &Groups| -> Vec<String> {
+            let g = groups[&G].coordinator().groups().groups.get("g").cloned().unwrap_or_default();
+            g.members.into_keys().collect()
+        };
+        // Past its rebalance timeout, within a session: still a member.
+        for ms in [300, 600, 900] {
+            heartbeat(&mut clients, &mut groups, ms, &a.member_id, a2.member_epoch, Some(vec![0, 1])).await;
+            clients.after_round(&view_at(ms + 50), &mut groups).await.unwrap();
+            assert!(members(&groups).contains(&a.member_id), "removed {ms} ms into a revocation");
+        }
+        // A session after the revocation, with the partition still held: out.
+        heartbeat(&mut clients, &mut groups, 1_100, &a.member_id, a2.member_epoch, Some(vec![0, 1])).await;
+        let view = view_at(1_100);
+        for _ in 0..3 {
+            clients.after_round(&view, &mut groups).await.unwrap();
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+        }
+        assert!(!members(&groups).contains(&a.member_id), "kept although it never released");
+    });
+}
+
+/// Offsets are accepted only from a member that still holds the partition:
+/// once it has released one, its commits for it are refused, and a commit
+/// refused in part writes nothing.
+#[test]
+fn offsets_for_a_released_partition_are_refused() {
+    Sim::new(7).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "c", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![2, 3] }];
+        let addrs = BTreeMap::new();
+        let start = rt.now();
+        let view_at = |ms: u64| ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            client_addrs: &addrs,
+            coordinator: Some(G),
+            now: start + Duration::from_millis(ms),
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let heartbeat =
+            async |clients: &mut Clients, groups: &mut Groups, ms, member: &str, epoch, owned: Option<Vec<u32>>| {
+                let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: member.into(),
+                    member_epoch: epoch,
+                    rebalance_timeout_ms: 100,
+                    subscribed: (epoch == 0).then(|| vec![7]),
+                    owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                });
+                let header =
+                    RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
+                let view = view_at(ms);
+                clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+                for _ in 0..3 {
+                    groups.get_mut(&G).unwrap().process().await.unwrap();
+                    clients.after_round(&view, groups).await.unwrap();
+                }
+                match &drain(&outbox, ApiKey::GROUP_HEARTBEAT).0[..] {
+                    [Response::GroupHeartbeat(h)] => h.clone(),
+                    other => panic!("expected one heartbeat answer, got {other:?}"),
+                }
+            };
+        let a = heartbeat(&mut clients, &mut groups, 0, "", 0, None).await;
+        assert_eq!(a.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2), "alone, it gets both");
+        let b = heartbeat(&mut clients, &mut groups, 10, "", 0, None).await;
+        assert_eq!(b.assignment.as_ref().map(|r| r.len()), Some(0), "nothing free yet");
+        // A learns that one partition is revoked, and keeps reading it.
+        let a2 = heartbeat(&mut clients, &mut groups, 20, &a.member_id, a.member_epoch, Some(vec![0, 1])).await;
+        assert_eq!(a2.assignment.as_ref().map(|r| r[0].partitions.len()), Some(1));
+        // A releases the revoked partition, then tries to commit both.
+        let kept = a2.assignment.as_ref().unwrap()[0].partitions.clone();
+        heartbeat(&mut clients, &mut groups, 30, &a.member_id, a2.member_epoch, Some(kept.clone())).await;
+        let released = 1 - kept[0];
+        let commit = |member: &str, partitions: Vec<u32>| {
+            Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
+                group_id: "g".into(),
+                member_id: member.into(),
+                member_epoch: a2.member_epoch,
+                resources: vec![lotse_proto::OffsetCommitResource {
+                    resource_id: 7,
+                    partitions: partitions
+                        .into_iter()
+                        .map(|p| lotse_proto::OffsetCommitPartition {
+                            partition: p,
+                            offset: 9,
+                            leader_term: 0,
+                            metadata: None,
+                        })
+                        .collect(),
+                }],
+            })
+        };
+        let view = view_at(40);
+        for (member, parts, expect) in [
+            (a.member_id.clone(), vec![kept[0], released], ErrorCode::FENCED_MEMBER_EPOCH),
+            ("no-such-member".to_string(), vec![kept[0]], ErrorCode::UNKNOWN_MEMBER_ID),
+        ] {
+            let header = RequestHeader { api_key: ApiKey::COMMIT_OFFSETS, api_version: 0, correlation_id: 2, flags: 0 };
+            let request = commit(&member, parts);
+            clients
+                .handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, &mut groups)
+                .await
+                .unwrap();
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, &mut groups).await.unwrap();
+            }
+            let (r, _) = drain(&outbox, ApiKey::COMMIT_OFFSETS);
+            let [Response::CommitOffsets(c)] = &r[..] else { panic!("expected one answer, got {r:?}") };
+            let errors: Vec<ErrorCode> = c.resources[0].partitions.iter().map(|p| p.error).collect();
+            assert!(errors.contains(&expect), "{member}: {errors:?}");
+            assert!(groups[&G].coordinator().groups().offsets.is_empty(), "{member}: a refused commit wrote offsets");
+        }
     });
 }

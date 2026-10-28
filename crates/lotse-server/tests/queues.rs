@@ -163,6 +163,8 @@ impl World {
                         streams: Vec::new(),
                         queues: queues.clone(),
                         exchanges: exchanges.clone(),
+                        group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
+                        group_heartbeat_interval: lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL,
                         coordinator: Some(2),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },

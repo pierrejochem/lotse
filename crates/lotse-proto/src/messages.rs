@@ -1214,3 +1214,356 @@ impl OutcomeResponse {
         Ok(OutcomeResponse { error: ErrorCode(r.u16()?), leader_hint: get_hint(r)? })
     }
 }
+
+/// Writes optional resources: a presence byte, then the list.
+fn put_opt_resources(w: &mut Writer, resources: Option<&[TxnResource]>) {
+    w.u8(u8::from(resources.is_some()));
+    if let Some(r) = resources {
+        put_txn_resources(w, r);
+    }
+}
+
+fn get_opt_resources(r: &mut Reader) -> Result<Option<Vec<TxnResource>>, DecodeError> {
+    Ok(if r.u8()? != 0 { Some(get_txn_resources(r)?) } else { None })
+}
+
+/// Joins, stays in or leaves a consumer group, and reconciles the member's
+/// partitions (KIP-848 style).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupHeartbeatRequest {
+    /// The group.
+    pub group_id: String,
+    /// Empty to join; the coordinator names the member.
+    pub member_id: String,
+    /// 0 to join, -1 to leave, otherwise the member's current epoch.
+    pub member_epoch: i32,
+    /// How long the member may take to release a revoked partition.
+    pub rebalance_timeout_ms: u32,
+    /// The streams it reads; only when joining or when they change.
+    pub subscribed: Option<Vec<u64>>,
+    /// The partitions it still owns; only when that changes.
+    pub owned: Option<Vec<TxnResource>>,
+}
+
+impl GroupHeartbeatRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.group_id);
+        w.string(&self.member_id);
+        w.i32(self.member_epoch);
+        w.u32(self.rebalance_timeout_ms);
+        w.u8(u8::from(self.subscribed.is_some()));
+        if let Some(s) = &self.subscribed {
+            w.array(s, |w, id| w.u64(*id));
+        }
+        put_opt_resources(w, self.owned.as_deref());
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = GroupHeartbeatRequest {
+            group_id: r.string()?,
+            member_id: r.string()?,
+            member_epoch: r.i32()?,
+            rebalance_timeout_ms: r.u32()?,
+            subscribed: if r.u8()? != 0 { Some(r.array(8, Reader::u64)?) } else { None },
+            owned: get_opt_resources(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The member's state after a heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupHeartbeatResponse {
+    /// Throttle time.
+    pub throttle_ms: u32,
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The member's id (new after a join).
+    pub member_id: String,
+    /// The member's epoch now.
+    pub member_epoch: i32,
+    /// When to send the next heartbeat.
+    pub heartbeat_interval_ms: u32,
+    /// The member's full assignment, whenever its epoch changed.
+    pub assignment: Option<Vec<TxnResource>>,
+}
+
+impl GroupHeartbeatResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.throttle_ms);
+        w.u16(self.error.0);
+        w.string(&self.member_id);
+        w.i32(self.member_epoch);
+        w.u32(self.heartbeat_interval_ms);
+        put_opt_resources(w, self.assignment.as_deref());
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resp = GroupHeartbeatResponse {
+            throttle_ms: r.u32()?,
+            error: ErrorCode(r.u16()?),
+            member_id: r.string()?,
+            member_epoch: r.i32()?,
+            heartbeat_interval_ms: r.u32()?,
+            assignment: get_opt_resources(r)?,
+        };
+        r.tags()?;
+        Ok(resp)
+    }
+}
+
+/// An offset to commit for one partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetCommitPartition {
+    /// Partition number.
+    pub partition: u32,
+    /// The next offset to read.
+    pub offset: u64,
+    /// The leader term the offset was read under, or 0.
+    pub leader_term: u64,
+    /// Free text kept with the offset.
+    pub metadata: Option<String>,
+}
+
+/// Offsets to commit for one resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetCommitResource {
+    /// Resource id.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<OffsetCommitPartition>,
+}
+
+fn put_commits(w: &mut Writer, resources: &[OffsetCommitResource]) {
+    w.array(resources, |w, r| {
+        w.u64(r.resource_id);
+        w.array(&r.partitions, |w, p| {
+            w.u32(p.partition);
+            w.u64(p.offset);
+            w.u64(p.leader_term);
+            w.opt_string(p.metadata.as_deref());
+            w.no_tags();
+        });
+        w.no_tags();
+    });
+}
+
+fn get_commits(r: &mut Reader) -> Result<Vec<OffsetCommitResource>, DecodeError> {
+    r.array(10, |r| {
+        let resource_id = r.u64()?;
+        let partitions = r.array(23, |r| {
+            let p = OffsetCommitPartition {
+                partition: r.u32()?,
+                offset: r.u64()?,
+                leader_term: r.u64()?,
+                metadata: r.opt_string()?,
+            };
+            r.tags()?;
+            Ok(p)
+        })?;
+        r.tags()?;
+        Ok(OffsetCommitResource { resource_id, partitions })
+    })
+}
+
+/// Commits a member's offsets for its group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOffsetsRequest {
+    /// The group.
+    pub group_id: String,
+    /// The member committing.
+    pub member_id: String,
+    /// Its epoch.
+    pub member_epoch: i32,
+    /// The offsets.
+    pub resources: Vec<OffsetCommitResource>,
+}
+
+impl CommitOffsetsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.group_id);
+        w.string(&self.member_id);
+        w.i32(self.member_epoch);
+        put_commits(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CommitOffsetsRequest {
+            group_id: r.string()?,
+            member_id: r.string()?,
+            member_epoch: r.i32()?,
+            resources: get_commits(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The outcome per partition of `CommitOffsets` or `AddOffsetsToTxn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOffsetsResponse {
+    /// Per resource and partition.
+    pub resources: Vec<TxnResourceResult>,
+}
+
+impl CommitOffsetsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        put_txn_results(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resp = CommitOffsetsResponse { resources: get_txn_results(r)? };
+        r.tags()?;
+        Ok(resp)
+    }
+}
+
+/// Reads a group's committed offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetFetchRequest {
+    /// The group.
+    pub group_id: String,
+    /// Refuse with `UNSTABLE_OFFSET_COMMIT` while a transaction holds an
+    /// uncommitted offset for a partition.
+    pub require_stable: bool,
+    /// The partitions.
+    pub resources: Vec<TxnResource>,
+}
+
+impl OffsetFetchRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.group_id);
+        w.u8(u8::from(self.require_stable));
+        put_txn_resources(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = OffsetFetchRequest {
+            group_id: r.string()?,
+            require_stable: r.u8()? != 0,
+            resources: get_txn_resources(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// No committed offset.
+pub const NO_OFFSET: u64 = u64::MAX;
+
+/// One partition's committed offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetFetchPartition {
+    /// Partition number.
+    pub partition: u32,
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The next offset to read, or [`NO_OFFSET`].
+    pub offset: u64,
+    /// The leader term it was committed with.
+    pub leader_term: u64,
+    /// What was kept with it.
+    pub metadata: Option<String>,
+}
+
+/// One resource's committed offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetFetchResource {
+    /// Resource id.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<OffsetFetchPartition>,
+}
+
+/// The committed offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetFetchResponse {
+    /// Per resource and partition.
+    pub resources: Vec<OffsetFetchResource>,
+}
+
+impl OffsetFetchResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.resources, |w, r| {
+            w.u64(r.resource_id);
+            w.array(&r.partitions, |w, p| {
+                w.u32(p.partition);
+                w.u16(p.error.0);
+                w.u64(p.offset);
+                w.u64(p.leader_term);
+                w.opt_string(p.metadata.as_deref());
+                w.no_tags();
+            });
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resources = r.array(10, |r| {
+            let resource_id = r.u64()?;
+            let partitions = r.array(25, |r| {
+                let p = OffsetFetchPartition {
+                    partition: r.u32()?,
+                    error: ErrorCode(r.u16()?),
+                    offset: r.u64()?,
+                    leader_term: r.u64()?,
+                    metadata: r.opt_string()?,
+                };
+                r.tags()?;
+                Ok(p)
+            })?;
+            r.tags()?;
+            Ok(OffsetFetchResource { resource_id, partitions })
+        })?;
+        r.tags()?;
+        Ok(OffsetFetchResponse { resources })
+    }
+}
+
+/// Commits a group's offsets within a transaction: they take effect when it
+/// commits, and are dropped when it aborts. Answered like `CommitOffsets`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddOffsetsToTxnRequest {
+    /// Transactional id.
+    pub txn_id: String,
+    /// Producer id from `InitProducer`.
+    pub producer_id: u64,
+    /// Its epoch.
+    pub producer_epoch: u16,
+    /// The group.
+    pub group_id: String,
+    /// The member whose partitions these are; a member that no longer owns
+    /// them is fenced.
+    pub member_id: String,
+    /// Its epoch.
+    pub member_epoch: i32,
+    /// The offsets.
+    pub resources: Vec<OffsetCommitResource>,
+}
+
+impl AddOffsetsToTxnRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.txn_id);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        w.string(&self.group_id);
+        w.string(&self.member_id);
+        w.i32(self.member_epoch);
+        put_commits(w, &self.resources);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AddOffsetsToTxnRequest {
+            txn_id: r.string()?,
+            producer_id: r.u64()?,
+            producer_epoch: r.u16()?,
+            group_id: r.string()?,
+            member_id: r.string()?,
+            member_epoch: r.i32()?,
+            resources: get_commits(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}

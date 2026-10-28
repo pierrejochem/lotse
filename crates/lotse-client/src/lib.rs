@@ -37,9 +37,11 @@
 #![warn(missing_docs)]
 
 mod consumer;
+mod group;
 mod publish;
 
 pub use consumer::{Consumer, Message};
+pub use group::{GroupConfig, GroupConsumer, GroupRecord};
 pub use publish::{OutMessage, Published};
 
 use std::collections::BTreeMap;
