@@ -28,10 +28,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lotse_auth::scram::ScramCredential;
 use lotse_proto::{
-    AdminResponse, AlterConfigsRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateResponse,
+    AdminResponse, AlterConfigsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateResponse,
     CreateStreamRequest, DeclareExchangeRequest, DeleteResourceRequest, DescribeConfigsRequest,
-    DescribeConfigsResponse, ErrorCode, LeaderHint, OutcomeResponse, ResourceConfigs, Response, config_source,
+    DescribeConfigsResponse, DescribeUsersResponse, ErrorCode, LeaderHint, OutcomeResponse, ResourceConfigs, Response,
+    UserEntry, config_source,
 };
 use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
@@ -58,13 +60,16 @@ pub(crate) struct AdminView<'a> {
     pub(crate) configured_groups: usize,
     /// Voters of the groups created at runtime.
     pub(crate) voters: &'a BTreeMap<GroupId, Vec<NodeId>>,
+    /// SCRAM users from the node configuration.
+    pub(crate) configured_users: &'a BTreeMap<String, ScramCredential>,
 }
 
 static NO_VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
+static NO_USERS: BTreeMap<String, ScramCredential> = BTreeMap::new();
 
 impl Default for AdminView<'_> {
     fn default() -> Self {
-        AdminView { metadata: None, nodes: &[], configured_groups: 0, voters: &NO_VOTERS }
+        AdminView { metadata: None, nodes: &[], configured_groups: 0, voters: &NO_VOTERS, configured_users: &NO_USERS }
     }
 }
 
@@ -80,6 +85,8 @@ pub(super) enum AdminThen {
     Deleted,
     /// A changed setting of a queue that may have been deleted since.
     Altered { queue_id: u64 },
+    /// A user's credential set or removed.
+    UserSet,
 }
 
 impl AdminThen {
@@ -88,7 +95,7 @@ impl AdminThen {
         match self {
             AdminThen::Created { .. } => created(code, resource_id, None, h),
             AdminThen::Bound { .. } | AdminThen::Unbound => outcome_response(code, h),
-            AdminThen::Deleted | AdminThen::Altered { .. } => admin_response(code, None, h),
+            AdminThen::Deleted | AdminThen::Altered { .. } | AdminThen::UserSet => admin_response(code, None, h),
         }
     }
 }
@@ -116,6 +123,9 @@ fn admin_response(error: ErrorCode, why: Option<&str>, leader_hint: Option<Leade
 
 /// Why a resource from the configuration cannot be changed at runtime.
 const CONFIGURED: &str = "the resource is in the node configuration; change it there";
+
+/// Longest user name, bytes.
+const MAX_USER_NAME: usize = 255;
 
 /// The key of the one setting that can change so far.
 const ACK_TIMEOUT: &str = "ack.timeout.ms";
@@ -411,6 +421,77 @@ impl Clients {
         let change = Change::AlterQueue { resource_id: req.resource_id, ack_timeout_ms };
         let then = AdminThen::Altered { queue_id: req.resource_id };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
+    }
+
+    /// Sets or removes a user's SCRAM credential.
+    pub(super) fn alter_user<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: AlterUserRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let credential = req.credential.map(|c| ScramCredential {
+            iterations: c.iterations,
+            salt: c.salt.to_vec(),
+            stored_key: c.stored_key.to_vec(),
+            server_key: c.server_key.to_vec(),
+        });
+        let refused = if req.user.is_empty() || req.user.len() > MAX_USER_NAME {
+            Some(format!("a user name has 1 to {MAX_USER_NAME} bytes"))
+        } else if credential.as_ref().is_some_and(|c| !c.is_valid()) {
+            Some(format!(
+                "a SCRAM-SHA-512 credential has a salt, 64-byte keys and {} to {} iterations",
+                lotse_auth::scram::MIN_ITERATIONS,
+                lotse_auth::scram::MAX_ITERATIONS
+            ))
+        } else if view.admin.configured_users.contains_key(&req.user) {
+            Some("the user is in the node configuration; change it there".into())
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let change = Change::SetUser { user: req.user, credential };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::UserSet);
+    }
+
+    /// Lists the users with a credential: configured and runtime ones.
+    pub(super) fn describe_users<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((error, leader_hint)) => {
+                let resp = DescribeUsersResponse { error, leader_hint, users: Vec::new() };
+                return outbox.push(id, &Response::DescribeUsers(resp));
+            }
+        };
+        let entry = |name: &String, c: &ScramCredential, source| UserEntry {
+            name: name.clone(),
+            mechanism: lotse_auth::scram::MECHANISM.into(),
+            iterations: c.iterations,
+            source,
+        };
+        let mut users: BTreeMap<&String, UserEntry> =
+            replica.metadata().users.iter().map(|(n, c)| (n, entry(n, c, config_source::DYNAMIC))).collect();
+        // Configured users win, as when logging in.
+        for (n, c) in view.admin.configured_users {
+            users.insert(n, entry(n, c, config_source::STATIC));
+        }
+        let resp =
+            DescribeUsersResponse { error: ErrorCode::NONE, leader_hint: None, users: users.into_values().collect() };
+        outbox.push(id, &Response::DescribeUsers(resp));
     }
 
     pub(super) fn describe_configs<R: Runtime, S: StateMachine>(

@@ -148,6 +148,20 @@ fn requests() -> Vec<Request> {
                 partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
             }],
         }),
+        Request::SaslHandshake(SaslHandshakeRequest { mechanism: "SCRAM-SHA-512".into() }),
+        Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: Bytes::from_static(b"n,,n=alice,r=x") }),
+        Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: Bytes::new() }),
+        Request::AlterUser(AlterUserRequest {
+            user: "alice".into(),
+            credential: Some(ScramCredentialData {
+                iterations: 4096,
+                salt: Bytes::from_static(b"salt"),
+                stored_key: Bytes::from(vec![1u8; 64]),
+                server_key: Bytes::from(vec![2u8; 64]),
+            }),
+        }),
+        Request::AlterUser(AlterUserRequest { user: "bob".into(), credential: None }),
+        Request::DescribeUsers(DescribeUsersRequest),
     ]
 }
 
@@ -441,6 +455,47 @@ fn responses() -> Vec<(ApiKey, Response)> {
                 leader_hint: Some(LeaderHint { leader: 2, term: 4 }),
             }),
         ),
+        (
+            ApiKey::SASL_HANDSHAKE,
+            Response::SaslHandshake(SaslHandshakeResponse {
+                error: ErrorCode::UNSUPPORTED_SASL_MECHANISM,
+                mechanisms: vec!["SCRAM-SHA-512".into(), "OAUTHBEARER".into()],
+            }),
+        ),
+        (
+            ApiKey::SASL_AUTHENTICATE,
+            Response::SaslAuthenticate(SaslAuthenticateResponse {
+                error: ErrorCode::NONE,
+                error_msg: None,
+                auth_bytes: Bytes::from_static(b"v=abc"),
+                session_lifetime_ms: 3_600_000,
+            }),
+        ),
+        (
+            ApiKey::SASL_AUTHENTICATE,
+            Response::SaslAuthenticate(SaslAuthenticateResponse {
+                error: ErrorCode::AUTHENTICATION_FAILED,
+                error_msg: Some("authentication failed".into()),
+                auth_bytes: Bytes::new(),
+                session_lifetime_ms: 0,
+            }),
+        ),
+        (
+            ApiKey::ALTER_USER,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::DESCRIBE_USERS,
+            Response::DescribeUsers(DescribeUsersResponse {
+                error: ErrorCode::NONE,
+                leader_hint: Some(LeaderHint { leader: 1, term: 2 }),
+                users: vec![
+                    UserEntry { name: "alice".into(), mechanism: "SCRAM-SHA-512".into(), iterations: 4096, source: 1 },
+                    UserEntry { name: "ops".into(), mechanism: "SCRAM-SHA-512".into(), iterations: 8192, source: 2 },
+                ],
+            }),
+        ),
+        (ApiKey::PRODUCE, Response::Error(ErrorCode::UNAUTHORIZED)),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
     ]
@@ -749,4 +804,33 @@ fn the_smallest_metrics_decode() {
     for case in cases {
         metrics_round_trip(case);
     }
+}
+
+/// The smallest users (empty names) and mechanism lists must decode too.
+#[test]
+fn the_smallest_users_and_mechanisms_decode() {
+    let user = UserEntry { name: String::new(), mechanism: String::new(), iterations: 0, source: 0 };
+    let resp = Response::DescribeUsers(DescribeUsersResponse {
+        error: ErrorCode::NONE,
+        leader_hint: None,
+        users: vec![user; 5],
+    });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::DESCRIBE_USERS).unwrap().1, resp);
+    let resp =
+        Response::SaslHandshake(SaslHandshakeResponse { error: ErrorCode::NONE, mechanisms: vec![String::new(); 5] });
+    assert_eq!(decode_response(encode_response(1, &resp), ApiKey::SASL_HANDSHAKE).unwrap().1, resp);
+    let bad = {
+        let mut w = codec::Writer::new();
+        w.string("alice");
+        w.u8(2);
+        w.no_tags();
+        w.finish()
+    };
+    let mut frame = BytesMut::new();
+    frame.put_u16(ApiKey::ALTER_USER.0);
+    frame.put_u16(0);
+    frame.put_u32(1);
+    frame.put_u16(0);
+    frame.put_slice(&bad);
+    assert!(decode_request(frame.freeze()).is_err(), "a credential flag of 2");
 }

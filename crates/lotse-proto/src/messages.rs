@@ -2290,3 +2290,211 @@ impl DescribeMetricsResponse {
         })
     }
 }
+
+/// Starts authenticating with a SASL mechanism (`SaslHandshake`), or starts
+/// over to authenticate again before the session ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaslHandshakeRequest {
+    /// `SCRAM-SHA-512` or `OAUTHBEARER`.
+    pub mechanism: String,
+}
+
+impl SaslHandshakeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.mechanism);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = SaslHandshakeRequest { mechanism: r.string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The answer to `SaslHandshake`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaslHandshakeResponse {
+    /// [`ErrorCode::UNSUPPORTED_SASL_MECHANISM`] if the mechanism is not
+    /// enabled here.
+    pub error: ErrorCode,
+    /// The mechanisms this node takes.
+    pub mechanisms: Vec<String>,
+}
+
+impl SaslHandshakeResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.array(&self.mechanisms, |w, m| w.string(m));
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(SaslHandshakeResponse { error: ErrorCode(r.u16()?), mechanisms: r.array(2, |r| r.string())? })
+    }
+}
+
+/// One step of the mechanism chosen with `SaslHandshake`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaslAuthenticateRequest {
+    /// The mechanism's message.
+    pub auth_bytes: Bytes,
+}
+
+impl SaslAuthenticateRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.bytes(&self.auth_bytes);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = SaslAuthenticateRequest { auth_bytes: r.bytes()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The answer to one `SaslAuthenticate` step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaslAuthenticateResponse {
+    /// [`ErrorCode::AUTHENTICATION_FAILED`] ends the attempt.
+    pub error: ErrorCode,
+    /// Why, for a failure.
+    pub error_msg: Option<String>,
+    /// The mechanism's answer.
+    pub auth_bytes: Bytes,
+    /// Once authenticated: how long the session lasts, ms. Authenticate
+    /// again on the same connection before it ends; after it, requests are
+    /// refused with [`ErrorCode::UNAUTHORIZED`].
+    pub session_lifetime_ms: u64,
+}
+
+impl SaslAuthenticateResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.opt_string(self.error_msg.as_deref());
+        w.bytes(&self.auth_bytes);
+        w.u64(self.session_lifetime_ms);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(SaslAuthenticateResponse {
+            error: ErrorCode(r.u16()?),
+            error_msg: r.opt_string()?,
+            auth_bytes: r.bytes()?,
+            session_lifetime_ms: r.u64()?,
+        })
+    }
+}
+
+/// A user's SCRAM-SHA-512 credential as the broker keeps it: never the
+/// password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScramCredentialData {
+    /// PBKDF2 iterations, at least 4096.
+    pub iterations: u32,
+    /// The salt.
+    pub salt: Bytes,
+    /// `H(ClientKey)`.
+    pub stored_key: Bytes,
+    /// `HMAC(SaltedPassword, "Server Key")`.
+    pub server_key: Bytes,
+}
+
+/// Sets or removes a user's SCRAM credential (admin). Answered with
+/// [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterUserRequest {
+    /// The user name.
+    pub user: String,
+    /// The new credential; `None` removes the user's.
+    pub credential: Option<ScramCredentialData>,
+}
+
+impl AlterUserRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.user);
+        match &self.credential {
+            Some(c) => {
+                w.u8(1);
+                w.u32(c.iterations);
+                w.bytes(&c.salt);
+                w.bytes(&c.stored_key);
+                w.bytes(&c.server_key);
+            }
+            None => w.u8(0),
+        }
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let user = r.string()?;
+        let credential = match r.u8()? {
+            0 => None,
+            1 => Some(ScramCredentialData {
+                iterations: r.u32()?,
+                salt: r.bytes()?,
+                stored_key: r.bytes()?,
+                server_key: r.bytes()?,
+            }),
+            _ => return Err(DecodeError::Malformed("credential flag is neither 0 nor 1")),
+        };
+        r.tags()?;
+        Ok(AlterUserRequest { user, credential })
+    }
+}
+
+/// Lists the users with a SCRAM credential (admin).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeUsersRequest;
+
+impl DescribeUsersRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeUsersRequest)
+    }
+}
+
+/// One user with a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserEntry {
+    /// The user name.
+    pub name: String,
+    /// `SCRAM-SHA-512`.
+    pub mechanism: String,
+    /// The credential's iterations.
+    pub iterations: u32,
+    /// [`config_source`]: set at runtime, or from the node configuration.
+    pub source: u8,
+}
+
+/// The users, sorted by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeUsersResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The users.
+    pub users: Vec<UserEntry>,
+}
+
+impl DescribeUsersResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.array(&self.users, |w, u| {
+            w.string(&u.name);
+            w.string(&u.mechanism);
+            w.u32(u.iterations);
+            w.u8(u.source);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeUsersResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            // name, mechanism, iterations, source: 2 + 2 + 4 + 1 bytes.
+            users: r.array(9, |r| {
+                Ok(UserEntry { name: r.string()?, mechanism: r.string()?, iterations: r.u32()?, source: r.u8()? })
+            })?,
+        })
+    }
+}

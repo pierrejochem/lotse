@@ -22,6 +22,7 @@ lotse-proto = { path = "crates/lotse-proto" }
 lotse-client = { path = "crates/lotse-client" }
 lotse-queue = { path = "crates/lotse-queue" }
 lotse-route = { path = "crates/lotse-route" }
+lotse-auth = { path = "crates/lotse-auth" }
 
 bytes = "1.7"
 crc32c = "0.6"
@@ -34,8 +35,18 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 x509-parser = "0.17"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 tracing = "0.1"
+# Authentication in lotse-auth: SCRAM-SHA-512 and JWT validation.
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonwebtoken = { version = "9", default-features = false }
+# Roots for fetching an identity provider's keys over HTTPS.
+webpki-roots = "1"
+# Signing test tokens (lotse-auth's testing feature); already in the tree through rustls.
+ring = "0.17"
 # Host metrics in lotse-rt-tokio; 0.36 is the newest that builds on rust-version 1.85.
 sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
 

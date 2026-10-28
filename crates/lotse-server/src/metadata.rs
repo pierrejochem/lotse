@@ -12,10 +12,14 @@
 //! anything that could differ between nodes. A record that names a resource
 //! that exists already changes nothing; the leader tells the client by
 //! looking at the applied state.
+//!
+//! Users' SCRAM credentials live here too, so every node can check a login
+//! without asking anyone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
 use lotse_route::{Binding, ExchangeKind};
 
@@ -54,6 +58,8 @@ pub(crate) enum Change {
     Delete { resource_id: u64 },
     /// A queue's ack timeout changed; 0 returns it to the default.
     AlterQueue { resource_id: u64, ack_timeout_ms: u64 },
+    /// A user's SCRAM credential set, or removed with `None`.
+    SetUser { user: String, credential: Option<ScramCredential> },
 }
 
 /// A stream created at runtime.
@@ -94,6 +100,8 @@ pub(crate) struct MetadataState {
     pub(crate) bindings: BTreeMap<u64, Vec<Binding>>,
     /// Tombstones: deleted resources and how many groups each had.
     pub(crate) deleted: BTreeMap<u64, u32>,
+    /// Users with a SCRAM credential, set at runtime.
+    pub(crate) users: BTreeMap<String, ScramCredential>,
 }
 
 const VERSION: u8 = 1;
@@ -191,6 +199,12 @@ impl MetadataState {
                     q.ack_timeout_ms = ack_timeout_ms;
                 }
             }
+            Change::SetUser { user, credential: Some(c) } => {
+                self.users.insert(user, c);
+            }
+            Change::SetUser { user, credential: None } => {
+                self.users.remove(&user);
+            }
         }
         Ok(())
     }
@@ -234,6 +248,11 @@ impl MetadataState {
         for (id, groups) in &self.deleted {
             b.put_u64_le(*id);
             b.put_u32_le(*groups);
+        }
+        b.put_u32_le(self.users.len() as u32);
+        for (name, c) in &self.users {
+            put_str(&mut b, name);
+            put_credential(&mut b, c);
         }
         b.freeze()
     }
@@ -284,6 +303,10 @@ impl MetadataState {
             let id = b.get_u64_le();
             s.deleted.insert(id, b.get_u32_le());
         }
+        for _ in 0..count(b)? {
+            let name = get_str(b)?;
+            s.users.insert(name, get_credential(b)?);
+        }
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
@@ -329,6 +352,14 @@ pub(crate) fn record(change: &Change) -> Bytes {
             b.put_u64_le(*resource_id);
             b.put_u64_le(*ack_timeout_ms);
         }
+        Change::SetUser { user, credential } => {
+            b.put_u8(7);
+            put_str(&mut b, user);
+            b.put_u8(u8::from(credential.is_some()));
+            if let Some(c) = credential {
+                put_credential(&mut b, c);
+            }
+        }
     }
     lotse_record::internal_control_batch(lotse_record::InternalControl::Metadata, &b).expect("one record")
 }
@@ -368,6 +399,16 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         6 => {
             need(b, 16)?;
             Change::AlterQueue { resource_id: b.get_u64_le(), ack_timeout_ms: b.get_u64_le() }
+        }
+        7 => {
+            let user = get_str(b)?;
+            need(b, 1)?;
+            let credential = match b.get_u8() {
+                0 => None,
+                1 => Some(get_credential(b)?),
+                _ => return Err("bad credential flag".into()),
+            };
+            Change::SetUser { user, credential }
         }
         _ => return Err("unknown metadata change".into()),
     };
@@ -411,6 +452,21 @@ fn get_bytes(b: &mut &[u8]) -> Result<Bytes, String> {
     let v = Bytes::copy_from_slice(&b[..n]);
     b.advance(n);
     Ok(v)
+}
+
+fn put_credential(b: &mut BytesMut, c: &ScramCredential) {
+    b.put_u32_le(c.iterations);
+    put_bytes(b, &c.salt);
+    put_bytes(b, &c.stored_key);
+    put_bytes(b, &c.server_key);
+}
+
+fn get_credential(b: &mut &[u8]) -> Result<ScramCredential, String> {
+    need(b, 4)?;
+    let iterations = b.get_u32_le();
+    let salt = get_bytes(b)?.to_vec();
+    let stored_key = get_bytes(b)?.to_vec();
+    Ok(ScramCredential { iterations, salt, stored_key, server_key: get_bytes(b)?.to_vec() })
 }
 
 fn put_nodes(b: &mut BytesMut, nodes: &[NodeId]) {

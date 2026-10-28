@@ -70,13 +70,18 @@ impl fmt::Debug for Instant {
     }
 }
 
-/// Monotonic time and timers.
+/// Monotonic time and timers, and the calendar.
 pub trait Clock: Clone + Send + Sync + 'static {
     /// The current instant.
     fn now(&self) -> Instant;
 
     /// Completes once `duration` has passed on this clock.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send;
+
+    /// Time since the Unix epoch, as the machine's wall clock tells it. It
+    /// may jump; use it only to compare with times others wrote down (a
+    /// token's expiry), never to measure intervals.
+    fn unix_time(&self) -> Duration;
 }
 
 /// How a segment file is opened.
@@ -169,6 +174,16 @@ pub trait Rng: Clone + Send + Sync + 'static {
     /// `true` with probability `numerator / denominator`.
     fn chance(&self, numerator: u64, denominator: u64) -> bool {
         self.below(denominator) < numerator
+    }
+
+    /// Fills `buf` with bytes nobody can predict, for secrets: nonces and
+    /// salts. [`Rng::next_u64`] need only be well spread, and an observer
+    /// may be able to predict it; this may not. Under simulation it comes
+    /// from the seed like everything else.
+    fn fill_secret(&self, buf: &mut [u8]) {
+        for chunk in buf.chunks_mut(8) {
+            chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
+        }
     }
 }
 
@@ -284,6 +299,17 @@ pub trait Conn: Send + Sync + 'static {
     fn peer_identity(&self) -> Option<PeerIdentity>;
 }
 
+/// Fetches documents over HTTP(S): an identity provider's discovery document
+/// and keys. Only `GET`, only small bodies.
+pub trait Http: Send + Sync + 'static {
+    /// The body of `url` if the server answers 200; any other status, a
+    /// body over [`MAX_HTTP_BODY`] or a failed TLS check is an error.
+    fn get(&self, url: &str) -> impl Future<Output = io::Result<Bytes>> + Send;
+}
+
+/// Largest body [`Http::get`] accepts.
+pub const MAX_HTTP_BODY: usize = 1 << 20;
+
 /// What the machine a node runs on looks like right now, for metrics.
 /// A value the platform cannot tell is `None`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -309,9 +335,9 @@ pub trait Host: Send + Sync + 'static {
 }
 
 /// Everything a Lotse node needs from its environment.
-pub trait Runtime: Clock + Disk + Spawn + Rng + Net + Host {}
+pub trait Runtime: Clock + Disk + Spawn + Rng + Net + Host + Http {}
 
-impl<T: Clock + Disk + Spawn + Rng + Net + Host> Runtime for T {}
+impl<T: Clock + Disk + Spawn + Rng + Net + Host + Http> Runtime for T {}
 
 #[cfg(test)]
 mod tests {

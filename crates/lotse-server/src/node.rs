@@ -34,6 +34,7 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Disk, Link, Listener, PeerIdentity, Runtime, Spawn};
 
+use crate::auth::{Auth, AuthConfig};
 use crate::client::{
     AdminView, ClientRequest, Clients, ClusterView, MarkerJob, NetStats, NodeView, QueueConfig, StreamConfig,
 };
@@ -90,6 +91,8 @@ pub struct NodeConfig {
     /// Producers kept per replica for idempotence; every node must use the
     /// same value ([`crate::DEFAULT_MAX_PRODUCERS`] by default).
     pub max_producers: usize,
+    /// How clients authenticate.
+    pub auth: AuthConfig,
 }
 
 /// What a group looks like from outside.
@@ -221,6 +224,14 @@ impl<R: Runtime> Node<R> {
             let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
             groups.insert(g, replica.await?);
         }
+        // Nodes reach each other's client ports too (transaction markers)
+        // and can only prove who they are with their certificates.
+        if cfg.auth.required && !rt.verifies_peers() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "authentication needs TLS: nodes authenticate to each other with their certificates",
+            )));
+        }
         let listener = rt.listen(&cfg.listen, Link::Node).await?;
         let client_listener = match &cfg.client_listen {
             Some(addr) => Some(rt.listen(addr, Link::Client).await?),
@@ -257,11 +268,12 @@ async fn run<R: Runtime, S: StateMachine>(
     client_listener: Option<R::Listener>,
     shared: Arc<Shared>,
 ) -> Result<(), Error> {
+    let auth = Auth::new(rt.clone(), cfg.auth.clone());
     let mut tasks = Vec::new();
     let others: BTreeSet<NodeId> = cfg.peers.keys().copied().filter(|id| *id != cfg.id).collect();
     tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone(), others)));
     if let Some(l) = client_listener {
-        tasks.push(rt.spawn(accept_clients(rt.clone(), l, shared.clone())));
+        tasks.push(rt.spawn(accept_clients(rt.clone(), l, shared.clone(), auth.clone())));
     }
     let mut peers = BTreeMap::new();
     for (&id, addr) in cfg.peers.iter().filter(|(id, _)| **id != cfg.id) {
@@ -278,7 +290,8 @@ async fn run<R: Runtime, S: StateMachine>(
         peers.insert(id, peer);
     }
     let jobs = Live::default();
-    let result = main_loop(&rt, &cfg, &mut groups, &factory, &peers, &shared, &jobs).await;
+    let around = Around { peers: &peers, shared: &shared, jobs: &jobs, auth: &auth };
+    let result = main_loop(&rt, &cfg, &mut groups, &factory, around).await;
     // Whatever ended the loop, everything else ends with it.
     shared.stop.set();
     for p in peers.values() {
@@ -368,15 +381,22 @@ async fn write_markers<R: Runtime>(
     shared.work.set();
 }
 
+/// What the main loop works with besides its groups.
+struct Around<'a, R> {
+    peers: &'a BTreeMap<NodeId, Arc<Peer>>,
+    shared: &'a Arc<Shared>,
+    jobs: &'a Live,
+    auth: &'a Auth<R>,
+}
+
 async fn main_loop<R: Runtime, S: StateMachine>(
     rt: &R,
     cfg: &NodeConfig,
     groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     factory: &Factory<S>,
-    peers: &BTreeMap<NodeId, Arc<Peer>>,
-    shared: &Arc<Shared>,
-    jobs: &Live,
+    around: Around<'_, R>,
 ) -> Result<(), Error> {
+    let Around { peers, shared, jobs, auth } = around;
     let mut next_tick = rt.now() + cfg.tick;
     let mut clients = Clients::default();
     // The coordinator writes markers through the native protocol, like a client.
@@ -397,7 +417,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // measured between two reads.
     let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
     while !shared.stop.is_set() {
-        if known.refresh(rt, cfg, groups, factory).await? {
+        if known.refresh(rt, cfg, groups, factory, auth).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
         }
         if shared.deleted.lock().expect("deleted lock").len() != known.deleted.len() {
@@ -429,6 +449,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 nodes: &nodes,
                 configured_groups: cfg.groups.len(),
                 voters: &known.voters,
+                configured_users: &cfg.auth.users,
             },
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
@@ -527,7 +548,7 @@ async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>, o
     }
 }
 
-async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
+async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>, auth: Arc<Auth<R>>) {
     let to_main = shared.clone();
     let commands: Arc<dyn Fn(ClientRequest) + std::marker::Send + Sync> = Arc::new(move |req| {
         to_main.commands.lock().expect("commands lock").push_back(Command::Client(req));
@@ -540,11 +561,12 @@ async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Sh
     while let Some(Ok((conn, peer))) = race(listener.accept(), &[&shared.stop]).await {
         *live.0.lock().expect("live lock") += 1;
         let (rt2, commands, stop, live) = (rt.clone(), commands.clone(), shared.stop.clone(), live.clone());
+        let auth = auth.clone();
         let net = shared.net.clone();
         // Dropping the handle detaches the task; `live` tracks it.
         drop(rt.spawn(async move {
             net.connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::client::serve(rt2, conn, peer, commands, net.clone(), stop).await;
+            crate::client::serve(rt2, conn, peer, commands, net.clone(), stop, auth).await;
             net.connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             let mut n = live.0.lock().expect("live lock");
             *n -= 1;
@@ -670,6 +692,7 @@ impl Known {
         cfg: &NodeConfig,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
         factory: &Factory<S>,
+        auth: &Auth<R>,
     ) -> Result<bool, Error> {
         let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return Ok(false) };
         if meta.applied() == self.applied {
@@ -677,6 +700,7 @@ impl Known {
         }
         self.applied = meta.applied();
         let state = meta.metadata().clone();
+        auth.set_users(&state.users);
         let mut known = Known::configured(cfg);
         known.applied = self.applied;
         known.removed = std::mem::take(&mut self.removed);

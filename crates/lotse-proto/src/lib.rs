@@ -91,6 +91,14 @@ impl ApiKey {
     pub const UNBIND: ApiKey = ApiKey(28);
     /// One node's metrics (admin).
     pub const DESCRIBE_METRICS: ApiKey = ApiKey(29);
+    /// Chooses a SASL mechanism.
+    pub const SASL_HANDSHAKE: ApiKey = ApiKey(30);
+    /// One step of SASL authentication.
+    pub const SASL_AUTHENTICATE: ApiKey = ApiKey(31);
+    /// Sets or removes a user's SCRAM credential (admin).
+    pub const ALTER_USER: ApiKey = ApiKey(32);
+    /// Lists the users with a SCRAM credential (admin).
+    pub const DESCRIBE_USERS: ApiKey = ApiKey(33);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -113,7 +121,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 27] = [
+    pub const SUPPORTED: [ApiVersionRange; 31] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -141,6 +149,10 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::ALTER_CONFIGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::UNBIND, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_METRICS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::SASL_HANDSHAKE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::SASL_AUTHENTICATE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ALTER_USER, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_USERS, min: 0, max: 0 },
     ];
 }
 
@@ -219,10 +231,16 @@ impl ErrorCode {
     pub const CONCURRENT_GROUP_CHANGE: ErrorCode = ErrorCode(25);
     /// A resource with that name exists already; the answer names its id.
     pub const RESOURCE_EXISTS: ErrorCode = ErrorCode(26);
+    /// The credentials or token were not accepted. The node says no more
+    /// than that, so names cannot be probed.
+    pub const AUTHENTICATION_FAILED: ErrorCode = ErrorCode(27);
+    /// The SASL mechanism is not enabled on this node; the answer lists the
+    /// ones that are.
+    pub const UNSUPPORTED_SASL_MECHANISM: ErrorCode = ErrorCode(28);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 27] = [
+        const NAMES: [&str; 29] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -250,6 +268,8 @@ impl ErrorCode {
             "UNSTABLE_OFFSET_COMMIT",
             "CONCURRENT_GROUP_CHANGE",
             "RESOURCE_EXISTS",
+            "AUTHENTICATION_FAILED",
+            "UNSUPPORTED_SASL_MECHANISM",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -355,6 +375,14 @@ pub enum Request {
     AlterConfigs(AlterConfigsRequest),
     /// [`ApiKey::DESCRIBE_METRICS`].
     DescribeMetrics(DescribeMetricsRequest),
+    /// [`ApiKey::SASL_HANDSHAKE`].
+    SaslHandshake(SaslHandshakeRequest),
+    /// [`ApiKey::SASL_AUTHENTICATE`].
+    SaslAuthenticate(SaslAuthenticateRequest),
+    /// [`ApiKey::ALTER_USER`].
+    AlterUser(AlterUserRequest),
+    /// [`ApiKey::DESCRIBE_USERS`].
+    DescribeUsers(DescribeUsersRequest),
 }
 
 impl Request {
@@ -388,6 +416,10 @@ impl Request {
             Request::DescribeConfigs(_) => ApiKey::DESCRIBE_CONFIGS,
             Request::AlterConfigs(_) => ApiKey::ALTER_CONFIGS,
             Request::DescribeMetrics(_) => ApiKey::DESCRIBE_METRICS,
+            Request::SaslHandshake(_) => ApiKey::SASL_HANDSHAKE,
+            Request::SaslAuthenticate(_) => ApiKey::SASL_AUTHENTICATE,
+            Request::AlterUser(_) => ApiKey::ALTER_USER,
+            Request::DescribeUsers(_) => ApiKey::DESCRIBE_USERS,
         }
     }
 }
@@ -429,12 +461,19 @@ pub enum Response {
     DescribeConfigs(DescribeConfigsResponse),
     /// To [`Request::DescribeMetrics`].
     DescribeMetrics(Box<DescribeMetricsResponse>),
+    /// To [`Request::SaslHandshake`].
+    SaslHandshake(SaslHandshakeResponse),
+    /// To [`Request::SaslAuthenticate`].
+    SaslAuthenticate(SaslAuthenticateResponse),
+    /// To [`Request::DescribeUsers`].
+    DescribeUsers(DescribeUsersResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
     Fetch(FetchResponse),
-    /// The request could not be served at all (unsupported version, or a
-    /// body that does not decode); the node closes the connection after it.
+    /// The request could not be served at all: an unsupported version
+    /// ([`ErrorCode::UNSUPPORTED_VERSION`]), or a connection not
+    /// authenticated or whose session ended ([`ErrorCode::UNAUTHORIZED`]).
     Error(ErrorCode),
 }
 
@@ -473,6 +512,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::DescribeConfigs(r) => r.put(&mut w),
         Request::AlterConfigs(r) => r.put(&mut w),
         Request::DescribeMetrics(r) => r.put(&mut w),
+        Request::SaslHandshake(r) => r.put(&mut w),
+        Request::SaslAuthenticate(r) => r.put(&mut w),
+        Request::AlterUser(r) => r.put(&mut w),
+        Request::DescribeUsers(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -520,6 +563,10 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::DESCRIBE_CONFIGS => Request::DescribeConfigs(DescribeConfigsRequest::get(&mut r)?),
         ApiKey::ALTER_CONFIGS => Request::AlterConfigs(AlterConfigsRequest::get(&mut r)?),
         ApiKey::DESCRIBE_METRICS => Request::DescribeMetrics(DescribeMetricsRequest::get(&mut r)?),
+        ApiKey::SASL_HANDSHAKE => Request::SaslHandshake(SaslHandshakeRequest::get(&mut r)?),
+        ApiKey::SASL_AUTHENTICATE => Request::SaslAuthenticate(SaslAuthenticateRequest::get(&mut r)?),
+        ApiKey::ALTER_USER => Request::AlterUser(AlterUserRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_USERS => Request::DescribeUsers(DescribeUsersRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -549,6 +596,9 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::Admin(r) => r.put(&mut w),
         Response::DescribeConfigs(r) => r.put(&mut w),
         Response::DescribeMetrics(r) => r.put(&mut w),
+        Response::SaslHandshake(r) => r.put(&mut w),
+        Response::SaslAuthenticate(r) => r.put(&mut w),
+        Response::DescribeUsers(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -626,9 +676,14 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {
             Response::Create(CreateResponse::get(&mut r)?)
         }
-        ApiKey::DELETE_RESOURCE | ApiKey::ALTER_CONFIGS => Response::Admin(AdminResponse::get(&mut r)?),
+        ApiKey::DELETE_RESOURCE | ApiKey::ALTER_CONFIGS | ApiKey::ALTER_USER => {
+            Response::Admin(AdminResponse::get(&mut r)?)
+        }
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_METRICS => Response::DescribeMetrics(Box::new(DescribeMetricsResponse::get(&mut r)?)),
+        ApiKey::SASL_HANDSHAKE => Response::SaslHandshake(SaslHandshakeResponse::get(&mut r)?),
+        ApiKey::SASL_AUTHENTICATE => Response::SaslAuthenticate(SaslAuthenticateResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_USERS => Response::DescribeUsers(DescribeUsersResponse::get(&mut r)?),
         ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
         ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
             Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)

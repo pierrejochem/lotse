@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use lotse_proto::ErrorCode;
 use lotse_route::{Binding, Exchange, ExchangeKind};
-use lotse_rt::{Clock, Net, Spawn};
+use lotse_rt::{Clock, Net, Rng, Spawn};
 
 use crate::{Client, ClientError, Transaction};
 
@@ -58,7 +58,7 @@ pub struct Published {
     pub routed: Vec<(String, u64)>,
 }
 
-impl<R: Net + Clock + Spawn> Client<R> {
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// The exchange as metadata last said, asking for it if unknown.
     pub(crate) async fn exchange(&self, name: &str) -> Result<Exchange, ClientError> {
         let now = self.rt.now();
@@ -159,7 +159,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Transaction<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
     /// Publishes a message within the transaction: it reaches every queue it
     /// is routed to if the transaction commits, and none if it aborts.
     pub async fn publish(

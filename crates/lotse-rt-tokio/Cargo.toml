@@ -16,6 +16,8 @@ tracing.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 x509-parser.workspace = true
+webpki-roots.workspace = true
+ring.workspace = true
 rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "fs"] }
 

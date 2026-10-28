@@ -28,6 +28,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use lotse_rt::{Clock, Instant, Rng, Spawn};
 
 pub use disk::{CrashReport, SimDisk, SimFile};
@@ -64,6 +65,7 @@ impl Sim {
             net,
             host: "sim".into(),
             identity: None,
+            http: SimHttp::default(),
         };
         exec.block_on(test(rt), self.seed)
     }
@@ -78,6 +80,7 @@ pub struct SimRuntime {
     net: SimNet,
     host: Arc<str>,
     identity: Option<lotse_rt::PeerIdentity>,
+    http: SimHttp,
 }
 
 impl SimRuntime {
@@ -105,6 +108,11 @@ impl SimRuntime {
         SimRuntime { identity, ..self.clone() }
     }
 
+    /// The documents served over HTTP, shared by every node.
+    pub fn http(&self) -> &SimHttp {
+        &self.http
+    }
+
     /// The network, for fault injection.
     pub fn net(&self) -> &SimNet {
         &self.net
@@ -129,6 +137,44 @@ impl Clock for SimRuntime {
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send {
         self.exec.sleep(duration)
+    }
+
+    /// [`SIM_EPOCH`] plus virtual time: every run starts on the same day.
+    fn unix_time(&self) -> Duration {
+        SIM_EPOCH + (self.exec.now() - lotse_rt::Instant::ZERO)
+    }
+}
+
+/// The wall-clock time a simulation starts at: 2026-01-01T00:00:00Z.
+pub const SIM_EPOCH: Duration = Duration::from_secs(1_767_225_600);
+
+/// Documents served over simulated HTTP, by URL: a fake identity provider.
+#[derive(Debug, Clone, Default)]
+pub struct SimHttp {
+    docs: Arc<Mutex<std::collections::BTreeMap<String, Bytes>>>,
+}
+
+impl SimHttp {
+    /// Serves `body` at `url` from now on.
+    pub fn serve(&self, url: &str, body: impl Into<Bytes>) {
+        self.docs.lock().expect("http lock").insert(url.to_owned(), body.into());
+    }
+
+    /// Stops serving `url`: requests fail as if the server were down.
+    pub fn remove(&self, url: &str) {
+        self.docs.lock().expect("http lock").remove(url);
+    }
+}
+
+impl lotse_rt::Http for SimRuntime {
+    fn get(&self, url: &str) -> impl Future<Output = std::io::Result<Bytes>> + Send {
+        let doc = self.http.docs.lock().expect("http lock").get(url).cloned();
+        let rt = self.clone();
+        async move {
+            // A round trip takes a moment, like any other.
+            rt.sleep(Duration::from_millis(1 + rt.rng.next_u64() % 5)).await;
+            doc.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such document"))
+        }
     }
 }
 

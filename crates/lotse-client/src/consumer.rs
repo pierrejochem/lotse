@@ -22,7 +22,7 @@ use std::time::Duration;
 use lotse_proto::{
     AckRequest, CreditRequest, ErrorCode, NackRequest, Request, Response, SubscribeRequest, UnsubscribeRequest,
 };
-use lotse_rt::{Clock, Net, Spawn};
+use lotse_rt::{Clock, Net, Rng, Spawn};
 
 use crate::{Attempt, Client, ClientError, Connection, PushQueue, race};
 
@@ -55,7 +55,7 @@ struct Sub<C: lotse_rt::Conn> {
 /// A subscription to a queue, from [`Client::subscribe`]. Read messages with
 /// [`Consumer::next`] and settle each with [`Consumer::ack`] or
 /// [`Consumer::nack`].
-pub struct Consumer<'a, R: Net + Clock + Spawn> {
+pub struct Consumer<'a, R: Net + Clock + Spawn + Rng> {
     client: &'a Client<R>,
     queue: String,
     resource_id: u64,
@@ -67,7 +67,7 @@ pub struct Consumer<'a, R: Net + Clock + Spawn> {
     used: (u32, u32),
 }
 
-impl<R: Net + Clock + Spawn> std::fmt::Debug for Consumer<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> std::fmt::Debug for Consumer<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Consumer")
             .field("queue", &self.queue)
@@ -77,7 +77,7 @@ impl<R: Net + Clock + Spawn> std::fmt::Debug for Consumer<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Client<R> {
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Subscribes to a queue with room for `credit` messages at a time
     /// (at least 1).
     pub async fn subscribe(&self, queue: &str, credit: u32) -> Result<Consumer<'_, R>, ClientError> {
@@ -104,7 +104,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Consumer<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     async fn ensure_subscribed(&mut self) -> Result<(), ClientError> {
         if self.sub.is_none() {
             let (sub, resource_id) = self.client.retrying(|| self.subscribe_once()).await?;
@@ -134,7 +134,7 @@ impl<R: Net + Clock + Spawn> Consumer<'_, R> {
                 // connection.
                 c.drop_conn(&addr, &conn);
                 c.forget(&self.queue, 0);
-                return Err(Attempt::Retry(e.to_string()));
+                return Err(e.into());
             }
         };
         match resp.error {
@@ -320,7 +320,7 @@ impl<R: Net + Clock + Spawn> Consumer<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Drop for Consumer<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Drop for Consumer<'_, R> {
     fn drop(&mut self) {
         if let Some((conn, reqs)) = self.cleanup() {
             // Detached: dropping the handle leaves the task running.

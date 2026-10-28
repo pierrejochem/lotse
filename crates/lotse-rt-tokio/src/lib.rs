@@ -36,6 +36,7 @@ use lotse_rt::{Clock, Disk, Host, HostStats, Instant, OpenMode, Rng, SegmentFile
 
 #[cfg(feature = "dev-certs")]
 pub mod dev_certs;
+mod http;
 mod net;
 mod tls;
 
@@ -52,6 +53,9 @@ pub struct TokioRuntime {
     /// Kept between calls: CPU use is measured since the previous refresh.
     system: Arc<Mutex<Option<sysinfo::System>>>,
     security: net::Security,
+    /// Extra CAs trusted for HTTPS, beyond the web's roots.
+    http_cas: Arc<Vec<rustls::pki_types::CertificateDer<'static>>>,
+    http_tls: Arc<std::sync::OnceLock<Arc<rustls::ClientConfig>>>,
 }
 
 impl TokioRuntime {
@@ -75,7 +79,20 @@ impl TokioRuntime {
             rng: Arc::new(AtomicU64::new(seed)),
             system: Arc::new(Mutex::new(None)),
             security: net::Security::Unset,
+            http_cas: Arc::new(Vec::new()),
+            http_tls: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// The same runtime also trusting the CA certificates in `pem` for
+    /// HTTPS (a private identity provider, or one in a test).
+    pub fn with_http_ca(self, pem: &[u8]) -> Result<Self, TlsError> {
+        use rustls::pki_types::pem::PemObject as _;
+        let mut cas = (*self.http_cas).clone();
+        for c in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+            cas.push(c.map_err(|e| TlsError::Pem { what: "an HTTPS CA certificate", detail: e.to_string() })?);
+        }
+        Ok(TokioRuntime { http_cas: Arc::new(cas), http_tls: Arc::new(std::sync::OnceLock::new()), ..self })
     }
 
     /// The same runtime speaking TLS 1.3 on every connection.
@@ -120,6 +137,24 @@ impl Clock for TokioRuntime {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(duration)
     }
+
+    fn unix_time(&self) -> Duration {
+        // The wall clock is read here and only here.
+        #[allow(clippy::disallowed_methods)]
+        let now = std::time::SystemTime::now();
+        now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+    }
+}
+
+impl lotse_rt::Http for TokioRuntime {
+    fn get(&self, url: &str) -> impl Future<Output = io::Result<Bytes>> + Send {
+        let url = url.to_owned();
+        let tls = match self.http_tls.get() {
+            Some(c) => Ok(c.clone()),
+            None => http::client_config(&self.http_cas).map(|c| self.http_tls.get_or_init(|| c).clone()),
+        };
+        async move { http::get(&url, tls?).await }
+    }
 }
 
 impl Rng for TokioRuntime {
@@ -129,6 +164,11 @@ impl Rng for TokioRuntime {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
+    }
+    /// The operating system's randomness, through ring.
+    fn fill_secret(&self, buf: &mut [u8]) {
+        use ring::rand::SecureRandom as _;
+        ring::rand::SystemRandom::new().fill(buf).expect("the operating system's random source");
     }
 }
 

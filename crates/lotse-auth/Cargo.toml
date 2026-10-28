@@ -1,0 +1,29 @@
+[package]
+name = "lotse-auth"
+description = "Authentication and authorization free of I/O: SCRAM-SHA-512, OAUTHBEARER tokens, roles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonwebtoken.workspace = true
+ring = { workspace = true, optional = true }
+
+[features]
+# A fake identity provider that signs tokens, for tests and simulations.
+testing = ["dep:ring"]
+
+[dev-dependencies]
+lotse-auth = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

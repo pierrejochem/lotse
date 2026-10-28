@@ -160,7 +160,12 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
         let mut clients = Clients::default();
-        let req = ClientRequest { outbox: outbox.clone(), header, request: produce_request("kept") };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header,
+            request: produce_request("kept"),
+            principal: Principal::Anonymous,
+        };
         clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(2, &all, None, |from, to| from == 1 && to == 2).await;
         assert_eq!(five.get(2).last_index(), 2, "node 2 holds the entry");
@@ -231,7 +236,12 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
         let outbox = Arc::new(Outbox::default());
         // The original reaches node 1 only; the client retries it there.
         for id in [1, 2] {
-            let req = ClientRequest { outbox: outbox.clone(), header: header(id), request: idempotent_request("x", 0) };
+            let req = ClientRequest {
+                outbox: outbox.clone(),
+                header: header(id),
+                request: idempotent_request("x", 0),
+                principal: Principal::Anonymous,
+            };
             clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         }
         five.run(1, &all, None, |_, _| false).await;
@@ -334,7 +344,11 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
         let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
         let mut clients = Clients::default();
         clients
-            .handle(ClientRequest { outbox: outbox.clone(), header, request: fetch }, &view, &mut groups)
+            .handle(
+                ClientRequest { outbox: outbox.clone(), header, request: fetch, principal: Principal::Anonymous },
+                &view,
+                &mut groups,
+            )
             .await
             .unwrap();
         let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -377,7 +391,14 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
-            clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+            clients
+                .handle(
+                    ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous },
+                    &view,
+                    groups,
+                )
+                .await
+                .unwrap();
             for _ in 0..3 {
                 groups.get_mut(&G).unwrap().process().await.unwrap();
                 clients.after_round(&view, groups).await.unwrap();
@@ -478,7 +499,14 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
         let mut clients = Clients::default();
         let send = async |clients: &mut Clients, groups: &mut Groups, key, request| {
             let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
-            clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+            clients
+                .handle(
+                    ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous },
+                    &view,
+                    groups,
+                )
+                .await
+                .unwrap();
             for _ in 0..3 {
                 groups.get_mut(&G).unwrap().process().await.unwrap();
                 clients.after_round(&view, groups).await.unwrap();
@@ -549,8 +577,12 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
         let mut c1 = Clients::default();
 
         // Message "a" at offset 1, committed and known committed everywhere.
-        let req =
-            ClientRequest { outbox: outbox.clone(), header: header(ApiKey::PRODUCE), request: produce_request("a") };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header: header(ApiKey::PRODUCE),
+            request: produce_request("a"),
+            principal: Principal::Anonymous,
+        };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(6, &all, Some(1), |_, _| true).await;
         assert_eq!(five.get(2).commit(), 2);
@@ -558,7 +590,12 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
         // Its ack reaches nodes 2 and 3 and commits on node 1; nobody else
         // learns that it is committed.
         let ack = Request::Ack(lotse_proto::AckRequest { queue_id: 7, txn_id: None, ranges: vec![(1, 2)] });
-        let req = ClientRequest { outbox: outbox.clone(), header: header(ApiKey::ACK), request: ack };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header: header(ApiKey::ACK),
+            request: ack,
+            principal: Principal::Anonymous,
+        };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         let near = |f: NodeId, t: NodeId| (f == 1 && (t == 2 || t == 3)) || ((f == 2 || f == 3) && t == 1);
         five.run(2, &all, None, near).await;
@@ -578,7 +615,12 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             credit_bytes: 1 << 20,
             exclusive: false,
         });
-        let req = ClientRequest { outbox: outbox.clone(), header: header(ApiKey::SUBSCRIBE), request: sub };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header: header(ApiKey::SUBSCRIBE),
+            request: sub,
+            principal: Principal::Anonymous,
+        };
         let groups = five.nodes.get_mut(&2).unwrap();
         c2.handle(req, &view, groups).await.unwrap();
         groups.get_mut(&G).unwrap().process().await.unwrap();
@@ -641,7 +683,14 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
                 let view = view_at(ms);
-                clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+                clients
+                    .handle(
+                        ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous },
+                        &view,
+                        groups,
+                    )
+                    .await
+                    .unwrap();
                 for _ in 0..3 {
                     groups.get_mut(&G).unwrap().process().await.unwrap();
                     clients.after_round(&view, groups).await.unwrap();
@@ -724,7 +773,14 @@ fn offsets_for_a_released_partition_are_refused() {
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
                 let view = view_at(ms);
-                clients.handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, groups).await.unwrap();
+                clients
+                    .handle(
+                        ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous },
+                        &view,
+                        groups,
+                    )
+                    .await
+                    .unwrap();
                 for _ in 0..3 {
                     groups.get_mut(&G).unwrap().process().await.unwrap();
                     clients.after_round(&view, groups).await.unwrap();
@@ -772,7 +828,11 @@ fn offsets_for_a_released_partition_are_refused() {
             let header = RequestHeader { api_key: ApiKey::COMMIT_OFFSETS, api_version: 0, correlation_id: 2, flags: 0 };
             let request = commit(&member, parts);
             clients
-                .handle(ClientRequest { outbox: outbox.clone(), header, request }, &view, &mut groups)
+                .handle(
+                    ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous },
+                    &view,
+                    &mut groups,
+                )
                 .await
                 .unwrap();
             for _ in 0..3 {
@@ -818,7 +878,13 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 deleted: &NOTHING_DELETED,
                 group_session: Duration::from_secs(1),
                 group_heartbeat: Duration::from_millis(100),
-                admin: AdminView { metadata: Some(G), nodes: &[1], configured_groups: 1, voters: &voters },
+                admin: AdminView {
+                    metadata: Some(G),
+                    nodes: &[1],
+                    configured_groups: 1,
+                    voters: &voters,
+                    ..AdminView::default()
+                },
                 client_addrs: &addrs,
                 coordinator: None,
                 node: NodeView::default(),
@@ -828,7 +894,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             for request in requests {
                 let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
                 let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
-                let req = ClientRequest { outbox: outbox.clone(), header, request };
+                let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
                 clients.handle(req, &view, groups).await.unwrap();
                 outboxes.push((outbox, key));
             }

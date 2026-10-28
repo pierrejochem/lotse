@@ -14,16 +14,21 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    AlterConfigsRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateStreamRequest, DeclareExchangeRequest,
-    DeleteResourceRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, ErrorCode,
-    LeaderHint, Request, Response,
+    AlterConfigsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateStreamRequest,
+    DeclareExchangeRequest, DeleteResourceRequest, DescribeConfigsRequest, DescribeMetricsRequest,
+    DescribeMetricsResponse, DescribeUsersRequest, ErrorCode, LeaderHint, Request, Response, ScramCredentialData,
+    UserEntry,
 };
 use lotse_route::ExchangeKind;
-use lotse_rt::{Clock, Net, Spawn};
+use lotse_rt::{Clock, Net, Rng, Spawn};
 
-use crate::{Attempt, Client, ClientError};
+use crate::{Attempt, CallError, Client, ClientError};
 
-impl<R: Net + Clock + Spawn> Client<R> {
+/// PBKDF2 iterations for passwords this client sets (RFC 7677's minimum,
+/// Kafka's default).
+const SCRAM_ITERATIONS: u32 = lotse_auth::scram::MIN_ITERATIONS;
+
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Creates a stream with `partitions` partitions, each replicated by
     /// `replication` nodes; returns its id.
     pub async fn create_stream(&self, name: &str, partitions: u32, replication: u8) -> Result<u64, ClientError> {
@@ -158,6 +163,58 @@ impl<R: Net + Clock + Spawn> Client<R> {
         .await
     }
 
+    /// Sets `user`'s SCRAM-SHA-512 password, creating the user if needed.
+    /// Only a salted credential leaves the client; the password does not.
+    pub async fn set_user_password(&self, user: &str, password: &str) -> Result<(), ClientError> {
+        let mut salt = [0u8; 16];
+        self.rt.fill_secret(&mut salt);
+        let c = lotse_auth::scram::ScramCredential::new(password, &salt, SCRAM_ITERATIONS);
+        let credential = ScramCredentialData {
+            iterations: c.iterations,
+            salt: Bytes::copy_from_slice(&c.salt),
+            stored_key: Bytes::from(c.stored_key),
+            server_key: Bytes::from(c.server_key),
+        };
+        self.alter_user(AlterUserRequest { user: user.into(), credential: Some(credential) }).await
+    }
+
+    /// Removes `user`'s SCRAM credential. Sessions it opened end at the
+    /// latest when the node's maximum session time is up.
+    pub async fn delete_user(&self, user: &str) -> Result<(), ClientError> {
+        self.alter_user(AlterUserRequest { user: user.into(), credential: None }).await
+    }
+
+    async fn alter_user(&self, req: AlterUserRequest) -> Result<(), ClientError> {
+        let req = Request::AlterUser(req);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
+                    Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                        Err(Attempt::Fail(ClientError::Broker { code, message: a.error_msg.clone() }))
+                    }
+                    other => other,
+                },
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// The users with a SCRAM credential, configured and set at runtime.
+    pub async fn describe_users(&self) -> Result<Vec<UserEntry>, ClientError> {
+        let req = Request::DescribeUsers(DescribeUsersRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeUsers(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d.users)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
     /// Every node's metrics, asked of each node directly, for every node
     /// the cluster's metadata names: each with its answer, or why there is
     /// none. Counters grow from each node's start; see `DescribeMetrics`.
@@ -266,6 +323,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
         };
         match self.call(&addr, req).await {
             Ok(r) => Ok(r),
+            Err(CallError::Denied(why)) => Err(Attempt::Fail(ClientError::Authentication(why))),
             Err(e) => {
                 *self.metadata_leader.lock().expect("leader lock") = None;
                 // The request may have arrived: a retry finds what it did.

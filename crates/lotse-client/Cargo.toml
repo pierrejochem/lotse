@@ -12,6 +12,7 @@ lotse-rt.workspace = true
 lotse-proto.workspace = true
 lotse-record.workspace = true
 lotse-route.workspace = true
+lotse-auth.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 

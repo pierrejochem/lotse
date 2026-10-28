@@ -23,7 +23,7 @@ use lotse_proto::{
     AddOffsetsToTxnRequest, CommitOffsetsRequest, ErrorCode, GroupHeartbeatRequest, NO_OFFSET, OffsetCommitPartition,
     OffsetCommitResource, OffsetFetchRequest, Request, Response, TxnResource,
 };
-use lotse_rt::{Clock, Instant, Net, Spawn};
+use lotse_rt::{Clock, Instant, Net, Rng, Spawn};
 
 use crate::{Attempt, Client, ClientError, Transaction};
 
@@ -65,7 +65,7 @@ pub struct GroupRecord {
 type Part = (String, u32);
 
 /// A member of a consumer group, from [`Client::join_group`].
-pub struct GroupConsumer<'a, R: Net + Clock + Spawn> {
+pub struct GroupConsumer<'a, R: Net + Clock + Spawn + Rng> {
     client: &'a Client<R>,
     group: String,
     cfg: GroupConfig,
@@ -82,7 +82,7 @@ pub struct GroupConsumer<'a, R: Net + Clock + Spawn> {
     turn: usize,
 }
 
-impl<R: Net + Clock + Spawn> std::fmt::Debug for GroupConsumer<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> std::fmt::Debug for GroupConsumer<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GroupConsumer")
             .field("group", &self.group)
@@ -93,7 +93,7 @@ impl<R: Net + Clock + Spawn> std::fmt::Debug for GroupConsumer<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Client<R> {
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Joins `group` to read `streams`; partitions arrive with the first
     /// calls to [`GroupConsumer::poll`].
     pub async fn join_group(
@@ -147,7 +147,7 @@ fn first_error(resp: &lotse_proto::CommitOffsetsResponse) -> Option<ErrorCode> {
     resp.resources.iter().flat_map(|r| r.partitions.iter()).map(|p| p.error).find(|e| *e != ErrorCode::NONE)
 }
 
-impl<R: Net + Clock + Spawn> GroupConsumer<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
     /// The member id, empty until joined.
     pub fn member_id(&self) -> &str {
         &self.member_id
@@ -405,12 +405,12 @@ impl<R: Net + Clock + Spawn> GroupConsumer<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Transaction<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
     /// Commits the consumer's positions with this transaction: they become
     /// the group's committed offsets if it commits, and nothing changes if it
     /// aborts. A consumer that no longer owns a partition is fenced and the
     /// transaction can only be aborted.
-    pub async fn send_offsets<C: Net + Clock + Spawn>(
+    pub async fn send_offsets<C: Net + Clock + Spawn + Rng>(
         &mut self,
         consumer: &GroupConsumer<'_, C>,
     ) -> Result<(), ClientError> {

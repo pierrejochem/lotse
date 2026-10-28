@@ -84,6 +84,7 @@ async fn main() {
             metadata: Some(1),
             coordinator: Some(2),
             max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+            auth: lotse_server::AuthConfig::none(),
         };
         let rt = TokioRuntime::new(root.join(format!("node-{id}"))).plaintext_on_loopback();
         std::fs::create_dir_all(rt.root()).expect("a temporary directory");

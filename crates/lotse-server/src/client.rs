@@ -55,6 +55,7 @@ use lotse_record::Batch;
 use lotse_route::Exchange;
 use lotse_rt::{Conn, Instant, Runtime};
 
+use crate::auth::{Auth, Principal};
 use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::GroupId;
@@ -63,11 +64,13 @@ mod admin;
 mod coord;
 mod groups;
 mod queues;
+mod session;
 mod stats;
 
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
 pub use queues::QueueConfig;
+use session::Session;
 pub(crate) use stats::{NetStats, NodeView};
 
 /// A stream and the Raft group of each of its partitions.
@@ -108,9 +111,14 @@ pub(crate) struct ClientRequest {
     outbox: Arc<Outbox>,
     header: RequestHeader,
     request: Request,
+    /// Who the request acts as.
+    #[allow(dead_code)] // checked once roles exist
+    principal: Principal,
 }
 
-/// Reads requests from one connection and writes its responses.
+/// Reads requests from one connection and writes its responses. Requests
+/// reach the main loop only once the connection is authenticated (or needs
+/// not be); the SASL requests are answered here.
 pub(crate) async fn serve<R: Runtime>(
     rt: R,
     conn: R::Conn,
@@ -118,7 +126,9 @@ pub(crate) async fn serve<R: Runtime>(
     commands: Arc<dyn Fn(ClientRequest) + std::marker::Send + Sync>,
     net: Arc<NetStats>,
     stop: Signal,
+    auth: Arc<Auth<R>>,
 ) {
+    let mut session = Session::new(auth, conn.peer_identity());
     let conn = Arc::new(conn);
     let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
     let closed = Signal::default();
@@ -126,7 +136,25 @@ pub(crate) async fn serve<R: Runtime>(
     while let Some(Ok(Some(frame))) = race(conn.recv(), &[&stop]).await {
         NetStats::add(&net.client_in, frame.len());
         match lotse_proto::decode_request(frame) {
-            Ok((header, request)) => commands(ClientRequest { outbox: outbox.clone(), header, request }),
+            Ok((header, Request::SaslHandshake(req))) => {
+                outbox.push(header.correlation_id, &Response::SaslHandshake(session.handshake(&req)));
+            }
+            Ok((header, Request::SaslAuthenticate(req))) => {
+                let Some(step) = race(session.authenticate(&rt, &req), &[&stop]).await else { break };
+                outbox.push(header.correlation_id, &Response::SaslAuthenticate(step.response));
+                if step.close {
+                    break;
+                }
+            }
+            Ok((header, request)) => match session.principal(rt.now()) {
+                Some(p) => commands(ClientRequest { outbox: outbox.clone(), header, request, principal: p.clone() }),
+                // Which versions a node speaks is no secret: a client asks
+                // before it knows how to authenticate.
+                None if matches!(request, Request::ApiVersions) => {
+                    commands(ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous })
+                }
+                None => outbox.push(header.correlation_id, &Response::Error(ErrorCode::UNAUTHORIZED)),
+            },
             // The client may retry with a version this node speaks.
             Err(lotse_proto::DecodeError::Unsupported(h)) => {
                 outbox.push(h.correlation_id, &Response::Error(ErrorCode::UNSUPPORTED_VERSION))
@@ -150,10 +178,11 @@ async fn write_to<C: Conn>(conn: Arc<C>, outbox: Arc<Outbox>, net: Arc<NetStats>
                     return;
                 }
             }
+            // Once the reader is done, what is queued still goes out (the
+            // answer to a failed login, say), then the writer ends.
+            None if closed.is_set() || stop.is_set() => return,
             None => {
-                if race(outbox.ready.wait(), &[&stop, &closed]).await.is_none() {
-                    return;
-                }
+                race(outbox.ready.wait(), &[&stop, &closed]).await;
                 outbox.ready.take();
             }
         }
@@ -312,7 +341,7 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, request } = req;
+        let ClientRequest { outbox, header, request, .. } = req;
         let id = header.correlation_id;
         match request {
             Request::ApiVersions => outbox.push(
@@ -352,6 +381,10 @@ impl Clients {
             Request::AlterConfigs(req) => self.alter_configs(outbox, id, req, view, groups),
             Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, view, groups),
             Request::DescribeMetrics(_) => self.describe_metrics(&outbox, id, view, groups),
+            Request::AlterUser(req) => self.alter_user(outbox, id, req, view, groups),
+            Request::DescribeUsers(_) => self.describe_users(outbox, id, view, groups),
+            // Answered by the connection's own task, never forwarded.
+            Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };

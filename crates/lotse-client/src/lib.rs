@@ -37,10 +37,12 @@
 #![warn(missing_docs)]
 
 mod admin;
+mod auth;
 mod consumer;
 mod group;
 mod publish;
 
+pub use auth::Credentials;
 pub use consumer::{Consumer, Message};
 pub use group::{GroupConfig, GroupConsumer, GroupRecord};
 pub use publish::{OutMessage, Published};
@@ -49,7 +51,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -60,7 +62,7 @@ use lotse_proto::{
     MetadataRequest, MetadataResponse, ProducePartition, ProduceRequest, ProduceResource, Request, Response,
     coordinator, isolation,
 };
-use lotse_rt::{Clock, Conn, Net, Spawn};
+use lotse_rt::{Clock, Conn, Net, Rng, Spawn};
 
 /// What went wrong.
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +113,10 @@ pub enum ClientError {
         /// The existing resource's id.
         resource_id: u64,
     },
+    /// The node did not accept the credentials, or does not offer the
+    /// mechanism. Retrying with the same credentials will not help.
+    #[error("authentication failed: {0}")]
+    Authentication(String),
     /// A published message was written to some of its queues only. Each
     /// failure says whether that write is unknown ([`ClientError::Unknown`])
     /// or did not happen.
@@ -148,6 +154,9 @@ pub struct ClientConfig {
     /// How long exchange bindings learnt from metadata are used before they
     /// are asked for again.
     pub metadata_max_age: Duration,
+    /// How to authenticate each connection; `None` sends no credentials
+    /// (the runtime's client certificate, if any, still counts).
+    pub credentials: Option<Credentials>,
 }
 
 impl ClientConfig {
@@ -163,6 +172,7 @@ impl ClientConfig {
             transactional_id: None,
             txn_timeout: Duration::from_secs(60),
             metadata_max_age: Duration::from_secs(30),
+            credentials: None,
         }
     }
 }
@@ -248,7 +258,7 @@ struct Route {
 }
 
 /// A client. Cheap to share behind an `Arc`; every method takes `&self`.
-pub struct Client<R: Net + Clock + Spawn> {
+pub struct Client<R: Net + Clock + Spawn + Rng> {
     rt: R,
     cfg: ClientConfig,
     session: Mutex<Option<Session>>,
@@ -271,9 +281,11 @@ pub struct Client<R: Net + Clock + Spawn> {
     metadata_leader: Mutex<Option<u32>>,
     /// Spreads admin requests over brokers while the leader is unknown.
     admin_turn: AtomicU32,
+    /// Why a connection could not authenticate, until a retry loop reports it.
+    denied: Mutex<Option<String>>,
 }
 
-impl<R: Net + Clock + Spawn> fmt::Debug for Client<R> {
+impl<R: Net + Clock + Spawn + Rng> fmt::Debug for Client<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client").field("bootstrap", &self.cfg.bootstrap).finish()
     }
@@ -299,7 +311,7 @@ struct Session {
     next: BTreeMap<(String, u32), i32>,
 }
 
-impl<R: Net + Clock + Spawn> Client<R> {
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// A client; it connects on first use.
     pub fn new(rt: R, cfg: ClientConfig) -> Self {
         Client {
@@ -317,6 +329,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             exchanges: Mutex::new(BTreeMap::new()),
             metadata_leader: Mutex::new(None),
             admin_turn: AtomicU32::new(0),
+            denied: Mutex::new(None),
         }
     }
 
@@ -336,6 +349,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
                         return Ok(m);
                     }
                     Ok(other) => why = format!("unexpected response {other:?}"),
+                    Err(CallError::Denied(why)) => return Err(ClientError::Authentication(why)),
                     Err(e) => why = format!("{addr}: {e}"),
                 }
             }
@@ -474,6 +488,15 @@ impl<R: Net + Clock + Spawn> Client<R> {
                     why
                 }
             };
+            // A connection that could not authenticate: the same credentials
+            // will not do better on the next try.
+            if let Some(denied) = self.denied.lock().expect("denied lock").take() {
+                return Err(if maybe_done {
+                    ClientError::Unknown(format!("an earlier attempt may have been carried out; then {denied}"))
+                } else {
+                    ClientError::Authentication(denied)
+                });
+            }
             if self.rt.now() - start >= self.cfg.retry_for {
                 return Err(if maybe_done {
                     ClientError::Unknown(format!("still unknown after {:?}: {why}", self.cfg.retry_for))
@@ -584,7 +607,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             Ok(r) => Ok(r),
             Err(e) => {
                 self.forget_coordinator();
-                Err(Attempt::Retry(e.to_string()))
+                Err(e.into())
             }
         }
     }
@@ -667,6 +690,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 self.forget(stream, partition);
                 return Err(unknown(why));
             }
+            Err(CallError::Denied(why)) => return Err(Attempt::Fail(ClientError::Authentication(why))),
         };
         let p = resp
             .resources
@@ -738,7 +762,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             // Markers are idempotent: whatever happened, sending again is safe.
             Err(e) => {
                 self.forget(stream, partition);
-                return Err(Attempt::Retry(e.to_string()));
+                return Err(e.into());
             }
         };
         let error = resp
@@ -812,7 +836,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
             Err(e) => {
                 self.forget(stream, partition);
-                return Err(Attempt::Retry(e.to_string()));
+                return Err(e.into());
             }
         };
         let p = resp
@@ -844,8 +868,19 @@ impl<R: Net + Clock + Spawn> Client<R> {
 
     /// Sends one request to `addr` and waits for its response.
     async fn call(&self, addr: &str, req: &Request) -> Result<Response, CallError> {
-        let conn = self.connection(addr).await?;
+        let conn = match self.connection(addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                if let CallError::Denied(why) = &e {
+                    *self.denied.lock().expect("denied lock") = Some(why.clone());
+                }
+                return Err(e);
+            }
+        };
         let res = conn.call(req, &self.rt, self.cfg.request_timeout).await;
+        if let Err(CallError::Denied(why)) = &res {
+            *self.denied.lock().expect("denied lock") = Some(why.clone());
+        }
         if res.is_err() {
             // A connection that failed once is not trusted again.
             let mut conns = self.conns.lock().expect("conns lock");
@@ -858,8 +893,34 @@ impl<R: Net + Clock + Spawn> Client<R> {
     }
 
     async fn connection(&self, addr: &str) -> Result<Arc<Connection<R::Conn>>, CallError> {
-        if let Some(c) = self.conns.lock().expect("conns lock").get(addr) {
-            return Ok(c.clone());
+        let cached = self.conns.lock().expect("conns lock").get(addr).cloned();
+        if let Some(c) = cached {
+            let times = *c.session.lock().expect("session lock");
+            match times {
+                None => return Ok(c),
+                Some(t) if self.rt.now() < t.renew_at => return Ok(c),
+                // Ended: requests would be refused. Start over.
+                Some(t) if self.rt.now() >= t.ends_at => self.drop_connection(addr, &c),
+                // One caller renews; the others go on with the session,
+                // which still holds.
+                Some(_) if c.renewing.swap(true, Ordering::AcqRel) => return Ok(c),
+                Some(_) => {
+                    let creds = self.cfg.credentials.as_ref().expect("a session comes from credentials");
+                    let renewed = c.authenticate(&self.rt, creds, self.cfg.request_timeout).await;
+                    c.renewing.store(false, Ordering::Release);
+                    match renewed {
+                        Ok(times) => {
+                            *c.session.lock().expect("session lock") = times;
+                            return Ok(c);
+                        }
+                        Err(CallError::Denied(why)) => {
+                            self.drop_connection(addr, &c);
+                            return Err(CallError::Denied(why));
+                        }
+                        Err(_) => self.drop_connection(addr, &c),
+                    }
+                }
+            }
         }
         let raw =
             match race(self.rt.connect(addr, lotse_rt::Link::Client), self.rt.sleep(self.cfg.request_timeout)).await {
@@ -870,12 +931,35 @@ impl<R: Net + Clock + Spawn> Client<R> {
         let conn = Arc::new(Connection::new(raw));
         // The reader ends when the connection breaks or is closed.
         drop(self.rt.spawn(conn.clone().read_responses()));
+        if let Some(creds) = &self.cfg.credentials {
+            match conn.authenticate(&self.rt, creds, self.cfg.request_timeout).await {
+                Ok(times) => *conn.session.lock().expect("session lock") = times,
+                Err(e) => {
+                    conn.close();
+                    // Nothing else went out on this connection.
+                    return Err(match e {
+                        CallError::Lost(why) => CallError::NotSent(why),
+                        e => e,
+                    });
+                }
+            }
+        }
         let mut conns = self.conns.lock().expect("conns lock");
         Ok(conns.entry(addr.to_string()).or_insert(conn).clone())
     }
 }
 
-impl<R: Net + Clock + Spawn> Drop for Client<R> {
+impl<R: Net + Clock + Spawn + Rng> Client<R> {
+    fn drop_connection(&self, addr: &str, conn: &Arc<Connection<R::Conn>>) {
+        let mut conns = self.conns.lock().expect("conns lock");
+        if conns.get(addr).is_some_and(|c| Arc::ptr_eq(c, conn)) {
+            conns.remove(addr);
+        }
+        conn.close();
+    }
+}
+
+impl<R: Net + Clock + Spawn + Rng> Drop for Client<R> {
     fn drop(&mut self) {
         for c in self.conns.lock().expect("conns lock").values() {
             c.close();
@@ -890,12 +974,26 @@ enum CallError {
     NotSent(String),
     /// It may have reached the broker.
     Lost(String),
+    /// The connection could not authenticate: the request never left, and
+    /// trying again will not help.
+    Denied(String),
+}
+
+impl From<CallError> for Attempt {
+    /// A connection that could not authenticate fails at once; anything
+    /// else is tried again.
+    fn from(e: CallError) -> Attempt {
+        match e {
+            CallError::Denied(why) => Attempt::Fail(ClientError::Authentication(why)),
+            e => Attempt::Retry(e.to_string()),
+        }
+    }
 }
 
 impl fmt::Display for CallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CallError::NotSent(s) | CallError::Lost(s) => f.write_str(s),
+            CallError::NotSent(s) | CallError::Lost(s) | CallError::Denied(s) => f.write_str(s),
         }
     }
 }
@@ -929,6 +1027,10 @@ struct Connection<C: Conn> {
     conn: C,
     waiting: Mutex<Waiting>,
     next_id: AtomicU32,
+    /// The authenticated session, if it ends.
+    session: Mutex<Option<auth::SessionTimes>>,
+    /// Someone is authenticating again.
+    renewing: AtomicBool,
 }
 
 fn deliver_push(queue: &PushQueue, push: Result<lotse_proto::DeliverPush, String>) {
@@ -949,7 +1051,13 @@ fn fill(slot: &Slot, value: Result<Bytes, String>) {
 
 impl<C: Conn> Connection<C> {
     fn new(conn: C) -> Self {
-        Connection { conn, waiting: Mutex::new(Waiting::default()), next_id: AtomicU32::new(1) }
+        Connection {
+            conn,
+            waiting: Mutex::new(Waiting::default()),
+            next_id: AtomicU32::new(1),
+            session: Mutex::new(None),
+            renewing: AtomicBool::new(false),
+        }
     }
 
     fn close(&self) {
@@ -1084,6 +1192,11 @@ impl<C: Conn> Connection<C> {
             }
         };
         match lotse_proto::decode_response(frame, req.api_key()) {
+            // Not authenticated, or the session ended: sending again with the
+            // same credentials gets the same answer.
+            Ok((_, Response::Error(ErrorCode::UNAUTHORIZED))) => {
+                Err(CallError::Denied("the node requires authentication".into()))
+            }
             Ok((_, Response::Error(code))) => Err(CallError::NotSent(format!("refused: {code}"))),
             Ok((_, resp)) => Ok(resp),
             Err(e) => Err(CallError::Lost(format!("undecodable response: {e}"))),
@@ -1094,7 +1207,7 @@ impl<C: Conn> Connection<C> {
 /// An open transaction, from [`Client::begin_transaction`]. End it with
 /// [`Transaction::commit`] or [`Transaction::abort`]; dropped without either,
 /// the coordinator aborts it after the transaction timeout.
-pub struct Transaction<'a, R: Net + Clock + Spawn> {
+pub struct Transaction<'a, R: Net + Clock + Spawn + Rng> {
     client: &'a Client<R>,
     _turn: AsyncGuard<'a>,
     txn_id: String,
@@ -1107,7 +1220,7 @@ pub struct Transaction<'a, R: Net + Clock + Spawn> {
     ended: bool,
 }
 
-impl<R: Net + Clock + Spawn> Drop for Transaction<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Drop for Transaction<'_, R> {
     fn drop(&mut self) {
         // Left open: the next transaction must not continue this one. A
         // fresh producer id makes the coordinator abort it first.
@@ -1117,7 +1230,7 @@ impl<R: Net + Clock + Spawn> Drop for Transaction<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> fmt::Debug for Transaction<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> fmt::Debug for Transaction<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Transaction")
             .field("txn_id", &self.txn_id)
@@ -1127,7 +1240,7 @@ impl<R: Net + Clock + Spawn> fmt::Debug for Transaction<'_, R> {
     }
 }
 
-impl<R: Net + Clock + Spawn> Transaction<'_, R> {
+impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
     /// Appends a batch to a partition within the transaction; returns the
     /// offset of its first record. Read_committed consumers see it only once
     /// the transaction commits.
