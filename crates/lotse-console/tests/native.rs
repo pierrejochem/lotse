@@ -114,12 +114,17 @@ async fn the_console_shows_a_real_cluster() {
 
     let store = Arc::new(MetricsStore::new(Duration::from_secs(3600), Duration::from_secs(10)));
     let clusters: Vec<Arc<dyn Cluster>> = vec![Arc::new(NativeCluster::new("local", bootstrap))];
-    let app = router(AppState::new(clusters, AuthConfig::Dev { user: "pierre".into() }, store, Duration::from_secs(1)));
+    let app = router(AppState::new(
+        clusters,
+        AuthConfig::Dev { user: "pierre".into(), password: None },
+        store,
+        Duration::from_secs(1),
+    ));
 
     let (status, list) = get(&app, "/api/v1/clusters").await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list[0]["nodes"], 3);
-    assert_eq!((list[0]["demo"].as_bool(), list[0]["tenants"].as_bool()), (Some(false), Some(false)));
+    assert_eq!((list[0]["demo"].as_bool(), list[0]["tenants"].as_bool()), (Some(false), Some(true)));
     assert_eq!(list[0]["status"], "all answering");
 
     // The first look: everything there, but no rates yet.
@@ -152,7 +157,7 @@ async fn the_console_shows_a_real_cluster() {
     assert!(p["high_watermark"].as_u64().unwrap() >= 40, "{p}");
     assert_eq!(p["replicas"].as_array().unwrap().len(), 3, "{p}");
     assert_eq!(s["replication"], 3);
-    assert!(s["tenant"].is_null() && s["retention_ms"].is_null());
+    assert!(s["tenant"] == "default" && s["retention_ms"].is_null(), "{s}");
     let (status, page) = get(&app, "/api/v1/clusters/local/streams/orders/records?partition=0&offset=3&count=5").await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let records = page["records"].as_array().unwrap();
@@ -192,9 +197,13 @@ async fn the_console_shows_a_real_cluster() {
     }
     assert!(found, "the created queue shows up");
 
-    // What a real cluster does not have.
+    // Without authentication there is the default tenant, and no quotas.
     let (status, t) = get(&app, "/api/v1/clusters/local/tenants").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{t}");
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["tenants"][0]["name"], "default", "{t}");
+    assert!(t["tenants"][0]["quota_bytes"].is_null() && t["tenants"][0]["queues"] == 2, "{t}");
+
+    // What a real cluster does not have.
     let (_, n) = get(&app, "/api/v1/clusters/local/nodes").await;
     assert!(n["upgrade"].is_null() && n["events"].as_array().unwrap().is_empty());
 

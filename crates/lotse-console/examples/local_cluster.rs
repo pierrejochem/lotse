@@ -111,13 +111,14 @@ async fn main() {
 
     let store = Arc::new(MetricsStore::new(Duration::from_secs(3600), Duration::from_secs(10)));
     let clusters: Vec<Arc<dyn Cluster>> = vec![Arc::new(NativeCluster::new("local", bootstrap))];
-    let who = lotse_console::auth::Identity {
-        principal: "console-metrics".into(),
-        display_name: "metrics sampler".into(),
-        token: None,
-    };
+    let who = lotse_console::auth::Identity::anonymous("console-metrics");
     tokio::spawn(run_sampler(clusters.clone(), Arc::clone(&store), who, Duration::from_secs(10)));
-    let state = AppState::new(clusters, AuthConfig::Dev { user: "local".into() }, store, Duration::from_secs(2));
+    let state = AppState::new(
+        clusters,
+        AuthConfig::Dev { user: "local".into(), password: None },
+        store,
+        Duration::from_secs(2),
+    );
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("the console's address is free");
     tracing::info!(%listen, "console ready");
     axum::serve(listener, router(state))

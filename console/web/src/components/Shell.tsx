@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useMatches, useNavigate, useParams, type UIMatch } from 'react-router-dom';
 import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useClusters, useMe } from '../api/queries';
+import { signOut } from '../api/client';
 import { useLiveStatus } from '../api/live';
 import { Icon, Mark } from './ui';
 import { counted } from '../format';
@@ -152,6 +153,11 @@ function Account() {
               {me.data?.auth_mode === 'dev' && ' (dev sign-in)'}
             </div>
           </div>
+          {me.data?.auth_mode === 'oidc' && (
+            <Menu.Item className="menu-item" onSelect={signOut}>
+              Sign out
+            </Menu.Item>
+          )}
           <Menu.Separator className="menu-sep" />
           <Menu.Label className="menu-label label">Theme</Menu.Label>
           <Menu.RadioGroup value={theme} onValueChange={(v) => setTheme(v as Theme)}>

@@ -632,8 +632,8 @@ pub struct Tenant {
     pub name: String,
     /// Bytes stored, all replicas.
     pub used_bytes: u64,
-    /// Storage quota, bytes.
-    pub quota_bytes: u64,
+    /// Storage quota, bytes; `None` where the cluster has no quotas.
+    pub quota_bytes: Option<u64>,
     /// Streams.
     pub streams: u32,
     /// Queues.
@@ -649,7 +649,8 @@ pub struct Tenant {
 pub struct RoleBinding {
     /// Principal.
     pub principal: String,
-    /// `mTLS` or `OIDC`.
+    /// How the subject is recognised: `user` or `group` (a group at the
+    /// identity provider); the demo says `mTLS` or `OIDC`.
     pub auth: String,
     /// Role.
     pub role: String,

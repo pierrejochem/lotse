@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
@@ -46,7 +46,12 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
   const navigate = useNavigate();
 
   const [name, setName] = useState('');
-  const [tenant, setTenant] = useState('commerce');
+  const [tenant, setTenant] = useState('');
+  const tenantNames = tenants.data?.tenants.map((t) => t.name) ?? [];
+  // Until one is picked, the first tenant the user may see.
+  useEffect(() => {
+    if (tenantNames.length > 0 && !tenantNames.includes(tenant)) setTenant(tenantNames[0] ?? '');
+  }, [tenantNames.join(' ')]); // eslint-disable-line react-hooks/exhaustive-deps
   const [levels, setLevels] = useState(1);
   const [ttl, setTtl] = useState('');
   const [ttlUnit, setTtlUnit] = useState<TtlUnit>('hours');
@@ -61,7 +66,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
   const req: S['CreateQueue'] = hasOptions
     ? {
         name,
-        tenant: hasTenants ? tenant : null,
+        tenant: hasTenants && tenant ? tenant : null,
         priority_levels: levels,
         single_active: sac,
         ttl_ms: ttl && Number(ttl) > 0 ? Number(ttl) * TTL_UNITS[ttlUnit] : null,
@@ -69,10 +74,10 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
         max_deliveries: useDlq ? maxDeliveries : null,
         create_dlq: useDlq && createDlq,
       }
-    : { name, tenant: hasTenants ? tenant : null, priority_levels: 1, single_active: false, ttl_ms: null, dlq: null, max_deliveries: null, create_dlq: false };
+    : { name, tenant: hasTenants && tenant ? tenant : null, priority_levels: 1, single_active: false, ttl_ms: null, dlq: null, max_deliveries: null, create_dlq: false };
   const nameError = touched && !NAME.test(name) ? 'Use lowercase letters, digits, dots and hyphens, starting with a letter or digit.' : null;
   const selected = tenants.data?.tenants.find((t) => t.name === tenant);
-  const overQuota = selected ? selected.used_bytes >= selected.quota_bytes : false;
+  const overQuota = selected?.quota_bytes != null ? selected.used_bytes >= selected.quota_bytes : false;
   const preview = useMemo(() => cliPreview(req), [JSON.stringify(req)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function submit(e: FormEvent) {
@@ -156,7 +161,11 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                   />
                   {selected && (
                     <span className={overQuota ? 'error-text' : 'help'}>
-                      {overQuota ? 'Storage quota reached; new queues are refused.' : `${bytes(selected.used_bytes)} of ${bytes(selected.quota_bytes)} quota used`}
+                      {overQuota
+                        ? 'Storage quota reached; new queues are refused.'
+                        : selected.quota_bytes != null
+                          ? `${bytes(selected.used_bytes)} of ${bytes(selected.quota_bytes)} quota used`
+                          : `${bytes(selected.used_bytes)} stored`}
                     </span>
                   )}
                 </div>}

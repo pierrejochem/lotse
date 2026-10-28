@@ -29,7 +29,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 
-use crate::auth::AuthConfig;
+use crate::auth::{AuthConfig, Sessions};
 use crate::cluster::Cluster;
 use crate::hub::Hub;
 use crate::metrics::MetricsStore;
@@ -45,6 +45,8 @@ pub struct AppState {
     pub metrics: Arc<MetricsStore>,
     /// Live updates.
     pub hub: Arc<Hub>,
+    /// Signed-in browsers, in `oidc` mode.
+    pub sessions: Option<Arc<Sessions>>,
 }
 
 impl AppState {
@@ -53,7 +55,14 @@ impl AppState {
         let clusters: BTreeMap<String, Arc<dyn Cluster>> =
             clusters.into_iter().map(|c| (c.id().to_owned(), c)).collect();
         let hub = Hub::new(clusters.clone(), live);
-        AppState { clusters: Arc::new(clusters), auth: Arc::new(auth), metrics, hub }
+        AppState { clusters: Arc::new(clusters), auth: Arc::new(auth), metrics, hub, sessions: None }
+    }
+}
+
+impl AppState {
+    /// The same state, signing users in with `sessions`.
+    pub fn with_sessions(self, sessions: Arc<Sessions>) -> Self {
+        AppState { sessions: Some(sessions), ..self }
     }
 }
 
@@ -75,6 +84,9 @@ pub fn router(state: AppState) -> Router {
         .route("/ws", get(ws::upgrade));
     Router::new()
         .nest("/api/v1", api)
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", post(auth::logout))
         .route("/api/openapi.json", get(|| async { axum::Json(openapi()) }))
         .fallback(assets::serve)
         .layer(axum::middleware::map_response(security_headers))

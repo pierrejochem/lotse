@@ -30,10 +30,27 @@ export async function unwrap<T>(call: Promise<Result<T>>): Promise<T> {
     throw new ApiError(0, 'NETWORK', 'The console cannot be reached. Check your connection and try again.');
   }
   if (res.data !== undefined && res.response.ok) return res.data;
+  if (res.response.status === 401) signIn();
   const body = res.error as Partial<S['ErrorBody']> | undefined;
   throw new ApiError(
     res.response.status,
     body?.code ?? 'HTTP_' + res.response.status,
     body?.message ?? `The console answered ${res.response.status}.`,
   );
+}
+
+/** Sends the browser to sign in, returning here afterwards. */
+export function signIn(): void {
+  if (typeof window === 'undefined') return;
+  const here = window.location.pathname + window.location.search;
+  window.location.assign('/auth/login?return_to=' + encodeURIComponent(here));
+}
+
+/** Ends the session: a form POST, so the console can redirect to the identity provider. */
+export function signOut(): void {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/auth/logout';
+  document.body.appendChild(form);
+  form.submit();
 }

@@ -66,12 +66,33 @@ fn parse(url: &str) -> io::Result<Url> {
 
 /// `GET url`.
 pub(crate) async fn get(url: &str, tls: Arc<ClientConfig>) -> io::Result<Bytes> {
-    tokio::time::timeout(TIMEOUT, fetch(url, tls))
+    tokio::time::timeout(TIMEOUT, fetch(url, tls, None))
         .await
         .map_err(|_| io::Error::new(ErrorKind::TimedOut, format!("{url} did not answer in time")))?
 }
 
-async fn fetch(url: &str, tls: Arc<ClientConfig>) -> io::Result<Bytes> {
+/// `POST url` with `fields` as `application/x-www-form-urlencoded`.
+pub(crate) async fn post_form(url: &str, fields: &[(&str, &str)], tls: Arc<ClientConfig>) -> io::Result<Bytes> {
+    let body = fields.iter().map(|(k, v)| format!("{}={}", encode(k), encode(v))).collect::<Vec<_>>().join("&");
+    tokio::time::timeout(TIMEOUT, fetch(url, tls, Some(body)))
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, format!("{url} did not answer in time")))?
+}
+
+/// Percent-encoding for form fields: everything but unreserved characters.
+fn encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+async fn fetch(url: &str, tls: Arc<ClientConfig>, form: Option<String>) -> io::Result<Bytes> {
     let u = parse(url)?;
     let host = u.host.trim_start_matches('[').trim_end_matches(']').to_owned();
     let addr = format!("{}:{}", u.host, u.port);
@@ -82,10 +103,19 @@ async fn fetch(url: &str, tls: Arc<ClientConfig>) -> io::Result<Bytes> {
         }
     }
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nUser-Agent: lotse\r\nConnection: close\r\n\r\n",
-        u.path, u.host
-    );
+    let request = match &form {
+        None => format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nUser-Agent: lotse\r\nConnection: close\r\n\r\n",
+            u.path, u.host
+        ),
+        Some(body) => format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nUser-Agent: lotse\r\nConnection: close\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+            u.path,
+            u.host,
+            body.len()
+        ),
+    };
     let raw = if u.tls {
         let name = ServerName::try_from(host).map_err(|e| io::Error::new(ErrorKind::InvalidInput, e.to_string()))?;
         let stream = tokio_rustls::TlsConnector::from(tls).connect(name, tcp).await?;
@@ -199,5 +229,11 @@ mod tests {
         assert_eq!((u.tls, u.port), (false, 80));
         assert_eq!(parse("https://idp.example").unwrap().path, "/");
         assert!(parse("ftp://x/").is_err() && parse("https://user@x/").is_err());
+    }
+
+    #[test]
+    fn form_fields_are_percent_encoded() {
+        assert_eq!(encode("a b&c=d/é"), "a%20b%26c%3Dd%2F%C3%A9");
+        assert_eq!(encode("AZaz09-._~"), "AZaz09-._~");
     }
 }

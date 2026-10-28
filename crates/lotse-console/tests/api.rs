@@ -19,7 +19,12 @@ fn app() -> axum::Router {
     let demo = DemoCluster::new("prod-hamburg-1");
     demo.backfill(&store, Duration::from_secs(3600), Duration::from_secs(10));
     let clusters: Vec<Arc<dyn Cluster>> = vec![Arc::new(demo)];
-    router(AppState::new(clusters, AuthConfig::Dev { user: "pierre".into() }, store, Duration::from_millis(50)))
+    router(AppState::new(
+        clusters,
+        AuthConfig::Dev { user: "pierre".into(), password: None },
+        store,
+        Duration::from_millis(50),
+    ))
 }
 
 async fn call(method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value, axum::http::HeaderMap) {

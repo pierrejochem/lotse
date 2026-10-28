@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use lotse_console::auth::{AuthConfig, Identity};
+use lotse_console::auth::{AuthConfig, Identity, Login, Secret, Sessions};
 use lotse_console::cluster::Cluster;
 use lotse_console::cluster::demo::DemoCluster;
 use lotse_console::cluster::native::NativeCluster;
@@ -69,7 +69,6 @@ async fn main() -> ExitCode {
                     }
                 };
                 tracing::info!(cluster = %id, ?bootstrap, "serving a cluster over the native protocol");
-                tracing::warn!(cluster = %id, "Lotse has no authentication yet: requests reach the cluster without credentials");
                 clusters.push(Arc::new(NativeCluster::with_runtime(id.clone(), bootstrap.clone(), rt)));
             }
         }
@@ -77,14 +76,36 @@ async fn main() -> ExitCode {
 
     // The sampler is the only thing that uses the console's own identity,
     // a read-only metrics role on the brokers.
-    let sampler_identity =
-        Identity { principal: cfg.metrics.principal.clone(), display_name: "metrics sampler".into(), token: None };
+    let sampler_identity = Identity {
+        principal: cfg.metrics.principal.clone(),
+        display_name: "metrics sampler".into(),
+        login: cfg.metrics.password.clone().map_or(Login::None, |p| Login::Password(Secret::new(p))),
+    };
     tokio::spawn(run_sampler(clusters.clone(), Arc::clone(&store), sampler_identity, cfg.metrics.step()));
 
-    if let AuthConfig::Dev { user } = &cfg.auth {
-        tracing::warn!(%user, "dev auth: every request acts as this user");
+    let mut state =
+        AppState::new(clusters, cfg.auth.clone(), store, Duration::from_millis(cfg.live.interval_ms.max(250)));
+    match &cfg.auth {
+        AuthConfig::Dev { user, .. } => tracing::warn!(%user, "dev auth: every request acts as this user"),
+        AuthConfig::Oidc(o) => {
+            let rt = TokioRuntime::new(std::env::temp_dir());
+            let rt = match &o.ca_file {
+                None => rt,
+                Some(path) => match std::fs::read(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|pem| rt.with_http_ca(&pem).map_err(|e| e.to_string()))
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("lotse-console: auth.ca_file {}: {e}", path.display());
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            tracing::info!(issuer = %o.issuer, "users sign in with OpenID Connect");
+            state = state.with_sessions(Arc::new(Sessions::new(o.clone(), rt)));
+        }
     }
-    let state = AppState::new(clusters, cfg.auth.clone(), store, Duration::from_millis(cfg.live.interval_ms.max(250)));
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
         Ok(l) => l,
         Err(e) => {

@@ -702,7 +702,7 @@ impl Cluster for DemoCluster {
             .iter()
             .find(|t| &t.name == wanted)
             .ok_or_else(|| ApiError::NotFound(format!("There is no tenant \"{wanted}\".")))?;
-        if tenant.used_bytes >= tenant.quota_bytes {
+        if tenant.quota_bytes.is_some_and(|q| tenant.used_bytes >= q) {
             return Err(ApiError::Forbidden(format!(
                 "Tenant {} has reached its storage quota. Raise the quota before adding queues.",
                 tenant.name
@@ -763,7 +763,7 @@ impl Cluster for DemoCluster {
             } else {
                 chip(Tone::Ok, "Within quota")
             };
-            Tenant { name: name.into(), used_bytes: used, quota_bytes: quota, streams, queues, principals, state }
+            Tenant { name: name.into(), used_bytes: used, quota_bytes: Some(quota), streams, queues, principals, state }
         };
         let created = |tenant: &str| {
             self.lock().created.values().filter(|(q, _)| q.tenant.as_deref() == Some(tenant)).count() as u32
@@ -915,7 +915,7 @@ mod tests {
     use super::*;
 
     fn me() -> Identity {
-        Identity { principal: "tester".into(), display_name: "tester".into(), token: None }
+        Identity::anonymous("tester")
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The browser's WebSocket: one per tab, many topics.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -22,8 +23,12 @@ pub async fn upgrade(State(st): State<AppState>, who: Identity, headers: HeaderM
     if !same_origin(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin WebSocket refused").into_response();
     }
-    ws.on_upgrade(move |socket| session(st, who, socket))
+    let sid = crate::auth::session_id(&headers);
+    ws.on_upgrade(move |socket| session(st, who, sid, socket))
 }
+
+/// How often an open socket checks that its sign-in still holds.
+const RECHECK: Duration = Duration::from_secs(15);
 
 /// `true` when there is no Origin header (non-browser clients) or its host
 /// matches the Host header.
@@ -33,7 +38,7 @@ pub fn same_origin(headers: &HeaderMap) -> bool {
     origin.split_once("://").map(|(_, rest)| rest.trim_end_matches('/')) == Some(host)
 }
 
-async fn session(st: AppState, who: Identity, socket: WebSocket) {
+async fn session(st: AppState, who: Identity, sid: Option<String>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
     let writer = tokio::spawn(async move {
@@ -44,7 +49,22 @@ async fn session(st: AppState, who: Identity, socket: WebSocket) {
         }
     });
     let mut subs: BTreeMap<Topic, JoinHandle<()>> = BTreeMap::new();
-    while let Some(Ok(msg)) = stream.next().await {
+    let mut recheck = tokio::time::interval(RECHECK);
+    recheck.tick().await;
+    loop {
+        let msg = tokio::select! {
+            m = stream.next() => m,
+            _ = recheck.tick() => {
+                // A socket outlives neither a sign-out nor an expired session.
+                if let (Some(sessions), Some(sid)) = (&st.sessions, &sid) {
+                    if sessions.identity(sid).await.is_none() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(Ok(msg)) = msg else { break };
         let Message::Text(text) = msg else { continue };
         match serde_json::from_str::<ClientMessage>(&text) {
             Ok(ClientMessage::Subscribe { topic }) => {

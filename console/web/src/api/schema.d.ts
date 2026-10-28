@@ -820,7 +820,8 @@ export interface components {
         ReplicaState: "leader" | "in_sync" | "catching_up";
         /** @description A role binding. */
         RoleBinding: {
-            /** @description `mTLS` or `OIDC`. */
+            /** @description How the subject is recognised: `user` or `group` (a group at the
+             *     identity provider); the demo says `mTLS` or `OIDC`. */
             auth: string;
             /** @description Principal. */
             principal: string;
@@ -930,9 +931,9 @@ export interface components {
             queues: number;
             /**
              * Format: int64
-             * @description Storage quota, bytes.
+             * @description Storage quota, bytes; `None` where the cluster has no quotas.
              */
-            quota_bytes: number;
+            quota_bytes?: number | null;
             /** @description State chip. */
             state: components["schemas"]["Chip"];
             /**

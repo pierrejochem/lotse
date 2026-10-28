@@ -146,13 +146,26 @@ impl Clock for TokioRuntime {
     }
 }
 
+impl TokioRuntime {
+    fn http_tls(&self) -> io::Result<Arc<rustls::ClientConfig>> {
+        match self.http_tls.get() {
+            Some(c) => Ok(c.clone()),
+            None => http::client_config(&self.http_cas).map(|c| self.http_tls.get_or_init(|| c).clone()),
+        }
+    }
+
+    /// `POST url` with form fields, for an OpenID Connect token endpoint;
+    /// the same rules as [`lotse_rt::Http::get`] (HTTPS, or HTTP on
+    /// loopback; a `200` only).
+    pub async fn post_form(&self, url: &str, fields: &[(&str, &str)]) -> io::Result<Bytes> {
+        http::post_form(url, fields, self.http_tls()?).await
+    }
+}
+
 impl lotse_rt::Http for TokioRuntime {
     fn get(&self, url: &str) -> impl Future<Output = io::Result<Bytes>> + Send {
         let url = url.to_owned();
-        let tls = match self.http_tls.get() {
-            Some(c) => Ok(c.clone()),
-            None => http::client_config(&self.http_cas).map(|c| self.http_tls.get_or_init(|| c).clone()),
-        };
+        let tls = self.http_tls();
         async move { http::get(&url, tls?).await }
     }
 }

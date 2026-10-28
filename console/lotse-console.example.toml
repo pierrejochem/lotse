@@ -1,15 +1,30 @@
 # Copy to lotse-console.toml and adjust.
 listen = "127.0.0.1:8080"
 
-# Every request acts as this user. Only for a machine only you can reach;
-# OIDC sign-in is not implemented yet.
+# Every request acts as this user. Only for a machine only you can reach.
+# `password` is the user's SCRAM password where the cluster requires
+# authentication.
 [auth]
 mode = "dev"
 user = "pierre"
+# password = "…"
 
-# The background sampler that feeds the charts uses this read-only identity.
+# Or: users sign in at your identity provider, the issuer the brokers trust.
+# Register the console there as a client with this redirect URL.
+# [auth]
+# mode = "oidc"
+# issuer = "https://id.example.com/realms/ops"
+# client_id = "lotse-console"
+# client_secret = "…"          # for a confidential client; PKCE is always used
+# redirect_url = "https://console.example.com/auth/callback"
+# principal_claim = "sub"       # the same claim the brokers use
+# ca_file = "/etc/lotse/idp-ca.pem"   # a private issuer's CA
+
+# The background sampler that feeds the charts uses this identity; give it a
+# viewer role. Everyone signed in sees the charts it collects.
 [metrics]
 principal = "console-metrics"
+# password = "…"
 sample_secs = 10
 retention_hours = 24
 
@@ -17,12 +32,12 @@ retention_hours = 24
 interval_ms = 2000
 
 # A real cluster: client addresses of some of its nodes; the others are
-# learnt from them. Lotse has no authentication yet, so the console
-# connects without credentials.
+# learnt from them. The console signs in to it as each user.
 # [[clusters]]
 # id = "prod-hamburg-1"
 # kind = "native"
 # bootstrap = ["broker-1:9000", "broker-2:9000", "broker-3:9000"]
+# ca_file = "/etc/lotse/ca.pem"
 
 # A built-in cluster with sample data.
 [[clusters]]

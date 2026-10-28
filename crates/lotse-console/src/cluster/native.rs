@@ -8,24 +8,28 @@
 //! [`RATE_WINDOW`] old. Until there is one, rates are `null`. Samples are
 //! taken at most once a second, whoever asks.
 //!
-//! Lotse has no authentication yet, so the console connects without
-//! credentials and every request looks the same to the cluster. The
-//! console gets no account of its own: once brokers authenticate, the
-//! signed-in user's identity goes with each request (ADR 0019).
+//! The console has no account of its own (ADR 0019). Each principal gets a
+//! seat: a client signed in as them (their SCRAM password, or their access
+//! token with OAUTHBEARER, renewed as the console renews it) and its own
+//! samples, so every screen shows what that principal may see and nothing
+//! else. Seats nobody used for [`SEAT_IDLE`] are closed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use lotse_client::{Client, ClientConfig, ClientError};
-use lotse_proto::{DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, kind};
+use lotse_client::{Client, ClientConfig, ClientError, Credentials, DEFAULT_TENANT};
+use lotse_proto::{
+    DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind, role, subject_kind,
+};
 use lotse_record::{Batch, Control, ControlType};
 use lotse_rt_tokio::TokioRuntime;
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use super::Cluster;
-use crate::auth::Identity;
+use crate::auth::{Identity, Login};
 use crate::error::{ApiError, ApiResult};
 use crate::model::*;
 use crate::time::rfc3339;
@@ -36,6 +40,8 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(5);
 const HISTORY: Duration = Duration::from_secs(300);
 /// A sample this young is used again instead of asking the nodes.
 const FRESH: Duration = Duration::from_secs(1);
+/// A seat unused this long is closed.
+pub const SEAT_IDLE: Duration = Duration::from_secs(900);
 
 /// What the cluster said at one moment.
 #[derive(Debug)]
@@ -142,10 +148,66 @@ fn p99(buckets: &[u64]) -> Option<f64> {
 #[derive(Debug)]
 pub struct NativeCluster {
     id: String,
+    bootstrap: Vec<String>,
+    rt: TokioRuntime,
+    /// By principal and how it signs in (for a password, its hash: another
+    /// password is another seat, which the cluster checks anew).
+    seats: Mutex<BTreeMap<SeatKey, Arc<Seat>>>,
+}
+
+/// A principal and how it signs in.
+type SeatKey = (String, Vec<u8>);
+
+/// One principal's connection to the cluster.
+struct Seat {
     client: Client<TokioRuntime>,
+    /// The access token the client signs in with, for OAUTHBEARER, and
+    /// when it expires.
+    token: Arc<Mutex<(String, Option<Instant>)>>,
     samples: Mutex<VecDeque<Arc<Sample>>>,
     /// One sample at a time: concurrent callers wait and share it.
     sampling: tokio::sync::Mutex<()>,
+    used: Mutex<Instant>,
+}
+
+impl std::fmt::Debug for Seat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Seat").finish_non_exhaustive()
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+impl Seat {
+    fn samples(&self) -> std::sync::MutexGuard<'_, VecDeque<Arc<Sample>>> {
+        lock(&self.samples)
+    }
+
+    /// A fresh sample and the base its rates are taken over.
+    async fn window(&self) -> ApiResult<(Arc<Sample>, Option<Arc<Sample>>)> {
+        let _turn = self.sampling.lock().await;
+        let now = Instant::now();
+        let fresh = self.samples().back().filter(|s| now - s.at < FRESH).cloned();
+        let sample = match fresh {
+            Some(s) => s,
+            None => {
+                let meta = self.client.metadata(&[]).await.map_err(failed)?;
+                let nodes = self.client.node_metrics().await.map_err(failed)?;
+                let nodes = nodes.into_iter().map(|(id, r)| (id, r.map_err(|e| e.to_string()))).collect();
+                let s = Arc::new(Sample { at: Instant::now(), meta, nodes });
+                let mut all = self.samples();
+                all.push_back(s.clone());
+                while all.front().is_some_and(|f| s.at - f.at > HISTORY) {
+                    all.pop_front();
+                }
+                s
+            }
+        };
+        let base = self.samples().iter().rev().find(|b| sample.at - b.at >= RATE_WINDOW).cloned();
+        Ok((sample, base))
+    }
 }
 
 fn node_name(id: u32) -> String {
@@ -156,8 +218,21 @@ fn chip(tone: Tone, text: &str) -> Chip {
     Chip { tone, text: text.into() }
 }
 
-fn unreachable(e: ClientError) -> ApiError {
-    ApiError::Unavailable(format!("The cluster does not answer: {e}"))
+/// What the user is told when a call fails.
+fn failed(e: ClientError) -> ApiError {
+    match e {
+        ClientError::Authentication(why) => {
+            ApiError::Forbidden(format!("The cluster did not accept your sign-in: {why}"))
+        }
+        ClientError::Broker { code: ErrorCode::UNAUTHORIZED, message } => {
+            ApiError::Forbidden(message.unwrap_or_else(|| "Your roles on this cluster do not allow this.".into()))
+        }
+        e => ApiError::Unavailable(format!("The cluster does not answer: {e}")),
+    }
+}
+
+fn tenant_of(r: &ResourceMetadata) -> Option<String> {
+    (!r.tenant.is_empty()).then(|| r.tenant.clone())
 }
 
 impl NativeCluster {
@@ -171,46 +246,61 @@ impl NativeCluster {
     /// A cluster called `id`, reached through `bootstrap` on `rt`'s network
     /// (TLS, normally).
     pub fn with_runtime(id: impl Into<String>, bootstrap: Vec<String>, rt: TokioRuntime) -> Self {
-        let cfg = ClientConfig {
-            request_timeout: Duration::from_secs(2),
-            retry_for: Duration::from_secs(5),
-            ..ClientConfig::new(bootstrap)
+        NativeCluster { id: id.into(), bootstrap, rt, seats: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// The seat of `who`, opened if need be; closes idle ones.
+    fn seat(&self, who: &Identity) -> Arc<Seat> {
+        let how = match &who.login {
+            Login::None => vec![0],
+            Login::Password(p) => [&[1u8][..], &Sha256::digest(p.expose().as_bytes())].concat(),
+            Login::Token { .. } => vec![2],
         };
-        let client = Client::new(rt, cfg);
-        NativeCluster {
-            id: id.into(),
-            client,
-            samples: Mutex::new(VecDeque::new()),
-            sampling: tokio::sync::Mutex::new(()),
-        }
-    }
-
-    fn samples(&self) -> std::sync::MutexGuard<'_, VecDeque<Arc<Sample>>> {
-        self.samples.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// A fresh sample and the base its rates are taken over.
-    async fn window(&self) -> ApiResult<(Arc<Sample>, Option<Arc<Sample>>)> {
-        let _turn = self.sampling.lock().await;
         let now = Instant::now();
-        let fresh = self.samples().back().filter(|s| now - s.at < FRESH).cloned();
-        let sample = match fresh {
-            Some(s) => s,
-            None => {
-                let meta = self.client.metadata(&[]).await.map_err(unreachable)?;
-                let nodes = self.client.node_metrics().await.map_err(unreachable)?;
-                let nodes = nodes.into_iter().map(|(id, r)| (id, r.map_err(|e| e.to_string()))).collect();
-                let s = Arc::new(Sample { at: Instant::now(), meta, nodes });
-                let mut all = self.samples();
-                all.push_back(s.clone());
-                while all.front().is_some_and(|f| s.at - f.at > HISTORY) {
-                    all.pop_front();
+        let mut seats = lock(&self.seats);
+        seats.retain(|_, s| now - *lock(&s.used) < SEAT_IDLE);
+        let seat = seats.entry((who.principal.clone(), how)).or_insert_with(|| {
+            let token = Arc::new(Mutex::new((String::new(), None)));
+            let credentials = match &who.login {
+                Login::None => None,
+                Login::Password(p) => {
+                    Some(Credentials::Scram { user: who.principal.clone(), password: p.expose().into() })
                 }
-                s
+                Login::Token { .. } => {
+                    let t = Arc::clone(&token);
+                    Some(Credentials::OAuthBearer(Arc::new(move || lock(&t).0.clone())))
+                }
+            };
+            let cfg = ClientConfig {
+                request_timeout: Duration::from_secs(2),
+                retry_for: Duration::from_secs(5),
+                credentials,
+                ..ClientConfig::new(self.bootstrap.clone())
+            };
+            Arc::new(Seat {
+                client: Client::new(self.rt.clone(), cfg),
+                token,
+                samples: Mutex::new(VecDeque::new()),
+                sampling: tokio::sync::Mutex::new(()),
+                used: Mutex::new(now),
+            })
+        });
+        *lock(&seat.used) = now;
+        if let Login::Token { token, expires } = &who.login {
+            // The newest token, for the next time the client signs in; a
+            // caller holding an older one (a live view opened earlier)
+            // does not set it back.
+            let mut held = lock(&seat.token);
+            if held.1.is_none_or(|e| *expires >= e) {
+                *held = (token.expose().to_owned(), Some(*expires));
             }
-        };
-        let base = self.samples().iter().rev().find(|b| sample.at - b.at >= RATE_WINDOW).cloned();
-        Ok((sample, base))
+        }
+        Arc::clone(seat)
+    }
+
+    /// How many seats are open (for tests).
+    pub fn seats(&self) -> usize {
+        lock(&self.seats).len()
     }
 
     fn nodes_of(&self, w: Window<'_>) -> Vec<Node> {
@@ -276,7 +366,7 @@ impl NativeCluster {
         let id = r.resource_id;
         StreamRow {
             name: r.name.clone(),
-            tenant: None,
+            tenant: tenant_of(r),
             partitions: r.partitions.len() as u32,
             in_bytes_per_sec: w
                 .rate(|n| n.partitions.iter().filter(|p| p.resource_id == id).map(|p| p.produce_bytes).sum()),
@@ -291,7 +381,13 @@ impl NativeCluster {
             Some(q) if q.ready > 0 && q.consumers.is_empty() => Some(chip(Tone::Warn, "No consumers")),
             Some(_) => None,
         };
-        QueueRow { name: r.name.clone(), tenant: None, ready: q.map_or(0, |q| q.ready), dead_lettered: None, attention }
+        QueueRow {
+            name: r.name.clone(),
+            tenant: tenant_of(r),
+            ready: q.map_or(0, |q| q.ready),
+            dead_lettered: None,
+            attention,
+        }
     }
 }
 
@@ -301,8 +397,8 @@ impl Cluster for NativeCluster {
         &self.id
     }
 
-    async fn summary(&self, _who: &Identity) -> ApiResult<ClusterRef> {
-        let (s, _) = match self.window().await {
+    async fn summary(&self, who: &Identity) -> ApiResult<ClusterRef> {
+        let (s, _) = match self.seat(who).window().await {
             Ok(w) => w,
             Err(e) => {
                 return Ok(ClusterRef {
@@ -311,7 +407,7 @@ impl Cluster for NativeCluster {
                     status: e.to_string(),
                     tone: Tone::Critical,
                     demo: false,
-                    tenants: false,
+                    tenants: true,
                     queue_options: false,
                 });
             }
@@ -329,13 +425,13 @@ impl Cluster for NativeCluster {
             status,
             tone,
             demo: false,
-            tenants: false,
+            tenants: true,
             queue_options: false,
         })
     }
 
-    async fn overview(&self, _who: &Identity) -> ApiResult<Overview> {
-        let (s, base) = self.window().await?;
+    async fn overview(&self, who: &Identity) -> ApiResult<Overview> {
+        let (s, base) = self.seat(who).window().await?;
         let w = Window { now: &s, base: base.as_deref() };
         let nodes = self.nodes_of(w);
         let groups: BTreeSet<u64> = s.answered().flat_map(|m| m.partitions.iter().map(|p| p.group)).collect();
@@ -426,20 +522,20 @@ impl Cluster for NativeCluster {
         })
     }
 
-    async fn nodes(&self, _who: &Identity) -> ApiResult<NodesView> {
-        let (s, base) = self.window().await?;
+    async fn nodes(&self, who: &Identity) -> ApiResult<NodesView> {
+        let (s, base) = self.seat(who).window().await?;
         let nodes = self.nodes_of(Window { now: &s, base: base.as_deref() });
         Ok(NodesView { nodes, disk_limits: None, upgrade: None, events: Vec::new() })
     }
 
-    async fn streams(&self, _who: &Identity) -> ApiResult<Vec<StreamRow>> {
-        let (s, base) = self.window().await?;
+    async fn streams(&self, who: &Identity) -> ApiResult<Vec<StreamRow>> {
+        let (s, base) = self.seat(who).window().await?;
         let w = Window { now: &s, base: base.as_deref() };
         Ok(s.resources(kind::STREAM).map(|r| self.stream_row(w, r)).collect())
     }
 
-    async fn stream(&self, _who: &Identity, name: &str) -> ApiResult<StreamDetail> {
-        let (s, base) = self.window().await?;
+    async fn stream(&self, who: &Identity, name: &str) -> ApiResult<StreamDetail> {
+        let (s, base) = self.seat(who).window().await?;
         let w = Window { now: &s, base: base.as_deref() };
         let r = s
             .resource(name, kind::STREAM)
@@ -541,7 +637,7 @@ impl Cluster for NativeCluster {
         };
         Ok(StreamDetail {
             name: r.name.clone(),
-            tenant: None,
+            tenant: tenant_of(r),
             replication: r.partitions.first().map_or(0, |p| p.voters.len() as u32),
             retention_ms: None,
             compaction: false,
@@ -557,13 +653,13 @@ impl Cluster for NativeCluster {
         })
     }
 
-    async fn queues(&self, _who: &Identity) -> ApiResult<Vec<QueueRow>> {
-        let (s, _) = self.window().await?;
+    async fn queues(&self, who: &Identity) -> ApiResult<Vec<QueueRow>> {
+        let (s, _) = self.seat(who).window().await?;
         Ok(s.resources(kind::QUEUE).map(|r| self.queue_row(&s, r)).collect())
     }
 
-    async fn queue(&self, _who: &Identity, name: &str) -> ApiResult<QueueDetail> {
-        let (s, base) = self.window().await?;
+    async fn queue(&self, who: &Identity, name: &str) -> ApiResult<QueueDetail> {
+        let (s, base) = self.seat(who).window().await?;
         let w = Window { now: &s, base: base.as_deref() };
         let r = s
             .resource(name, kind::QUEUE)
@@ -598,7 +694,7 @@ impl Cluster for NativeCluster {
         let q = served.map(|(_, q)| q);
         Ok(QueueDetail {
             name: r.name.clone(),
-            tenant: None,
+            tenant: tenant_of(r),
             single_active: false,
             ttl_ms: None,
             dlq: None,
@@ -623,9 +719,8 @@ impl Cluster for NativeCluster {
         })
     }
 
-    async fn create_queue(&self, _who: &Identity, req: &CreateQueue) -> ApiResult<()> {
+    async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
         let unsupported = [
-            (req.tenant.is_some(), "tenants"),
             (req.priority_levels != 1, "priority levels"),
             (req.single_active, "single active consumer"),
             (req.ttl_ms.is_some(), "message TTL"),
@@ -639,23 +734,23 @@ impl Cluster for NativeCluster {
                 missing.join(", ")
             )));
         }
-        let meta = self.client.metadata(&[]).await.map_err(unreachable)?;
+        let seat = self.seat(who);
+        let meta = seat.client.metadata(&[]).await.map_err(failed)?;
         let replication = meta.brokers.len().clamp(1, 3) as u8;
-        match self.client.create_queue(&req.name, replication, None).await {
+        let tenant = req.tenant.as_deref().unwrap_or(DEFAULT_TENANT);
+        match seat.client.create_queue_in(tenant, &req.name, replication, None).await {
             Ok(_) => Ok(()),
             Err(ClientError::ResourceExists { name, .. }) => Err(ApiError::Conflict(format!("{name} exists already."))),
-            Err(ClientError::Broker { code, message }) => Err(ApiError::BadRequest(format!(
-                "The cluster refused the queue: {}{}",
-                code.name(),
-                message.map(|m| format!(": {m}")).unwrap_or_default()
-            ))),
-            Err(e) => Err(unreachable(e)),
+            Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, message }) => Err(ApiError::BadRequest(
+                format!("The cluster refused the queue: {}", message.unwrap_or_else(|| "invalid request".into())),
+            )),
+            Err(e) => Err(failed(e)),
         }
     }
 
     async fn read(
         &self,
-        _who: &Identity,
+        who: &Identity,
         stream: &str,
         partition: u32,
         offset: u64,
@@ -667,14 +762,15 @@ impl Cluster for NativeCluster {
         // Producers whose transaction is aborted from some offset on, until
         // their abort marker.
         let mut aborting: BTreeMap<u64, u64> = BTreeMap::new();
+        let seat = self.seat(who);
         for _ in 0..8 {
             if out.len() >= count as usize {
                 break;
             }
             let wait = Duration::from_millis(100);
             let f = match isolation {
-                Isolation::Committed => self.client.fetch(stream, partition, at, wait).await,
-                Isolation::Uncommitted => self.client.fetch_uncommitted(stream, partition, at, wait).await,
+                Isolation::Committed => seat.client.fetch(stream, partition, at, wait).await,
+                Isolation::Uncommitted => seat.client.fetch_uncommitted(stream, partition, at, wait).await,
             };
             let f = match f {
                 Ok(f) => f,
@@ -686,7 +782,7 @@ impl Cluster for NativeCluster {
                         "Offset {at} is outside {stream} P{partition}. Start at its log start or later."
                     )));
                 }
-                Err(e) => return Err(unreachable(e)),
+                Err(e) => return Err(failed(e)),
             };
             if f.records.is_empty() {
                 break;
@@ -712,15 +808,79 @@ impl Cluster for NativeCluster {
         Ok(out)
     }
 
-    async fn tenants(&self, _who: &Identity) -> ApiResult<TenantsView> {
-        Err(ApiError::NotFound(format!(
-            "{} has no tenants: Lotse does not have tenants, quotas or role bindings yet.",
-            self.id
-        )))
+    async fn tenants(&self, who: &Identity) -> ApiResult<TenantsView> {
+        let seat = self.seat(who);
+        let (s, _) = seat.window().await?;
+        let tenants = seat.client.describe_tenants().await.map_err(failed)?;
+        // Every binding for a cluster admin; one's own for everyone else.
+        let bindings = match seat.client.describe_role_bindings().await {
+            Ok(all) => all.into_iter().map(|(b, _)| b).collect(),
+            Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. }) => {
+                seat.client.who_am_i().await.map_err(failed)?.bindings
+            }
+            Err(e) => return Err(failed(e)),
+        };
+        let applies = |b: &RoleBindingData, t: &str| b.role == role::CLUSTER_ADMIN || b.tenant == t;
+        let rows = tenants
+            .iter()
+            .map(|t| {
+                let mine: Vec<&ResourceMetadata> = s.meta.resources.iter().filter(|r| r.tenant == t.name).collect();
+                let subjects: BTreeSet<(u8, &str)> = bindings
+                    .iter()
+                    .filter(|b| applies(b, &t.name))
+                    .map(|b| (b.subject_kind, b.subject.as_str()))
+                    .collect();
+                Tenant {
+                    name: t.name.clone(),
+                    used_bytes: mine.iter().flat_map(|r| s.replicas(r.resource_id)).map(|p| p.size_bytes).sum(),
+                    quota_bytes: None,
+                    streams: mine.iter().filter(|r| r.kind == kind::STREAM).count() as u32,
+                    queues: mine.iter().filter(|r| r.kind == kind::QUEUE).count() as u32,
+                    principals: subjects.len() as u32,
+                    state: if t.source == lotse_proto::config_source::STATIC {
+                        chip(Tone::Info, "Configured")
+                    } else {
+                        chip(Tone::Ok, "Active")
+                    },
+                }
+            })
+            .collect();
+        let per_tenant = tenants
+            .iter()
+            .map(|t| TenantBindings {
+                tenant: t.name.clone(),
+                bindings: bindings.iter().filter(|b| applies(b, &t.name)).map(binding_row).collect(),
+            })
+            .collect();
+        Ok(TenantsView { tenants: rows, bindings: per_tenant })
     }
 
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         Err(ApiError::BadRequest(format!("No upgrade is running on {}: it has no operator yet.", self.id)))
+    }
+}
+
+/// A binding as the tenants screen lists it.
+fn binding_row(b: &RoleBindingData) -> RoleBinding {
+    let name = |r: u8| match r {
+        role::CLUSTER_ADMIN => "cluster-admin",
+        role::TENANT_ADMIN => "tenant-admin",
+        role::PRODUCER => "producer",
+        role::CONSUMER => "consumer",
+        role::VIEWER => "viewer",
+        _ => "unknown",
+    };
+    RoleBinding {
+        principal: b.subject.clone(),
+        auth: if b.subject_kind == subject_kind::GROUP { "group" } else { "user" }.into(),
+        role: name(b.role).into(),
+        resources: vec![if b.role == role::CLUSTER_ADMIN {
+            "every tenant".into()
+        } else if b.prefix.is_empty() {
+            "*".into()
+        } else {
+            format!("{}*", b.prefix)
+        }],
     }
 }
 

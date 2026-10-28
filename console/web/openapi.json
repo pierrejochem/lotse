@@ -1930,7 +1930,7 @@
         "properties": {
           "auth": {
             "type": "string",
-            "description": "`mTLS` or `OIDC`."
+            "description": "How the subject is recognised: `user` or `group` (a group at the\nidentity provider); the demo says `mTLS` or `OIDC`."
           },
           "principal": {
             "type": "string",
@@ -2140,7 +2140,6 @@
         "required": [
           "name",
           "used_bytes",
-          "quota_bytes",
           "streams",
           "queues",
           "principals",
@@ -2164,9 +2163,12 @@
             "minimum": 0
           },
           "quota_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "Storage quota, bytes.",
+            "description": "Storage quota, bytes; `None` where the cluster has no quotas.",
             "minimum": 0
           },
           "state": {

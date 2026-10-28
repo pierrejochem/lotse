@@ -4,11 +4,19 @@
 //! listen = "127.0.0.1:8080"
 //!
 //! [auth]
-//! mode = "dev"          # "oidc" once implemented
+//! mode = "dev"          # or "oidc", see below
 //! user = "pierre"
+//! password = "…"        # the user's SCRAM password, if the clusters require authentication
+//!
+//! # [auth]
+//! # mode = "oidc"
+//! # issuer = "https://id.example.com/realms/ops"
+//! # client_id = "lotse-console"
+//! # redirect_url = "https://console.example.com/auth/callback"
 //!
 //! [metrics]
-//! principal = "console-metrics"   # read-only broker role, used only by the sampler
+//! principal = "console-metrics"   # viewer role on the brokers, used only by the sampler
+//! password = "…"                  # its SCRAM password, if the clusters require authentication
 //! sample_secs = 10
 //! retention_hours = 24
 //!
@@ -59,6 +67,9 @@ pub struct MetricsConfig {
     /// Principal of the console's read-only metrics identity. The sampler
     /// uses it; nothing a user does ever does.
     pub principal: String,
+    /// Its SCRAM password, where the clusters require authentication.
+    #[serde(default)]
+    pub password: Option<String>,
     /// Seconds between samples.
     pub sample_secs: u64,
     /// Hours of history to keep in memory.
@@ -67,7 +78,7 @@ pub struct MetricsConfig {
 
 impl Default for MetricsConfig {
     fn default() -> Self {
-        MetricsConfig { principal: "console-metrics".into(), sample_secs: 10, retention_hours: 24 }
+        MetricsConfig { principal: "console-metrics".into(), password: None, sample_secs: 10, retention_hours: 24 }
     }
 }
 
@@ -174,11 +185,18 @@ impl Config {
                 c.id()
             )));
         }
-        if matches!(cfg.auth, AuthConfig::Oidc { .. }) {
-            return Err(ConfigError::Invalid(
-                "auth.mode = \"oidc\" is not implemented yet. Use mode = \"dev\" on a machine only you can reach."
-                    .into(),
-            ));
+        if let AuthConfig::Oidc(o) = &cfg.auth {
+            if !o.redirect_url.ends_with("/auth/callback") {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.redirect_url must be this console's /auth/callback, e.g. \"https://console.example.com/auth/callback\"; it is \"{}\".",
+                    o.redirect_url
+                )));
+            }
+            if !o.redirect_url.starts_with("https://") && !cfg.listen.ip().is_loopback() {
+                return Err(ConfigError::Invalid(
+                    "auth.redirect_url must use https:// unless the console listens on loopback: the session cookie would travel in the clear.".into(),
+                ));
+            }
         }
         if !cfg.listen.ip().is_loopback() && matches!(cfg.auth, AuthConfig::Dev { .. }) {
             tracing::warn!(listen = %cfg.listen, "dev auth on a non-loopback address: anyone who can reach it acts as the dev user");
@@ -211,18 +229,28 @@ mod tests {
     }
 
     #[test]
-    fn refuses_what_does_not_work_yet() {
+    fn checks_clusters_and_sign_in() {
         let native = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = [\"b1:9000\"]");
         assert!(
             matches!(&Config::parse(&native).unwrap().clusters[0], ClusterConfig::Native { bootstrap, .. } if bootstrap.len() == 1)
         );
         let empty = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = []");
         assert!(Config::parse(&empty).unwrap_err().to_string().contains("bootstrap"));
-        let oidc = OK.replace(
-            "mode = \"dev\"\n        user = \"pierre\"",
-            "mode = \"oidc\"\nissuer = \"https://id\"\nclient_id = \"c\"",
+        let oidc = |redirect: &str| {
+            OK.replace(
+                "mode = \"dev\"\n        user = \"pierre\"",
+                &format!("mode = \"oidc\"\nissuer = \"https://id\"\nclient_id = \"c\"\nredirect_url = \"{redirect}\""),
+            )
+        };
+        let c = Config::parse(&oidc("https://console/auth/callback")).unwrap();
+        assert!(
+            matches!(&c.auth, AuthConfig::Oidc(o) if o.scopes.contains(&"openid".to_string()) && o.principal_claim == "sub")
         );
-        assert!(Config::parse(&oidc).unwrap_err().to_string().contains("oidc"));
+        assert!(Config::parse(&oidc("https://console/elsewhere")).unwrap_err().to_string().contains("/auth/callback"));
+        // Plain HTTP only where nobody else can listen in.
+        assert!(Config::parse(&oidc("http://127.0.0.1:8080/auth/callback")).is_ok());
+        let public = oidc("http://console/auth/callback").replace("127.0.0.1:8080", "0.0.0.0:8080");
+        assert!(Config::parse(&public).unwrap_err().to_string().contains("https"));
     }
 
     #[test]

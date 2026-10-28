@@ -51,10 +51,21 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         replication: u8,
         ack_timeout: Option<Duration>,
     ) -> Result<u64, ClientError> {
+        self.create_queue_in(&self.cfg.tenant, name, replication, ack_timeout).await
+    }
+
+    /// [`Client::create_queue`] in `tenant` instead of the configured one.
+    pub async fn create_queue_in(
+        &self,
+        tenant: &str,
+        name: &str,
+        replication: u8,
+        ack_timeout: Option<Duration>,
+    ) -> Result<u64, ClientError> {
         let configs = ack_timeout.map(|t| vec![("ack.timeout.ms".to_string(), t.as_millis().to_string())]);
         let req = Request::CreateQueue(CreateQueueRequest {
             name: name.into(),
-            tenant: self.cfg.tenant.clone(),
+            tenant: tenant.into(),
             priority_levels: 1,
             single_active: false,
             dlq: None,

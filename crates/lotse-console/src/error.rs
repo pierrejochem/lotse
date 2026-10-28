@@ -16,6 +16,9 @@ pub enum ApiError {
     /// The request is malformed or breaks a rule.
     #[error("{0}")]
     BadRequest(String),
+    /// Nobody is signed in, or the session ended: sign in at `/auth/login`.
+    #[error("Sign in to continue.")]
+    Unauthorized,
     /// The signed-in user's role does not allow this.
     #[error("{0}")]
     Forbidden(String),
@@ -32,6 +35,7 @@ impl ApiError {
         match self {
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
             ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             ApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "CLUSTER_UNAVAILABLE"),

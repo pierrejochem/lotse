@@ -175,6 +175,7 @@ async fn fetch(cluster: &dyn Cluster, topic: &Topic, who: &Identity) -> Arc<str>
                 ApiError::Unavailable(_) => "CLUSTER_UNAVAILABLE",
                 ApiError::BadRequest(_) => "BAD_REQUEST",
                 ApiError::Conflict(_) => "CONFLICT",
+                ApiError::Unauthorized => "UNAUTHORIZED",
             };
             Update { topic, data: None, error: Some(ErrorBody { code: code.into(), message: e.to_string() }) }
         }
@@ -197,7 +198,7 @@ mod tests {
     }
 
     fn user(p: &str) -> Identity {
-        Identity { principal: p.into(), display_name: p.into(), token: None }
+        Identity::anonymous(p)
     }
 
     fn overview() -> Topic {
