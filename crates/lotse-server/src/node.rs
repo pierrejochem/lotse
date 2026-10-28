@@ -62,6 +62,12 @@ pub struct NodeConfig {
     pub client_addrs: BTreeMap<NodeId, String>,
     /// Streams and the groups of their partitions.
     pub streams: Vec<StreamConfig>,
+    /// The group that coordinates producers (hands out producer ids); one
+    /// of `groups`. `None`: no idempotent produce.
+    pub coordinator: Option<GroupId>,
+    /// Producers kept per replica for idempotence; every node must use the
+    /// same value ([`crate::DEFAULT_MAX_PRODUCERS`] by default).
+    pub max_producers: usize,
 }
 
 /// What a group looks like from outside.
@@ -176,7 +182,8 @@ impl<R: Runtime> Node<R> {
         for &g in &cfg.groups {
             let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
             let dir = PathBuf::from("groups").join(g.to_string());
-            groups.insert(g, Replica::open(rt.clone(), dir, raft, state_machine(g), cfg.log).await?);
+            let replica = Replica::open_with(rt.clone(), dir, raft, state_machine(g), cfg.log, cfg.max_producers);
+            groups.insert(g, replica.await?);
         }
         let listener = rt.listen(&cfg.listen).await?;
         let client_listener = match &cfg.client_listen {
@@ -251,7 +258,12 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             next_tick = rt.now() + cfg.tick;
             groups.values_mut().for_each(|g| g.raft().tick());
         }
-        let view = ClusterView { streams: &cfg.streams, client_addrs: &cfg.client_addrs, now: rt.now() };
+        let view = ClusterView {
+            streams: &cfg.streams,
+            client_addrs: &cfg.client_addrs,
+            coordinator: cfg.coordinator,
+            now: rt.now(),
+        };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {
             let (group, batch, reply) = match command {
@@ -262,7 +274,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 }
             };
             let res = match groups.get_mut(&group) {
-                Some(g) => g.propose(batch).map_err(|e: ProposeError| e.to_string()),
+                Some(g) => g.propose(batch).map(|p| (p.first, p.last)).map_err(|e: ProposeError| e.to_string()),
                 None => Err(format!("group {group} is not hosted here")),
             };
             let mut r = reply.lock().expect("reply lock");

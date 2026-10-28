@@ -71,7 +71,7 @@ fn a_single_replica_commits_and_reapplies_after_a_power_loss() {
     Sim::new(1).run(|rt| async move {
         let mut r = open(&rt).await;
         elect(&mut r).await;
-        let (first, last) = r.propose(batch(3, "a")).unwrap();
+        let Proposed { first, last, .. } = r.propose(batch(3, "a")).unwrap();
         assert_eq!((first, last), (2, 4), "no-op at 1, three records");
         r.propose(batch(1, "b")).unwrap();
         r.process().await.unwrap();
@@ -147,5 +147,77 @@ fn a_write_interrupted_by_a_crash_leaves_the_old_file() {
         tmp.append(Bytes::from_static(b"new, not yet in place")).await.unwrap();
         rt.crash();
         assert_eq!(read_file(&rt, &dir.join("f")).await.unwrap().as_deref(), Some(&b"old"[..]));
+    });
+}
+
+/// An idempotent batch of one record from producer 7.
+fn idempotent(seq: i32, value: &str) -> Bytes {
+    let mut raw = BytesMut::from(&batch(1, value)[..]);
+    lotse_record::set_producer(&mut raw, 7, 0, seq).unwrap();
+    raw.freeze()
+}
+
+async fn commit(r: &mut Replica<SimRuntime, Recorder>, b: Bytes) -> Proposed {
+    let p = r.propose(b).unwrap();
+    r.process().await.unwrap();
+    r.process().await.unwrap();
+    p
+}
+
+#[test]
+fn producer_state_survives_a_restart_and_a_snapshot() {
+    Sim::new(5).run(|rt| async move {
+        let mut r = open(&rt).await;
+        elect(&mut r).await;
+        let a = commit(&mut r, idempotent(0, "a")).await;
+        assert!(!a.duplicate);
+        let again = r.propose(idempotent(0, "a")).unwrap();
+        assert_eq!((again.first, again.term, again.duplicate), (a.first, None, true), "applied: written");
+        assert!(matches!(r.propose(idempotent(5, "x")), Err(ProposeError::OutOfOrderSequence { expected: 1 })));
+
+        // After a power loss the state is rebuilt from the log.
+        drop(r);
+        rt.crash();
+        let mut r = open(&rt).await;
+        elect(&mut r).await;
+        assert_eq!(r.propose(idempotent(0, "a")).unwrap().first, a.first, "still known after a restart");
+        let b = commit(&mut r, idempotent(1, "b")).await;
+
+        // From a snapshot, with nothing of the producer left in the log after it.
+        r.compact().await.unwrap();
+        drop(r);
+        rt.crash();
+        let mut r = open(&rt).await;
+        elect(&mut r).await;
+        let again = r.propose(idempotent(1, "b")).unwrap();
+        assert_eq!((again.first, again.duplicate), (b.first, true), "restored from the snapshot");
+        assert!(!commit(&mut r, idempotent(2, "c")).await.duplicate);
+        assert_eq!(applied(&r), ["a", "b", "c"], "every batch once");
+    });
+}
+
+#[test]
+fn an_unapplied_batch_is_recognised_from_the_log_tail_after_a_restart() {
+    Sim::new(6).run(|rt| async move {
+        let mut r = open(&rt).await;
+        elect(&mut r).await;
+        let a = r.propose(idempotent(0, "a")).unwrap();
+        assert_eq!(a.term, Some(r.raft_ref().term()), "in flight");
+        // Appended and synced, but not yet applied when the power goes.
+        r.process().await.unwrap();
+        drop(r);
+        rt.crash();
+        let mut r = open(&rt).await;
+        // Lead again without processing, so nothing is applied yet: only the
+        // log tail can know the batch.
+        while r.raft_ref().role() != lotse_raft::Role::Leader {
+            r.raft().tick();
+        }
+        assert_eq!(r.applied(), 0);
+        let again = r.propose(idempotent(0, "a")).unwrap();
+        assert_eq!((again.first, again.duplicate), (a.first, true), "the retry finds the original in the log");
+        assert!(again.term.is_some(), "still in flight");
+        elect(&mut r).await;
+        assert_eq!(applied(&r), ["a"]);
     });
 }

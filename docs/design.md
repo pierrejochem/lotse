@@ -109,7 +109,17 @@ Pro `producer_id` werden gehalten: Epoch, die letzten 5 Einträge `(base_seq, la
 - Lücke in der Sequenz → `OutOfOrderSequence`.
 - Ältere Epoch → `ProducerFenced`.
 
-Der State liegt im Speicher und wird beim Segment-Roll als `.pstate` gesichert. Recovery replayt nur ab dem letzten Snapshot.
+Ein Producer, den die Partition nicht kennt, wird mit jeder Sequenz angenommen: Er ist neu oder wurde verdrängt (siehe unten), und dann lässt sich ein Retry nicht mehr erkennen.
+
+Der Leader prüft gegen das **ganze Log**, nicht nur gegen das Committete: gegen den angewendeten Producer-State und gegen das Ende des Logs, das angehängt, aber noch nicht angewendet ist. So erkennt er auch einen Retry, dessen Original noch unterwegs ist, auf ihm selbst oder nach einem Leaderwechsel auf dem neuen Leader. Ein solches Duplikat wird beantwortet, sobald der Commit des Originals entscheidet. Das Log-Ende wird beim Start aus dem Log neu aufgebaut und beim Truncate mit abgeschnitten.
+
+Jede Partition hält höchstens `max_producers` Producer (Standard 10.000, auf allen Nodes gleich). Kommt beim Anwenden einer mehr hinzu, fällt der Producer heraus, dessen letzter Schreibvorgang im Log am weitesten zurückliegt. Die Regel hängt nur am Log, also verdrängen alle Replicas dieselben Producer.
+
+Der angewendete Producer-State ist Teil des Raft-Snapshots der Replica, neben den Daten der State Machine, und reist mit ihm zu Followern; Recovery replayt nur das Log nach dem Snapshot. (Das ersetzt die `.pstate`-Dateien beim Segment-Roll; ADR 0028.)
+
+Producer-IDs vergibt die Koordinator-Gruppe: `InitProducer` schlägt dort einen Allokations-Entry vor, und sobald er nach derselben Regel wie ein `Produce` committet ist, ist die ID sein Raft-Index. Indizes werden nie wiederverwendet, also auch IDs nicht. Idempotente Producer bekommen Epoch 0; Epochs kommen mit transaktionalen IDs. Bis die Metadaten-Gruppe existiert, legt die Node-Konfiguration die Koordinator-Gruppe fest.
+
+`lotse-client` produziert standardmäßig idempotent: Er nummeriert Batches pro Partition, schickt pro Partition einen nach dem anderen und wiederholt einen unbekannten Ausgang mit derselben Sequenz. Bleibt der Ausgang bis zum Ende der Retry-Zeit unbekannt, meldet er `Unknown` und beginnt mit einer neuen Producer-ID, damit spätere Batches nicht hinter einer Lücke warten, die sich vielleicht nie füllt.
 
 ### Lesepfad: HW und LSO
 
@@ -240,7 +250,7 @@ Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frame
 
 `Publish` routet über Exchanges und schreibt in die Ziel-Queues. `Produce` schreibt direkt in eine Partition. Beide nutzen dasselbe Batch-Format und dieselben Idempotenzregeln.
 
-Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `Metadata` 1, `FindCoordinator` 2, `Produce` 3, `Fetch` 4 und so weiter. Alle beginnen bei Version 0. Umgesetzt sind bisher `ApiVersions`, `Metadata`, `Produce` und `Fetch` (ADR 0026).
+Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `Metadata` 1, `FindCoordinator` 2, `Produce` 3, `Fetch` 4 und so weiter bis `InitProducer` 16. Alle beginnen bei Version 0. Umgesetzt sind bisher `ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch` und `InitProducer` (ADR 0026, ADR 0028).
 
 ### Zero-copy
 
@@ -294,6 +304,12 @@ Metadata     <- names: array<string>            // leer = alle
 ```
 
 Eine Queue erscheint als Ressource mit genau einer Partition 0.
+
+```
+FindCoordinator <- key_type u8,          // 0 = GROUP, 1 = PRODUCER
+                   key string             // Gruppenname oder transaktionale ID, sonst leer
+                -> error u16, node_id u32, host string, port u16, error_msg string?
+```
 
 ### Streams
 
@@ -436,6 +452,7 @@ AlterConfigs    <- resource_id u64, set: array{key string, value string}, delete
 | 12 | `CORRUPT_BATCH` | nein | CRC oder Format ungültig |
 | 13 | `UNAUTHORIZED` | nein | RBAC verweigert |
 | 14 | `UNSUPPORTED_VERSION` | nein | API-Version außerhalb min/max |
+| 18 | `COORDINATOR_NOT_AVAILABLE` | ja | Keine Koordinator-Gruppe konfiguriert oder gerade ohne Leader |
 
 ## Weitere Entscheidungen
 
@@ -625,4 +642,4 @@ Die Designentscheidungen für Broker und Console sind getroffen. Offen für die 
 - [ ] Admin-APIs für Purge, Requeue und Leader verschieben, danach die Buttons in der UI
 - [ ] Einklappbares Menü auf dem Telefon
 
-Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-proto`, `lotse-sim`, `lotse-server`, `lotse-client` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt und Clients über den ersten Schnitt des nativen Protokolls bedient (`ApiVersions`, `Metadata`, `Produce`, `Fetch`). Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Vier Simulationen prüfen das, die CI fährt jede mit 5.000 Seeds, die Client-Simulation pro Push mit 2.000 und nächtlich mit 5.000 (ADR 0027): die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready`, die Node-Simulation mit drei ganzen Nodes und drei Gruppen über das simulierte Netz und die Client-Simulation mit drei oder fünf Nodes, Producern und Consumern über `lotse-client`. Sie prüft, dass kein bestätigter Batch verloren geht oder wandert, dass Consumer nur Committetes lesen, dass ein als nicht geschrieben gemeldeter Batch tatsächlich fehlt und dass nichts doppelt im Log steht. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und schreibt und liest über `lotse-client` weiter. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 eingebauten Durability-Fehler der Replica, alle 9 eingebauten Transportfehler und alle 8 eingebauten Protokollfehler (Bestätigung vor dem Commit oder ohne Term-Prüfung, „nicht geschrieben“ schon beim Ersetzen des Entries, unkommittete Daten im Fetch, falsches `OFFSET_OUT_OF_RANGE`, Client-Wiederholung bei unbekanntem Ausgang). Den heikelsten davon fängt nur ein deterministischer Test mit fünf Replicas, weil die Simulation die nötige Geschichte zu selten trifft. Zwei echte Fehler wurden so gefunden: der Hard State vor dem Log (ADR 0023) und ein zu enges `OFFSET_OUT_OF_RANGE` nach einem Leaderwechsel (ADR 0026). Die Console läuft gegen einen eingebauten Demo-Cluster, bis das native Protokoll Admin-API-Keys hat. Nächster Schritt: idempotente Producer (Producer-IDs und Sequenzen), danach Transaktionen.
+Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-proto`, `lotse-sim`, `lotse-server`, `lotse-client` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt und Clients über das native Protokoll bedient (`ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `InitProducer`). `Produce` ist idempotent: Producer-IDs aus der Koordinator-Gruppe, Sequenzen geprüft gegen das ganze Log, Producer-State in den Snapshots (ADR 0028); `lotse-client` nutzt das standardmäßig. Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Vier Simulationen prüfen das, die CI fährt jede mit 5.000 Seeds, die Client-Simulation pro Push mit 2.000 und nächtlich mit 5.000 (ADR 0027): die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready`, die Node-Simulation mit drei ganzen Nodes und drei Gruppen über das simulierte Netz und die Client-Simulation mit drei oder fünf Nodes, einem idempotenten und einem einfachen Producer und zwei Consumern über `lotse-client`. Sie prüft, dass kein bestätigter Batch verloren geht oder wandert, dass Consumer nur Committetes lesen, dass ein als nicht geschrieben gemeldeter Batch tatsächlich fehlt und dass nichts doppelt im Log steht, obwohl der idempotente Producer unbekannte Ausgänge wiederholt. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und schreibt und liest über `lotse-client` weiter. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 eingebauten Durability-Fehler der Replica, alle 9 eingebauten Transportfehler, alle 8 eingebauten Protokollfehler und alle 11 eingebauten Idempotenzfehler (Prüfung ohne Log-Ende, keine Duplikaterkennung, Log-Ende nicht gekürzt oder nicht neu aufgebaut, Producer-State nicht im Snapshot, kein Fencing, Lücken akzeptiert, falsche Verdrängung, Duplikat eines laufenden Batches sofort beantwortet, Client mit wiederverwendeter Sequenz oder alter Producer-ID nach unbekanntem Ausgang). Die heikelsten fängt nur ein deterministischer Test mit fünf Replicas, weil die Simulation die nötige Geschichte zu selten trifft. Zwei echte Fehler wurden so gefunden: der Hard State vor dem Log (ADR 0023) und ein zu enges `OFFSET_OUT_OF_RANGE` nach einem Leaderwechsel (ADR 0026). Die Console läuft gegen einen eingebauten Demo-Cluster, bis das native Protokoll Admin-API-Keys hat. Nächster Schritt: Transaktionen (`__txn_state`, Marker, LSO).

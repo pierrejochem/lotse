@@ -13,8 +13,8 @@
 //! with tagged fields, so later versions can add fields old readers skip.
 //! Field conventions are in [`codec`].
 //!
-//! The first cut has `ApiVersions`, `Metadata`, `Produce` and `Fetch`, all
-//! at version 0.
+//! Implemented so far: `ApiVersions`, `Metadata`, `FindCoordinator`,
+//! `Produce`, `Fetch` and `InitProducer`, all at version 0.
 
 #![warn(missing_docs)]
 
@@ -50,19 +50,24 @@ impl ApiKey {
     pub const API_VERSIONS: ApiKey = ApiKey(0);
     /// Nodes, resources and partition leaders.
     pub const METADATA: ApiKey = ApiKey(1);
-    /// Reserved: the coordinator of a group or transaction.
+    /// The node coordinating a consumer group or producers.
     pub const FIND_COORDINATOR: ApiKey = ApiKey(2);
     /// Append batches to stream partitions.
     pub const PRODUCE: ApiKey = ApiKey(3);
     /// Read batches from stream partitions.
     pub const FETCH: ApiKey = ApiKey(4);
+    /// A producer id and epoch for idempotent (and later transactional)
+    /// produce. Keys 5 to 15 are the stream and queue keys of the design.
+    pub const INIT_PRODUCER: ApiKey = ApiKey(16);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 4] = [
+    pub const SUPPORTED: [ApiVersionRange; 6] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PRODUCE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FETCH, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::INIT_PRODUCER, min: 0, max: 0 },
     ];
 }
 
@@ -113,10 +118,18 @@ impl ErrorCode {
     pub const UNAUTHORIZED: ErrorCode = ErrorCode(13);
     /// API version outside the node's range.
     pub const UNSUPPORTED_VERSION: ErrorCode = ErrorCode(14);
+    /// The member's epoch is outdated: join again.
+    pub const FENCED_MEMBER_EPOCH: ErrorCode = ErrorCode(15);
+    /// The member is not known: join again.
+    pub const UNKNOWN_MEMBER_ID: ErrorCode = ErrorCode(16);
+    /// The frame is larger than the limit; the connection is closed.
+    pub const FRAME_TOO_LARGE: ErrorCode = ErrorCode(17);
+    /// No coordinator is configured, or it has no leader right now.
+    pub const COORDINATOR_NOT_AVAILABLE: ErrorCode = ErrorCode(18);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 15] = [
+        const NAMES: [&str; 19] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -132,6 +145,10 @@ impl ErrorCode {
             "CORRUPT_BATCH",
             "UNAUTHORIZED",
             "UNSUPPORTED_VERSION",
+            "FENCED_MEMBER_EPOCH",
+            "UNKNOWN_MEMBER_ID",
+            "FRAME_TOO_LARGE",
+            "COORDINATOR_NOT_AVAILABLE",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -144,6 +161,7 @@ impl ErrorCode {
                 | ErrorCode::FENCED_LEADER_TERM
                 | ErrorCode::NOT_ENOUGH_REPLICAS
                 | ErrorCode::REQUEST_TIMED_OUT
+                | ErrorCode::COORDINATOR_NOT_AVAILABLE
         )
     }
 }
@@ -183,10 +201,14 @@ pub enum Request {
     ApiVersions,
     /// [`ApiKey::METADATA`].
     Metadata(MetadataRequest),
+    /// [`ApiKey::FIND_COORDINATOR`].
+    FindCoordinator(FindCoordinatorRequest),
     /// [`ApiKey::PRODUCE`].
     Produce(ProduceRequest),
     /// [`ApiKey::FETCH`].
     Fetch(FetchRequest),
+    /// [`ApiKey::INIT_PRODUCER`].
+    InitProducer(InitProducerRequest),
 }
 
 impl Request {
@@ -195,8 +217,10 @@ impl Request {
         match self {
             Request::ApiVersions => ApiKey::API_VERSIONS,
             Request::Metadata(_) => ApiKey::METADATA,
+            Request::FindCoordinator(_) => ApiKey::FIND_COORDINATOR,
             Request::Produce(_) => ApiKey::PRODUCE,
             Request::Fetch(_) => ApiKey::FETCH,
+            Request::InitProducer(_) => ApiKey::INIT_PRODUCER,
         }
     }
 }
@@ -208,6 +232,10 @@ pub enum Response {
     ApiVersions(ApiVersionsResponse),
     /// To [`Request::Metadata`].
     Metadata(MetadataResponse),
+    /// To [`Request::FindCoordinator`].
+    FindCoordinator(FindCoordinatorResponse),
+    /// To [`Request::InitProducer`].
+    InitProducer(InitProducerResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -228,8 +256,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
     match request {
         Request::ApiVersions => w.no_tags(),
         Request::Metadata(r) => r.put(&mut w),
+        Request::FindCoordinator(r) => r.put(&mut w),
         Request::Produce(r) => r.put(&mut w),
         Request::Fetch(r) => r.put(&mut w),
+        Request::InitProducer(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -252,8 +282,10 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
             Request::ApiVersions
         }
         ApiKey::METADATA => Request::Metadata(MetadataRequest::get(&mut r)?),
+        ApiKey::FIND_COORDINATOR => Request::FindCoordinator(FindCoordinatorRequest::get(&mut r)?),
         ApiKey::PRODUCE => Request::Produce(ProduceRequest::get(&mut r)?),
         ApiKey::FETCH => Request::Fetch(FetchRequest::get(&mut r)?),
+        ApiKey::INIT_PRODUCER => Request::InitProducer(InitProducerRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -269,6 +301,8 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
     match response {
         Response::ApiVersions(r) => r.put(&mut w),
         Response::Metadata(r) => r.put(&mut w),
+        Response::FindCoordinator(r) => r.put(&mut w),
+        Response::InitProducer(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -300,6 +334,8 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
     let response = match api_key {
         ApiKey::API_VERSIONS => Response::ApiVersions(ApiVersionsResponse::get(&mut r)?),
         ApiKey::METADATA => Response::Metadata(MetadataResponse::get(&mut r)?),
+        ApiKey::FIND_COORDINATOR => Response::FindCoordinator(FindCoordinatorResponse::get(&mut r)?),
+        ApiKey::INIT_PRODUCER => Response::InitProducer(InitProducerResponse::get(&mut r)?),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),

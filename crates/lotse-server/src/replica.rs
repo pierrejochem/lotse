@@ -18,6 +18,11 @@
 //! snapshot, the term runs and configurations from the log; committed
 //! entries after the snapshot are applied again.
 //!
+//! The replica also keeps the producer state that makes produce idempotent
+//! ([`crate::producers`]): checked on [`Replica::propose`], updated as the
+//! log grows, is truncated and is applied, and saved in snapshots next to the
+//! state machine's data.
+//!
 //! ```text
 //! <dir>/raft.state   term, vote, commit (+ crc)
 //! <dir>/snapshot     index, term, membership, state machine data (+ crc)
@@ -37,9 +42,11 @@ use lotse_raft::{
 use lotse_record::{Batch, RaftControl};
 use lotse_rt::{Disk, OpenMode, SegmentFile};
 
+use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, ProducerState};
+
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -82,6 +89,33 @@ pub enum ProposeError {
     /// Control batches are written by the broker, not proposed.
     #[error("control batches cannot be proposed")]
     Control,
+    /// The batch does not continue its producer's sequence.
+    #[error("out of order: the producer's next sequence is {expected}")]
+    OutOfOrderSequence {
+        /// The sequence the batch should start with.
+        expected: i32,
+    },
+    /// A newer epoch of the producer is active.
+    #[error("fenced: the producer's current epoch is {current}")]
+    ProducerFenced {
+        /// The current epoch.
+        current: u16,
+    },
+}
+
+/// Where a proposed batch is in the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Proposed {
+    /// First index.
+    pub first: u64,
+    /// Last index.
+    pub last: u64,
+    /// The entry's term while it is not applied; `None` for a duplicate of
+    /// a batch that is applied already (and so committed).
+    pub term: Option<u64>,
+    /// The batch was in the log already (an idempotent retry): nothing new
+    /// was proposed, `first..=last` is the original.
+    pub duplicate: bool,
 }
 
 /// What a [`Replica::process`] round produced for the node.
@@ -104,6 +138,7 @@ pub struct Replica<D: Disk, S> {
     sm: S,
     applied: u64,
     snapshot: Option<(SnapshotMeta, Bytes)>,
+    producers: ProducerState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
 }
@@ -126,17 +161,34 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         disk: D,
         dir: impl Into<PathBuf>,
         cfg: Config,
-        mut sm: S,
+        sm: S,
         log_config: LogConfig,
     ) -> Result<Self, Error> {
+        Self::open_with(disk, dir, cfg, sm, log_config, DEFAULT_MAX_PRODUCERS).await
+    }
+
+    /// [`Replica::open`] keeping at most `max_producers` producers. Every
+    /// replica of a group must use the same limit: it decides which
+    /// producers are evicted.
+    pub async fn open_with(
+        disk: D,
+        dir: impl Into<PathBuf>,
+        cfg: Config,
+        mut sm: S,
+        log_config: LogConfig,
+        max_producers: usize,
+    ) -> Result<Self, Error> {
         let dir = dir.into();
+        let mut producers = ProducerState::new(max_producers);
         disk.create_dir_all(&dir).await?;
         let snapshot = match read_file(&disk, &dir.join(SNAPSHOT)).await? {
             Some(bytes) => Some(decode_snapshot(bytes)?),
             None => None,
         };
         if let Some((_, data)) = &snapshot {
-            sm.restore(data).map_err(Error::Corrupt)?;
+            let (p, d) = split_snapshot_data(data)?;
+            producers.restore(&p).map_err(Error::Corrupt)?;
+            sm.restore(&d).map_err(Error::Corrupt)?;
         }
         let hard_state = match read_file(&disk, &dir.join(HARD_STATE)).await? {
             Some(bytes) => decode_hard_state(bytes)?,
@@ -159,6 +211,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             for batch in batches(log.read(offset, 1 << 20).await?)? {
                 let e = to_entry(&batch)?;
                 runs.append(e.first, e.last, e.term);
+                // Applied entries are applied again below; until then, and
+                // for the uncommitted rest, the producer state sees them as
+                // the tail of the log.
+                producers.appended(e.first, e.last, e.term, &batch);
                 if e.kind == EntryKind::Config {
                     let m = Membership::decode(&e.data).ok_or_else(|| Error::Corrupt("bad membership".into()))?;
                     configs.push((e.last, m));
@@ -181,6 +237,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             sm,
             applied: snap_index,
             snapshot,
+            producers,
             max_fill_bytes: 1 << 20,
         })
     }
@@ -211,8 +268,9 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     }
 
     /// Proposes a data batch as the leader. Returns the indices it occupies;
-    /// it is stamped when it is persisted.
-    pub fn propose(&mut self, batch: Bytes) -> Result<(u64, u64), ProposeError> {
+    /// it is stamped when it is persisted. An idempotent batch that is in
+    /// the log already is not proposed again: the original is returned.
+    pub fn propose(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {
         let (parsed, rest) = Batch::parse(&batch)?;
         if !rest.is_empty() {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("more than one batch")));
@@ -220,7 +278,24 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         if parsed.attributes().control {
             return Err(ProposeError::Control);
         }
-        self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)
+        if parsed.producer_id() != 0 && parsed.base_sequence() < 0 {
+            return Err(ProposeError::Invalid(lotse_record::Error::Malformed("idempotent batch without a sequence")));
+        }
+        // Only a leader answers for the log, duplicates included.
+        if self.raft.role() != lotse_raft::Role::Leader {
+            return Err(ProposeError::NotLeader(NotLeader { leader: self.raft.leader() }));
+        }
+        match self.producers.check(&parsed) {
+            Check::New => {}
+            Check::Duplicate { first, last, term } => return Ok(Proposed { first, last, term, duplicate: true }),
+            Check::OutOfOrder { expected } => return Err(ProposeError::OutOfOrderSequence { expected }),
+            Check::Fenced { current } => return Err(ProposeError::ProducerFenced { current }),
+        }
+        let (first, last) =
+            self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
+        let term = self.raft.term();
+        self.producers.appended(first, last, term, &parsed);
+        Ok(Proposed { first, last, term: Some(term), duplicate: false })
     }
 
     /// Persists, applies and sends whatever the group has ready.
@@ -231,17 +306,24 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let ready = self.raft.ready();
         if let Some(snap) = ready.snapshot {
             write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&snap.meta, &snap.data)).await?;
-            self.sm.restore(&snap.data).map_err(Error::Corrupt)?;
+            let (p, d) = split_snapshot_data(&snap.data)?;
+            self.producers.restore(&p).map_err(Error::Corrupt)?;
+            self.sm.restore(&d).map_err(Error::Corrupt)?;
             self.log.reset(snap.meta.index).await?;
             self.applied = snap.meta.index;
             self.snapshot = Some((snap.meta, snap.data));
         }
         if let Some(from) = ready.truncate_from {
             self.log.truncate_from(from - 1).await?;
+            self.producers.truncated(from);
         }
         if !ready.entries.is_empty() {
             for e in &ready.entries {
-                self.log.append(to_batch(e)?).await?;
+                let batch = to_batch(e)?;
+                if e.kind == EntryKind::Normal {
+                    self.producers.appended(e.first, e.last, e.term, &Batch::parse(&batch)?.0);
+                }
+                self.log.append(batch).await?;
             }
             // Nothing may be acknowledged before it is durable.
             self.log.sync().await?;
@@ -278,6 +360,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                         batch.base_offset()
                     )));
                 }
+                self.producers.applied(batch.base_offset() + 1, batch.next_offset(), &batch);
                 // Control batches (Raft's own, transaction markers) are not data.
                 if !batch.attributes().control {
                     self.sm.apply(&batch);
@@ -325,7 +408,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         }
         self.raft.compact(index);
         let meta = self.raft.snapshot_meta();
-        let data = self.sm.snapshot();
+        let data = snapshot_data(&self.producers.encode(), &self.sm.snapshot());
         write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
         self.snapshot = Some((meta, data));
         Ok(index)
@@ -454,6 +537,24 @@ fn decode_hard_state(bytes: Bytes) -> Result<HardState, Error> {
     let vote = b.get_u64_le();
     let commit = b.get_u64_le();
     Ok(HardState { term, vote: has_vote.then_some(vote), commit })
+}
+
+/// A snapshot's data: the producer state, then the state machine's.
+fn snapshot_data(producers: &[u8], sm: &[u8]) -> Bytes {
+    let mut b = BytesMut::with_capacity(4 + producers.len() + sm.len());
+    b.put_u32_le(producers.len() as u32);
+    b.put_slice(producers);
+    b.put_slice(sm);
+    b.freeze()
+}
+
+fn split_snapshot_data(data: &Bytes) -> Result<(Bytes, Bytes), Error> {
+    let short = || Error::Corrupt("snapshot data is truncated".into());
+    let len = u32::from_le_bytes(data.get(..4).ok_or_else(short)?.try_into().expect("four bytes")) as usize;
+    if data.len() < 4 + len {
+        return Err(short());
+    }
+    Ok((data.slice(4..4 + len), data.slice(4 + len..)))
 }
 
 fn encode_snapshot(meta: &SnapshotMeta, data: &[u8]) -> Bytes {

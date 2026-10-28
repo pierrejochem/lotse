@@ -20,7 +20,7 @@ struct Recorder(Arc<Mutex<Vec<Bytes>>>);
 
 impl StateMachine for Recorder {
     fn apply(&mut self, batch: &Batch) {
-        self.0.lock().unwrap().push(batch.records().unwrap()[0].value.clone().unwrap());
+        self.0.lock().unwrap().push(batch.records().unwrap()[0].value.clone().unwrap_or_default());
     }
     fn snapshot(&self) -> Bytes {
         Bytes::new()
@@ -53,7 +53,7 @@ impl Cluster {
     async fn start(&mut self, id: NodeId) {
         let rt = TokioRuntime::new(self.root.join(format!("node-{id}")));
         std::fs::create_dir_all(rt.root()).unwrap();
-        let recorders: BTreeMap<GroupId, Recorder> = [1, 2].iter().map(|g| (*g, Recorder::default())).collect();
+        let recorders: BTreeMap<GroupId, Recorder> = [1, 2, 3].iter().map(|g| (*g, Recorder::default())).collect();
         let made = recorders.clone();
         let node = Node::start(rt, self.cfgs[&id].clone(), move |g| made[&g].clone()).await.unwrap();
         let handle = node.handle();
@@ -100,13 +100,16 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     id,
                     listen: peers[&id].clone(),
                     peers: peers.clone(),
-                    groups: vec![1, 2],
+                    // Group 3 coordinates producers.
+                    groups: vec![1, 2, 3],
                     tick: Duration::from_millis(10),
                     pre_vote: true,
                     log: LogConfig::default(),
                     client_listen: Some(clients[&id].clone()),
                     client_addrs: clients.clone(),
                     streams: streams.clone(),
+                    coordinator: Some(3),
+                    max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                 },
             )
         })

@@ -15,8 +15,15 @@
 //!   beyond the commit index (the high watermark). Without enough data it
 //!   waits until a commit brings more or `max_wait_ms` runs out.
 //!
+//! - `FindCoordinator` names the leader of the coordinator group, and
+//!   `InitProducer` hands out producer ids there: it proposes an allocation
+//!   entry and, once that is committed under the same rule as a produce,
+//!   answers with its Raft index. Indices are never reused, so neither are
+//!   ids.
+//!
 //! Until the metadata group exists, streams and their partitions' groups
-//! come from the node configuration ([`StreamConfig`]).
+//! come from the node configuration ([`StreamConfig`]), and so does the
+//! coordinator group.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -25,14 +32,15 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_proto::{
     ApiKey, ApiVersionsResponse, Broker, ErrorCode, FetchPartitionResponse, FetchRequest, FetchResourceResponse,
-    FetchResponse, LeaderHint, MetadataRequest, MetadataResponse, PartitionMetadata, ProducePartitionResponse,
-    ProduceRequest, ProduceResourceResponse, ProduceResponse, Request, RequestHeader, ResourceMetadata, Response, kind,
+    FetchResponse, FindCoordinatorRequest, FindCoordinatorResponse, InitProducerRequest, InitProducerResponse,
+    LeaderHint, MetadataRequest, MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceRequest,
+    ProduceResourceResponse, ProduceResponse, Request, RequestHeader, ResourceMetadata, Response, coordinator, kind,
 };
 use lotse_raft::{NodeId, RaftGroup, Role};
-use lotse_record::Batch;
+use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{Conn, Instant, Runtime};
 
-use crate::replica::{Error, ProposeError, Replica, StateMachine};
+use crate::replica::{Error, ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::GroupId;
 
@@ -131,6 +139,19 @@ struct PendingProduce {
     waiting: Vec<Waiting>,
 }
 
+/// An `InitProducer` waiting for its allocation entry to commit.
+struct PendingInit {
+    outbox: Arc<Outbox>,
+    correlation_id: u32,
+    deadline: Instant,
+    group: GroupId,
+    last: u64,
+    term: u64,
+}
+
+/// How long the coordinator waits for an allocation to commit.
+const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct PendingFetch {
     outbox: Arc<Outbox>,
     correlation_id: u32,
@@ -142,6 +163,7 @@ struct PendingFetch {
 pub(crate) struct ClusterView<'a> {
     pub(crate) streams: &'a [StreamConfig],
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
+    pub(crate) coordinator: Option<GroupId>,
     pub(crate) now: Instant,
 }
 
@@ -160,6 +182,7 @@ fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
 #[derive(Default)]
 pub(crate) struct Clients {
     produces: Vec<PendingProduce>,
+    inits: Vec<PendingInit>,
     fetches: Vec<PendingFetch>,
     /// Sum of the groups' commit indices when pending fetches were last
     /// tried: they are tried again only after a commit or at their deadline.
@@ -186,6 +209,10 @@ impl Clients {
             ),
             Request::Metadata(m) => outbox.push(id, &Response::Metadata(metadata(&m, view, groups))),
             Request::Produce(p) => self.produce(outbox, id, p, view, groups),
+            Request::FindCoordinator(f) => {
+                outbox.push(id, &Response::FindCoordinator(find_coordinator(&f, view, groups)))
+            }
+            Request::InitProducer(req) => self.init_producer(outbox, id, req, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -226,14 +253,26 @@ impl Clients {
                         out.error_msg = Some("transactions are not supported yet".into());
                     }
                     Some((g, replica)) => match replica.propose(p.batch) {
-                        Ok((first, last)) => {
+                        Ok(Proposed { first, last, term, .. }) => {
                             out.base_offset = first - 1;
-                            let term = replica.raft_ref().term();
-                            waiting.push(Waiting { resource: ri, partition: pi, group: g, last, term });
+                            // A duplicate of an applied batch is written; anything
+                            // else (new, or the original still in flight) is
+                            // answered once its entry's commit decides.
+                            if let Some(term) = term {
+                                waiting.push(Waiting { resource: ri, partition: pi, group: g, last, term });
+                            }
                         }
                         Err(ProposeError::NotLeader(_)) => {
                             out.error = ErrorCode::NOT_LEADER;
                             out.leader_hint = hint(replica.raft_ref());
+                        }
+                        Err(e @ ProposeError::OutOfOrderSequence { .. }) => {
+                            out.error = ErrorCode::OUT_OF_ORDER_SEQUENCE;
+                            out.error_msg = Some(e.to_string());
+                        }
+                        Err(e @ ProposeError::ProducerFenced { .. }) => {
+                            out.error = ErrorCode::PRODUCER_FENCED;
+                            out.error_msg = Some(e.to_string());
                         }
                         Err(e) => {
                             out.error = ErrorCode::CORRUPT_BATCH;
@@ -252,6 +291,39 @@ impl Clients {
         }
     }
 
+    fn init_producer<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        correlation_id: u32,
+        req: InitProducerRequest,
+        view: &ClusterView<'_>,
+        groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+    ) {
+        let fail = |error, leader_hint| {
+            Response::InitProducer(InitProducerResponse { error, producer_id: 0, producer_epoch: 0, leader_hint })
+        };
+        if req.txn_id.is_some() {
+            return outbox.push(correlation_id, &fail(ErrorCode::INVALID_TXN_STATE, None));
+        }
+        let Some((group, replica)) = view.coordinator.and_then(|g| groups.get_mut(&g).map(|r| (g, r))) else {
+            return outbox.push(correlation_id, &fail(ErrorCode::COORDINATOR_NOT_AVAILABLE, None));
+        };
+        let mut b = BatchBuilder::new(BatchOptions::default());
+        b.push(0, Some(b"producer-id"), None, &[]);
+        let batch = b.finish().expect("one record");
+        match replica.propose(batch) {
+            Ok(Proposed { last, term: Some(term), .. }) => {
+                let deadline = view.now + INIT_TIMEOUT;
+                self.inits.push(PendingInit { outbox, correlation_id, deadline, group, last, term });
+            }
+            Ok(_) => unreachable!("an allocation is not idempotent, so never a duplicate"),
+            Err(ProposeError::NotLeader(_)) => {
+                outbox.push(correlation_id, &fail(ErrorCode::NOT_LEADER, hint(replica.raft_ref())))
+            }
+            Err(_) => outbox.push(correlation_id, &fail(ErrorCode::COORDINATOR_NOT_AVAILABLE, None)),
+        }
+    }
+
     /// Answers whatever the last round decided, and requests that ran out
     /// of time.
     pub(crate) async fn after_round<R: Runtime, S: StateMachine>(
@@ -261,6 +333,8 @@ impl Clients {
     ) -> Result<(), Error> {
         let produces = std::mem::take(&mut self.produces);
         self.produces = produces.into_iter().filter_map(|p| settle(p, view.now, groups)).collect();
+        let inits = std::mem::take(&mut self.inits);
+        self.inits = inits.into_iter().filter_map(|p| settle_init(p, view.now, groups)).collect();
 
         let commits: u64 = groups.values().map(|g| g.raft_ref().commit()).sum();
         let committed = std::mem::replace(&mut self.commits_seen, commits) != commits;
@@ -319,6 +393,30 @@ fn settle<R: Runtime, S: StateMachine>(
         return None;
     }
     Some(p)
+}
+
+/// Answers an `InitProducer` once its allocation entry is committed here.
+fn settle_init<R: Runtime, S: StateMachine>(
+    p: PendingInit,
+    now: Instant,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+) -> Option<PendingInit> {
+    let raft = groups[&p.group].raft_ref();
+    let (error, producer_id, leader_hint) = if raft.commit() >= p.last {
+        match raft.log().term_at(p.last) {
+            // The id is the index of the committed allocation: unique.
+            Some(t) if t == p.term => (ErrorCode::NONE, p.last, None),
+            Some(_) => (ErrorCode::NOT_LEADER, 0, hint(raft)),
+            None => (ErrorCode::REQUEST_TIMED_OUT, 0, None),
+        }
+    } else if now >= p.deadline {
+        (ErrorCode::REQUEST_TIMED_OUT, 0, None)
+    } else {
+        return Some(p);
+    };
+    let resp = InitProducerResponse { error, producer_id, producer_epoch: 0, leader_hint };
+    p.outbox.push(p.correlation_id, &Response::InitProducer(resp));
+    None
 }
 
 /// Reads what the fetch asks for; answers and returns `None` if there is
@@ -402,6 +500,36 @@ fn committed_prefix(read: Bytes, hw: u64) -> Result<Bytes, Error> {
         rest = next;
     }
     Ok(read.slice(..len))
+}
+
+fn find_coordinator<R: Runtime, S: StateMachine>(
+    req: &FindCoordinatorRequest,
+    view: &ClusterView<'_>,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+) -> FindCoordinatorResponse {
+    let unavailable = |why: &str| FindCoordinatorResponse {
+        error: ErrorCode::COORDINATOR_NOT_AVAILABLE,
+        node_id: 0,
+        host: String::new(),
+        port: 0,
+        error_msg: Some(why.into()),
+    };
+    if req.key_type != coordinator::PRODUCER {
+        return unavailable("only producer coordination is supported so far");
+    }
+    let Some(g) = view.coordinator else { return unavailable("no coordinator group is configured") };
+    let leader = groups.get(&g).and_then(|r| r.raft_ref().leader());
+    let addr = leader.and_then(|l| view.client_addrs.get(&l).map(|a| (l, a)));
+    match addr.and_then(|(l, a)| a.rsplit_once(':').map(|(h, p)| (l, h, p))) {
+        Some((leader, host, port)) => FindCoordinatorResponse {
+            error: ErrorCode::NONE,
+            node_id: leader as u32,
+            host: host.into(),
+            port: port.parse().unwrap_or(0),
+            error_msg: None,
+        },
+        None => unavailable("the coordinator group has no leader right now"),
+    }
 }
 
 fn metadata<R: Runtime, S: StateMachine>(

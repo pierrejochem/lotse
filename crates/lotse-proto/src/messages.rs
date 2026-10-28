@@ -519,3 +519,123 @@ impl FetchResponse {
         Ok(FetchResponse { throttle_ms, resources })
     }
 }
+
+/// What [`FindCoordinatorRequest::key`] names.
+pub mod coordinator {
+    /// A consumer group.
+    pub const GROUP: u8 = 0;
+    /// A producer (idempotent or transactional); the key is the
+    /// transactional id, or empty.
+    pub const PRODUCER: u8 = 1;
+}
+
+/// Asks which node coordinates a group or producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindCoordinatorRequest {
+    /// [`coordinator`].
+    pub key_type: u8,
+    /// Group name or transactional id.
+    pub key: String,
+}
+
+impl FindCoordinatorRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u8(self.key_type);
+        w.string(&self.key);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = FindCoordinatorRequest { key_type: r.u8()?, key: r.string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The coordinating node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindCoordinatorResponse {
+    /// [`ErrorCode::COORDINATOR_NOT_AVAILABLE`] while there is none.
+    pub error: ErrorCode,
+    /// Its node id.
+    pub node_id: u32,
+    /// Host clients connect to.
+    pub host: String,
+    /// Port clients connect to.
+    pub port: u16,
+    /// Details for humans.
+    pub error_msg: Option<String>,
+}
+
+impl FindCoordinatorResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u32(self.node_id);
+        w.string(&self.host);
+        w.u16(self.port);
+        w.opt_string(self.error_msg.as_deref());
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resp = FindCoordinatorResponse {
+            error: ErrorCode(r.u16()?),
+            node_id: r.u32()?,
+            host: r.string()?,
+            port: r.u16()?,
+            error_msg: r.opt_string()?,
+        };
+        r.tags()?;
+        Ok(resp)
+    }
+}
+
+/// Asks the coordinator for a producer id and epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitProducerRequest {
+    /// Transactional id; `None` for an idempotent producer.
+    pub txn_id: Option<String>,
+    /// Transaction timeout.
+    pub txn_timeout_ms: u32,
+}
+
+impl InitProducerRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.opt_string(self.txn_id.as_deref());
+        w.u32(self.txn_timeout_ms);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = InitProducerRequest { txn_id: r.opt_string()?, txn_timeout_ms: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// A producer id and epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitProducerResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The id; never `0`.
+    pub producer_id: u64,
+    /// The epoch.
+    pub producer_epoch: u16,
+    /// The coordinator, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl InitProducerResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(InitProducerResponse {
+            error: ErrorCode(r.u16()?),
+            producer_id: r.u64()?,
+            producer_epoch: r.u16()?,
+            leader_hint: get_hint(r)?,
+        })
+    }
+}

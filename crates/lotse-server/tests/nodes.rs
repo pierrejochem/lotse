@@ -102,6 +102,8 @@ impl World {
                         client_listen: None,
                         client_addrs: BTreeMap::new(),
                         streams: Vec::new(),
+                        coordinator: None,
+                        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },
                 )
             })

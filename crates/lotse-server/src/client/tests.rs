@@ -105,6 +105,16 @@ fn produce_request(value: &str) -> Request {
     })
 }
 
+/// The same, stamped as batch `seq` of idempotent producer 42.
+fn idempotent_request(value: &str, seq: i32) -> Request {
+    let Request::Produce(mut req) = produce_request(value) else { unreachable!() };
+    let batch = &mut req.resources[0].partitions[0].batch;
+    let mut raw = bytes::BytesMut::from(&batch[..]);
+    lotse_record::set_producer(&mut raw, 42, 0, seq).unwrap();
+    *batch = raw.freeze();
+    Request::Produce(req)
+}
+
 fn answers(outbox: &Outbox) -> Vec<Response> {
     let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
     frames.into_iter().map(|f| lotse_proto::decode_response(f, ApiKey::PRODUCE).unwrap().1).collect()
@@ -128,7 +138,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
         // A produce reaches node 1; its entry (index 2) gets to node 2 only.
         let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
         let addrs = BTreeMap::new();
-        let view = ClusterView { streams: &streams, client_addrs: &addrs, now: rt.now() };
+        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
         let mut clients = Clients::default();
@@ -167,6 +177,49 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
                 assert_eq!((part.error, part.base_offset), (ErrorCode::NONE, 1), "written, at offset 1");
             }
             other => panic!("expected one produce answer, got {other:?}"),
+        }
+    });
+}
+
+/// A retry of a batch that is still in flight is answered by the original's
+/// fate, not at once: here the original is replaced, so neither request may
+/// claim it was written.
+#[test]
+fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
+    Sim::new(2).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView { streams: &streams, client_addrs: &addrs, coordinator: None, now: rt.now() };
+        let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
+        let mut clients = Clients::default();
+        let outbox = Arc::new(Outbox::default());
+        // The original reaches node 1 only; the client retries it there.
+        for id in [1, 2] {
+            let req = ClientRequest { outbox: outbox.clone(), header: header(id), request: idempotent_request("x", 0) };
+            clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+        }
+        five.run(1, &all, None, |_, _| false).await;
+        assert_eq!(five.get(1).last_index(), 2, "proposed once: the retry is a duplicate");
+        clients.after_round(&view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+        assert!(answers(&outbox).is_empty(), "neither is answered while the original is in flight");
+
+        // Node 3 wins without it and overwrites it on node 1, then commits.
+        five.campaign(3);
+        five.run(8, &[1, 3, 4, 5], Some(3), |_, _| true).await;
+        assert_eq!(five.get(3).role(), Role::Leader);
+        assert!(five.get(1).commit() >= 2);
+        clients.after_round(&view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+        let got = answers(&outbox);
+        assert_eq!(got.len(), 2);
+        for a in got {
+            let Response::Produce(p) = a else { panic!("{a:?}") };
+            assert_eq!(p.resources[0].partitions[0].error, ErrorCode::NOT_LEADER, "not written, so retriable");
         }
     });
 }

@@ -10,10 +10,12 @@
 
 mod client;
 mod node;
+mod producers;
 mod replica;
 mod signal;
 pub mod wire;
 
 pub use client::StreamConfig;
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle};
-pub use replica::{Error, Output, ProposeError, Replica, StateMachine};
+pub use producers::DEFAULT_MAX_PRODUCERS;
+pub use replica::{Error, Output, ProposeError, Proposed, Replica, StateMachine};

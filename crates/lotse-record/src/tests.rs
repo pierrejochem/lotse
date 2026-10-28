@@ -184,3 +184,16 @@ fn raft_control_batches_round_trip_and_are_not_transaction_markers() {
     let (batch, _) = Batch::parse(&marker).unwrap();
     assert_eq!(raft_control(&batch).unwrap(), None);
 }
+
+#[test]
+fn producer_fields_can_be_set_after_building() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(b"v"), &[]);
+    b.push(1, None, Some(b"w"), &[]);
+    let mut raw = bytes::BytesMut::from(&b.finish().unwrap()[..]);
+    set_producer(&mut raw, 77, 3, 41).unwrap();
+    let (batch, _) = Batch::parse(&raw.clone().freeze()).expect("the checksum was recomputed");
+    assert_eq!((batch.producer_id(), batch.producer_epoch(), batch.base_sequence()), (77, 3, 41));
+    assert_eq!(batch.records().unwrap().len(), 2);
+    assert!(set_producer(&mut raw[..20], 1, 0, 0).is_err(), "a cut batch is refused");
+}

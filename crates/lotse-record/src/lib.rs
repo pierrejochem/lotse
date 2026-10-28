@@ -312,6 +312,22 @@ pub fn stamp(batch: &mut [u8], base_offset: u64, term: u64) -> Result<(), Error>
     Ok(())
 }
 
+/// Sets the producer fields of an encoded batch in place and recomputes
+/// its checksum, which covers them. An idempotent client stamps the batch it
+/// was given with its producer id, epoch and the sequence of the first record.
+pub fn set_producer(batch: &mut [u8], producer_id: u64, producer_epoch: u16, base_sequence: i32) -> Result<(), Error> {
+    let len = peek_len(batch).ok_or(Error::Truncated)?;
+    if len < HEADER_LEN || batch.len() < len {
+        return Err(Error::Truncated);
+    }
+    put_u64(batch, 47, producer_id);
+    put_u16(batch, 55, producer_epoch);
+    put_i32(batch, 57, base_sequence);
+    let crc = crc32c::crc32c(&batch[CRC_START..len]);
+    put_u32(batch, 21, crc);
+    Ok(())
+}
+
 /// Total length of the batch starting at `buf[0]`, if `buf` holds at least
 /// its length prefix. Used to frame batches when scanning a segment.
 pub fn peek_len(buf: &[u8]) -> Option<usize> {

@@ -8,10 +8,20 @@
 //! Requests on one connection are pipelined: each carries a correlation id
 //! and a reader task hands every response to whoever waits for it.
 //!
-//! A `Produce` whose outcome is unknown (the connection broke after sending,
-//! or `REQUEST_TIMED_OUT`) is **not** retried: without idempotent producers
-//! a retry could write the batch twice. The caller gets
-//! [`ClientError::Unknown`] and decides.
+//! Produce is idempotent by default ([`ClientConfig::idempotent`]): the
+//! client gets a producer id from the coordinator (`FindCoordinator`,
+//! `InitProducer`), stamps every batch with it and a sequence number per
+//! partition, and retries a batch whose outcome is unknown (the connection
+//! broke after sending, `REQUEST_TIMED_OUT`) with the same sequence; the
+//! leader recognises a batch it already has and answers with its offset.
+//! Produces to one partition go out one at a time, in call order, so
+//! sequences arrive in order.
+//!
+//! Only when retrying runs out of time with the outcome still unknown does
+//! the caller get [`ClientError::Unknown`]; the client then starts over with
+//! a new producer id, so later batches do not wait for a gap that may never
+//! fill. Without idempotence an unknown outcome is never retried, since a
+//! retry could write the batch twice.
 
 #![warn(missing_docs)]
 
@@ -26,8 +36,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    ApiKey, ErrorCode, FetchPartition, FetchRequest, FetchResource, MetadataRequest, MetadataResponse,
-    ProducePartition, ProduceRequest, ProduceResource, Request, Response, isolation,
+    ApiKey, ErrorCode, FetchPartition, FetchRequest, FetchResource, FindCoordinatorRequest, InitProducerRequest,
+    MetadataRequest, MetadataResponse, ProducePartition, ProduceRequest, ProduceResource, Request, Response,
+    coordinator, isolation,
 };
 use lotse_rt::{Clock, Conn, Net, Spawn};
 
@@ -68,6 +79,9 @@ pub struct ClientConfig {
     pub backoff: Duration,
     /// How long the leader waits for the quorum on a produce.
     pub produce_timeout: Duration,
+    /// Produce idempotently (on by default). Needs a coordinator group in
+    /// the cluster.
+    pub idempotent: bool,
 }
 
 impl ClientConfig {
@@ -79,6 +93,7 @@ impl ClientConfig {
             retry_for: Duration::from_secs(30),
             backoff: Duration::from_millis(50),
             produce_timeout: Duration::from_secs(5),
+            idempotent: true,
         }
     }
 }
@@ -106,6 +121,8 @@ struct Route {
 pub struct Client<R: Net + Clock + Spawn> {
     rt: R,
     cfg: ClientConfig,
+    session: Mutex<Option<Session>>,
+    partition_locks: Mutex<BTreeMap<(String, u32), Arc<AsyncLock>>>,
     conns: Mutex<BTreeMap<String, Arc<Connection<R::Conn>>>>,
     brokers: Mutex<BTreeMap<u32, String>>,
     routes: Mutex<BTreeMap<(String, u32), Route>>,
@@ -121,8 +138,20 @@ impl<R: Net + Clock + Spawn> fmt::Debug for Client<R> {
 enum Attempt {
     /// Try again (after refreshing metadata).
     Retry(String),
+    /// Try again; the request may have been carried out (only idempotent
+    /// produce retries these).
+    RetryMaybeDone(String),
     /// Give up with this error.
     Fail(ClientError),
+}
+
+/// The producer id this client writes with.
+#[derive(Debug, Clone)]
+struct Session {
+    producer_id: u64,
+    epoch: u16,
+    /// Next sequence per partition.
+    next: BTreeMap<(String, u32), i32>,
 }
 
 impl<R: Net + Clock + Spawn> Client<R> {
@@ -131,6 +160,8 @@ impl<R: Net + Clock + Spawn> Client<R> {
         Client {
             rt,
             cfg,
+            session: Mutex::new(None),
+            partition_locks: Mutex::new(BTreeMap::new()),
             conns: Mutex::new(BTreeMap::new()),
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
@@ -231,17 +262,25 @@ impl<R: Net + Clock + Spawn> Client<R> {
         Fut: Future<Output = Result<T, Attempt>>,
     {
         let start = self.rt.now();
+        let mut maybe_done = false;
         loop {
-            match attempt().await {
+            let why = match attempt().await {
                 Ok(v) => return Ok(v),
                 Err(Attempt::Fail(e)) => return Err(e),
-                Err(Attempt::Retry(why)) => {
-                    if self.rt.now() - start >= self.cfg.retry_for {
-                        return Err(ClientError::GaveUp(self.cfg.retry_for, why));
-                    }
-                    self.rt.sleep(self.cfg.backoff).await;
+                Err(Attempt::Retry(why)) => why,
+                Err(Attempt::RetryMaybeDone(why)) => {
+                    maybe_done = true;
+                    why
                 }
+            };
+            if self.rt.now() - start >= self.cfg.retry_for {
+                return Err(if maybe_done {
+                    ClientError::Unknown(format!("still unknown after {:?}: {why}", self.cfg.retry_for))
+                } else {
+                    ClientError::GaveUp(self.cfg.retry_for, why)
+                });
             }
+            self.rt.sleep(self.cfg.backoff).await;
         }
     }
 
@@ -249,10 +288,98 @@ impl<R: Net + Clock + Spawn> Client<R> {
     /// a partition. Returns the offset of its first record once the batch is
     /// committed.
     pub async fn produce(&self, stream: &str, partition: u32, batch: Bytes) -> Result<u64, ClientError> {
-        self.retrying(|| self.produce_once(stream, partition, batch.clone())).await
+        if !self.cfg.idempotent {
+            return self.retrying(|| self.produce_once(stream, partition, batch.clone(), false)).await;
+        }
+        let records = lotse_record::Batch::parse(&batch)
+            .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?
+            .0
+            .record_count();
+        let key = (stream.to_string(), partition);
+        let lock = self.partition_locks.lock().expect("locks lock").entry(key.clone()).or_default().clone();
+        let _turn = lock.lock().await;
+        let (producer_id, epoch, seq) = self.next_sequence(&key).await?;
+        let mut stamped = bytes::BytesMut::from(&batch[..]);
+        lotse_record::set_producer(&mut stamped, producer_id, epoch, seq)
+            .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?;
+        let stamped = stamped.freeze();
+        let res = self.retrying(|| self.produce_once(stream, partition, stamped.clone(), true)).await;
+        let mut session = self.session.lock().expect("session lock");
+        match &res {
+            Ok(_) => {
+                if let Some(s) = session.as_mut().filter(|s| s.producer_id == producer_id) {
+                    s.next.insert(key, seq.wrapping_add(records as i32));
+                }
+            }
+            // Written or not, nobody can tell: later batches would wait behind a
+            // gap that may never fill. Start over with a new producer id.
+            Err(ClientError::Unknown(_))
+            | Err(ClientError::Broker {
+                code: ErrorCode::OUT_OF_ORDER_SEQUENCE | ErrorCode::PRODUCER_FENCED, ..
+            }) => {
+                if session.as_ref().is_some_and(|s| s.producer_id == producer_id) {
+                    *session = None;
+                }
+            }
+            // Definitely not written: the sequence is free for the next batch.
+            Err(_) => {}
+        }
+        res
     }
 
-    async fn produce_once(&self, stream: &str, partition: u32, batch: Bytes) -> Result<u64, Attempt> {
+    /// The producer id, epoch and next sequence for a partition, getting a
+    /// producer id first if there is none.
+    async fn next_sequence(&self, key: &(String, u32)) -> Result<(u64, u16, i32), ClientError> {
+        if let Some(s) = self.session.lock().expect("session lock").as_ref() {
+            return Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)));
+        }
+        let (producer_id, epoch) = self.retrying(|| self.init_producer_once()).await?;
+        let mut session = self.session.lock().expect("session lock");
+        // Another partition's produce may have started a session meanwhile.
+        let s = session.get_or_insert(Session { producer_id, epoch, next: BTreeMap::new() });
+        Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)))
+    }
+
+    async fn init_producer_once(&self) -> Result<(u64, u16), Attempt> {
+        let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
+        addrs.extend(self.cfg.bootstrap.iter().cloned());
+        let find =
+            Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: String::new() });
+        let mut coordinator = None;
+        let mut why = String::from("no broker answered");
+        for addr in addrs {
+            match self.call(&addr, &find).await {
+                Ok(Response::FindCoordinator(f)) if f.error == ErrorCode::NONE => {
+                    coordinator = Some(format!("{}:{}", f.host, f.port));
+                    break;
+                }
+                Ok(Response::FindCoordinator(f)) => {
+                    why = f.error_msg.unwrap_or_else(|| f.error.to_string());
+                    if !f.error.retriable() {
+                        return Err(Attempt::Fail(ClientError::Broker { code: f.error, message: Some(why) }));
+                    }
+                }
+                Ok(other) => why = format!("unexpected response {other:?}"),
+                Err(e) => why = e.to_string(),
+            }
+        }
+        let Some(addr) = coordinator else { return Err(Attempt::Retry(why)) };
+        let init = Request::InitProducer(InitProducerRequest { txn_id: None, txn_timeout_ms: 0 });
+        match self.call(&addr, &init).await {
+            Ok(Response::InitProducer(r)) if r.error == ErrorCode::NONE => Ok((r.producer_id, r.producer_epoch)),
+            // An id that was handed out but never received is just unused.
+            Ok(Response::InitProducer(r)) if r.error.retriable() => Err(Attempt::Retry(r.error.to_string())),
+            Ok(Response::InitProducer(r)) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
+            Ok(other) => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) => Err(Attempt::Retry(e.to_string())),
+        }
+    }
+
+    async fn produce_once(&self, stream: &str, partition: u32, batch: Bytes, idempotent: bool) -> Result<u64, Attempt> {
+        // An idempotent batch may be sent again whatever happened to it.
+        let unknown = |why: String| {
+            if idempotent { Attempt::RetryMaybeDone(why) } else { Attempt::Fail(ClientError::Unknown(why)) }
+        };
         let (route, addr) = self.route(stream, partition).await?;
         let req = Request::Produce(ProduceRequest {
             txn_id: None,
@@ -264,19 +391,22 @@ impl<R: Net + Clock + Spawn> Client<R> {
         });
         let resp = match self.call(&addr, &req).await {
             Ok(Response::Produce(r)) => r,
-            Ok(other) => return Err(Attempt::Fail(ClientError::Unknown(format!("unexpected response {other:?}")))),
+            Ok(other) => return Err(unknown(format!("unexpected response {other:?}"))),
             // Not sent at all: safe to try again.
             Err(CallError::NotSent(why)) => {
                 self.forget(stream, partition);
                 return Err(Attempt::Retry(why));
             }
-            Err(CallError::Lost(why)) => return Err(Attempt::Fail(ClientError::Unknown(why))),
+            Err(CallError::Lost(why)) => {
+                self.forget(stream, partition);
+                return Err(unknown(why));
+            }
         };
         let p = resp
             .resources
             .first()
             .and_then(|r| r.partitions.first())
-            .ok_or_else(|| Attempt::Fail(ClientError::Unknown("empty produce response".into())))?;
+            .ok_or_else(|| unknown("empty produce response".into()))?;
         match p.error {
             ErrorCode::NONE => Ok(p.base_offset),
             // Refused before it was proposed, or definitely not written.
@@ -285,7 +415,8 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 Err(Attempt::Retry(format!("{}", p.error)))
             }
             ErrorCode::REQUEST_TIMED_OUT => {
-                Err(Attempt::Fail(ClientError::Unknown(p.error_msg.clone().unwrap_or_else(|| p.error.to_string()))))
+                self.forget(stream, partition);
+                Err(unknown(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
             }
             code => Err(Attempt::Fail(ClientError::Broker { code, message: p.error_msg.clone() })),
         }
@@ -524,6 +655,43 @@ impl<C: Conn> Connection<C> {
             Ok((_, resp)) => Ok(resp),
             Err(e) => Err(CallError::Lost(format!("undecodable response: {e}"))),
         }
+    }
+}
+
+/// A lock held across awaits: one produce per partition at a time, so
+/// sequence numbers reach the leader in order.
+#[derive(Default)]
+struct AsyncLock {
+    state: Mutex<(bool, Vec<Waker>)>,
+}
+
+struct AsyncGuard<'a>(&'a AsyncLock);
+
+impl AsyncLock {
+    async fn lock(&self) -> AsyncGuard<'_> {
+        poll_fn(|cx| {
+            let mut s = self.state.lock().expect("lock state");
+            if s.0 {
+                s.1.push(cx.waker().clone());
+                Poll::Pending
+            } else {
+                s.0 = true;
+                Poll::Ready(())
+            }
+        })
+        .await;
+        AsyncGuard(self)
+    }
+}
+
+impl Drop for AsyncGuard<'_> {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut s = self.0.state.lock().expect("lock state");
+            s.0 = false;
+            std::mem::take(&mut s.1)
+        };
+        waiters.into_iter().for_each(Waker::wake);
     }
 }
 

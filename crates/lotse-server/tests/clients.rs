@@ -2,8 +2,9 @@
 //!
 //! Three or five nodes host a stream with two partitions (two Raft groups;
 //! five voters allow histories three cannot, such as an entry that is
-//! truncated on its leader and still committed later). Two
-//! producers write through `lotse-client`, two consumers read every
+//! truncated on its leader and still committed later) and a coordinator
+//! group. Two producers write through `lotse-client`, one idempotent and one
+//! not, two consumers read every
 //! partition from the start, all over the simulated network, while pairs of
 //! hosts (clients included) are partitioned and nodes lose power and
 //! restart. Afterwards the network heals and the partitions are read in full.
@@ -15,7 +16,8 @@
 //!   offset (nothing uncommitted left a node);
 //! - no batch a producer gave up on is there (a definite "not written"
 //!   means not written);
-//! - no batch is there twice (the client never retries an unknown outcome);
+//! - no batch is there twice (the idempotent producer retries unknown
+//!   outcomes, the other never does);
 //! - after healing, a new batch commits in each partition.
 
 use std::collections::BTreeMap;
@@ -119,13 +121,16 @@ impl World {
                         id,
                         listen: peers[&id].clone(),
                         peers: peers.clone(),
-                        groups: vec![1, 2],
+                        // Group 3 coordinates producers.
+                        groups: vec![1, 2, 3],
                         tick: TICK,
                         pre_vote,
                         log,
                         client_listen: Some(client_addrs[&id].clone()),
                         client_addrs: client_addrs.clone(),
                         streams: streams.clone(),
+                        coordinator: Some(3),
+                        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },
                 )
             })
@@ -166,8 +171,11 @@ impl World {
     }
 }
 
+/// Producer `c1` is idempotent and retries unknown outcomes; `c2` is not
+/// and leaves them to the caller. Neither may cause a duplicate.
 async fn producer(rt: SimRuntime, name: String, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
-    let client = Client::new(rt.clone(), client_config());
+    let idempotent = name == "c1";
+    let client = Client::new(rt.clone(), ClientConfig { idempotent, ..client_config() });
     let mut seq = 0u64;
     while !stop.load(Ordering::Relaxed) {
         let partition = rt.below(u64::from(PARTITIONS)) as u32;

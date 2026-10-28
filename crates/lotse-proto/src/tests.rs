@@ -19,6 +19,9 @@ fn requests() -> Vec<Request> {
             }],
         }),
         Request::Produce(ProduceRequest { txn_id: Some("txn-1".into()), timeout_ms: 0, resources: vec![] }),
+        Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: String::new() }),
+        Request::InitProducer(InitProducerRequest { txn_id: None, txn_timeout_ms: 60_000 }),
+        Request::InitProducer(InitProducerRequest { txn_id: Some("payments".into()), txn_timeout_ms: 0 }),
         Request::Fetch(FetchRequest {
             max_wait_ms: 500,
             min_bytes: 1,
@@ -115,6 +118,44 @@ fn responses() -> Vec<(ApiKey, Response)> {
                 }],
             }),
         ),
+        (
+            ApiKey::FIND_COORDINATOR,
+            Response::FindCoordinator(FindCoordinatorResponse {
+                error: ErrorCode::NONE,
+                node_id: 2,
+                host: "n2".into(),
+                port: 9000,
+                error_msg: None,
+            }),
+        ),
+        (
+            ApiKey::FIND_COORDINATOR,
+            Response::FindCoordinator(FindCoordinatorResponse {
+                error: ErrorCode::COORDINATOR_NOT_AVAILABLE,
+                node_id: 0,
+                host: String::new(),
+                port: 0,
+                error_msg: Some("no leader".into()),
+            }),
+        ),
+        (
+            ApiKey::INIT_PRODUCER,
+            Response::InitProducer(InitProducerResponse {
+                error: ErrorCode::NONE,
+                producer_id: 4711,
+                producer_epoch: 0,
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::INIT_PRODUCER,
+            Response::InitProducer(InitProducerResponse {
+                error: ErrorCode::NOT_LEADER,
+                producer_id: 0,
+                producer_epoch: 0,
+                leader_hint: Some(LeaderHint { leader: 3, term: 2 }),
+            }),
+        ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
     ]
@@ -175,7 +216,7 @@ fn an_unknown_key_or_version_is_reported_with_its_header() {
         other => panic!("{other:?}"),
     }
     let mut frame = BytesMut::from(&encode_request(5, &Request::ApiVersions)[..]);
-    frame[0..2].copy_from_slice(&ApiKey::FIND_COORDINATOR.0.to_le_bytes());
+    frame[0..2].copy_from_slice(&ApiKey(5).0.to_le_bytes()); // ListOffsets: not yet
     assert!(matches!(decode_request(frame.freeze()), Err(DecodeError::Unsupported(_))));
 }
 
@@ -220,6 +261,8 @@ fn unknown_tags_are_skipped() {
 fn error_codes_have_names_and_retry_classes() {
     assert_eq!(ErrorCode::NOT_LEADER.name(), "NOT_LEADER");
     assert_eq!(ErrorCode::UNSUPPORTED_VERSION.name(), "UNSUPPORTED_VERSION");
+    assert_eq!(ErrorCode::COORDINATOR_NOT_AVAILABLE.name(), "COORDINATOR_NOT_AVAILABLE");
+    assert!(ErrorCode::COORDINATOR_NOT_AVAILABLE.retriable());
     assert_eq!(ErrorCode(999).name(), "UNKNOWN");
     assert!(ErrorCode::NOT_LEADER.retriable() && ErrorCode::REQUEST_TIMED_OUT.retriable());
     assert!(!ErrorCode::CORRUPT_BATCH.retriable() && !ErrorCode::UNKNOWN_RESOURCE.retriable());
