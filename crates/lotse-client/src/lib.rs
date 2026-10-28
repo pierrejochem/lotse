@@ -861,11 +861,12 @@ impl<R: Net + Clock + Spawn> Client<R> {
         if let Some(c) = self.conns.lock().expect("conns lock").get(addr) {
             return Ok(c.clone());
         }
-        let raw = match race(self.rt.connect(addr), self.rt.sleep(self.cfg.request_timeout)).await {
-            Some(Ok(c)) => c,
-            Some(Err(e)) => return Err(CallError::NotSent(format!("cannot connect to {addr}: {e}"))),
-            None => return Err(CallError::NotSent(format!("connecting to {addr} timed out"))),
-        };
+        let raw =
+            match race(self.rt.connect(addr, lotse_rt::Link::Client), self.rt.sleep(self.cfg.request_timeout)).await {
+                Some(Ok(c)) => c,
+                Some(Err(e)) => return Err(CallError::NotSent(format!("cannot connect to {addr}: {e}"))),
+                None => return Err(CallError::NotSent(format!("connecting to {addr} timed out"))),
+            };
         let conn = Arc::new(Connection::new(raw));
         // The reader ends when the connection breaks or is closed.
         drop(self.rt.spawn(conn.clone().read_responses()));

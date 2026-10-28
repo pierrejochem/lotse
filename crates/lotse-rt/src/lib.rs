@@ -175,6 +175,57 @@ pub trait Rng: Clone + Send + Sync + 'static {
 /// Largest frame a connection carries (the native protocol's limit too).
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
+/// Which kind of link a listener or connection is. With TLS the two differ
+/// in what the other end must show: a node link needs a node certificate on
+/// both ends; a client link needs the server's certificate to match the
+/// address dialled, and takes a client certificate if one is offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// Node to node (Raft and replication).
+    Node,
+    /// Client to node: the native protocol, also when a node is the client.
+    Client,
+}
+
+/// Who is at the other end of a connection, as its verified certificate
+/// names it.
+///
+/// A node certificate carries the URI `lotse://node/<id>` among its subject
+/// alternative names; any other certificate names a principal by its
+/// subject's common name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PeerIdentity {
+    /// A broker node of the cluster.
+    Node(u64),
+    /// A client principal.
+    Principal(String),
+}
+
+impl PeerIdentity {
+    /// The URI prefix that marks a node certificate.
+    pub const NODE_URI: &'static str = "lotse://node/";
+
+    /// The node id a certificate's URI names, if it is a node URI.
+    pub fn node_from_uri(uri: &str) -> Option<u64> {
+        let id = uri.strip_prefix(Self::NODE_URI)?;
+        // Only the canonical decimal form: no sign, no leading zeros, so one
+        // node has exactly one name.
+        if id.is_empty() || (id.len() > 1 && id.starts_with('0')) || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        id.parse().ok()
+    }
+}
+
+impl fmt::Display for PeerIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PeerIdentity::Node(id) => write!(f, "node {id}"),
+            PeerIdentity::Principal(p) => write!(f, "{p}"),
+        }
+    }
+}
+
 /// Connections between nodes and to clients.
 ///
 /// A connection carries whole frames: each frame arrives complete and in
@@ -182,17 +233,29 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// between: a frame is never cut, duplicated or reordered. That is what TCP
 /// with length prefixes gives, and what the simulation reproduces; lost and
 /// reordered *messages* happen across reconnections, which callers handle.
+///
+/// A network either verifies peers ([`Net::verifies_peers`]: TLS with
+/// certificates from the cluster's CA, or a simulation that hands out
+/// identities) or it does not (plain TCP, only on loopback). When it does,
+/// every connection's [`Conn::peer_identity`] is what the other end proved,
+/// and a [`Link::Node`] connection never completes without a node
+/// certificate on both ends.
 pub trait Net: Clone + Send + Sync + 'static {
     /// A connection.
     type Conn: Conn;
     /// A listening socket.
     type Listener: Listener<Conn = Self::Conn>;
 
-    /// Listens on `addr` (`host:port`).
-    fn listen(&self, addr: &str) -> impl Future<Output = io::Result<Self::Listener>> + Send;
+    /// Listens on `addr` (`host:port`) for links of kind `link`.
+    fn listen(&self, addr: &str, link: Link) -> impl Future<Output = io::Result<Self::Listener>> + Send;
 
-    /// Connects to `addr`.
-    fn connect(&self, addr: &str) -> impl Future<Output = io::Result<Self::Conn>> + Send;
+    /// Connects to `addr` as a link of kind `link`.
+    fn connect(&self, addr: &str, link: Link) -> impl Future<Output = io::Result<Self::Conn>> + Send;
+
+    /// Whether connections carry identities the other end proved. A node
+    /// that gets `false` here cannot tell its peers apart and trusts the
+    /// network instead, which is only allowed on loopback.
+    fn verifies_peers(&self) -> bool;
 }
 
 /// Accepts connections.
@@ -215,6 +278,10 @@ pub trait Conn: Send + Sync + 'static {
 
     /// The next frame; `Ok(None)` once the peer closed the connection cleanly.
     fn recv(&self) -> impl Future<Output = io::Result<Option<Bytes>>> + Send;
+
+    /// Who the other end proved to be; `None` if it showed no certificate or
+    /// the network does not verify peers.
+    fn peer_identity(&self) -> Option<PeerIdentity>;
 }
 
 /// What the machine a node runs on looks like right now, for metrics.
@@ -272,6 +339,22 @@ mod tests {
         let rng = Counter(Default::default());
         for _ in 0..1000 {
             assert!(rng.below(7) < 7);
+        }
+    }
+
+    #[test]
+    fn a_node_uri_has_one_spelling() {
+        assert_eq!(PeerIdentity::node_from_uri("lotse://node/7"), Some(7));
+        assert_eq!(PeerIdentity::node_from_uri("lotse://node/0"), Some(0));
+        for bad in [
+            "lotse://node/",
+            "lotse://node/07",
+            "lotse://node/+7",
+            "lotse://node/7a",
+            "lotse://nodes/7",
+            "lotse://node/99999999999999999999",
+        ] {
+            assert_eq!(PeerIdentity::node_from_uri(bad), None, "{bad}");
         }
     }
 }

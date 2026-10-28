@@ -85,7 +85,7 @@ async fn main() {
             coordinator: Some(2),
             max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         };
-        let rt = TokioRuntime::new(root.join(format!("node-{id}")));
+        let rt = TokioRuntime::new(root.join(format!("node-{id}"))).plaintext_on_loopback();
         std::fs::create_dir_all(rt.root()).expect("a temporary directory");
         nodes.push(Node::start(rt, cfg, |_| Nothing).await.expect("the node starts"));
     }
@@ -93,7 +93,7 @@ async fn main() {
     tracing::info!(?bootstrap, data = %root.display(), "three nodes running");
 
     // A little traffic, so the screens have something to show.
-    let writer = Client::new(TokioRuntime::new(&root), ClientConfig::new(bootstrap.clone()));
+    let writer = Client::new(TokioRuntime::new(&root).plaintext_on_loopback(), ClientConfig::new(bootstrap.clone()));
     tokio::spawn(async move {
         let mut i = 0u64;
         loop {

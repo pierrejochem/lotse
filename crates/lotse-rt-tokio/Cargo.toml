@@ -11,9 +11,20 @@ publish.workspace = true
 lotse-rt.workspace = true
 bytes.workspace = true
 sysinfo.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "fs"] }
 
+[features]
+# A throwaway CA for tests and local clusters.
+dev-certs = ["dep:rcgen"]
+
 [dev-dependencies]
+lotse-rt-tokio = { path = ".", features = ["dev-certs"] }
 lotse-log.workspace = true
 lotse-record.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

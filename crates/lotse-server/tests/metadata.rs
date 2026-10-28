@@ -374,7 +374,7 @@ async fn transactional(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: 
 
 /// The error a node gives for a fetch of `resource_id`, asked directly.
 async fn fetch_error(rt: &SimRuntime, addr: &str, resource_id: u64) -> Option<ErrorCode> {
-    let conn = rt.connect(addr).await.ok()?;
+    let conn = rt.connect(addr, lotse_rt::Link::Client).await.ok()?;
     let req = lotse_proto::Request::Fetch(lotse_proto::FetchRequest {
         max_wait_ms: 0,
         min_bytes: 1,

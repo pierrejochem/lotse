@@ -22,8 +22,8 @@ Status: foundation. The runtime seam with its Tokio implementation, the record f
 
 | Crate | What it does |
 | --- | --- |
-| `lotse-rt` | The only seam to the outside world: `Clock`, `Disk`, `SegmentFile`, `Spawn`, `Rng`, `Net` (connections carrying whole frames) and `Host` (CPU, memory and disk, for metrics) as traits |
-| `lotse-rt-tokio` | The production runtime: Tokio, the file system with directory fsyncs, TCP with length-prefixed frames |
+| `lotse-rt` | The only seam to the outside world: `Clock`, `Disk`, `SegmentFile`, `Spawn`, `Rng`, `Net` (connections carrying whole frames, node or client links, and who the other end proved to be) and `Host` (CPU, memory and disk, for metrics) as traits |
+| `lotse-rt-tokio` | The production runtime: Tokio, the file system with directory fsyncs, length-prefixed frames over TLS 1.3 (rustls) with node and client certificates from the cluster's CA, or plain TCP on loopback when asked for; a throwaway CA for tests (`dev-certs`) |
 | `lotse-record` | The batch format used on disk, on the wire and in Raft: 65-byte header, ZigZag-varint records, CRC32C, transaction markers, queue acks and delivery counts |
 | `lotse-queue` | Queue semantics on the log, free of I/O: the ack index every replica applies (settled offsets as ranges, delivery counts) and the leader's dispatcher (subscriptions, credit, messages in flight, redelivery, ack timeout) |
 | `lotse-log` | Segmented partition log (also the Raft log): append, read, roll, truncate, crash recovery |
@@ -90,7 +90,7 @@ The metadata simulation in `crates/lotse-server/tests/metadata.rs` runs four or 
 - Compression codecs (zstd, lz4) are declared in the format but not implemented; compressed batches are rejected.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
 - Raft: snapshots travel in one message and must fit in one 16 MiB frame; chunked transfer comes later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
-- Connections have no TLS or authentication yet, between nodes or from clients. Raft group membership is fixed when a group is created; placement does not move groups when nodes join or leave.
+- Clients are not authenticated yet beyond an optional certificate, and nothing is authorized; certificates are read once at start (no reloading, no revocation check). Raft group membership is fixed when a group is created; placement does not move groups when nodes join or leave.
 - Native protocol: only `ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn`, `WriteTxnMarkers`, the queue, group and admin keys. A plain idempotent producer's id does not survive a client restart (transactional ids do), and a producer evicted from a full partition loses its deduplication. `Fetch` copies through the log rather than using `sendfile`.
 - Transactions: partitions do not verify with the coordinator that a transaction is open, so a client that skips `AddPartitionsToTxn` can hold back a partition's last stable offset; one coordinator group serves all transactional ids; `AddAcksToTxn` and `AddOffsetsToTxn` are not there yet; aborted ranges are kept until log retention exists.
 - Queues: exchanges are routed by the client (no `Publish` wire key), with bindings it may have cached for up to `metadata_max_age`, one message per publish; no dead-letter queues, TTL, delay, priorities, single active consumer or transactional acks. Delivery counts are written only on requeue and ack timeout, so after a failover they may start over. Settled offsets are kept as ranges for the life of the queue until retention exists.

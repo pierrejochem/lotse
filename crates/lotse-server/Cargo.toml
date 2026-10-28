@@ -23,7 +23,7 @@ thiserror.workspace = true
 [dev-dependencies]
 lotse-sim.workspace = true
 lotse-client.workspace = true
-lotse-rt-tokio.workspace = true
+lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]

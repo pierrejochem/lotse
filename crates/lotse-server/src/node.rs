@@ -32,7 +32,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
-use lotse_rt::{Conn, Disk, Listener, Runtime, Spawn};
+use lotse_rt::{Conn, Disk, Link, Listener, PeerIdentity, Runtime, Spawn};
 
 use crate::client::{
     AdminView, ClientRequest, Clients, ClusterView, MarkerJob, NetStats, NodeView, QueueConfig, StreamConfig,
@@ -221,9 +221,9 @@ impl<R: Runtime> Node<R> {
             let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
             groups.insert(g, replica.await?);
         }
-        let listener = rt.listen(&cfg.listen).await?;
+        let listener = rt.listen(&cfg.listen, Link::Node).await?;
         let client_listener = match &cfg.client_listen {
-            Some(addr) => Some(rt.listen(addr).await?),
+            Some(addr) => Some(rt.listen(addr, Link::Client).await?),
             None => None,
         };
         let shared = Arc::new(Shared::default());
@@ -258,7 +258,8 @@ async fn run<R: Runtime, S: StateMachine>(
     shared: Arc<Shared>,
 ) -> Result<(), Error> {
     let mut tasks = Vec::new();
-    tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone())));
+    let others: BTreeSet<NodeId> = cfg.peers.keys().copied().filter(|id| *id != cfg.id).collect();
+    tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone(), others)));
     if let Some(l) = client_listener {
         tasks.push(rt.spawn(accept_clients(rt.clone(), l, shared.clone())));
     }
@@ -267,6 +268,7 @@ async fn run<R: Runtime, S: StateMachine>(
         let peer = Arc::new(Peer { queue: Mutex::new(VecDeque::new()), ready: Signal::default() });
         tasks.push(rt.spawn(send_to(
             rt.clone(),
+            id,
             addr.clone(),
             peer.clone(),
             shared.net.clone(),
@@ -504,10 +506,20 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     Ok(())
 }
 
-async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
+/// Takes connections from the other nodes. When the network verifies peers,
+/// a connection is only taken from a node of this cluster, and carries only
+/// that node's frames: a certificate from the cluster's CA for some other
+/// node id, or for no node at all, gets nowhere.
+async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>, others: BTreeSet<NodeId>) {
     let mut readers = Vec::new();
+    let verify = rt.verifies_peers();
     while let Some(Ok((conn, _peer))) = race(listener.accept(), &[&shared.stop]).await {
-        readers.push(rt.spawn(read_from(conn, shared.clone())));
+        let sender = match (verify, conn.peer_identity()) {
+            (false, _) => None,
+            (true, Some(PeerIdentity::Node(id))) if others.contains(&id) => Some(id),
+            (true, _) => continue,
+        };
+        readers.push(rt.spawn(read_from(conn, shared.clone(), sender)));
     }
     drop(listener);
     for r in readers {
@@ -551,21 +563,49 @@ async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Sh
     }
 }
 
-async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>) {
+/// Reads one peer's frames into the inbox. `sender` is the node the
+/// connection proved to be, if the network verifies peers.
+async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>, sender: Option<NodeId>) {
     while let Some(Ok(Some(frame))) = race(conn.recv(), &[&shared.stop]).await {
         NetStats::add(&shared.net.peer_in, frame.len());
         // A frame that does not decode means a broken or foreign peer: drop
         // the connection, the peer reconnects.
         let Ok(decoded) = wire::decode(frame) else { return };
+        // A node speaks only for itself.
+        if sender.is_some_and(|id| decoded.0 != id) {
+            return;
+        }
         shared.inbox.lock().expect("inbox lock").push_back(decoded);
         shared.work.set();
     }
 }
 
-async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, net: Arc<NetStats>, stop: Signal, tick: Duration) {
+/// Keeps a connection to node `to` and sends its frames. When the network
+/// verifies peers, a connection whose certificate names another node is
+/// dropped like a failed one: the address may now belong to someone else.
+async fn send_to<R: Runtime>(
+    rt: R,
+    to: NodeId,
+    addr: String,
+    peer: Arc<Peer>,
+    net: Arc<NetStats>,
+    stop: Signal,
+    tick: Duration,
+) {
     let mut backoff = tick;
+    let verify = rt.verifies_peers();
     while !stop.is_set() {
-        let conn = match race(rt.connect(&addr), &[&stop]).await {
+        let connected = race(rt.connect(&addr, Link::Node), &[&stop]).await.map(|r| {
+            r.and_then(|c| match c.peer_identity() {
+                _ if !verify => Ok(c),
+                Some(PeerIdentity::Node(id)) if id == to => Ok(c),
+                other => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("{addr} is {other:?}, not node {to}"),
+                )),
+            })
+        });
+        let conn = match connected {
             Some(Ok(c)) => c,
             Some(Err(_)) => {
                 race(rt.sleep(backoff), &[&stop]).await;

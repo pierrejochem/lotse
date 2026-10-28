@@ -10,8 +10,10 @@
 //! file also syncs its directory, which Linux needs for the change itself to
 //! survive a power loss; that is what the [`Disk`] contract promises.
 //!
-//! Network: TCP with a 4-byte big-endian length before each frame, Nagle off.
-//! TLS comes with the native protocol.
+//! Network: TCP with a 4-byte big-endian length before each frame, Nagle off,
+//! inside TLS 1.3 ([`TlsConfig`]). Plain TCP only on loopback, and only when
+//! asked for ([`TokioRuntime::plaintext_on_loopback`]); a runtime given
+//! neither refuses to use the network.
 
 #![warn(missing_docs)]
 
@@ -30,11 +32,15 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use lotse_rt::{
-    Clock, Conn, Disk, Host, HostStats, Instant, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn,
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use lotse_rt::{Clock, Disk, Host, HostStats, Instant, OpenMode, Rng, SegmentFile, Spawn};
+
+#[cfg(feature = "dev-certs")]
+pub mod dev_certs;
+mod net;
+mod tls;
+
+pub use net::{TokioConn, TokioListener};
+pub use tls::{TlsConfig, TlsError};
 
 /// The production runtime. Cheap to clone; clones share the clock, the disk
 /// root and the random generator. Must be used inside a Tokio runtime.
@@ -45,6 +51,7 @@ pub struct TokioRuntime {
     rng: Arc<AtomicU64>,
     /// Kept between calls: CPU use is measured since the previous refresh.
     system: Arc<Mutex<Option<sysinfo::System>>>,
+    security: net::Security,
 }
 
 impl TokioRuntime {
@@ -67,7 +74,20 @@ impl TokioRuntime {
             root: Arc::new(root.into()),
             rng: Arc::new(AtomicU64::new(seed)),
             system: Arc::new(Mutex::new(None)),
+            security: net::Security::Unset,
         }
+    }
+
+    /// The same runtime speaking TLS 1.3 on every connection.
+    pub fn with_tls(self, tls: TlsConfig) -> Self {
+        TokioRuntime { security: net::Security::Tls(tls), ..self }
+    }
+
+    /// The same runtime speaking plain TCP, which it then allows only to and
+    /// from loopback addresses: for development and tests on one machine.
+    /// Nothing proves who is at the other end.
+    pub fn plaintext_on_loopback(self) -> Self {
+        TokioRuntime { security: net::Security::Plain, ..self }
     }
 
     /// The directory disk paths are relative to.
@@ -295,28 +315,6 @@ impl SegmentFile for TokioFile {
     }
 }
 
-/// A TCP listener.
-#[derive(Debug)]
-pub struct TokioListener {
-    inner: tokio::net::TcpListener,
-    addr: String,
-}
-
-/// A TCP connection carrying length-prefixed frames.
-#[derive(Debug)]
-pub struct TokioConn {
-    rd: tokio::sync::Mutex<OwnedReadHalf>,
-    wr: tokio::sync::Mutex<OwnedWriteHalf>,
-}
-
-impl TokioConn {
-    fn new(stream: tokio::net::TcpStream) -> io::Result<Self> {
-        stream.set_nodelay(true)?;
-        let (rd, wr) = stream.into_split();
-        Ok(TokioConn { rd: tokio::sync::Mutex::new(rd), wr: tokio::sync::Mutex::new(wr) })
-    }
-}
-
 impl Host for TokioRuntime {
     fn host_stats(&self) -> impl Future<Output = HostStats> + Send {
         let (system, root) = (Arc::clone(&self.system), Arc::clone(&self.root));
@@ -368,67 +366,5 @@ fn volume_of(dir: &Path) -> (Option<u64>, Option<u64>) {
     match best {
         Some(d) => (Some(d.available_space()), Some(d.total_space())),
         None => (None, None),
-    }
-}
-
-impl Net for TokioRuntime {
-    type Conn = TokioConn;
-    type Listener = TokioListener;
-
-    fn listen(&self, addr: &str) -> impl Future<Output = io::Result<TokioListener>> + Send {
-        let addr = addr.to_owned();
-        async move {
-            let inner = tokio::net::TcpListener::bind(&addr).await?;
-            let addr = inner.local_addr()?.to_string();
-            Ok(TokioListener { inner, addr })
-        }
-    }
-
-    fn connect(&self, addr: &str) -> impl Future<Output = io::Result<TokioConn>> + Send {
-        let addr = addr.to_owned();
-        async move { TokioConn::new(tokio::net::TcpStream::connect(&addr).await?) }
-    }
-}
-
-impl Listener for TokioListener {
-    type Conn = TokioConn;
-
-    fn local_addr(&self) -> String {
-        self.addr.clone()
-    }
-
-    async fn accept(&self) -> io::Result<(TokioConn, String)> {
-        let (stream, peer) = self.inner.accept().await?;
-        Ok((TokioConn::new(stream)?, peer.to_string()))
-    }
-}
-
-impl Conn for TokioConn {
-    async fn send(&self, frame: Bytes) -> io::Result<()> {
-        if frame.len() > MAX_FRAME {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "frame too large"));
-        }
-        let mut wr = self.wr.lock().await;
-        wr.write_all(&(frame.len() as u32).to_be_bytes()).await?;
-        wr.write_all(&frame).await?;
-        wr.flush().await
-    }
-
-    async fn recv(&self) -> io::Result<Option<Bytes>> {
-        let mut rd = self.rd.lock().await;
-        let mut len = [0u8; 4];
-        // A clean close lands between frames; anywhere else it is an error.
-        let n = rd.read(&mut len).await?;
-        if n == 0 {
-            return Ok(None);
-        }
-        rd.read_exact(&mut len[n..]).await?;
-        let len = u32::from_be_bytes(len) as usize;
-        if len > MAX_FRAME {
-            return Err(io::Error::new(ErrorKind::InvalidData, format!("frame of {len} bytes exceeds the limit")));
-        }
-        let mut buf = BytesMut::zeroed(len);
-        rd.read_exact(&mut buf).await?;
-        Ok(Some(buf.freeze()))
     }
 }

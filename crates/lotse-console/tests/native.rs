@@ -98,12 +98,12 @@ async fn the_console_shows_a_real_cluster() {
             coordinator: Some(2),
             max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         };
-        let rt = TokioRuntime::new(root.join(format!("node-{id}")));
+        let rt = TokioRuntime::new(root.join(format!("node-{id}"))).plaintext_on_loopback();
         std::fs::create_dir_all(rt.root()).unwrap();
         nodes.push(Node::start(rt, cfg, |_| Nothing).await.unwrap());
     }
     let bootstrap: Vec<String> = clients.values().cloned().collect();
-    let client = Client::new(TokioRuntime::new(&root), ClientConfig::new(bootstrap.clone()));
+    let client = Client::new(TokioRuntime::new(&root).plaintext_on_loopback(), ClientConfig::new(bootstrap.clone()));
     for i in 0..20 {
         client.produce("orders", 0, batch(&format!("order {i}"))).await.expect("produce");
     }

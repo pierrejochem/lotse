@@ -161,15 +161,22 @@ fn unreachable(e: ClientError) -> ApiError {
 }
 
 impl NativeCluster {
-    /// A cluster called `id`, reached through `bootstrap`.
+    /// A cluster called `id`, reached through `bootstrap` with plain TCP on
+    /// loopback: for local clusters and tests.
     pub fn new(id: impl Into<String>, bootstrap: Vec<String>) -> Self {
+        // The client reads no files; the runtime's root is never used.
+        NativeCluster::with_runtime(id, bootstrap, TokioRuntime::new(std::env::temp_dir()).plaintext_on_loopback())
+    }
+
+    /// A cluster called `id`, reached through `bootstrap` on `rt`'s network
+    /// (TLS, normally).
+    pub fn with_runtime(id: impl Into<String>, bootstrap: Vec<String>, rt: TokioRuntime) -> Self {
         let cfg = ClientConfig {
             request_timeout: Duration::from_secs(2),
             retry_for: Duration::from_secs(5),
             ..ClientConfig::new(bootstrap)
         };
-        // The client reads no files; the runtime's root is never used.
-        let client = Client::new(TokioRuntime::new(std::env::temp_dir()), cfg);
+        let client = Client::new(rt, cfg);
         NativeCluster {
             id: id.into(),
             client,

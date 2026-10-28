@@ -11,6 +11,7 @@ use lotse_console::cluster::native::NativeCluster;
 use lotse_console::config::{ClusterConfig, Config};
 use lotse_console::metrics::{MetricsStore, run_sampler};
 use lotse_console::{AppState, openapi, router};
+use lotse_rt_tokio::{TlsConfig, TokioRuntime};
 
 /// Lotse management console.
 #[derive(Debug, Parser)]
@@ -52,10 +53,24 @@ async fn main() -> ExitCode {
                 tracing::info!(cluster = %id, "serving the built-in demo cluster");
                 clusters.push(Arc::new(demo));
             }
-            ClusterConfig::Native { id, bootstrap } => {
+            ClusterConfig::Native { id, bootstrap, ca_file } => {
+                let rt = TokioRuntime::new(std::env::temp_dir());
+                let rt = match ca_file {
+                    Some(ca) => match TlsConfig::from_files(ca, None::<(&str, &str)>) {
+                        Ok(tls) => rt.with_tls(tls),
+                        Err(e) => {
+                            eprintln!("lotse-console: cluster \"{id}\": {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    None => {
+                        tracing::warn!(cluster = %id, "no ca_file: plain TCP, loopback only");
+                        rt.plaintext_on_loopback()
+                    }
+                };
                 tracing::info!(cluster = %id, ?bootstrap, "serving a cluster over the native protocol");
                 tracing::warn!(cluster = %id, "Lotse has no authentication yet: requests reach the cluster without credentials");
-                clusters.push(Arc::new(NativeCluster::new(id.clone(), bootstrap.clone())));
+                clusters.push(Arc::new(NativeCluster::with_runtime(id.clone(), bootstrap.clone(), rt)));
             }
         }
     }

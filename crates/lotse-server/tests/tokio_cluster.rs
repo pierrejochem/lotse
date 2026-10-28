@@ -1,5 +1,6 @@
-//! Three real nodes on localhost: Tokio, TCP and the local disk, with a
-//! client speaking the native protocol.
+//! Three real nodes on localhost: Tokio, TLS 1.3 with certificates from a
+//! throwaway CA, and the local disk, with a client speaking the native
+//! protocol.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use lotse_log::LogConfig;
 use lotse_raft::{NodeId, Role};
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt_tokio::TokioRuntime;
+use lotse_rt_tokio::dev_certs::DevCa;
 use lotse_server::wire::GroupId;
 use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine, StreamConfig};
 
@@ -45,13 +47,15 @@ type Running = (Node<TokioRuntime>, NodeHandle, BTreeMap<GroupId, Recorder>);
 
 struct Cluster {
     root: PathBuf,
+    ca: DevCa,
     cfgs: BTreeMap<NodeId, NodeConfig>,
     nodes: BTreeMap<NodeId, Running>,
 }
 
 impl Cluster {
     async fn start(&mut self, id: NodeId) {
-        let rt = TokioRuntime::new(self.root.join(format!("node-{id}")));
+        let tls = self.ca.node_tls(id, &["127.0.0.1"]).unwrap();
+        let rt = TokioRuntime::new(self.root.join(format!("node-{id}"))).with_tls(tls);
         std::fs::create_dir_all(rt.root()).unwrap();
         let recorders: BTreeMap<GroupId, Recorder> = [1, 2, 3].iter().map(|g| (*g, Recorder::default())).collect();
         let made = recorders.clone();
@@ -119,7 +123,7 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
             )
         })
         .collect();
-    let mut c = Cluster { root: root.clone(), cfgs, nodes: BTreeMap::new() };
+    let mut c = Cluster { root: root.clone(), ca: DevCa::new(), cfgs, nodes: BTreeMap::new() };
     for id in 1..=3 {
         c.start(id).await;
     }
@@ -128,8 +132,10 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
         leader.propose(g, batch(&format!("first-{g}"))).await.unwrap();
         c.everywhere(g, &format!("first-{g}")).await;
     }
-    let client =
-        Client::new(TokioRuntime::new(std::env::temp_dir()), ClientConfig::new(clients.values().cloned().collect()));
+    let client = Client::new(
+        TokioRuntime::new(std::env::temp_dir()).with_tls(c.ca.client_tls(None).unwrap()),
+        ClientConfig::new(clients.values().cloned().collect()),
+    );
     let mut acked = Vec::new();
     for p in 0..2 {
         let at = client.produce("orders", p, batch(&format!("client-{p}"))).await.unwrap();

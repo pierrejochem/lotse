@@ -19,6 +19,7 @@
 //! id = "prod-hamburg-1"
 //! kind = "native"
 //! bootstrap = ["broker-1:9000", "broker-2:9000"]
+//! ca_file = "/etc/lotse/ca.pem"   # the cluster's CA; without it, plain TCP on loopback only
 //!
 //! [[clusters]]
 //! id = "demo"
@@ -111,6 +112,10 @@ pub enum ClusterConfig {
         /// Client addresses of some of its nodes (`host:port`); the others
         /// are learnt from them.
         bootstrap: Vec<String>,
+        /// The cluster's CA certificate (PEM), to reach it over TLS. Without
+        /// it the console speaks plain TCP, which only works on loopback.
+        #[serde(default)]
+        ca_file: Option<std::path::PathBuf>,
     },
 }
 

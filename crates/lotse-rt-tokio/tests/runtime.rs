@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use lotse_log::{Log, LogConfig};
 use lotse_record::{BatchBuilder, BatchOptions};
-use lotse_rt::{Clock, Conn, Disk, Host, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn};
+use lotse_rt::{Clock, Conn, Disk, Host, Link, Listener, MAX_FRAME, Net, OpenMode, Rng, SegmentFile, Spawn};
 use lotse_rt_tokio::TokioRuntime;
 
 /// A fresh directory under the system temp dir, removed when dropped.
@@ -92,8 +92,8 @@ async fn disk_operations_keep_the_contract() {
 
 #[tokio::test]
 async fn tcp_carries_whole_frames_in_order() {
-    let rt = TokioRuntime::new(std::env::temp_dir());
-    let listener = rt.listen("127.0.0.1:0").await.unwrap();
+    let rt = TokioRuntime::new(std::env::temp_dir()).plaintext_on_loopback();
+    let listener = rt.listen("127.0.0.1:0", Link::Node).await.unwrap();
     let addr = listener.local_addr();
     let server = rt.spawn(async move {
         let (conn, _) = listener.accept().await.unwrap();
@@ -103,7 +103,7 @@ async fn tcp_carries_whole_frames_in_order() {
         }
         got
     });
-    let conn = rt.connect(&addr).await.unwrap();
+    let conn = rt.connect(&addr, Link::Node).await.unwrap();
     let big = Bytes::from(vec![7u8; 1 << 20]);
     for i in 0..50u32 {
         conn.send(Bytes::from(i.to_be_bytes().to_vec())).await.unwrap();

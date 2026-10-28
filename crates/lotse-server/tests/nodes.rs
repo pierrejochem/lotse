@@ -114,7 +114,17 @@ impl World {
             })
             .collect();
         let mut w = World {
-            hosts: ids.iter().map(|&id| (id, rt.node(&format!("n{id}")))).collect(),
+            // Half the seeds run as with TLS: every node proves its id.
+            hosts: {
+                let verify = rt.chance(1, 2);
+                rt.net().verify_peers(verify);
+                ids.iter()
+                    .map(|&id| {
+                        let host = rt.node(&format!("n{id}"));
+                        (id, if verify { host.with_identity(Some(lotse_rt::PeerIdentity::Node(id))) } else { host })
+                    })
+                    .collect()
+            },
             cfgs,
             running: BTreeMap::new(),
             down_until: BTreeMap::new(),

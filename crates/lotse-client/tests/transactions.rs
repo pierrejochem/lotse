@@ -14,7 +14,7 @@ use lotse_sim::{Sim, SimRuntime};
 /// A broker that answers everything a transaction needs, except produce,
 /// which it swallows: every produce's outcome stays unknown.
 async fn broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
-    let listener = rt.listen("b1:9000").await.unwrap();
+    let listener = rt.listen("b1:9000", lotse_rt::Link::Client).await.unwrap();
     loop {
         let Ok((conn, _)) = listener.accept().await else { return };
         let end_called = end_called.clone();
@@ -119,7 +119,7 @@ fn a_transaction_with_an_unknown_write_cannot_be_committed() {
 /// A broker with a fanout exchange to queues `a` (written) and `b` (never
 /// written: its partition has no leader that takes the produce).
 async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
-    let listener = rt.listen("b1:9000").await.unwrap();
+    let listener = rt.listen("b1:9000", lotse_rt::Link::Client).await.unwrap();
     loop {
         let Ok((conn, _)) = listener.accept().await else { return };
         let end_called = end_called.clone();
