@@ -342,7 +342,10 @@ async fn user(
                 2 => {
                     let name = format!("{}{}-{u}-{serial}", NAMES[rt.below(2) as usize], tenant);
                     match c.create_stream(&name, 1, 1 + rt.below(2) as u8).await {
-                        Ok(_) => {
+                        // The name is this attempt's own: if it exists, an
+                        // earlier try of this same request created it and
+                        // its answer was lost.
+                        Ok(_) | Err(ClientError::ResourceExists { .. }) => {
                             h.lock().unwrap().tenant_of.insert(name.clone(), tenant.into());
                             Ok(Done::Created { user: u, tenant: tenant.into(), stream: name })
                         }
