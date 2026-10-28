@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly: the client, queue and group simulations at full depth (ADRs 0027, 0031, 0033).
+  # Nightly: the client, queue, group and metadata simulations at full depth
+  # (ADRs 0027, 0031, 0033, 0034).
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
@@ -57,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_at_runtime
         env:
           LOTSE_SIM_SEEDS: "5000"
 
@@ -98,3 +99,15 @@ jobs:
       - run: cargo test -p lotse-server --release --test groups
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
+
+  # The metadata simulation, in a job of its own (ADR 0034): 2,000 seeds on
+  # pushes and pull requests, 5,000 nightly.
+  metadata-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p lotse-server --release --test metadata
+        env:
+          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}

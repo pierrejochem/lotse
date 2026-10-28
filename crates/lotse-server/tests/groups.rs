@@ -114,6 +114,7 @@ impl World {
                         exchanges: Vec::new(),
                         group_session_timeout: SESSION,
                         group_heartbeat_interval: TICK * 10,
+                        metadata: None,
                         coordinator: Some(5),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                     },

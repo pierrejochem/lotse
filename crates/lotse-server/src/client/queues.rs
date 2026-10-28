@@ -159,9 +159,9 @@ impl Clients {
         let reply = |error, subscription_id, leader_hint| {
             outbox.push(correlation_id, &Response::Subscribe(SubscribeResponse { error, subscription_id, leader_hint }))
         };
-        let Some((g, replica)) = Self::queue_group(view, req.queue_id).and_then(|g| groups.get(&g).map(|r| (g, r)))
-        else {
-            return reply(ErrorCode::UNKNOWN_RESOURCE, 0, None);
+        let group = Self::queue_group(view, req.queue_id);
+        let Some((g, replica)) = group.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
+            return reply(super::absent(req.queue_id, group), 0, None);
         };
         if replica.raft_ref().role() != Role::Leader {
             return reply(ErrorCode::NOT_LEADER, 0, hint(replica.raft_ref()));
@@ -213,8 +213,8 @@ impl Clients {
         groups: &'a mut Groups<R, S>,
         queue_id: u64,
     ) -> Result<(GroupId, &'a mut Replica<R, S>), Refusal> {
-        let g = Self::queue_group(view, queue_id).ok_or((ErrorCode::UNKNOWN_RESOURCE, None))?;
-        let replica = groups.get_mut(&g).ok_or((ErrorCode::UNKNOWN_RESOURCE, None))?;
+        let g = Self::queue_group(view, queue_id).ok_or((super::absent(queue_id, None), None))?;
+        let replica = groups.get_mut(&g).ok_or((ErrorCode::NOT_LEADER, None))?;
         if replica.raft_ref().role() != Role::Leader {
             return Err((ErrorCode::NOT_LEADER, hint(replica.raft_ref())));
         }

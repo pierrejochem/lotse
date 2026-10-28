@@ -59,10 +59,12 @@ use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, Stat
 use crate::signal::{Signal, race};
 use crate::wire::GroupId;
 
+mod admin;
 mod coord;
 mod groups;
 mod queues;
 
+pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
 pub use queues::QueueConfig;
 
@@ -196,6 +198,8 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) group_session: Duration,
     /// How often group members send heartbeats.
     pub(crate) group_heartbeat: Duration,
+    /// The metadata group and what admin requests need.
+    pub(crate) admin: admin::AdminView<'a>,
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
     pub(crate) now: Instant,
@@ -216,6 +220,18 @@ impl ClusterView<'_> {
     fn stream_group_of(&self, resource_id: u64, partition: u32) -> Option<GroupId> {
         let s = self.streams.iter().find(|s| s.resource_id == resource_id)?;
         s.partitions.get(partition as usize).copied()
+    }
+}
+
+/// Why a partition cannot be served here: it does not exist, or the client
+/// must look for its leader elsewhere: a group created at runtime runs on
+/// its voters only, and a resource created a moment ago may not have
+/// reached this node's metadata yet (runtime ids are never configured).
+fn absent(resource_id: u64, group: Option<GroupId>) -> ErrorCode {
+    if group.is_some() || resource_id >= crate::metadata::DYNAMIC_BASE {
+        ErrorCode::NOT_LEADER
+    } else {
+        ErrorCode::UNKNOWN_RESOURCE
     }
 }
 
@@ -249,6 +265,8 @@ pub(crate) struct Clients {
     queue_writes: Vec<queues::QueueWrite>,
     /// The group coordinator's clocks.
     group_timers: groups::GroupTimers,
+    /// Admin records in flight.
+    admin_writes: Vec<admin::AdminWrite>,
 }
 
 impl Clients {
@@ -290,6 +308,11 @@ impl Clients {
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
             Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
             Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),
+            Request::CreateStream(req) => self.create_stream(outbox, id, req, view, groups),
+            Request::CreateQueue(req) => self.create_queue(outbox, id, req, view, groups),
+            Request::DeclareExchange(req) => self.declare_exchange(outbox, id, req, view, groups),
+            Request::Bind(req) => self.bind(outbox, id, req, false, view, groups),
+            Request::Unbind(req) => self.bind(outbox, id, req, true, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -324,7 +347,7 @@ impl Clients {
                 };
                 let group = view.group_of(res.resource_id, p.partition);
                 match group.and_then(|g| groups.get_mut(&g).map(|r| (g, r))) {
-                    None => out.error = ErrorCode::UNKNOWN_RESOURCE,
+                    None => out.error = absent(res.resource_id, group),
                     Some(_) if req.txn_id.is_some() != transactional(&p.batch) => {
                         out.error = ErrorCode::INVALID_TXN_STATE;
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
@@ -418,9 +441,9 @@ impl Clients {
             for (ri, r) in m.resources.iter().enumerate() {
                 let mut partitions = Vec::new();
                 for (pi, p) in r.partitions.iter().enumerate() {
-                    let error = match view.group_of(r.resource_id, *p).and_then(|g| groups.get_mut(&g).map(|x| (g, x)))
-                    {
-                        None => ErrorCode::UNKNOWN_RESOURCE,
+                    let group = view.group_of(r.resource_id, *p);
+                    let error = match group.and_then(|g| groups.get_mut(&g).map(|x| (g, x))) {
+                        None => absent(r.resource_id, group),
                         Some((g, replica)) => {
                             match replica.propose_marker(m.producer_id, m.producer_epoch, m.commit, m.coordinator_epoch)
                             {
@@ -463,6 +486,7 @@ impl Clients {
         self.markers = markers.into_iter().filter_map(|p| settle_markers(p, view.now, groups)).collect();
         let jobs = self.coordinate(view, groups);
         self.expire_members(view, groups);
+        self.settle_admin(view, groups);
         self.settle_queue_writes(view.now, groups);
         self.serve_queues(view, groups).await?;
 
@@ -631,8 +655,9 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                 records: Bytes::new(),
                 leader_hint: None,
             };
-            match view.stream_group_of(res.resource_id, fp.partition).and_then(|g| groups.get(&g)) {
-                None => out.error = ErrorCode::UNKNOWN_RESOURCE,
+            let group = view.stream_group_of(res.resource_id, fp.partition);
+            match group.and_then(|g| groups.get(&g)) {
+                None => out.error = absent(res.resource_id, group),
                 Some(replica) => {
                     let raft = replica.raft_ref();
                     // Offsets below the commit index are committed (index = offset + 1).
@@ -774,7 +799,11 @@ fn metadata<R: Runtime, S: StateMachine>(
                         let voters = raft.membership().voters.iter().map(|v| *v as u32).collect();
                         (raft.leader().unwrap_or(0) as u32, raft.term(), voters)
                     }
-                    None => (0, 0, Vec::new()),
+                    // Not hosted here: its voters know the leader.
+                    None => {
+                        let voters = view.admin.voters.get(g).map(|v| v.iter().map(|n| *n as u32).collect());
+                        (0, 0, voters.unwrap_or_default())
+                    }
                 };
                 PartitionMetadata { partition: i as u32, leader, leader_term, voters }
             })

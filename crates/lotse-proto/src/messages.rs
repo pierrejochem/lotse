@@ -253,7 +253,7 @@ impl MetadataResponse {
                 0 => None,
                 _ => Some(ExchangeMetadata {
                     exchange_type: r.u8()?,
-                    bindings: r.array(16, |r| {
+                    bindings: r.array(13, |r| {
                         let b = BindingMetadata {
                             queue_id: r.u64()?,
                             binding_key: r.string()?,
@@ -1562,6 +1562,194 @@ impl AddOffsetsToTxnRequest {
             member_id: r.string()?,
             member_epoch: r.i32()?,
             resources: get_commits(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+fn put_configs(w: &mut Writer, configs: &[(String, String)]) {
+    w.array(configs, |w, (k, v)| {
+        w.string(k);
+        w.string(v);
+    });
+}
+
+fn get_configs(r: &mut Reader) -> Result<Vec<(String, String)>, DecodeError> {
+    r.array(4, |r| Ok((r.string()?, r.string()?)))
+}
+
+/// Creates a stream (admin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateStreamRequest {
+    /// Its name; unique among all resources.
+    pub name: String,
+    /// Number of partitions.
+    pub partitions: u32,
+    /// Replicas per partition.
+    pub replication: u8,
+    /// Settings, `key = value`.
+    pub configs: Vec<(String, String)>,
+}
+
+impl CreateStreamRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.u32(self.partitions);
+        w.u8(self.replication);
+        put_configs(w, &self.configs);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CreateStreamRequest {
+            name: r.string()?,
+            partitions: r.u32()?,
+            replication: r.u8()?,
+            configs: get_configs(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Creates a queue (admin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateQueueRequest {
+    /// Its name; unique among all resources.
+    pub name: String,
+    /// Priority levels, 1-10 (only 1 is supported so far).
+    pub priority_levels: u8,
+    /// Single active consumer (not supported so far).
+    pub single_active: bool,
+    /// Dead-letter queue (not supported so far).
+    pub dlq: Option<String>,
+    /// Replicas.
+    pub replication: u8,
+    /// Settings, `key = value` (`ack.timeout.ms`).
+    pub configs: Vec<(String, String)>,
+}
+
+impl CreateQueueRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.u8(self.priority_levels);
+        w.u8(u8::from(self.single_active));
+        w.opt_string(self.dlq.as_deref());
+        w.u8(self.replication);
+        put_configs(w, &self.configs);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CreateQueueRequest {
+            name: r.string()?,
+            priority_levels: r.u8()?,
+            single_active: r.u8()? != 0,
+            dlq: r.opt_string()?,
+            replication: r.u8()?,
+            configs: get_configs(r)?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Declares an exchange (admin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclareExchangeRequest {
+    /// Its name; unique among all resources.
+    pub name: String,
+    /// [`exchange_type`].
+    pub exchange_type: u8,
+    /// Settings, `key = value`.
+    pub configs: Vec<(String, String)>,
+}
+
+impl DeclareExchangeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.u8(self.exchange_type);
+        put_configs(w, &self.configs);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DeclareExchangeRequest { name: r.string()?, exchange_type: r.u8()?, configs: get_configs(r)? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The resource created, or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateResponse {
+    /// Outcome; [`ErrorCode::RESOURCE_EXISTS`] names the existing one.
+    pub error: ErrorCode,
+    /// The resource's id.
+    pub resource_id: u64,
+    /// Why, for a refusal.
+    pub error_msg: Option<String>,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl CreateResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u64(self.resource_id);
+        w.opt_string(self.error_msg.as_deref());
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(CreateResponse {
+            error: ErrorCode(r.u16()?),
+            resource_id: r.u64()?,
+            error_msg: r.opt_string()?,
+            leader_hint: get_hint(r)?,
+        })
+    }
+}
+
+/// Binds a queue to an exchange, or unbinds it (admin). Answered with an
+/// outcome only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindRequest {
+    /// The exchange.
+    pub exchange_id: u64,
+    /// The queue.
+    pub queue_id: u64,
+    /// Matched against routing keys (direct, topic).
+    pub binding_key: String,
+    /// Headers to match (headers exchange); a `None` value is null.
+    pub header_match: Vec<(Bytes, Option<Bytes>)>,
+    /// All headers must match (`true`) or any one.
+    pub match_all: bool,
+}
+
+impl BindRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.exchange_id);
+        w.u64(self.queue_id);
+        w.string(&self.binding_key);
+        w.array(&self.header_match, |w, (k, v)| {
+            w.bytes(k);
+            w.u8(u8::from(v.is_some()));
+            if let Some(v) = v {
+                w.bytes(v);
+            }
+        });
+        w.u8(u8::from(self.match_all));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = BindRequest {
+            exchange_id: r.u64()?,
+            queue_id: r.u64()?,
+            binding_key: r.string()?,
+            header_match: r.array(5, |r| {
+                let k = r.bytes()?;
+                let v = if r.u8()? != 0 { Some(r.bytes()?) } else { None };
+                Ok((k, v))
+            })?,
+            match_all: r.u8()? != 0,
         };
         r.tags()?;
         Ok(req)

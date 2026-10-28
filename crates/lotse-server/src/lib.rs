@@ -11,6 +11,7 @@
 mod client;
 mod coordinator;
 mod groups;
+mod metadata;
 mod node;
 mod producers;
 mod replica;
@@ -19,6 +20,7 @@ mod txns;
 pub mod wire;
 
 pub use client::{QueueConfig, StreamConfig};
+pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle};
 pub use producers::DEFAULT_MAX_PRODUCERS;
 

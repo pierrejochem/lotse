@@ -38,5 +38,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0031 | [Queues: the first cut](0031-queues-first-cut.md) | Accepted |
 | 0032 | [Publish: exchanges routed by the client](0032-publish-routed-by-the-client.md) | Accepted |
 | 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
+| 0034 | [The metadata group: resources created at runtime](0034-metadata-group.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

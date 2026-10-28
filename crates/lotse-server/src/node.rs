@@ -34,7 +34,7 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Listener, Runtime, Spawn};
 
-use crate::client::{ClientRequest, Clients, ClusterView, MarkerJob, QueueConfig, StreamConfig};
+use crate::client::{AdminView, ClientRequest, Clients, ClusterView, MarkerJob, QueueConfig, StreamConfig};
 use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
@@ -75,6 +75,10 @@ pub struct NodeConfig {
     /// Consumer groups: how often members send heartbeats
     /// ([`crate::DEFAULT_GROUP_HEARTBEAT_INTERVAL`] by default).
     pub group_heartbeat_interval: Duration,
+    /// The metadata group (one of `groups`): streams, queues and exchanges
+    /// created at runtime with the admin requests. `None`: only the
+    /// configured ones.
+    pub metadata: Option<GroupId>,
     /// The group that coordinates producers (hands out producer ids); one
     /// of `groups`. `None`: no idempotent produce.
     pub coordinator: Option<GroupId>,
@@ -197,7 +201,7 @@ impl<R: Runtime> Node<R> {
     pub async fn start<S: StateMachine>(
         rt: R,
         cfg: NodeConfig,
-        state_machine: impl Fn(GroupId) -> S,
+        state_machine: impl Fn(GroupId) -> S + std::marker::Send + Sync + 'static,
     ) -> Result<Node<R>, Error> {
         let voters: Vec<NodeId> = cfg.peers.keys().copied().collect();
         let mut groups = BTreeMap::new();
@@ -216,7 +220,8 @@ impl<R: Runtime> Node<R> {
         };
         let shared = Arc::new(Shared::default());
         let handle = NodeHandle { shared: shared.clone() };
-        let task = rt.clone().spawn(run(rt, cfg, groups, listener, client_listener, shared));
+        let factory: Factory<S> = Arc::new(state_machine);
+        let task = rt.clone().spawn(run(rt, cfg, groups, factory, listener, client_listener, shared));
         Ok(Node { handle, task })
     }
 
@@ -232,10 +237,14 @@ impl<R: Runtime> Node<R> {
     }
 }
 
+/// Makes a fresh state machine for a group.
+type Factory<S> = Arc<dyn Fn(GroupId) -> S + std::marker::Send + Sync>;
+
 async fn run<R: Runtime, S: StateMachine>(
     rt: R,
     cfg: NodeConfig,
     mut groups: BTreeMap<GroupId, Replica<R, S>>,
+    factory: Factory<S>,
     listener: R::Listener,
     client_listener: Option<R::Listener>,
     shared: Arc<Shared>,
@@ -252,7 +261,7 @@ async fn run<R: Runtime, S: StateMachine>(
         peers.insert(id, peer);
     }
     let jobs = Live::default();
-    let result = main_loop(&rt, &cfg, &mut groups, &peers, &shared, &jobs).await;
+    let result = main_loop(&rt, &cfg, &mut groups, &factory, &peers, &shared, &jobs).await;
     // Whatever ended the loop, everything else ends with it.
     shared.stop.set();
     for p in peers.values() {
@@ -341,6 +350,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     rt: &R,
     cfg: &NodeConfig,
     groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+    factory: &Factory<S>,
     peers: &BTreeMap<NodeId, Arc<Peer>>,
     shared: &Arc<Shared>,
     jobs: &Live,
@@ -358,7 +368,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
         },
     ));
+    let nodes: Vec<NodeId> = cfg.peers.keys().copied().collect();
+    let mut known = Known::configured(cfg);
     while !shared.stop.is_set() {
+        known.refresh(rt, cfg, groups, factory).await?;
         let wait = next_tick - rt.now();
         if !wait.is_zero() && !shared.work.take() {
             race(rt.sleep(wait), &[&shared.work, &shared.stop]).await;
@@ -369,11 +382,17 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             groups.values_mut().for_each(|g| g.raft().tick());
         }
         let view = ClusterView {
-            streams: &cfg.streams,
-            queues: &cfg.queues,
-            exchanges: &cfg.exchanges,
+            streams: &known.streams,
+            queues: &known.queues,
+            exchanges: &known.exchanges,
             group_session: cfg.group_session_timeout,
             group_heartbeat: cfg.group_heartbeat_interval,
+            admin: AdminView {
+                metadata: cfg.metadata,
+                nodes: &nodes,
+                configured_groups: cfg.groups.len(),
+                voters: &known.voters,
+            },
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
             now: rt.now(),
@@ -529,5 +548,95 @@ async fn send_to<R: Runtime>(rt: R, addr: String, peer: Arc<Peer>, stop: Signal,
                 break; // reconnect; the frame is lost, Raft resends
             }
         }
+    }
+}
+
+/// The resources this node knows: configured ones and, once the metadata
+/// group has applied them, those created at runtime.
+struct Known {
+    streams: Vec<StreamConfig>,
+    queues: Vec<QueueConfig>,
+    exchanges: Vec<lotse_route::Exchange>,
+    /// Voters of runtime groups.
+    voters: BTreeMap<GroupId, Vec<NodeId>>,
+    /// The metadata group's applied index these were built from.
+    applied: u64,
+}
+
+impl Known {
+    fn configured(cfg: &NodeConfig) -> Known {
+        Known {
+            streams: cfg.streams.clone(),
+            queues: cfg.queues.clone(),
+            exchanges: cfg.exchanges.clone(),
+            voters: BTreeMap::new(),
+            applied: 0,
+        }
+    }
+
+    /// Rebuilds the view after the metadata group applied something, and
+    /// opens the runtime groups this node is a voter of.
+    async fn refresh<R: Runtime, S: StateMachine>(
+        &mut self,
+        rt: &R,
+        cfg: &NodeConfig,
+        groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+        factory: &Factory<S>,
+    ) -> Result<(), Error> {
+        let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return Ok(()) };
+        if meta.applied() == self.applied {
+            return Ok(());
+        }
+        self.applied = meta.applied();
+        let state = meta.metadata().clone();
+        let mut known = Known::configured(cfg);
+        known.applied = self.applied;
+        for s in state.streams.values() {
+            known.streams.push(StreamConfig {
+                name: s.name.clone(),
+                resource_id: s.resource_id,
+                partitions: s.partitions.iter().map(|(g, _)| *g).collect(),
+            });
+        }
+        for q in state.queues.values() {
+            known.queues.push(QueueConfig {
+                name: q.name.clone(),
+                resource_id: q.resource_id,
+                group: q.group,
+                ack_timeout: Duration::from_millis(q.ack_timeout_ms),
+            });
+        }
+        for x in state.exchanges.values() {
+            known.exchanges.push(lotse_route::Exchange {
+                name: x.name.clone(),
+                resource_id: x.resource_id,
+                kind: x.kind,
+                bindings: Vec::new(),
+            });
+        }
+        for x in &mut known.exchanges {
+            if let Some(extra) = state.bindings.get(&x.resource_id) {
+                for b in extra {
+                    if !x.bindings.contains(b) {
+                        x.bindings.push(b.clone());
+                    }
+                }
+            }
+        }
+        for (g, voters, queue) in state.groups() {
+            known.voters.insert(g, voters.to_vec());
+            // Only voters replicate a group; the others learn its leader
+            // from them.
+            if voters.contains(&cfg.id) && !groups.contains_key(&g) {
+                let raft =
+                    Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.to_vec()) };
+                let dir = PathBuf::from("groups").join(g.to_string());
+                let options = ReplicaOptions { max_producers: cfg.max_producers, queue };
+                let replica = Replica::open_with(rt.clone(), dir, raft, factory(g), cfg.log, options).await?;
+                groups.insert(g, replica);
+            }
+        }
+        *self = known;
+        Ok(())
     }
 }

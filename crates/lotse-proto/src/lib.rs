@@ -73,6 +73,16 @@ impl ApiKey {
     pub const OFFSET_FETCH: ApiKey = ApiKey(8);
     /// Commits a group's offsets within a transaction.
     pub const ADD_OFFSETS_TO_TXN: ApiKey = ApiKey(19);
+    /// Creates a stream (admin).
+    pub const CREATE_STREAM: ApiKey = ApiKey(21);
+    /// Creates a queue (admin).
+    pub const CREATE_QUEUE: ApiKey = ApiKey(22);
+    /// Declares an exchange (admin).
+    pub const DECLARE_EXCHANGE: ApiKey = ApiKey(23);
+    /// Binds a queue to an exchange (admin).
+    pub const BIND: ApiKey = ApiKey(24);
+    /// Removes a binding (admin).
+    pub const UNBIND: ApiKey = ApiKey(28);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -95,7 +105,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 18] = [
+    pub const SUPPORTED: [ApiVersionRange; 23] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -114,6 +124,11 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::COMMIT_OFFSETS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::OFFSET_FETCH, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::ADD_OFFSETS_TO_TXN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREATE_STREAM, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREATE_QUEUE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DECLARE_EXCHANGE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::BIND, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::UNBIND, min: 0, max: 0 },
     ];
 }
 
@@ -189,10 +204,12 @@ impl ErrorCode {
     pub const UNSTABLE_OFFSET_COMMIT: ErrorCode = ErrorCode(24);
     /// Another change to the same consumer group is in progress: retry.
     pub const CONCURRENT_GROUP_CHANGE: ErrorCode = ErrorCode(25);
+    /// A resource with that name exists already; the answer names its id.
+    pub const RESOURCE_EXISTS: ErrorCode = ErrorCode(26);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 26] = [
+        const NAMES: [&str; 27] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -219,6 +236,7 @@ impl ErrorCode {
             "ACK_TIMED_OUT",
             "UNSTABLE_OFFSET_COMMIT",
             "CONCURRENT_GROUP_CHANGE",
+            "RESOURCE_EXISTS",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -306,6 +324,16 @@ pub enum Request {
     OffsetFetch(OffsetFetchRequest),
     /// [`ApiKey::ADD_OFFSETS_TO_TXN`].
     AddOffsetsToTxn(AddOffsetsToTxnRequest),
+    /// [`ApiKey::CREATE_STREAM`].
+    CreateStream(CreateStreamRequest),
+    /// [`ApiKey::CREATE_QUEUE`].
+    CreateQueue(CreateQueueRequest),
+    /// [`ApiKey::DECLARE_EXCHANGE`].
+    DeclareExchange(DeclareExchangeRequest),
+    /// [`ApiKey::BIND`].
+    Bind(BindRequest),
+    /// [`ApiKey::UNBIND`].
+    Unbind(BindRequest),
 }
 
 impl Request {
@@ -330,6 +358,11 @@ impl Request {
             Request::CommitOffsets(_) => ApiKey::COMMIT_OFFSETS,
             Request::OffsetFetch(_) => ApiKey::OFFSET_FETCH,
             Request::AddOffsetsToTxn(_) => ApiKey::ADD_OFFSETS_TO_TXN,
+            Request::CreateStream(_) => ApiKey::CREATE_STREAM,
+            Request::CreateQueue(_) => ApiKey::CREATE_QUEUE,
+            Request::DeclareExchange(_) => ApiKey::DECLARE_EXCHANGE,
+            Request::Bind(_) => ApiKey::BIND,
+            Request::Unbind(_) => ApiKey::UNBIND,
         }
     }
 }
@@ -362,6 +395,9 @@ pub enum Response {
     CommitOffsets(CommitOffsetsResponse),
     /// To [`Request::OffsetFetch`].
     OffsetFetch(OffsetFetchResponse),
+    /// To [`Request::CreateStream`], [`Request::CreateQueue`] and
+    /// [`Request::DeclareExchange`].
+    Create(CreateResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -398,6 +434,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::CommitOffsets(r) => r.put(&mut w),
         Request::OffsetFetch(r) => r.put(&mut w),
         Request::AddOffsetsToTxn(r) => r.put(&mut w),
+        Request::CreateStream(r) => r.put(&mut w),
+        Request::CreateQueue(r) => r.put(&mut w),
+        Request::DeclareExchange(r) => r.put(&mut w),
+        Request::Bind(r) | Request::Unbind(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -436,6 +476,11 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::COMMIT_OFFSETS => Request::CommitOffsets(CommitOffsetsRequest::get(&mut r)?),
         ApiKey::OFFSET_FETCH => Request::OffsetFetch(OffsetFetchRequest::get(&mut r)?),
         ApiKey::ADD_OFFSETS_TO_TXN => Request::AddOffsetsToTxn(AddOffsetsToTxnRequest::get(&mut r)?),
+        ApiKey::CREATE_STREAM => Request::CreateStream(CreateStreamRequest::get(&mut r)?),
+        ApiKey::CREATE_QUEUE => Request::CreateQueue(CreateQueueRequest::get(&mut r)?),
+        ApiKey::DECLARE_EXCHANGE => Request::DeclareExchange(DeclareExchangeRequest::get(&mut r)?),
+        ApiKey::BIND => Request::Bind(BindRequest::get(&mut r)?),
+        ApiKey::UNBIND => Request::Unbind(BindRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -461,6 +506,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::GroupHeartbeat(r) => r.put(&mut w),
         Response::CommitOffsets(r) => r.put(&mut w),
         Response::OffsetFetch(r) => r.put(&mut w),
+        Response::Create(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -532,7 +578,12 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::END_TXN => Response::EndTxn(EndTxnResponse::get(&mut r)?),
         ApiKey::WRITE_TXN_MARKERS => Response::WriteTxnMarkers(WriteTxnMarkersResponse::get(&mut r)?),
         ApiKey::SUBSCRIBE => Response::Subscribe(SubscribeResponse::get(&mut r)?),
-        ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE => Response::Outcome(OutcomeResponse::get(&mut r)?),
+        ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE | ApiKey::BIND | ApiKey::UNBIND => {
+            Response::Outcome(OutcomeResponse::get(&mut r)?)
+        }
+        ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {
+            Response::Create(CreateResponse::get(&mut r)?)
+        }
         ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
         ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
             Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)

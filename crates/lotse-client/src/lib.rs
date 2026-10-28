@@ -36,6 +36,7 @@
 
 #![warn(missing_docs)]
 
+mod admin;
 mod consumer;
 mod group;
 mod publish;
@@ -98,6 +99,15 @@ pub enum ClientError {
         /// The routing key.
         routing_key: String,
     },
+    /// A resource with that name exists already (perhaps created by an
+    /// earlier attempt of this same request).
+    #[error("{name} exists already (id {resource_id})")]
+    ResourceExists {
+        /// The name.
+        name: String,
+        /// The existing resource's id.
+        resource_id: u64,
+    },
     /// A published message was written to some of its queues only. Each
     /// failure says whether that write is unknown ([`ClientError::Unknown`])
     /// or did not happen.
@@ -132,6 +142,9 @@ pub struct ClientConfig {
     pub transactional_id: Option<String>,
     /// How long a transaction may stay open before the coordinator aborts it.
     pub txn_timeout: Duration,
+    /// How long exchange bindings learnt from metadata are used before they
+    /// are asked for again.
+    pub metadata_max_age: Duration,
 }
 
 impl ClientConfig {
@@ -146,6 +159,7 @@ impl ClientConfig {
             idempotent: true,
             transactional_id: None,
             txn_timeout: Duration::from_secs(60),
+            metadata_max_age: Duration::from_secs(30),
         }
     }
 }
@@ -246,8 +260,14 @@ pub struct Client<R: Net + Clock + Spawn> {
     routes: Mutex<BTreeMap<(String, u32), Route>>,
     /// Resource names by id, for requests that address resources by id.
     names: Mutex<BTreeMap<u64, String>>,
-    /// Exchanges by name, for routing published messages.
-    exchanges: Mutex<BTreeMap<String, lotse_route::Exchange>>,
+    /// Exchanges by name, for routing published messages, and when they
+    /// were learnt (bindings may change: they are relearnt after
+    /// [`ClientConfig::metadata_max_age`]).
+    exchanges: Mutex<BTreeMap<String, (lotse_route::Exchange, lotse_rt::Instant)>>,
+    /// The metadata group's leader, for admin requests.
+    metadata_leader: Mutex<Option<u32>>,
+    /// Spreads admin requests over brokers while the leader is unknown.
+    admin_turn: AtomicU32,
 }
 
 impl<R: Net + Clock + Spawn> fmt::Debug for Client<R> {
@@ -292,6 +312,8 @@ impl<R: Net + Clock + Spawn> Client<R> {
             routes: Mutex::new(BTreeMap::new()),
             names: Mutex::new(BTreeMap::new()),
             exchanges: Mutex::new(BTreeMap::new()),
+            metadata_leader: Mutex::new(None),
+            admin_turn: AtomicU32::new(0),
         }
     }
 
@@ -319,6 +341,28 @@ impl<R: Net + Clock + Spawn> Client<R> {
             }
             self.rt.sleep(self.cfg.backoff).await;
         }
+    }
+
+    /// Asks every known broker and merges what they know (each resource
+    /// from the first broker that knows it).
+    async fn metadata_from_all(&self, names: &[&str]) -> MetadataResponse {
+        let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
+        addrs.extend(self.cfg.bootstrap.iter().cloned());
+        addrs.sort();
+        addrs.dedup();
+        let mut merged = MetadataResponse::default();
+        for addr in addrs {
+            let req = Request::Metadata(MetadataRequest { names: names.iter().map(|n| n.to_string()).collect() });
+            let Ok(Response::Metadata(m)) = self.call(&addr, &req).await else { continue };
+            self.learn(&m);
+            for r in m.resources.into_iter().filter(|r| r.error == ErrorCode::NONE) {
+                if !merged.resources.iter().any(|x| x.name == r.name) {
+                    merged.resources.push(r);
+                }
+            }
+            merged.brokers = m.brokers;
+        }
+        merged
     }
 
     fn learn(&self, m: &MetadataResponse) {
@@ -349,15 +393,40 @@ impl<R: Net + Clock + Spawn> Client<R> {
         let route = match known {
             Some(r) if r.leader != 0 => r,
             _ => {
-                let m = self.metadata(&[stream]).await.map_err(Attempt::Fail)?;
+                let mut m = self.metadata(&[stream]).await.map_err(Attempt::Fail)?;
+                if !m.resources.iter().any(|r| r.name == stream && r.error == ErrorCode::NONE) {
+                    // A resource created a moment ago may not have reached
+                    // that broker yet: any broker that knows it will do.
+                    m = self.metadata_from_all(&[stream]).await;
+                }
                 let res = m.resources.iter().find(|r| r.name == stream && r.error == ErrorCode::NONE);
                 let Some(p) = res.and_then(|r| r.partitions.iter().find(|p| p.partition == partition)) else {
                     return Err(Attempt::Fail(ClientError::UnknownStream(stream.into(), partition)));
                 };
-                if p.leader == 0 {
+                let resource_id = res.expect("found").resource_id;
+                let (mut leader, mut term) = (p.leader, p.leader_term);
+                if leader == 0 {
+                    // Partitions created at runtime live on some nodes only:
+                    // their voters know the leader.
+                    for v in p.voters.clone() {
+                        let addr = self.brokers.lock().expect("brokers lock").get(&v).cloned();
+                        let Some(addr) = addr else { continue };
+                        let req = Request::Metadata(MetadataRequest { names: vec![stream.to_string()] });
+                        let Ok(Response::Metadata(vm)) = self.call(&addr, &req).await else { continue };
+                        self.learn(&vm);
+                        let found = vm.resources.iter().find(|r| r.name == stream).and_then(|r| {
+                            r.partitions.iter().find(|p| p.partition == partition).map(|p| (p.leader, p.leader_term))
+                        });
+                        if let Some((l, t)) = found.filter(|(l, _)| *l != 0) {
+                            (leader, term) = (l, t);
+                            break;
+                        }
+                    }
+                }
+                if leader == 0 {
                     return Err(Attempt::Retry("the partition has no leader".into()));
                 }
-                Route { resource_id: res.expect("found").resource_id, leader: p.leader, term: p.leader_term }
+                Route { resource_id, leader, term }
             }
         };
         let addr = self.brokers.lock().expect("brokers lock").get(&route.leader).cloned();

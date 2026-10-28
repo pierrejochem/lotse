@@ -48,12 +48,13 @@ use lotse_record::{Batch, RaftControl};
 use lotse_rt::{Disk, OpenMode, SegmentFile};
 
 use crate::coordinator::CoordinatorState;
+use crate::metadata::MetadataState;
 use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, ProducerState};
 use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 5;
+const FORMAT: u8 = 6;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -150,6 +151,7 @@ struct PartitionState {
     txns: TxnState,
     coordinator: CoordinatorState,
     queue: Option<QueueLog>,
+    metadata: MetadataState,
 }
 
 impl PartitionState {
@@ -169,15 +171,22 @@ impl PartitionState {
         if let Some(q) = &mut self.queue {
             q.apply(batch)?;
         }
+        if let Ok(Some(lotse_record::Control::Internal(lotse_record::InternalControl::Metadata, payload))) =
+            lotse_record::control(batch)
+        {
+            self.metadata.apply(last, &payload).map_err(Error::Corrupt)?;
+        }
         self.coordinator.applied(last, batch).map_err(Error::Corrupt)
     }
 
-    /// Snapshot data: the four states (the queue's empty outside a queue
+    /// Snapshot data: the five states (the queue's empty outside a queue
     /// group), then the state machine's.
     fn snapshot(&self, sm: &[u8]) -> Bytes {
         let mut b = BytesMut::new();
         let queue = self.queue.as_ref().map(QueueLog::encode).unwrap_or_default();
-        for part in [self.producers.encode(), self.txns.encode(), self.coordinator.encode(), queue] {
+        for part in
+            [self.producers.encode(), self.txns.encode(), self.coordinator.encode(), queue, self.metadata.encode()]
+        {
             b.put_u32_le(part.len() as u32);
             b.put_slice(&part);
         }
@@ -185,13 +194,13 @@ impl PartitionState {
         b.freeze()
     }
 
-    /// Restores the four states from snapshot data; returns the state
+    /// Restores the five states from snapshot data; returns the state
     /// machine's part.
     fn restore(&mut self, data: &Bytes) -> Result<Bytes, Error> {
         let short = || Error::Corrupt("snapshot data is truncated".into());
         let mut at = 0;
         let mut parts = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..5 {
             let len = data.get(at..at + 4).ok_or_else(short)?;
             let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
             parts.push(data.get(at + 4..at + 4 + len).ok_or_else(short)?.to_vec());
@@ -203,6 +212,7 @@ impl PartitionState {
         if let Some(q) = &mut self.queue {
             *q = QueueLog::decode(Bytes::from(parts[3].clone())).map_err(Error::Corrupt)?;
         }
+        self.metadata = MetadataState::decode(&parts[4]).map_err(Error::Corrupt)?;
         Ok(data.slice(at..))
     }
 }
@@ -288,6 +298,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             txns: TxnState::default(),
             coordinator: CoordinatorState::default(),
             queue: options.queue.then(QueueLog::new),
+            metadata: MetadataState::default(),
         };
         disk.create_dir_all(&dir).await?;
         let snapshot = match read_file(&disk, &dir.join(SNAPSHOT)).await? {
@@ -456,6 +467,12 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// The partition's transaction state, as applied.
     pub(crate) fn txns(&self) -> &TxnState {
         &self.state.txns
+    }
+
+    /// The cluster's runtime resources, as applied (empty outside the
+    /// metadata group).
+    pub(crate) fn metadata(&self) -> &MetadataState {
+        &self.state.metadata
     }
 
     /// The queue's ack index, as applied (`None` outside a queue group).

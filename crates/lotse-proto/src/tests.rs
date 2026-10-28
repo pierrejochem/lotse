@@ -40,6 +40,39 @@ fn requests() -> Vec<Request> {
         Request::Ack(AckRequest { queue_id: 9, txn_id: None, ranges: vec![(0, 3), (5, 6)] }),
         Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
+        Request::CreateStream(CreateStreamRequest {
+            name: "orders".into(),
+            partitions: 6,
+            replication: 3,
+            configs: vec![("retention.ms".into(), "1000".into())],
+        }),
+        Request::CreateQueue(CreateQueueRequest {
+            name: "jobs".into(),
+            priority_levels: 1,
+            single_active: false,
+            dlq: None,
+            replication: 3,
+            configs: vec![],
+        }),
+        Request::DeclareExchange(DeclareExchangeRequest {
+            name: "events".into(),
+            exchange_type: exchange_type::TOPIC,
+            configs: vec![],
+        }),
+        Request::Bind(BindRequest {
+            exchange_id: 4,
+            queue_id: 5,
+            binding_key: "eu.#".into(),
+            header_match: vec![(Bytes::from_static(b"k"), None)],
+            match_all: true,
+        }),
+        Request::Unbind(BindRequest {
+            exchange_id: 4,
+            queue_id: 5,
+            binding_key: String::new(),
+            header_match: vec![],
+            match_all: false,
+        }),
         Request::GroupHeartbeat(GroupHeartbeatRequest {
             group_id: "billing".into(),
             member_id: String::new(),
@@ -155,6 +188,25 @@ fn responses() -> Vec<(ApiKey, Response)> {
                                 ],
                                 match_all: false,
                             }],
+                        }),
+                    },
+                    // The smallest bindings: empty keys, no headers.
+                    ResourceMetadata {
+                        error: ErrorCode::NONE,
+                        name: "f".into(),
+                        resource_id: 13,
+                        kind: kind::EXCHANGE,
+                        partitions: vec![],
+                        exchange: Some(ExchangeMetadata {
+                            exchange_type: exchange_type::FANOUT,
+                            bindings: [10, 11]
+                                .map(|queue_id| BindingMetadata {
+                                    queue_id,
+                                    binding_key: String::new(),
+                                    header_match: vec![],
+                                    match_all: true,
+                                })
+                                .to_vec(),
                         }),
                     },
                     ResourceMetadata {
@@ -285,6 +337,16 @@ fn responses() -> Vec<(ApiKey, Response)> {
             Response::Subscribe(SubscribeResponse { error: ErrorCode::NONE, subscription_id: 3, leader_hint: None }),
         ),
         (ApiKey::ACK, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
+        (
+            ApiKey::CREATE_QUEUE,
+            Response::Create(CreateResponse {
+                error: ErrorCode::RESOURCE_EXISTS,
+                resource_id: 1 << 40,
+                error_msg: Some("jobs exists".into()),
+                leader_hint: Some(LeaderHint { leader: 2, term: 3 }),
+            }),
+        ),
+        (ApiKey::BIND, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
         (
             ApiKey::GROUP_HEARTBEAT,
             Response::GroupHeartbeat(GroupHeartbeatResponse {
@@ -478,4 +540,28 @@ fn pushes_round_trip_and_are_told_from_responses() {
     assert_eq!(decode_push(encode_push(&ended)).unwrap(), ended);
     let resp = encode_response(5, &Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None }));
     assert!(!is_push(&resp), "a response is not a push");
+}
+
+/// Array counts are checked against the smallest encoding of an element:
+/// a response of nothing but minimal bindings must still decode.
+#[test]
+fn the_smallest_bindings_decode() {
+    let minimal =
+        |queue_id| BindingMetadata { queue_id, binding_key: String::new(), header_match: vec![], match_all: true };
+    let resp = Response::Metadata(MetadataResponse {
+        brokers: vec![],
+        resources: vec![ResourceMetadata {
+            error: ErrorCode::NONE,
+            name: String::new(),
+            resource_id: 1,
+            kind: kind::EXCHANGE,
+            partitions: vec![],
+            exchange: Some(ExchangeMetadata {
+                exchange_type: exchange_type::FANOUT,
+                bindings: vec![minimal(1), minimal(2)],
+            }),
+        }],
+    });
+    let frame = encode_response(1, &resp);
+    assert_eq!(decode_response(frame, ApiKey::METADATA).unwrap().1, resp);
 }

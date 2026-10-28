@@ -61,16 +61,23 @@ pub struct Published {
 impl<R: Net + Clock + Spawn> Client<R> {
     /// The exchange as metadata last said, asking for it if unknown.
     pub(crate) async fn exchange(&self, name: &str) -> Result<Exchange, ClientError> {
-        if let Some(x) = self.exchanges.lock().expect("exchanges lock").get(name) {
+        let now = self.rt.now();
+        if let Some((x, at)) = self.exchanges.lock().expect("exchanges lock").get(name)
+            && now - *at < self.cfg.metadata_max_age
+        {
             return Ok(x.clone());
         }
         // `learn` keeps the exchange and the queues bound to it.
-        self.metadata(&[name]).await?;
+        let m = self.metadata(&[name]).await?;
+        if !m.resources.iter().any(|r| r.name == name && r.error == ErrorCode::NONE) {
+            // Declared a moment ago: not every broker knows it yet.
+            self.metadata_from_all(&[name]).await;
+        }
         self.exchanges
             .lock()
             .expect("exchanges lock")
             .get(name)
-            .cloned()
+            .map(|(x, _)| x.clone())
             .ok_or_else(|| ClientError::UnknownStream(name.into(), 0))
     }
 
@@ -131,6 +138,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
 
     /// Remembers the exchanges a metadata response describes.
     pub(crate) fn learn_exchanges(&self, m: &lotse_proto::MetadataResponse) {
+        let now = self.rt.now();
         let mut exchanges = self.exchanges.lock().expect("exchanges lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             let Some(x) = &r.exchange else { continue };
@@ -145,8 +153,8 @@ impl<R: Net + Clock + Spawn> Client<R> {
                     match_all: b.match_all,
                 })
                 .collect();
-            exchanges
-                .insert(r.name.clone(), Exchange { name: r.name.clone(), resource_id: r.resource_id, kind, bindings });
+            let x = Exchange { name: r.name.clone(), resource_id: r.resource_id, kind, bindings };
+            exchanges.insert(r.name.clone(), (x, now));
         }
     }
 }
