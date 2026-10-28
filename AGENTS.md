@@ -39,7 +39,7 @@ cd console/web && npm run api                              # after changing an A
 cd console/web && npm run typecheck && npm test
 ```
 
-CI (`.github/workflows/ci.yml`) runs format, clippy, tests, the web app build with an OpenAPI drift check, and the simulations at 5,000 seeds. Keep it green.
+CI (`.github/workflows/ci.yml`) runs format, clippy, tests, the web app build with an OpenAPI drift check, and the simulations at 5,000 seeds; the client simulation runs 2,000 seeds per push and 5,000 nightly ([ADR 0027](docs/adr/0027-client-simulation-depth-in-ci.md)). Keep it green, and check the nightly run.
 
 ## Rules that are not negotiable
 

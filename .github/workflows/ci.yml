@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly: the client simulation at full depth (ADR 0027).
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,6 +57,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data
         env:
           LOTSE_SIM_SEEDS: "5000"
+      # The client simulation is the slowest: 2,000 seeds on pushes and pull
+      # requests, 5,000 nightly and on manual runs (ADR 0027).
+      - run: cargo test -p lotse-server --release --test clients
+        env:
+          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
