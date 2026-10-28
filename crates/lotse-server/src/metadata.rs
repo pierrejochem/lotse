@@ -13,7 +13,7 @@
 //! that exists already changes nothing; the leader tells the client by
 //! looking at the applied state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_raft::NodeId;
@@ -42,7 +42,7 @@ pub(crate) fn group_id(index: u64, p: u32) -> GroupId {
 pub(crate) enum Change {
     /// A stream; one voter set per partition.
     CreateStream { name: String, partitions: Vec<Vec<NodeId>> },
-    /// A queue and its voters.
+    /// A queue and its voters; an ack timeout of 0 is the default.
     CreateQueue { name: String, voters: Vec<NodeId>, ack_timeout_ms: u64 },
     /// An exchange.
     DeclareExchange { name: String, kind: ExchangeKind },
@@ -50,6 +50,10 @@ pub(crate) enum Change {
     Bind { exchange_id: u64, binding: Binding },
     /// A binding removed from an exchange.
     Unbind { exchange_id: u64, binding: Binding },
+    /// A resource deleted, with its groups.
+    Delete { resource_id: u64 },
+    /// A queue's ack timeout changed; 0 returns it to the default.
+    AlterQueue { resource_id: u64, ack_timeout_ms: u64 },
 }
 
 /// A stream created at runtime.
@@ -68,6 +72,7 @@ pub(crate) struct DynQueue {
     pub(crate) resource_id: u64,
     pub(crate) group: GroupId,
     pub(crate) voters: Vec<NodeId>,
+    /// 0: the default.
     pub(crate) ack_timeout_ms: u64,
 }
 
@@ -87,6 +92,8 @@ pub(crate) struct MetadataState {
     pub(crate) exchanges: BTreeMap<u64, DynExchange>,
     /// Bindings added at runtime, per exchange (configured ones included).
     pub(crate) bindings: BTreeMap<u64, Vec<Binding>>,
+    /// Tombstones: deleted resources and how many groups each had.
+    pub(crate) deleted: BTreeMap<u64, u32>,
 }
 
 const VERSION: u8 = 1;
@@ -101,6 +108,17 @@ impl MetadataState {
             .chain(self.exchanges.values().map(|x| (&x.name, x.resource_id)))
             .find(|(n, _)| n.as_str() == name)
             .map(|(_, id)| id)
+    }
+
+    /// Whether `id` is a deleted resource.
+    pub(crate) fn is_deleted(&self, id: u64) -> bool {
+        self.deleted.contains_key(&id)
+    }
+
+    /// The groups of deleted resources.
+    pub(crate) fn deleted_groups(&self) -> BTreeSet<GroupId> {
+        let groups = |(&id, &n): (&u64, &u32)| (0..n).map(move |p| group_id(id - DYNAMIC_BASE, p));
+        self.deleted.iter().flat_map(groups).collect()
     }
 
     /// Every runtime group and its voters.
@@ -136,6 +154,11 @@ impl MetadataState {
                 }
             }
             Change::Bind { exchange_id, binding } => {
+                // The bind was checked against what existed then; a delete
+                // may have come before it in the log.
+                if self.is_deleted(exchange_id) || self.is_deleted(binding.queue_id) {
+                    return Ok(());
+                }
                 let list = self.bindings.entry(exchange_id).or_default();
                 if !list.contains(&binding) {
                     list.push(binding);
@@ -144,6 +167,28 @@ impl MetadataState {
             Change::Unbind { exchange_id, binding } => {
                 if let Some(list) = self.bindings.get_mut(&exchange_id) {
                     list.retain(|b| *b != binding);
+                }
+            }
+            Change::Delete { resource_id } => {
+                let groups = if let Some(s) = self.streams.remove(&resource_id) {
+                    s.partitions.len() as u32
+                } else if self.queues.remove(&resource_id).is_some() {
+                    for list in self.bindings.values_mut() {
+                        list.retain(|b| b.queue_id != resource_id);
+                    }
+                    1
+                } else if self.exchanges.remove(&resource_id).is_some() {
+                    0
+                } else {
+                    // Unknown or deleted already: nothing to do.
+                    return Ok(());
+                };
+                self.bindings.remove(&resource_id);
+                self.deleted.insert(resource_id, groups);
+            }
+            Change::AlterQueue { resource_id, ack_timeout_ms } => {
+                if let Some(q) = self.queues.get_mut(&resource_id) {
+                    q.ack_timeout_ms = ack_timeout_ms;
                 }
             }
         }
@@ -184,6 +229,11 @@ impl MetadataState {
             for binding in list {
                 put_binding(&mut b, binding);
             }
+        }
+        b.put_u32_le(self.deleted.len() as u32);
+        for (id, groups) in &self.deleted {
+            b.put_u64_le(*id);
+            b.put_u32_le(*groups);
         }
         b.freeze()
     }
@@ -229,6 +279,11 @@ impl MetadataState {
             }
             s.bindings.insert(x, list);
         }
+        for _ in 0..count(b)? {
+            need(b, 12)?;
+            let id = b.get_u64_le();
+            s.deleted.insert(id, b.get_u32_le());
+        }
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
@@ -265,6 +320,15 @@ pub(crate) fn record(change: &Change) -> Bytes {
             b.put_u64_le(*exchange_id);
             put_binding(&mut b, binding);
         }
+        Change::Delete { resource_id } => {
+            b.put_u8(5);
+            b.put_u64_le(*resource_id);
+        }
+        Change::AlterQueue { resource_id, ack_timeout_ms } => {
+            b.put_u8(6);
+            b.put_u64_le(*resource_id);
+            b.put_u64_le(*ack_timeout_ms);
+        }
     }
     lotse_record::internal_control_batch(lotse_record::InternalControl::Metadata, &b).expect("one record")
 }
@@ -296,6 +360,14 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let exchange_id = b.get_u64_le();
             let binding = get_binding(b)?;
             if t == 3 { Change::Bind { exchange_id, binding } } else { Change::Unbind { exchange_id, binding } }
+        }
+        5 => {
+            need(b, 8)?;
+            Change::Delete { resource_id: b.get_u64_le() }
+        }
+        6 => {
+            need(b, 16)?;
+            Change::AlterQueue { resource_id: b.get_u64_le(), ack_timeout_ms: b.get_u64_le() }
         }
         _ => return Err("unknown metadata change".into()),
     };

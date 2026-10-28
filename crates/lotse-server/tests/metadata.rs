@@ -1,23 +1,34 @@
-//! Resources created at runtime against a faulty cluster, checked over many
-//! seeds.
+//! Resources created, changed and deleted at runtime against a faulty
+//! cluster, checked over many seeds.
 //!
 //! Four or five nodes start with a metadata group, a coordinator group and
-//! one configured stream, `base`. Two admin clients create the same streams, queues and an exchange
-//! concurrently and bind the queues, while a producer writes to whatever
-//! streams exist and a publisher publishes through the exchange; pairs of
-//! hosts are partitioned and nodes lose power. After healing every node is
-//! asked what exists.
+//! one configured stream, `base`. Two admin clients create the same streams,
+//! queues and an exchange concurrently, bind the queues, change queues' ack
+//! timeouts, and delete and create again `s3`, `q2` and `x1`, while a
+//! producer writes to the streams, a publisher publishes through the
+//! exchange and a transactional producer writes to `base` and `s3` in
+//! transactions; pairs of hosts are partitioned and nodes lose power. After
+//! healing every node is asked what exists.
 //!
 //! Checked:
-//! - every node reports the same resources with the same ids, and one id
-//!   per name: concurrent creates of a name agree on its id;
-//! - a configured name cannot be created again;
-//! - an acknowledged create is there, with the id it was acknowledged with,
-//!   its partitions and as many voters per partition as asked for;
+//! - every node reports the same resources with the same ids, one per name;
+//! - a configured name cannot be created again, and configured resources
+//!   cannot be deleted;
+//! - an acknowledged create of a name never deleted is there, with the id it
+//!   was acknowledged with, its partitions and as many voters per partition
+//!   as asked for; of a name that was deleted, no older resource outlives a
+//!   newer acknowledged one;
+//! - a deleted resource is gone everywhere: no node runs its groups, no
+//!   disk holds their files, every node answers `UNKNOWN_RESOURCE` for it,
+//!   and no exchange keeps a binding to a deleted queue;
 //! - each node runs exactly the groups it is a voter of;
-//! - every acknowledged produce to a created stream is there at its offset;
+//! - a queue's ack timeout is its default or a value an admin set;
+//! - every acknowledged produce to a stream never deleted is there at its
+//!   offset;
 //! - a published message goes only to queues that were bound to the
-//!   exchange.
+//!   exchange;
+//! - a transaction whose partitions were deleted still ends: the
+//!   transactional id commits again afterwards.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,11 +38,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_client::{Client, ClientConfig, ClientError, OutMessage};
 use lotse_log::LogConfig;
-use lotse_proto::kind;
+use lotse_proto::{ErrorCode, kind};
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_route::ExchangeKind;
-use lotse_rt::{Clock, Rng, Spawn};
+use lotse_rt::{Clock, Conn, Disk, Net, Rng, Spawn};
 use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine};
 use lotse_sim::{Sim, SimRuntime, check_seeds};
 
@@ -77,15 +88,40 @@ fn spec(name: &str) -> (u8, u32, u8) {
     }
 }
 
+/// The names admins delete (and create again).
+const DELETED: [&str; 3] = ["s3", "q2", "x1"];
+
 #[derive(Default)]
 struct Outcomes {
-    /// Acknowledged creates (or `ResourceExists`): name → id.
+    /// Acknowledged creates (or `ResourceExists`): name → ids.
     ids: BTreeMap<String, BTreeSet<u64>>,
+    /// Names a delete was tried for, whatever the outcome.
+    delete_tried: BTreeSet<String>,
+    /// Acknowledged deletes: name → ids.
+    deleted: BTreeMap<String, BTreeSet<u64>>,
+    /// Ack timeouts tried per queue, in ms; 0 is a reset to the default.
+    timeouts: BTreeMap<String, BTreeSet<u64>>,
     /// Queues ever bound to the exchange (or tried).
     bound: BTreeSet<String>,
     /// Acknowledged produces: (stream, partition, offset) → value.
     produced: BTreeMap<(String, u32, u64), String>,
     published: u64,
+    /// Transactions committed, and how many wrote to `s3`.
+    committed: u64,
+    committed_s3: u64,
+}
+
+/// Whatever a request may run into while resources come and go: no answer
+/// in time, an unknown outcome, a name not (yet) known or a resource
+/// deleted under it.
+fn coming_and_going(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::GaveUp(..)
+            | ClientError::Unknown(_)
+            | ClientError::UnknownStream(..)
+            | ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, .. }
+    )
 }
 
 struct World {
@@ -171,8 +207,9 @@ impl World {
     }
 }
 
-/// What one node reports: name → (id, kind, voters per partition).
-type View = BTreeMap<String, (u64, u8, Vec<Vec<u32>>)>;
+/// What one node reports: name → (id, kind, voters per partition, queues
+/// bound to it).
+type View = BTreeMap<String, (u64, u8, Vec<Vec<u32>>, BTreeSet<u64>)>;
 
 const NAMES: [&str; 7] = ["s1", "s2", "s3", "q1", "q2", "q3", "x1"];
 
@@ -180,11 +217,16 @@ async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
     let client = Client::new(rt.clone(), client_config(n));
     while !stop.load(Ordering::Relaxed) {
         if rt.chance(1, 10) {
-            // The configured stream exists already, everywhere.
+            // The configured stream exists already, everywhere, and stays.
             match client.create_stream("base", 1, 1).await {
                 Err(ClientError::ResourceExists { resource_id: 7, .. }) => {}
                 Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
                 other => panic!("a configured name was created again: {other:?}"),
+            }
+            match client.delete("base").await {
+                Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. }) => {}
+                Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
+                other => panic!("a configured resource was deleted: {other:?}"),
             }
         }
         let name = NAMES[rt.below(NAMES.len() as u64) as usize];
@@ -205,15 +247,44 @@ async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
             let q = ["q1", "q2"][rt.below(2) as usize];
             out.lock().unwrap().bound.insert(q.into());
             match client.bind("x1", q, "").await {
-                Ok(()) | Err(ClientError::GaveUp(..) | ClientError::Unknown(_) | ClientError::UnknownStream(..)) => {}
+                Ok(()) => {}
+                Err(e) if coming_and_going(&e) => {}
                 Err(e) => panic!("unexpected error binding {q}: {e}"),
+            }
+        }
+        if rt.chance(1, 4) {
+            let q = ["q1", "q2", "q3"][rt.below(3) as usize];
+            let ms = if rt.chance(1, 4) { 0 } else { 100 + rt.below(5_000) };
+            out.lock().unwrap().timeouts.entry(q.into()).or_default().insert(ms);
+            let res = if ms == 0 {
+                client.alter_configs(q, &[], &["ack.timeout.ms"]).await
+            } else {
+                client.alter_configs(q, &[("ack.timeout.ms", &ms.to_string())], &[]).await
+            };
+            match res {
+                Ok(()) => {}
+                Err(e) if coming_and_going(&e) => {}
+                Err(e) => panic!("unexpected error changing {q}: {e}"),
+            }
+        }
+        if rt.chance(1, 5) {
+            let name = DELETED[rt.below(DELETED.len() as u64) as usize];
+            out.lock().unwrap().delete_tried.insert(name.into());
+            match client.delete(name).await {
+                Ok(id) => {
+                    out.lock().unwrap().deleted.entry(name.into()).or_default().insert(id);
+                }
+                Err(e) if coming_and_going(&e) => {}
+                Err(e) => panic!("unexpected error deleting {name}: {e}"),
             }
         }
         rt.sleep(TICK * (5 + rt.below(20) as u32)).await;
     }
 }
 
-async fn producer(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
+/// Produces and publishes until stopped; returns its client, routes and
+/// sequences cached, for the final check.
+async fn producer(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) -> Client<SimRuntime> {
     let client = Client::new(rt.clone(), client_config(n));
     let mut seq = 0;
     while !stop.load(Ordering::Relaxed) {
@@ -225,7 +296,7 @@ async fn producer(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<A
             Ok(offset) => {
                 out.lock().unwrap().produced.insert((stream.into(), partition, offset), value.clone());
             }
-            Err(ClientError::GaveUp(..) | ClientError::Unknown(_) | ClientError::UnknownStream(..)) => {}
+            Err(e) if coming_and_going(&e) => {}
             Err(e) => panic!("unexpected produce error: {e}"),
         }
         if rt.chance(1, 3) {
@@ -244,11 +315,86 @@ async fn producer(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<A
                         assert!(o.bound.contains(q), "{value} was routed to {q}, which was never bound");
                     }
                 }
-                Err(ClientError::GaveUp(..) | ClientError::Unknown(_) | ClientError::UnknownStream(..)) => {}
+                Err(e) if coming_and_going(&e) => {}
                 Err(e) => panic!("unexpected publish error: {e}"),
             }
         }
         rt.sleep(TICK * (1 + rt.below(4) as u32)).await;
+    }
+    client
+}
+
+fn txn_config(n: u64) -> ClientConfig {
+    ClientConfig { transactional_id: Some("tx".into()), txn_timeout: Duration::from_millis(800), ..client_config(n) }
+}
+
+/// Writes transactions to `base` and, often, `s3`, which admins delete.
+async fn transactional(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), txn_config(n));
+    let mut seq = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let mut txn = match client.begin_transaction().await {
+            Ok(t) => t,
+            Err(e) if coming_and_going(&e) => continue,
+            Err(e) => panic!("unexpected error beginning a transaction: {e}"),
+        };
+        let mut written = true;
+        let to_s3 = rt.chance(2, 3);
+        let streams: &[&str] = if to_s3 { &["base", "s3"] } else { &["base"] };
+        for stream in streams {
+            seq += 1;
+            let partition = if *stream == "s3" { rt.below(u64::from(spec("s3").1)) as u32 } else { 0 };
+            match txn.produce(stream, partition, message(&format!("t{seq}"))).await {
+                Ok(_) => {}
+                // Not written, maybe written, fenced by a timeout or refused
+                // because the partition was deleted: the transaction aborts.
+                Err(_) => written = false,
+            }
+        }
+        // Abandoned now and then: the coordinator's timeout aborts it.
+        if rt.chance(1, 5) {
+            drop(txn);
+        } else if !written || rt.chance(1, 4) {
+            let _ = txn.abort().await;
+        } else {
+            match txn.commit().await {
+                Ok(()) => {
+                    let mut o = out.lock().unwrap();
+                    o.committed += 1;
+                    o.committed_s3 += u64::from(to_s3);
+                }
+                Err(e) if coming_and_going(&e) => {}
+                Err(ClientError::Broker { code: ErrorCode::PRODUCER_FENCED, .. }) => {}
+                Err(e) => panic!("unexpected error committing: {e}"),
+            }
+        }
+        rt.sleep(TICK * (1 + rt.below(5) as u32)).await;
+    }
+}
+
+/// The error a node gives for a fetch of `resource_id`, asked directly.
+async fn fetch_error(rt: &SimRuntime, addr: &str, resource_id: u64) -> Option<ErrorCode> {
+    let conn = rt.connect(addr).await.ok()?;
+    let req = lotse_proto::Request::Fetch(lotse_proto::FetchRequest {
+        max_wait_ms: 0,
+        min_bytes: 1,
+        max_bytes: 1 << 10,
+        isolation: lotse_proto::isolation::COMMITTED,
+        resources: vec![lotse_proto::FetchResource {
+            resource_id,
+            partitions: vec![lotse_proto::FetchPartition {
+                partition: 0,
+                fetch_offset: 0,
+                leader_term: 0,
+                max_bytes: 1 << 10,
+            }],
+        }],
+    });
+    conn.send(lotse_proto::encode_request(1, &req)).await.ok()?;
+    let frame = conn.recv().await.ok()??;
+    match lotse_proto::decode_response(frame, lotse_proto::ApiKey::FETCH).ok()?.1 {
+        lotse_proto::Response::Fetch(f) => Some(f.resources.first()?.partitions.first()?.error),
+        _ => None,
     }
 }
 
@@ -261,9 +407,10 @@ async fn run(rt: SimRuntime) {
     for a in 1..=2 {
         tasks.push(rt.spawn(admin(rt.node(&format!("a{a}")), n, out.clone(), stop.clone())));
     }
-    tasks.push(rt.spawn(producer(rt.node("p1"), n, out.clone(), stop.clone())));
+    let producing = rt.spawn(producer(rt.node("p1"), n, out.clone(), stop.clone()));
+    tasks.push(rt.spawn(transactional(rt.node("t1"), n, out.clone(), stop.clone())));
     let mut hosts: Vec<String> = (1..=n).map(|i| format!("n{i}")).collect();
-    hosts.extend(["a1", "a2", "p1"].map(String::from));
+    hosts.extend(["a1", "a2", "p1", "t1"].map(String::from));
     let end = rt.now() + Duration::from_secs(5);
     let mut partition_until = None;
     while rt.now() < end {
@@ -296,6 +443,7 @@ async fn run(rt: SimRuntime) {
     for t in tasks {
         t.await;
     }
+    let producer = producing.await;
     rt.net().heal();
     for id in std::mem::take(&mut w.down_until).into_keys() {
         w.start(id).await;
@@ -303,12 +451,15 @@ async fn run(rt: SimRuntime) {
     let out = std::mem::take(&mut *out.lock().unwrap());
     assert!(!out.ids.is_empty(), "nothing was created: the run checked nothing");
     if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        let deleted: usize = out.deleted.values().map(BTreeSet::len).sum();
         eprintln!(
-            "stats: nodes {n} created {} produced {} published {} bound {:?}",
-            out.ids.len(),
+            "stats: nodes {n} created {} deleted {deleted} produced {} published {} bound {:?} committed {} (s3 {})",
+            out.ids.values().map(BTreeSet::len).sum::<usize>(),
             out.produced.len(),
             out.published,
-            out.bound
+            out.bound,
+            out.committed,
+            out.committed_s3,
         );
     }
 
@@ -330,13 +481,14 @@ async fn run(rt: SimRuntime) {
                 .iter()
                 .map(|r| {
                     let voters = r.partitions.iter().map(|p| p.voters.clone()).collect();
-                    (r.name.clone(), (r.resource_id, r.kind, voters))
+                    let bound = r.exchange.iter().flat_map(|x| x.bindings.iter().map(|b| b.queue_id)).collect();
+                    (r.name.clone(), (r.resource_id, r.kind, voters, bound))
                 })
                 .collect();
             views.insert(id, view);
         }
         let first = views[&1].clone();
-        let created = out.ids.keys().all(|name| first.contains_key(name));
+        let created = out.ids.keys().filter(|n| !out.delete_tried.contains(*n)).all(|name| first.contains_key(name));
         if views.values().all(|v| *v == first) && created {
             break;
         }
@@ -344,19 +496,84 @@ async fn run(rt: SimRuntime) {
         rt.sleep(TICK * 20).await;
     }
     let view = &views[&1];
+    // Ids that were acknowledged once and are gone now: deleted.
+    let mut gone: Vec<(String, u64)> = Vec::new();
     for (name, ids) in &out.ids {
-        assert_eq!(ids.len(), 1, "{name} was acknowledged with different ids: {ids:?}");
-        let (id, k, voters) = &view[name];
-        assert!(ids.contains(id), "{name} exists as {id}, but was acknowledged as {ids:?}");
         let (want_kind, partitions, replication) = spec(name);
-        assert_eq!(*k, want_kind, "{name} has the wrong kind");
-        if want_kind != kind::EXCHANGE {
-            assert_eq!(voters.len() as u32, partitions, "{name} has the wrong number of partitions");
-            for v in voters {
-                assert_eq!(v.len(), usize::from(replication), "{name}: a partition with voters {v:?}");
+        let now = view.get(name);
+        if !out.delete_tried.contains(name) {
+            assert_eq!(ids.len(), 1, "{name} was acknowledged with different ids: {ids:?}");
+            assert!(now.is_some_and(|(id, ..)| ids.contains(id)), "{name} is {now:?}, but was acknowledged as {ids:?}");
+        }
+        if let Some((id, k, voters, _)) = now {
+            let newest = *ids.last().expect("one at least");
+            assert!(*id >= newest, "{name} is {id}, older than {newest}, acknowledged after it");
+            assert_eq!(*k, want_kind, "{name} has the wrong kind");
+            if want_kind != kind::EXCHANGE {
+                assert_eq!(voters.len() as u32, partitions, "{name} has the wrong number of partitions");
+                for v in voters {
+                    assert_eq!(v.len(), usize::from(replication), "{name}: a partition with voters {v:?}");
+                }
+            }
+        }
+        for id in ids.iter().filter(|id| now.is_none_or(|(now, ..)| now != *id)) {
+            gone.push((name.clone(), *id));
+        }
+    }
+    for (name, ids) in &out.deleted {
+        for id in ids {
+            assert!(view.get(name).is_none_or(|(now, ..)| now != id), "{name} {id} was deleted, but is there");
+            gone.push((name.clone(), *id));
+        }
+    }
+    gone.sort();
+    gone.dedup();
+    // No binding outlives the queue it names.
+    let queues: BTreeSet<u64> = view.values().filter(|(_, k, ..)| *k == kind::QUEUE).map(|(id, ..)| *id).collect();
+    for (name, (_, _, _, bound)) in view {
+        assert!(bound.is_subset(&queues), "{name} binds queues that do not exist: {bound:?}, queues {queues:?}");
+    }
+
+    // A deleted resource is gone everywhere: every node calls it unknown.
+    let deadline = rt.now() + Duration::from_secs(10);
+    for (name, id) in gone.iter().filter(|(name, _)| spec(name).0 == kind::STREAM) {
+        for node in 1..=n {
+            loop {
+                let error = fetch_error(&rt.node("checker"), &format!("n{node}:9000"), *id).await;
+                if error == Some(ErrorCode::UNKNOWN_RESOURCE) {
+                    break;
+                }
+                assert!(rt.now() < deadline, "node {node} answers {error:?} for {name} {id}, which was deleted");
+                rt.sleep(TICK * 20).await;
             }
         }
     }
+
+    // Ack timeouts are the default or what an admin set.
+    let admin =
+        Client::new(rt.node("checker"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(n) });
+    for (name, (_, k, ..)) in view.iter().filter(|(_, (id, ..))| *id >= lotse_server::DYNAMIC_BASE) {
+        let configs = admin.describe_configs(name).await.expect("the healed cluster describes resources");
+        if *k != kind::QUEUE {
+            assert!(configs.is_empty(), "{name} has settings: {configs:?}");
+            continue;
+        }
+        let [c] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        let tried = out.timeouts.get(name).cloned().unwrap_or_default();
+        let ms: u64 = c.value.parse().expect("a number");
+        match c.source {
+            lotse_proto::config_source::DEFAULT => {
+                assert_eq!(
+                    u128::from(ms),
+                    lotse_server::QueueConfig::DEFAULT_ACK_TIMEOUT.as_millis(),
+                    "{name}: the default"
+                )
+            }
+            lotse_proto::config_source::DYNAMIC => assert!(tried.contains(&ms), "{name}: {ms} ms, tried {tried:?}"),
+            other => panic!("{name}: source {other}"),
+        }
+    }
+    drop(admin);
 
     // Each node runs exactly the groups it is a voter of.
     let deadline = rt.now() + Duration::from_secs(10);
@@ -364,12 +581,24 @@ async fn run(rt: SimRuntime) {
         let mut wrong = Vec::new();
         for (id, entry) in &w.running {
             let (_, handle) = entry.as_ref().expect("all nodes are up");
-            for (name, (rid, _, voters)) in view.iter().filter(|(_, (rid, _, _))| *rid >= lotse_server::DYNAMIC_BASE) {
+            for (name, (rid, _, voters, _)) in view.iter().filter(|(_, (rid, ..))| *rid >= lotse_server::DYNAMIC_BASE) {
                 for (p, v) in voters.iter().enumerate() {
-                    let group = group_of(*rid, view, name, p);
+                    let group = group_of(*rid, p);
                     let hosted = handle.status(group).is_some();
                     if hosted != v.contains(&(*id as u32)) {
                         wrong.push((id, name.clone(), p, hosted));
+                    }
+                }
+            }
+            // Deleted groups run nowhere, and their files are gone.
+            for (name, rid) in &gone {
+                for p in 0..spec(name).1 as usize {
+                    let group = group_of(*rid, p);
+                    let dir = std::path::PathBuf::from("groups").join(group.to_string());
+                    let on_disk =
+                        w.hosts[id].list(&dir).await.is_ok() || w.hosts[id].list(&dir.join("log")).await.is_ok();
+                    if handle.status(group).is_some() || on_disk {
+                        wrong.push((id, format!("deleted {name}"), p, true));
                     }
                 }
             }
@@ -381,14 +610,39 @@ async fn run(rt: SimRuntime) {
         rt.sleep(TICK * 20).await;
     }
 
-    // Every acknowledged produce is where it was acknowledged.
-    for ((stream, partition, offset), value) in &out.produced {
+    // Every acknowledged produce to a stream never deleted is where it was
+    // acknowledged.
+    for ((stream, partition, offset), value) in out.produced.iter().filter(|((s, ..), _)| !out.delete_tried.contains(s))
+    {
         let f = checker.fetch(stream, *partition, *offset, TICK * 20).await.expect("the healed cluster serves reads");
         let (b, _) = Batch::parse(&f.records).expect("the batch is there");
         let got = String::from_utf8(b.records().unwrap()[0].value.clone().unwrap().to_vec()).unwrap();
         assert_eq!((b.base_offset(), &got), (*offset, value), "{stream}/{partition}: acknowledged {value} at {offset}");
     }
     drop(checker);
+
+    // The producer goes on writing to every stream there is, also one that
+    // was deleted and created again under it: what it cached of the old
+    // one (route, sequence) gives way.
+    for stream in ["s1", "s2", "s3"].into_iter().filter(|s| view.contains_key(*s)) {
+        let deadline = rt.now() + Duration::from_secs(10);
+        loop {
+            match producer.produce(stream, 0, message("after")).await {
+                Ok(_) => break,
+                Err(e) => assert!(rt.now() < deadline, "the producer cannot write to {stream} any more: {e}"),
+            }
+        }
+    }
+    drop(producer);
+
+    // Transactions that wrote to deleted partitions ended: the
+    // transactional id commits again.
+    let t = Client::new(rt.node("t1"), ClientConfig { retry_for: Duration::from_secs(20), ..txn_config(n) });
+    let mut txn = t.begin_transaction().await.expect("the transactional id begins again: its last transaction ended");
+    txn.produce("base", 0, message("last")).await.expect("a produce in the last transaction");
+    txn.commit().await.expect("the last transaction commits");
+    drop(t);
+
     for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
         handle.stop();
         let _ = node.join().await;
@@ -396,12 +650,12 @@ async fn run(rt: SimRuntime) {
 }
 
 /// The group of partition `p` of a runtime resource: see `lotse_server::DYNAMIC_BASE`.
-fn group_of(resource_id: u64, _view: &View, _name: &str, p: usize) -> u64 {
+fn group_of(resource_id: u64, p: usize) -> u64 {
     let index = resource_id - lotse_server::DYNAMIC_BASE;
     lotse_server::DYNAMIC_BASE + index * u64::from(lotse_server::MAX_PARTITIONS) + p as u64
 }
 
 #[test]
-fn resources_created_at_runtime_agree_everywhere() {
+fn resources_created_changed_and_deleted_at_runtime_agree_everywhere() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
 }

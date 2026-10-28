@@ -146,7 +146,13 @@ impl<R: Net + Clock + Spawn> Consumer<'_, R> {
                 c.redirect(&self.queue, 0, resp.leader_hint);
                 Err(Attempt::Retry(code.to_string()))
             }
-            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+            code => {
+                // Deleted: the name may come back as a new queue.
+                if code == ErrorCode::UNKNOWN_RESOURCE {
+                    c.forget(&self.queue, 0);
+                }
+                Err(Attempt::Fail(ClientError::Broker { code, message: None }))
+            }
         }
     }
 
@@ -182,6 +188,8 @@ impl<R: Net + Clock + Spawn> Consumer<'_, R> {
                 Some(Ok(push)) if push.error != ErrorCode::NONE => {
                     if push.error == ErrorCode::NOT_LEADER {
                         self.client.redirect(&self.queue, 0, push.leader_hint);
+                    } else if push.error == ErrorCode::UNKNOWN_RESOURCE {
+                        self.client.forget(&self.queue, 0);
                     }
                     self.ended();
                 }

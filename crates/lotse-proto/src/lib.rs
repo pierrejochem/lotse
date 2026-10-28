@@ -81,6 +81,12 @@ impl ApiKey {
     pub const DECLARE_EXCHANGE: ApiKey = ApiKey(23);
     /// Binds a queue to an exchange (admin).
     pub const BIND: ApiKey = ApiKey(24);
+    /// Deletes a resource created at runtime (admin).
+    pub const DELETE_RESOURCE: ApiKey = ApiKey(25);
+    /// Reads resources' settings (admin).
+    pub const DESCRIBE_CONFIGS: ApiKey = ApiKey(26);
+    /// Changes a resource's settings (admin).
+    pub const ALTER_CONFIGS: ApiKey = ApiKey(27);
     /// Removes a binding (admin).
     pub const UNBIND: ApiKey = ApiKey(28);
     /// Subscribes to a queue.
@@ -105,7 +111,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 23] = [
+    pub const SUPPORTED: [ApiVersionRange; 26] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -128,6 +134,9 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::CREATE_QUEUE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DECLARE_EXCHANGE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::BIND, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DELETE_RESOURCE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_CONFIGS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ALTER_CONFIGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::UNBIND, min: 0, max: 0 },
     ];
 }
@@ -334,6 +343,12 @@ pub enum Request {
     Bind(BindRequest),
     /// [`ApiKey::UNBIND`].
     Unbind(BindRequest),
+    /// [`ApiKey::DELETE_RESOURCE`].
+    DeleteResource(DeleteResourceRequest),
+    /// [`ApiKey::DESCRIBE_CONFIGS`].
+    DescribeConfigs(DescribeConfigsRequest),
+    /// [`ApiKey::ALTER_CONFIGS`].
+    AlterConfigs(AlterConfigsRequest),
 }
 
 impl Request {
@@ -363,6 +378,9 @@ impl Request {
             Request::DeclareExchange(_) => ApiKey::DECLARE_EXCHANGE,
             Request::Bind(_) => ApiKey::BIND,
             Request::Unbind(_) => ApiKey::UNBIND,
+            Request::DeleteResource(_) => ApiKey::DELETE_RESOURCE,
+            Request::DescribeConfigs(_) => ApiKey::DESCRIBE_CONFIGS,
+            Request::AlterConfigs(_) => ApiKey::ALTER_CONFIGS,
         }
     }
 }
@@ -398,6 +416,10 @@ pub enum Response {
     /// To [`Request::CreateStream`], [`Request::CreateQueue`] and
     /// [`Request::DeclareExchange`].
     Create(CreateResponse),
+    /// To [`Request::DeleteResource`] and [`Request::AlterConfigs`].
+    Admin(AdminResponse),
+    /// To [`Request::DescribeConfigs`].
+    DescribeConfigs(DescribeConfigsResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -438,6 +460,9 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::CreateQueue(r) => r.put(&mut w),
         Request::DeclareExchange(r) => r.put(&mut w),
         Request::Bind(r) | Request::Unbind(r) => r.put(&mut w),
+        Request::DeleteResource(r) => r.put(&mut w),
+        Request::DescribeConfigs(r) => r.put(&mut w),
+        Request::AlterConfigs(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -481,6 +506,9 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::DECLARE_EXCHANGE => Request::DeclareExchange(DeclareExchangeRequest::get(&mut r)?),
         ApiKey::BIND => Request::Bind(BindRequest::get(&mut r)?),
         ApiKey::UNBIND => Request::Unbind(BindRequest::get(&mut r)?),
+        ApiKey::DELETE_RESOURCE => Request::DeleteResource(DeleteResourceRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_CONFIGS => Request::DescribeConfigs(DescribeConfigsRequest::get(&mut r)?),
+        ApiKey::ALTER_CONFIGS => Request::AlterConfigs(AlterConfigsRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -507,6 +535,8 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::CommitOffsets(r) => r.put(&mut w),
         Response::OffsetFetch(r) => r.put(&mut w),
         Response::Create(r) => r.put(&mut w),
+        Response::Admin(r) => r.put(&mut w),
+        Response::DescribeConfigs(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -584,6 +614,8 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {
             Response::Create(CreateResponse::get(&mut r)?)
         }
+        ApiKey::DELETE_RESOURCE | ApiKey::ALTER_CONFIGS => Response::Admin(AdminResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
         ApiKey::GROUP_HEARTBEAT => Response::GroupHeartbeat(GroupHeartbeatResponse::get(&mut r)?),
         ApiKey::COMMIT_OFFSETS | ApiKey::ADD_OFFSETS_TO_TXN => {
             Response::CommitOffsets(CommitOffsetsResponse::get(&mut r)?)

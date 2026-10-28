@@ -36,7 +36,7 @@
 //! from the node configuration ([`StreamConfig`], [`QueueConfig`]), and so
 //! does the coordinator group.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -194,6 +194,8 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) streams: &'a [StreamConfig],
     pub(crate) queues: &'a [QueueConfig],
     pub(crate) exchanges: &'a [Exchange],
+    /// Resources deleted at runtime: gone for good.
+    pub(crate) deleted: &'a BTreeSet<u64>,
     /// How long a group member may go without a heartbeat.
     pub(crate) group_session: Duration,
     /// How often group members send heartbeats.
@@ -221,19 +223,27 @@ impl ClusterView<'_> {
         let s = self.streams.iter().find(|s| s.resource_id == resource_id)?;
         s.partitions.get(partition as usize).copied()
     }
-}
 
-/// Why a partition cannot be served here: it does not exist, or the client
-/// must look for its leader elsewhere: a group created at runtime runs on
-/// its voters only, and a resource created a moment ago may not have
-/// reached this node's metadata yet (runtime ids are never configured).
-fn absent(resource_id: u64, group: Option<GroupId>) -> ErrorCode {
-    if group.is_some() || resource_id >= crate::metadata::DYNAMIC_BASE {
-        ErrorCode::NOT_LEADER
-    } else {
-        ErrorCode::UNKNOWN_RESOURCE
+    /// Why a partition cannot be served here: it does not exist (any
+    /// more), or the client must look for its leader elsewhere: a group
+    /// created at runtime runs on its voters only, and a resource created a
+    /// moment ago may not have reached this node's metadata yet (runtime
+    /// ids are never configured). A deleted id is gone for good: ids are
+    /// never reused.
+    fn absent(&self, resource_id: u64, group: Option<GroupId>) -> ErrorCode {
+        if self.deleted.contains(&resource_id) {
+            ErrorCode::UNKNOWN_RESOURCE
+        } else if group.is_some() || resource_id >= crate::metadata::DYNAMIC_BASE {
+            ErrorCode::NOT_LEADER
+        } else {
+            ErrorCode::UNKNOWN_RESOURCE
+        }
     }
 }
+
+/// What a request waiting on `group` hears when the group has gone: it was
+/// deleted, the only way a group stops being hosted while the node runs.
+const GONE: &str = "the resource was deleted";
 
 fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
     raft.leader().map(|l| LeaderHint { leader: l as u32, term: raft.term() })
@@ -313,6 +323,9 @@ impl Clients {
             Request::DeclareExchange(req) => self.declare_exchange(outbox, id, req, view, groups),
             Request::Bind(req) => self.bind(outbox, id, req, false, view, groups),
             Request::Unbind(req) => self.bind(outbox, id, req, true, view, groups),
+            Request::DeleteResource(req) => self.delete_resource(outbox, id, req, view, groups),
+            Request::AlterConfigs(req) => self.alter_configs(outbox, id, req, view, groups),
+            Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, view, groups),
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };
@@ -347,7 +360,7 @@ impl Clients {
                 };
                 let group = view.group_of(res.resource_id, p.partition);
                 match group.and_then(|g| groups.get_mut(&g).map(|r| (g, r))) {
-                    None => out.error = absent(res.resource_id, group),
+                    None => out.error = view.absent(res.resource_id, group),
                     Some(_) if req.txn_id.is_some() != transactional(&p.batch) => {
                         out.error = ErrorCode::INVALID_TXN_STATE;
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
@@ -443,7 +456,7 @@ impl Clients {
                 for (pi, p) in r.partitions.iter().enumerate() {
                     let group = view.group_of(r.resource_id, *p);
                     let error = match group.and_then(|g| groups.get_mut(&g).map(|x| (g, x))) {
-                        None => absent(r.resource_id, group),
+                        None => view.absent(r.resource_id, group),
                         Some((g, replica)) => {
                             match replica.propose_marker(m.producer_id, m.producer_epoch, m.commit, m.coordinator_epoch)
                             {
@@ -528,7 +541,11 @@ fn settle_markers<R: Runtime, S: StateMachine>(
 ) -> Option<PendingMarkers> {
     let timed_out = now >= p.deadline;
     p.waiting.retain(|&(mi, ri, pi, g, last, term)| {
-        let error = match outcome(groups[&g].raft_ref(), last, term) {
+        let Some(replica) = groups.get(&g) else {
+            p.response.markers[mi].resources[ri].partitions[pi].error = ErrorCode::UNKNOWN_RESOURCE;
+            return false;
+        };
+        let error = match outcome(replica.raft_ref(), last, term) {
             Some(code) => code,
             None if timed_out => ErrorCode::REQUEST_TIMED_OUT,
             None => return true,
@@ -573,7 +590,12 @@ fn settle<R: Runtime, S: StateMachine>(
     let timed_out = now >= p.deadline;
     p.waiting.retain(|w| {
         let out = &mut p.response.resources[w.resource].partitions[w.partition];
-        let raft = groups[&w.group].raft_ref();
+        let Some(replica) = groups.get(&w.group) else {
+            out.error = ErrorCode::UNKNOWN_RESOURCE;
+            out.error_msg = Some(GONE.into());
+            return false;
+        };
+        let raft = replica.raft_ref();
         if raft.commit() >= w.last {
             // Committed here, so final: the entry at `last` is ours exactly
             // if it carries the term we proposed in.
@@ -657,7 +679,7 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
             };
             let group = view.stream_group_of(res.resource_id, fp.partition);
             match group.and_then(|g| groups.get(&g)) {
-                None => out.error = absent(res.resource_id, group),
+                None => out.error = view.absent(res.resource_id, group),
                 Some(replica) => {
                     let raft = replica.raft_ref();
                     // Offsets below the commit index are committed (index = offset + 1).

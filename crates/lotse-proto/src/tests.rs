@@ -73,6 +73,14 @@ fn requests() -> Vec<Request> {
             header_match: vec![],
             match_all: false,
         }),
+        Request::DeleteResource(DeleteResourceRequest { resource_id: 1 << 40, if_empty: true }),
+        Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![7, 1 << 40] }),
+        Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![] }),
+        Request::AlterConfigs(AlterConfigsRequest {
+            resource_id: 1 << 40,
+            set: vec![("ack.timeout.ms".into(), "5000".into())],
+            delete: vec![String::new(), "x".into()],
+        }),
         Request::GroupHeartbeat(GroupHeartbeatRequest {
             group_id: "billing".into(),
             member_id: String::new(),
@@ -348,6 +356,41 @@ fn responses() -> Vec<(ApiKey, Response)> {
         ),
         (ApiKey::BIND, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
         (
+            ApiKey::DELETE_RESOURCE,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::INVALID_REQUEST,
+                error_msg: Some("configured".into()),
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::ALTER_CONFIGS,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::NOT_LEADER,
+                error_msg: None,
+                leader_hint: Some(LeaderHint { leader: 1, term: 9 }),
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_CONFIGS,
+            Response::DescribeConfigs(DescribeConfigsResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                resources: vec![
+                    ResourceConfigs {
+                        resource_id: 1 << 40,
+                        error: ErrorCode::NONE,
+                        configs: vec![ConfigEntry {
+                            key: "ack.timeout.ms".into(),
+                            value: "5000".into(),
+                            source: config_source::DYNAMIC,
+                        }],
+                    },
+                    ResourceConfigs { resource_id: 9, error: ErrorCode::UNKNOWN_RESOURCE, configs: vec![] },
+                ],
+            }),
+        ),
+        (
             ApiKey::GROUP_HEARTBEAT,
             Response::GroupHeartbeat(GroupHeartbeatResponse {
                 throttle_ms: 0,
@@ -564,4 +607,20 @@ fn the_smallest_bindings_decode() {
     });
     let frame = encode_response(1, &resp);
     assert_eq!(decode_response(frame, ApiKey::METADATA).unwrap().1, resp);
+}
+
+/// The smallest described resources (no settings) and settings (empty
+/// strings) must decode too: responses of nothing else.
+#[test]
+fn the_smallest_described_configs_decode() {
+    let none = |resource_id| ResourceConfigs { resource_id, error: ErrorCode::NONE, configs: vec![] };
+    let empty = ConfigEntry { key: String::new(), value: String::new(), source: config_source::DEFAULT };
+    let only = |resources| {
+        Response::DescribeConfigs(DescribeConfigsResponse { error: ErrorCode::NONE, leader_hint: None, resources })
+    };
+    let entries = ResourceConfigs { resource_id: 3, error: ErrorCode::NONE, configs: vec![empty; 4] };
+    for resp in [only((1..=4).map(none).collect()), only(vec![entries])] {
+        let frame = encode_response(1, &resp);
+        assert_eq!(decode_response(frame, ApiKey::DESCRIBE_CONFIGS).unwrap().1, resp);
+    }
 }

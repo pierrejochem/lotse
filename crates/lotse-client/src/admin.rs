@@ -1,18 +1,21 @@
-//! Admin requests: creating streams and queues, declaring exchanges and
-//! binding queues to them, at runtime ([ADR 0034](../../docs/adr/0034-metadata-group.md)).
+//! Admin requests: creating, binding, changing and deleting streams,
+//! queues and exchanges at runtime ([ADR 0034](../../docs/adr/0034-metadata-group.md),
+//! [ADR 0035](../../docs/adr/0035-deleting-resources-and-changing-settings.md)).
 //!
 //! They go to the metadata group's leader. Any broker answers `NOT_LEADER`
 //! with a hint to it, which the client follows. A create whose outcome is
 //! unknown is retried; if the first attempt did create the resource, the
 //! retry finds it and the answer is [`ClientError::ResourceExists`] with its
-//! id, which the caller can compare with what it expected.
+//! id, which the caller can compare with what it expected. A delete is done
+//! once the resource is gone, whoever deleted it, so a retried delete
+//! succeeds too.
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    BindRequest, CreateQueueRequest, CreateStreamRequest, DeclareExchangeRequest, ErrorCode, LeaderHint, Request,
-    Response,
+    AlterConfigsRequest, BindRequest, ConfigEntry, CreateQueueRequest, CreateStreamRequest, DeclareExchangeRequest,
+    DeleteResourceRequest, DescribeConfigsRequest, ErrorCode, LeaderHint, Request, Response,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Spawn};
@@ -82,6 +85,84 @@ impl<R: Net + Clock + Spawn> Client<R> {
     /// Removes a binding made by [`Client::bind`].
     pub async fn unbind(&self, exchange: &str, queue: &str, key: &str) -> Result<(), ClientError> {
         self.binding(exchange, queue, key, Vec::new(), true, true).await
+    }
+
+    /// Deletes a stream, queue or exchange created at runtime, with its
+    /// data and bindings; returns its id. Resources from the node
+    /// configuration cannot be deleted. Done once the resource is gone,
+    /// even if someone else deleted it first.
+    pub async fn delete(&self, name: &str) -> Result<u64, ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = Request::DeleteResource(DeleteResourceRequest { resource_id, if_empty: false });
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
+                    Err(Attempt::Fail(ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, .. })) => Ok(()),
+                    Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                        Err(Attempt::Fail(ClientError::Broker { code, message: a.error_msg.clone() }))
+                    }
+                    other => other,
+                },
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await?;
+        self.exchanges.lock().expect("exchanges lock").remove(name);
+        Ok(resource_id)
+    }
+
+    /// Changes settings of a resource created at runtime: `set` gives keys
+    /// new values, `reset` returns keys to their default. Only a queue's
+    /// `ack.timeout.ms` can change so far.
+    pub async fn alter_configs(&self, name: &str, set: &[(&str, &str)], reset: &[&str]) -> Result<(), ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = Request::AlterConfigs(AlterConfigsRequest {
+            resource_id,
+            set: set.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            delete: reset.iter().map(|k| k.to_string()).collect(),
+        });
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
+                    Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                        Err(Attempt::Fail(ClientError::Broker { code, message: a.error_msg.clone() }))
+                    }
+                    other => other,
+                },
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// A resource's settings, with where each value comes from
+    /// ([`lotse_proto::config_source`]). Read from the metadata leader, so
+    /// changes this client made are in it.
+    pub async fn describe_configs(&self, name: &str) -> Result<Vec<ConfigEntry>, ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![resource_id] });
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeConfigs(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    match d.resources.into_iter().next() {
+                        Some(r) if r.error == ErrorCode::NONE => Ok(r.configs),
+                        Some(r) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
+                        None => Err(Attempt::Retry("no resource in the answer".into())),
+                    }
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// The id of the resource called `name`, asking every broker before
+    /// calling it unknown.
+    async fn resource_id(&self, name: &str) -> Result<u64, ClientError> {
+        let m = self.metadata_from_all(&[name]).await;
+        let found = m.resources.iter().find(|r| r.name == name && r.error == ErrorCode::NONE);
+        found.map(|r| r.resource_id).ok_or_else(|| ClientError::UnknownStream(name.into(), 0))
     }
 
     async fn binding(

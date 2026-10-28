@@ -1755,3 +1755,168 @@ impl BindRequest {
         Ok(req)
     }
 }
+
+/// Deletes a stream, queue or exchange created at runtime (admin).
+/// Answered with [`AdminResponse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteResourceRequest {
+    /// The resource.
+    pub resource_id: u64,
+    /// Only if it holds no messages (not supported so far).
+    pub if_empty: bool,
+}
+
+impl DeleteResourceRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        w.u8(u8::from(self.if_empty));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DeleteResourceRequest { resource_id: r.u64()?, if_empty: r.u8()? != 0 };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Changes a resource's settings (admin). Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterConfigsRequest {
+    /// The resource.
+    pub resource_id: u64,
+    /// Settings to set, `key = value`.
+    pub set: Vec<(String, String)>,
+    /// Settings to return to their default.
+    pub delete: Vec<String>,
+}
+
+impl AlterConfigsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        put_configs(w, &self.set);
+        w.array(&self.delete, |w, k| w.string(k));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req =
+            AlterConfigsRequest { resource_id: r.u64()?, set: get_configs(r)?, delete: r.array(2, |r| r.string())? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The outcome of an admin change that creates nothing (`DeleteResource`,
+/// `AlterConfigs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Why, for a refusal.
+    pub error_msg: Option<String>,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl AdminResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.opt_string(self.error_msg.as_deref());
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(AdminResponse { error: ErrorCode(r.u16()?), error_msg: r.opt_string()?, leader_hint: get_hint(r)? })
+    }
+}
+
+/// Reads resources' settings (admin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeConfigsRequest {
+    /// The resources.
+    pub resource_ids: Vec<u64>,
+}
+
+impl DescribeConfigsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.resource_ids, |w, id| w.u64(*id));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DescribeConfigsRequest { resource_ids: r.array(8, |r| r.u64())? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Where a setting's value comes from.
+pub mod config_source {
+    /// Not set: the default.
+    pub const DEFAULT: u8 = 0;
+    /// Set at runtime (`CreateQueue`, `AlterConfigs`).
+    pub const DYNAMIC: u8 = 1;
+    /// From the node configuration; cannot be changed at runtime.
+    pub const STATIC: u8 = 2;
+}
+
+/// One setting of a resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntry {
+    /// Its key.
+    pub key: String,
+    /// Its value.
+    pub value: String,
+    /// [`config_source`].
+    pub source: u8,
+}
+
+/// One resource's settings, or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceConfigs {
+    /// The resource.
+    pub resource_id: u64,
+    /// [`ErrorCode::UNKNOWN_RESOURCE`] if there is no such resource.
+    pub error: ErrorCode,
+    /// Its settings.
+    pub configs: Vec<ConfigEntry>,
+}
+
+/// The settings asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeConfigsResponse {
+    /// Whether the request could be served here at all.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// Per resource, in the order asked.
+    pub resources: Vec<ResourceConfigs>,
+}
+
+impl DescribeConfigsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.array(&self.resources, |w, r| {
+            w.u64(r.resource_id);
+            w.u16(r.error.0);
+            w.array(&r.configs, |w, c| {
+                w.string(&c.key);
+                w.string(&c.value);
+                w.u8(c.source);
+            });
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeConfigsResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            // resource id, error, an empty settings array: 8 + 2 + 1 bytes.
+            resources: r.array(11, |r| {
+                Ok(ResourceConfigs {
+                    resource_id: r.u64()?,
+                    error: ErrorCode(r.u16()?),
+                    configs: r
+                        .array(5, |r| Ok(ConfigEntry { key: r.string()?, value: r.string()?, source: r.u8()? }))?,
+                })
+            })?,
+        })
+    }
+}

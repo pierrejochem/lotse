@@ -64,3 +64,48 @@ fn placement_spreads_groups_over_the_least_loaded_nodes() {
     let total: usize = load.values().sum();
     assert_eq!(total, 3 + 6);
 }
+
+#[test]
+fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&Change::CreateStream { name: "s".into(), partitions: vec![vec![1], vec![2], vec![3]] }))
+        .unwrap();
+    s.apply(2, &payload(&Change::CreateQueue { name: "q".into(), voters: vec![1], ack_timeout_ms: 0 })).unwrap();
+    s.apply(3, &payload(&Change::DeclareExchange { name: "x".into(), kind: ExchangeKind::Fanout })).unwrap();
+    let to_q = Binding { queue_id: resource_id(2), key: String::new(), headers: vec![], match_all: true };
+    // A configured exchange (id 9) holds a runtime binding to the queue too.
+    for x in [resource_id(3), 9] {
+        s.apply(4, &payload(&Change::Bind { exchange_id: x, binding: to_q.clone() })).unwrap();
+    }
+    s.apply(5, &payload(&Change::AlterQueue { resource_id: resource_id(2), ack_timeout_ms: 750 })).unwrap();
+    assert_eq!(s.queues[&resource_id(2)].ack_timeout_ms, 750);
+
+    s.apply(6, &payload(&Change::Delete { resource_id: resource_id(2) })).unwrap();
+    assert!(s.queues.is_empty() && s.is_deleted(resource_id(2)));
+    assert!(s.bindings.values().all(Vec::is_empty), "bindings to the queue are gone, on every exchange");
+    // A bind and an alter that were admitted before the delete arrive after it.
+    s.apply(7, &payload(&Change::Bind { exchange_id: resource_id(3), binding: to_q.clone() })).unwrap();
+    s.apply(8, &payload(&Change::AlterQueue { resource_id: resource_id(2), ack_timeout_ms: 1 })).unwrap();
+    assert!(s.bindings.values().all(Vec::is_empty) && s.queues.is_empty());
+
+    s.apply(9, &payload(&Change::Delete { resource_id: resource_id(1) })).unwrap();
+    s.apply(10, &payload(&Change::Delete { resource_id: resource_id(3) })).unwrap();
+    // Deleting again, or something never created, changes nothing.
+    let before = s.clone();
+    s.apply(11, &payload(&Change::Delete { resource_id: resource_id(1) })).unwrap();
+    s.apply(12, &payload(&Change::Delete { resource_id: 9 })).unwrap();
+    assert_eq!(s, before);
+    assert!(s.streams.is_empty() && s.exchanges.is_empty() && !s.bindings.contains_key(&resource_id(3)));
+    assert_eq!(s.groups().count(), 0);
+    let gone: Vec<GroupId> = s.deleted_groups().into_iter().collect();
+    assert_eq!(gone, vec![group_id(1, 0), group_id(1, 1), group_id(1, 2), group_id(2, 0)]);
+    // The name is free again, under a new id.
+    s.apply(13, &payload(&Change::CreateQueue { name: "q".into(), voters: vec![1], ack_timeout_ms: 0 })).unwrap();
+    assert_eq!(s.id_of("q"), Some(resource_id(13)));
+
+    let bytes = s.encode();
+    assert_eq!(MetadataState::decode(&bytes).unwrap(), s);
+    for cut in 0..bytes.len() {
+        assert!(MetadataState::decode(&bytes[..cut]).is_err(), "cut at {cut}");
+    }
+}

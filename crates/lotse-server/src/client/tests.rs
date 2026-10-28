@@ -13,6 +13,8 @@ use lotse_sim::{Sim, SimRuntime};
 
 use super::*;
 
+static NOTHING_DELETED: BTreeSet<u64> = BTreeSet::new();
+
 #[derive(Debug, Default)]
 struct Nothing;
 
@@ -146,6 +148,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -213,6 +216,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -300,6 +304,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -358,6 +363,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 streams: &streams,
                 queues: &[],
                 exchanges: &[],
+                deleted: &NOTHING_DELETED,
                 group_session: Duration::from_secs(45),
                 group_heartbeat: Duration::from_secs(5),
                 admin: AdminView::default(),
@@ -395,6 +401,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -453,6 +460,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             streams: &[],
             queues: &queues,
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -521,6 +529,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             streams: &[],
             queues: &queues,
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(45),
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
@@ -601,6 +610,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(1),
             group_heartbeat: Duration::from_millis(100),
             admin: AdminView::default(),
@@ -682,6 +692,7 @@ fn offsets_for_a_released_partition_are_refused() {
             streams: &streams,
             queues: &[],
             exchanges: &[],
+            deleted: &NOTHING_DELETED,
             group_session: Duration::from_secs(1),
             group_heartbeat: Duration::from_millis(100),
             admin: AdminView::default(),
@@ -765,5 +776,134 @@ fn offsets_for_a_released_partition_are_refused() {
             assert!(errors.contains(&expect), "{member}: {errors:?}");
             assert!(groups[&G].coordinator().groups().offsets.is_empty(), "{member}: a refused commit wrote offsets");
         }
+    });
+}
+
+/// A bind or an alter admitted before a delete of its queue, and applied
+/// after it, changed nothing: it must not be acknowledged. Two admitted in
+/// the same round before the delete always land in that order, a history
+/// the simulation meets too rarely.
+#[test]
+fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
+    Sim::new(8).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "m", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let addrs = BTreeMap::new();
+        let voters = BTreeMap::new();
+        let mut clients = Clients::default();
+        let ask = async |clients: &mut Clients,
+                         groups: &mut Groups,
+                         queues: &[QueueConfig],
+                         exchanges: &[Exchange],
+                         requests: Vec<Request>| {
+            let view = ClusterView {
+                streams: &[],
+                queues,
+                exchanges,
+                deleted: &NOTHING_DELETED,
+                group_session: Duration::from_secs(1),
+                group_heartbeat: Duration::from_millis(100),
+                admin: AdminView { metadata: Some(G), nodes: &[1], configured_groups: 1, voters: &voters },
+                client_addrs: &addrs,
+                coordinator: None,
+                now: rt.now(),
+            };
+            let mut outboxes = Vec::new();
+            for request in requests {
+                let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+                let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+                let req = ClientRequest { outbox: outbox.clone(), header, request };
+                clients.handle(req, &view, groups).await.unwrap();
+                outboxes.push((outbox, key));
+            }
+            for _ in 0..5 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            outboxes
+                .into_iter()
+                .map(|(o, key)| match &drain(&o, key).0[..] {
+                    [r] => r.clone(),
+                    other => panic!("expected one answer, got {other:?}"),
+                })
+                .collect::<Vec<Response>>()
+        };
+        let created = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![
+                Request::CreateQueue(lotse_proto::CreateQueueRequest {
+                    name: "q".into(),
+                    priority_levels: 1,
+                    single_active: false,
+                    dlq: None,
+                    replication: 1,
+                    configs: vec![],
+                }),
+                Request::DeclareExchange(lotse_proto::DeclareExchangeRequest {
+                    name: "x".into(),
+                    exchange_type: lotse_proto::exchange_type::FANOUT,
+                    configs: vec![],
+                }),
+            ],
+        )
+        .await;
+        let [Response::Create(q), Response::Create(x)] = &created[..] else { panic!("{created:?}") };
+        assert_eq!((q.error, x.error), (ErrorCode::NONE, ErrorCode::NONE));
+        let state = groups[&G].metadata().clone();
+        let dq = &state.queues[&q.resource_id];
+        let queues = [QueueConfig {
+            name: "q".into(),
+            resource_id: q.resource_id,
+            group: dq.group,
+            ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+        }];
+        let exchanges = [Exchange {
+            name: "x".into(),
+            resource_id: x.resource_id,
+            kind: lotse_route::ExchangeKind::Fanout,
+            bindings: vec![],
+        }];
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &queues,
+            &exchanges,
+            vec![
+                Request::Bind(lotse_proto::BindRequest {
+                    exchange_id: x.resource_id,
+                    queue_id: q.resource_id,
+                    binding_key: String::new(),
+                    header_match: vec![],
+                    match_all: true,
+                }),
+                Request::AlterConfigs(lotse_proto::AlterConfigsRequest {
+                    resource_id: q.resource_id,
+                    set: vec![("ack.timeout.ms".into(), "500".into())],
+                    delete: vec![],
+                }),
+                Request::DeleteResource(lotse_proto::DeleteResourceRequest {
+                    resource_id: q.resource_id,
+                    if_empty: false,
+                }),
+            ],
+        )
+        .await;
+        let [Response::Outcome(bind), Response::Admin(alter), Response::Admin(delete)] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert_eq!(delete.error, ErrorCode::NONE, "the delete went through");
+        assert_eq!(bind.error, ErrorCode::UNKNOWN_RESOURCE, "a bind to a queue deleted before it was acknowledged");
+        assert_eq!(alter.error, ErrorCode::UNKNOWN_RESOURCE, "an alter of a deleted queue was acknowledged");
+        let state = groups[&G].metadata();
+        assert!(state.bindings.values().all(Vec::is_empty) && state.queues.is_empty());
     });
 }

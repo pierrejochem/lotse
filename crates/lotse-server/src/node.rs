@@ -23,16 +23,16 @@
 //! ends and the listener is closed before [`Node::start`]'s task finishes, so
 //! a restarted node can bind the same address.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
-use lotse_rt::{Conn, Listener, Runtime, Spawn};
+use lotse_rt::{Conn, Disk, Listener, Runtime, Spawn};
 
 use crate::client::{AdminView, ClientRequest, Clients, ClusterView, MarkerJob, QueueConfig, StreamConfig};
 use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
@@ -126,6 +126,8 @@ struct Shared {
     inbox: Mutex<VecDeque<Incoming>>,
     commands: Mutex<VecDeque<Command>>,
     status: Mutex<BTreeMap<GroupId, GroupStatus>>,
+    /// Resources deleted at runtime, for marker jobs.
+    deleted: Mutex<BTreeSet<u64>>,
     work: Signal,
     stop: Signal,
 }
@@ -207,10 +209,9 @@ impl<R: Runtime> Node<R> {
         let mut groups = BTreeMap::new();
         for &g in &cfg.groups {
             let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
-            let dir = PathBuf::from("groups").join(g.to_string());
             let options =
                 ReplicaOptions { max_producers: cfg.max_producers, queue: cfg.queues.iter().any(|q| q.group == g) };
-            let replica = Replica::open_with(rt.clone(), dir, raft, state_machine(g), cfg.log, options);
+            let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
             groups.insert(g, replica.await?);
         }
         let listener = rt.listen(&cfg.listen).await?;
@@ -318,6 +319,11 @@ async fn write_markers<R: Runtime>(
     let stop = [&job.cancel, &shared.stop];
     for &(resource_id, partition) in &job.partitions {
         loop {
+            // A deleted partition took the transaction's data with it: its
+            // marker is moot, and its leader no longer answers for it.
+            if shared.deleted.lock().expect("deleted lock").contains(&resource_id) {
+                break;
+            }
             let marker = lotse_proto::TxnMarker {
                 producer_id: job.producer_id,
                 producer_epoch: job.epoch,
@@ -371,7 +377,13 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let nodes: Vec<NodeId> = cfg.peers.keys().copied().collect();
     let mut known = Known::configured(cfg);
     while !shared.stop.is_set() {
-        known.refresh(rt, cfg, groups, factory).await?;
+        if known.refresh(rt, cfg, groups, factory).await? {
+            shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
+        }
+        if shared.deleted.lock().expect("deleted lock").len() != known.deleted.len() {
+            // Marker jobs look before each attempt.
+            shared.deleted.lock().expect("deleted lock").clone_from(&known.deleted);
+        }
         let wait = next_tick - rt.now();
         if !wait.is_zero() && !shared.work.take() {
             race(rt.sleep(wait), &[&shared.work, &shared.stop]).await;
@@ -385,6 +397,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             streams: &known.streams,
             queues: &known.queues,
             exchanges: &known.exchanges,
+            deleted: &known.deleted,
             group_session: cfg.group_session_timeout,
             group_heartbeat: cfg.group_heartbeat_interval,
             admin: AdminView {
@@ -559,6 +572,10 @@ struct Known {
     exchanges: Vec<lotse_route::Exchange>,
     /// Voters of runtime groups.
     voters: BTreeMap<GroupId, Vec<NodeId>>,
+    /// Resources deleted at runtime.
+    deleted: BTreeSet<u64>,
+    /// Groups of deleted resources whose files this process has removed.
+    removed: BTreeSet<GroupId>,
     /// The metadata group's applied index these were built from.
     applied: u64,
 }
@@ -570,27 +587,43 @@ impl Known {
             queues: cfg.queues.clone(),
             exchanges: cfg.exchanges.clone(),
             voters: BTreeMap::new(),
+            deleted: BTreeSet::new(),
+            removed: BTreeSet::new(),
             applied: 0,
         }
     }
 
-    /// Rebuilds the view after the metadata group applied something, and
-    /// opens the runtime groups this node is a voter of.
+    /// Rebuilds the view after the metadata group applied something, opens
+    /// the runtime groups this node is a voter of, and closes and removes
+    /// deleted ones. Returns whether it closed a group.
     async fn refresh<R: Runtime, S: StateMachine>(
         &mut self,
         rt: &R,
         cfg: &NodeConfig,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
         factory: &Factory<S>,
-    ) -> Result<(), Error> {
-        let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return Ok(()) };
+    ) -> Result<bool, Error> {
+        let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return Ok(false) };
         if meta.applied() == self.applied {
-            return Ok(());
+            return Ok(false);
         }
         self.applied = meta.applied();
         let state = meta.metadata().clone();
         let mut known = Known::configured(cfg);
         known.applied = self.applied;
+        known.removed = std::mem::take(&mut self.removed);
+        known.deleted = state.deleted.keys().copied().collect();
+        // Deleted groups close and lose their files. The tombstone stays in
+        // the metadata state, which is durable before anything is removed,
+        // so a node that stops halfway never opens the group again and
+        // finishes the removal after a restart.
+        let mut closed = false;
+        for g in state.deleted_groups() {
+            closed |= groups.remove(&g).is_some();
+            if known.removed.insert(g) {
+                remove_group_files(rt, &group_dir(g)).await?;
+            }
+        }
         for s in state.streams.values() {
             known.streams.push(StreamConfig {
                 name: s.name.clone(),
@@ -603,7 +636,10 @@ impl Known {
                 name: q.name.clone(),
                 resource_id: q.resource_id,
                 group: q.group,
-                ack_timeout: Duration::from_millis(q.ack_timeout_ms),
+                ack_timeout: match q.ack_timeout_ms {
+                    0 => QueueConfig::DEFAULT_ACK_TIMEOUT,
+                    ms => Duration::from_millis(ms),
+                },
             });
         }
         for x in state.exchanges.values() {
@@ -630,13 +666,34 @@ impl Known {
             if voters.contains(&cfg.id) && !groups.contains_key(&g) {
                 let raft =
                     Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.to_vec()) };
-                let dir = PathBuf::from("groups").join(g.to_string());
                 let options = ReplicaOptions { max_producers: cfg.max_producers, queue };
-                let replica = Replica::open_with(rt.clone(), dir, raft, factory(g), cfg.log, options).await?;
+                let replica = Replica::open_with(rt.clone(), group_dir(g), raft, factory(g), cfg.log, options).await?;
                 groups.insert(g, replica);
             }
         }
         *self = known;
-        Ok(())
+        Ok(closed)
     }
+}
+
+/// Where a group lives on the disk.
+fn group_dir(g: GroupId) -> PathBuf {
+    PathBuf::from("groups").join(g.to_string())
+}
+
+/// Removes a closed group's files and directories, as much as is there:
+/// nothing if it never ran here, the rest if a removal was cut short.
+async fn remove_group_files<D: Disk>(disk: &D, dir: &Path) -> Result<(), Error> {
+    for d in [dir.join("log"), dir.to_path_buf()] {
+        let files = match disk.list(&d).await {
+            Ok(files) => files,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for f in files {
+            disk.remove(&f).await?;
+        }
+        disk.remove_dir(&d).await?;
+    }
+    Ok(())
 }

@@ -92,7 +92,8 @@ pub enum OpenMode {
 /// Access to the log volume.
 ///
 /// Paths are relative to the volume root. Implementations must make
-/// `rename` atomic and `remove`/`rename` durable once they return.
+/// `rename` atomic and `remove`/`remove_dir`/`rename` durable once they
+/// return.
 pub trait Disk: Clone + Send + Sync + 'static {
     /// File handle type.
     type File: SegmentFile;
@@ -111,6 +112,9 @@ pub trait Disk: Clone + Send + Sync + 'static {
 
     /// Removes a file.
     fn remove(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// Removes an empty directory; fails if it holds anything.
+    fn remove_dir(&self, dir: &Path) -> impl Future<Output = io::Result<()>> + Send;
 }
 
 /// An append-only file as the log uses it.

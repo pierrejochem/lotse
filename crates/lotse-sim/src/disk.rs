@@ -207,6 +207,25 @@ impl SimDisk {
         ready(s.files.remove(path).map(|_| ()).ok_or_else(|| not_found(path)))
     }
 
+    pub(crate) fn remove_dir(&self, dir: &Path) -> impl Future<Output = io::Result<()>> + Send + use<> {
+        let mut s = self.state.lock().expect("disk lock");
+        if !s.dirs.contains(dir) {
+            return ready(Err(not_found(dir)));
+        }
+        let inside = |p: &PathBuf| p.parent() == Some(dir);
+        if s.files.keys().any(inside) || s.dirs.iter().any(inside) {
+            return ready(Err(io::Error::new(
+                io::ErrorKind::DirectoryNotEmpty,
+                format!("{} is not empty", dir.display()),
+            )));
+        }
+        if let Err(e) = spend(&mut s) {
+            return ready(Err(e));
+        }
+        s.dirs.remove(dir);
+        ready(Ok(()))
+    }
+
     fn with_file<T>(
         &self,
         file: &SimFile,

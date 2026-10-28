@@ -161,7 +161,7 @@ impl Clients {
         };
         let group = Self::queue_group(view, req.queue_id);
         let Some((g, replica)) = group.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
-            return reply(super::absent(req.queue_id, group), 0, None);
+            return reply(view.absent(req.queue_id, group), 0, None);
         };
         if replica.raft_ref().role() != Role::Leader {
             return reply(ErrorCode::NOT_LEADER, 0, hint(replica.raft_ref()));
@@ -213,7 +213,7 @@ impl Clients {
         groups: &'a mut Groups<R, S>,
         queue_id: u64,
     ) -> Result<(GroupId, &'a mut Replica<R, S>), Refusal> {
-        let g = Self::queue_group(view, queue_id).ok_or((super::absent(queue_id, None), None))?;
+        let g = Self::queue_group(view, queue_id).ok_or((view.absent(queue_id, None), None))?;
         let replica = groups.get_mut(&g).ok_or((ErrorCode::NOT_LEADER, None))?;
         if replica.raft_ref().role() != Role::Leader {
             return Err((ErrorCode::NOT_LEADER, hint(replica.raft_ref())));
@@ -316,7 +316,12 @@ impl Clients {
     pub(super) fn settle_queue_writes<R: Runtime, S: StateMachine>(&mut self, now: Instant, groups: &Groups<R, S>) {
         let writes = std::mem::take(&mut self.queue_writes);
         for mut w in writes {
-            let replica = &groups[&w.group];
+            let Some(replica) = groups.get(&w.group) else {
+                if let Some((outbox, id)) = w.reply.take() {
+                    answer(&outbox, id, ErrorCode::UNKNOWN_RESOURCE, None);
+                }
+                continue;
+            };
             let decided = outcome(replica.raft_ref(), w.last, w.term);
             if decided == Some(ErrorCode::NONE) && replica.applied() < w.last {
                 self.queue_writes.push(w); // committed; applied in a moment
@@ -352,6 +357,11 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) -> Result<(), Error> {
+        // A queue whose group has gone was deleted: its subscriptions end.
+        let gone: Vec<GroupId> = self.queues.keys().copied().filter(|g| !groups.contains_key(g)).collect();
+        for g in gone {
+            self.stop_serving(g, ErrorCode::UNKNOWN_RESOURCE, None);
+        }
         for qc in view.queues {
             let Some(replica) = groups.get_mut(&qc.group) else { continue };
             let (g, raft) = (qc.group, replica.raft_ref());

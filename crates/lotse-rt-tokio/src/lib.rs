@@ -223,6 +223,14 @@ impl Disk for TokioRuntime {
             sync_dir(full.parent().unwrap_or(Path::new(".")))
         })
     }
+
+    fn remove_dir(&self, dir: &Path) -> impl Future<Output = io::Result<()>> + Send {
+        let full = self.path(dir);
+        blocking(move || {
+            std::fs::remove_dir(&full)?;
+            sync_dir(full.parent().unwrap_or(Path::new(".")))
+        })
+    }
 }
 
 impl SegmentFile for TokioFile {

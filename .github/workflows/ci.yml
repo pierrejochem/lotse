@@ -58,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_at_runtime
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted
         env:
           LOTSE_SIM_SEEDS: "5000"
 

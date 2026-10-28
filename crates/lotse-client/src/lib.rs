@@ -343,8 +343,8 @@ impl<R: Net + Clock + Spawn> Client<R> {
         }
     }
 
-    /// Asks every known broker and merges what they know (each resource
-    /// from the first broker that knows it).
+    /// Asks every known broker and merges what they know: per name, the
+    /// newest resource any of them knows.
     async fn metadata_from_all(&self, names: &[&str]) -> MetadataResponse {
         let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
         addrs.extend(self.cfg.bootstrap.iter().cloned());
@@ -355,11 +355,7 @@ impl<R: Net + Clock + Spawn> Client<R> {
             let req = Request::Metadata(MetadataRequest { names: names.iter().map(|n| n.to_string()).collect() });
             let Ok(Response::Metadata(m)) = self.call(&addr, &req).await else { continue };
             self.learn(&m);
-            for r in m.resources.into_iter().filter(|r| r.error == ErrorCode::NONE) {
-                if !merged.resources.iter().any(|x| x.name == r.name) {
-                    merged.resources.push(r);
-                }
-            }
+            merge_newest(&mut merged.resources, m.resources);
             merged.brokers = m.brokers;
         }
         merged
@@ -685,7 +681,13 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 self.forget(stream, partition);
                 Err(unknown(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
             }
-            code => Err(Attempt::Fail(ClientError::Broker { code, message: p.error_msg.clone() })),
+            code => {
+                // Deleted: the name may come back as a new resource.
+                if code == ErrorCode::UNKNOWN_RESOURCE {
+                    self.forget(stream, partition);
+                }
+                Err(Attempt::Fail(ClientError::Broker { code, message: p.error_msg.clone() }))
+            }
         }
     }
 
@@ -814,7 +816,12 @@ impl<R: Net + Clock + Spawn> Client<R> {
                 self.redirect(stream, partition, p.leader_hint);
                 Err(Attempt::Retry(code.to_string()))
             }
-            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+            code => {
+                if code == ErrorCode::UNKNOWN_RESOURCE {
+                    self.forget(stream, partition);
+                }
+                Err(Attempt::Fail(ClientError::Broker { code, message: None }))
+            }
         }
     }
 
@@ -1277,3 +1284,20 @@ async fn race<F: Future, G: Future>(fut: F, cancel: G) -> Option<F::Output> {
     })
     .await
 }
+
+/// Adds what one broker knows to `merged`, keeping per name the newest
+/// resource: a name deleted and created again has a new, higher id (ids
+/// grow with the metadata log), and a broker that lags may still report the
+/// old one.
+fn merge_newest(merged: &mut Vec<lotse_proto::ResourceMetadata>, more: Vec<lotse_proto::ResourceMetadata>) {
+    for r in more.into_iter().filter(|r| r.error == ErrorCode::NONE) {
+        match merged.iter_mut().find(|x| x.name == r.name) {
+            Some(x) if x.resource_id < r.resource_id => *x = r,
+            Some(_) => {}
+            None => merged.push(r),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

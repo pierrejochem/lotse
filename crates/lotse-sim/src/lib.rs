@@ -157,6 +157,9 @@ impl lotse_rt::Disk for SimRuntime {
     fn remove(&self, path: &std::path::Path) -> impl Future<Output = std::io::Result<()>> + Send {
         self.disk.remove(path)
     }
+    fn remove_dir(&self, dir: &std::path::Path) -> impl Future<Output = std::io::Result<()>> + Send {
+        self.disk.remove_dir(dir)
+    }
 }
 
 impl lotse_rt::Net for SimRuntime {
