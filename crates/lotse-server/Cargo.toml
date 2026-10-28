@@ -12,12 +12,14 @@ lotse-rt.workspace = true
 lotse-record.workspace = true
 lotse-log.workspace = true
 lotse-raft.workspace = true
+lotse-proto.workspace = true
 bytes.workspace = true
 crc32c.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 lotse-sim.workspace = true
+lotse-client.workspace = true
 lotse-rt-tokio.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 

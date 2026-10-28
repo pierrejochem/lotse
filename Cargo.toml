@@ -18,6 +18,8 @@ lotse-sim = { path = "crates/lotse-sim" }
 lotse-raft = { path = "crates/lotse-raft" }
 lotse-server = { path = "crates/lotse-server" }
 lotse-rt-tokio = { path = "crates/lotse-rt-tokio" }
+lotse-proto = { path = "crates/lotse-proto" }
+lotse-client = { path = "crates/lotse-client" }
 
 bytes = "1.7"
 crc32c = "0.6"

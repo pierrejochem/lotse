@@ -219,6 +219,8 @@ Push:     length u32 | api_key u16 | api_version u16 | correlation_id 0
 
 Requests auf einer Verbindung werden gepipelined; Antworten kommen pro Partition geordnet, aber nicht global. Push-Frames (Zustellung an Queue-Consumer) nutzen `correlation_id = 0` und tragen die Subscription-ID.
 
+Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frames, auf TCP mit `u32`-Präfix, und der Codec beginnt danach. Eine Antwort, deren Body nur aus einem Fehlercode besteht (der Request ließ sich gar nicht bedienen, etwa `UNSUPPORTED_VERSION`), setzt das Flag `ERROR` (2).
+
 ### Verbindungsaufbau
 
 1. TLS-Handshake; bei mTLS liefert das Client-Zertifikat den Principal.
@@ -237,6 +239,8 @@ Requests auf einer Verbindung werden gepipelined; Antworten kommen pro Partition
 | Admin | `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind`, `DeleteResource`, `DescribeConfigs`, `AlterConfigs` |
 
 `Publish` routet über Exchanges und schreibt in die Ziel-Queues. `Produce` schreibt direkt in eine Partition. Beide nutzen dasselbe Batch-Format und dieselben Idempotenzregeln.
+
+Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `Metadata` 1, `FindCoordinator` 2, `Produce` 3, `Fetch` 4 und so weiter. Alle beginnen bei Version 0. Umgesetzt sind bisher `ApiVersions`, `Metadata`, `Produce` und `Fetch` (ADR 0026).
 
 ### Zero-copy
 
@@ -270,7 +274,8 @@ varint              ZigZag-varint
 string              u16 Länge + UTF-8 (0xFFFF = null)
 bytes               u32 Länge + Daten
 array<T>            varint Anzahl + Elemente
-tagged_fields       am Ende jeder Struktur, für abwärtskompatible Erweiterungen
+tagged_fields       array{tag varint, bytes} am Ende jeder Struktur, für abwärtskompatible
+                    Erweiterungen; unbekannte Tags werden übersprungen
 ```
 
 Ein Frame ist standardmäßig höchstens 16 MiB groß (konfigurierbar), ein Record-Batch höchstens 1 MiB. Der Broker prüft `length` vor dem Lesen des Bodys und schließt bei Überschreitung mit `FRAME_TOO_LARGE`.
@@ -309,6 +314,14 @@ Fetch    <- max_wait_ms u32, min_bytes u32, max_bytes u32,
                        aborted_txns: array{producer_id u64, first_offset u64},
                        records bytes}}          // rohe Segmentbytes, zero-copy
 ```
+
+Eine Partition mit `NOT_LEADER` trägt als Tag 0 `{leader u32, term u64}`.
+
+**Wann `Produce` antwortet.** Der Leader schlägt jeden Batch vor und antwortet, sobald das Ergebnis endgültig ist: geschrieben, wenn der Index des Batches **auf diesem Node** committet ist und dort den Term trägt, in dem er vorgeschlagen wurde; nicht geschrieben (`NOT_LEADER`), wenn der committete Entry dort einen anderen Term hat. Committete Entries ändern sich nie, deshalb ist diese Antwort endgültig. Wird der Entry auf diesem Node ersetzt, bevor er committet ist, meldet der Leader **keinen** Fehler: Ein anderer Node kann ihn noch haben und später committen (mit fünf Voters ist das möglich). Sieht der Node den Commit nicht innerhalb von `timeout_ms`, lautet die Antwort `REQUEST_TIMED_OUT`, Ausgang unbekannt.
+
+**Was `Fetch` liefert.** Nur der Leader bedient Fetches, und nie einen Batch ab seinem Commit-Index (der High Watermark). Ein neuer Leader kennt den Commit-Index erst, wenn ein Entry seines Terms committet ist; seine High Watermark kann also kurz hinter Offsets liegen, die ein Client schon gelesen hat. Deshalb heißt `OFFSET_OUT_OF_RANGE` vor dem Log-Start oder hinter dem Log-Ende des Leaders; dazwischen wartet der Fetch auf Daten.
+
+Bis die Metadaten-Gruppe existiert, kommen Streams und die Raft-Gruppe jeder Partition aus der Node-Konfiguration. `lotse-client` wiederholt einen `Produce` mit unbekanntem Ausgang nicht, solange es keine idempotenten Producer gibt; er wiederholt nur, was sicher nicht geschrieben wurde.
 
 ### Consumer Groups
 
@@ -412,7 +425,7 @@ AlterConfigs    <- resource_id u64, set: array{key string, value string}, delete
 | 1 | `NOT_LEADER` | ja | Falscher Node; Leader-ID und Term als Tagged Field |
 | 2 | `FENCED_LEADER_TERM` | ja | Client-Term veraltet; Metadata neu laden |
 | 3 | `UNKNOWN_RESOURCE` | nein | ID existiert nicht (mehr) |
-| 4 | `OFFSET_OUT_OF_RANGE` | nein | Offset vor Log-Start oder hinter HW |
+| 4 | `OFFSET_OUT_OF_RANGE` | nein | Offset vor Log-Start oder hinter dem Log-Ende des Leaders |
 | 5 | `NOT_ENOUGH_REPLICAS` | ja | Kein Quorum erreichbar |
 | 6 | `REQUEST_TIMED_OUT` | ja | Quorum-Bestätigung nicht innerhalb `timeout_ms` |
 | 7 | `OUT_OF_ORDER_SEQUENCE` | nein | Lücke in der Producer-Sequenz |
@@ -612,4 +625,4 @@ Die Designentscheidungen für Broker und Console sind getroffen. Offen für die 
 - [ ] Admin-APIs für Purge, Requeue und Leader verschieben, danach die Buttons in der UI
 - [ ] Einklappbares Menü auf dem Telefon
 
-Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-sim`, `lotse-server` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt. Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Drei Simulationen prüfen das: die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready` und die Node-Simulation mit drei ganzen Nodes, drei Gruppen, Partitionen und Stromausfällen über das simulierte Netz; die CI fährt jede mit 5.000 Seeds. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und prüft, dass der Rest weiterläuft und der alte Node aufholt. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 eingebauten Durability-Fehler der Replica und alle 9 eingebauten Transportfehler (verworfene, falsch zugestellte oder falsch adressierte Nachrichten, ein Sender ohne Neuverbindung, Fehler im Wire-Format, ein Client-Batch mit fremdem Term). Die Replica-Simulation hat einen echten Fehler gefunden: Der Hard State wurde vor dem Log geschrieben, sodass ein Knoten nach einem Stromausfall nie committete Entries anwenden konnte (ADR 0023). Die Console läuft gegen einen eingebauten Demo-Cluster, bis `lotse-client` existiert. Nächster Schritt: das native Protokoll.
+Umgesetzt sind `lotse-rt` mit `lotse-rt-tokio`, `lotse-record`, `lotse-log`, `lotse-raft`, `lotse-proto`, `lotse-sim`, `lotse-server`, `lotse-client` und `lotse-console` mit `console/web`. Der Raft-Kern ist vollständig: optionales Pre-Vote, immer aktives Check-Quorum mit Leader-Stickiness, No-Op beim Leaderwechsel, Snapshots, Learner, Joint Consensus, Leader-Transfer, ReadIndex und optionale Leases. `lotse-server` hat `Replica`, eine Raft-Gruppe dauerhaft auf ihrem eigenen Log (atomare Zustandsdateien, `sync` vor jeder Bestätigung, Wiederherstellung beim Start), und `Node`, der viele Gruppen über einen Transport mit Bündelung pro Ziel-Node betreibt und Clients über den ersten Schnitt des nativen Protokolls bedient (`ApiVersions`, `Metadata`, `Produce`, `Fetch`). Derselbe `Node` läuft auf Tokio mit echter Disk und TCP und in der Simulation. Vier Simulationen prüfen das, die CI fährt jede mit 5.000 Seeds: die Raft-Simulation (Nachrichtenfehler, Partitionen, Uhren-Drift, Abstürze, Kompaktierung, Mitgliederwechsel, Führungsübergabe, linearisierbare Lesezugriffe), die Replica-Simulation mit Stromausfällen auch mitten in einem `Ready`, die Node-Simulation mit drei ganzen Nodes und drei Gruppen über das simulierte Netz und die Client-Simulation mit drei oder fünf Nodes, Producern und Consumern über `lotse-client`. Sie prüft, dass kein bestätigter Batch verloren geht oder wandert, dass Consumer nur Committetes lesen, dass ein als nicht geschrieben gemeldeter Batch tatsächlich fehlt und dass nichts doppelt im Log steht. Ein Test startet zusätzlich drei echte Nodes auf localhost, stoppt einen Leader und schreibt und liest über `lotse-client` weiter. Zusammen mit den Unit-Tests erkennen sie 18 eingebaute Raft-Fehler, alle 8 eingebauten Durability-Fehler der Replica, alle 9 eingebauten Transportfehler und alle 8 eingebauten Protokollfehler (Bestätigung vor dem Commit oder ohne Term-Prüfung, „nicht geschrieben“ schon beim Ersetzen des Entries, unkommittete Daten im Fetch, falsches `OFFSET_OUT_OF_RANGE`, Client-Wiederholung bei unbekanntem Ausgang). Den heikelsten davon fängt nur ein deterministischer Test mit fünf Replicas, weil die Simulation die nötige Geschichte zu selten trifft. Zwei echte Fehler wurden so gefunden: der Hard State vor dem Log (ADR 0023) und ein zu enges `OFFSET_OUT_OF_RANGE` nach einem Leaderwechsel (ADR 0026). Die Console läuft gegen einen eingebauten Demo-Cluster, bis das native Protokoll Admin-API-Keys hat. Nächster Schritt: idempotente Producer (Producer-IDs und Sequenzen), danach Transaktionen.

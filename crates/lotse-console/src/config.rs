@@ -99,7 +99,7 @@ pub enum ClusterConfig {
         /// Cluster ID.
         id: String,
     },
-    /// A real cluster over the native protocol (needs `lotse-client`).
+    /// A real cluster over the native protocol (needs its admin API keys).
     Native {
         /// Cluster ID.
         id: String,
@@ -157,7 +157,7 @@ impl Config {
         }
         if let Some(c) = cfg.clusters.iter().find(|c| matches!(c, ClusterConfig::Native { .. })) {
             return Err(ConfigError::Invalid(format!(
-                "Cluster \"{}\" uses kind = \"native\", which needs lotse-client and is not available yet. Use kind = \"demo\" for now.",
+                "Cluster \"{}\" uses kind = \"native\", which needs the admin API of the native protocol and is not available yet. Use kind = \"demo\" for now.",
                 c.id()
             )));
         }
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn refuses_what_does_not_work_yet() {
         let native = OK.replace("kind = \"demo\"", "kind = \"native\"\nbootstrap = [\"b1:9092\"]");
-        assert!(Config::parse(&native).unwrap_err().to_string().contains("lotse-client"));
+        assert!(Config::parse(&native).unwrap_err().to_string().contains("admin API"));
         let oidc = OK.replace(
             "mode = \"dev\"\n        user = \"pierre\"",
             "mode = \"oidc\"\nissuer = \"https://id\"\nclient_id = \"c\"",

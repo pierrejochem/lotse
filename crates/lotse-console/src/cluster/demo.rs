@@ -1,4 +1,5 @@
-//! A built-in cluster with sample data, until `lotse-client` exists.
+//! A built-in cluster with sample data, until the native protocol has its
+//! admin API keys.
 //!
 //! It serves the scene from the mockups: a rolling upgrade from 0.4.0 to
 //! 0.4.1 is under way, broker-3 is catching up after its restart, broker-2

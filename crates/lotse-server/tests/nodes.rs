@@ -99,6 +99,9 @@ impl World {
                         tick: TICK,
                         pre_vote,
                         log,
+                        client_listen: None,
+                        client_addrs: BTreeMap::new(),
+                        streams: Vec::new(),
                     },
                 )
             })

@@ -1,0 +1,18 @@
+[package]
+name = "lotse-client"
+description = "Rust client for Lotse over the native protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lotse-rt.workspace = true
+lotse-proto.workspace = true
+lotse-record.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

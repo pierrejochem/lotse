@@ -15,7 +15,9 @@ A message broker in Rust: RabbitMQ-style reliable queues and Kafka-style persist
 | `crates/lotse-record` | Batch format: 65-byte header, ZigZag-varint records, CRC32C, transaction and Raft control batches |
 | `crates/lotse-log` | Segmented partition log, which is also the Raft log |
 | `crates/lotse-raft` | Sans-I/O Raft core and Multi-Raft; `testing::MemNode` is the in-memory driver |
-| `crates/lotse-server` | Broker node: `Replica` (a Raft group on `lotse-log`), `Node` (many groups, one transport), `wire` (node-to-node format); simulations in `tests/cluster.rs` and `tests/nodes.rs`, real TCP in `tests/tokio_cluster.rs` |
+| `crates/lotse-proto` | Native protocol: frames, codec conventions, error codes, request and response types |
+| `crates/lotse-server` | Broker node: `Replica` (a Raft group on `lotse-log`), `Node` (many groups, one transport), `wire` (node-to-node format), `client` (serving the native protocol); simulations in `tests/cluster.rs`, `tests/nodes.rs` and `tests/clients.rs`, real TCP in `tests/tokio_cluster.rs` |
+| `crates/lotse-client` | Rust client over the native protocol, on `lotse-rt` (runs in the simulation too) |
 | `crates/lotse-sim` | Deterministic simulation: seeded executor, virtual time, crashing disks, a faulty network; Raft fault simulation in `tests/raft.rs` |
 | `crates/lotse-console` | Management console backend (axum), serves `console/web` |
 | `console/web` | Console frontend: React 18, TypeScript, Radix primitives, TanStack Query, generated OpenAPI client |
@@ -68,4 +70,4 @@ CI (`.github/workflows/ci.yml`) runs format, clippy, tests, the web app build wi
 
 Built and tested: runtime seam, record format, segmented log, the Raft core (elections with optional pre-vote and mandatory check-quorum, snapshots, learners, joint consensus, leader transfer, ReadIndex and optional leases), the simulation harness, and the management console against a built-in demo cluster.
 
-`lotse-server` has `Replica`, a durable Raft group on `lotse-log`, and `Node`, which runs many groups over one transport with Multi-Raft batching ([ADR 0025](docs/adr/0025-frame-oriented-network-seam-and-raft-wire-format.md)). `lotse-rt-tokio` runs it on real disks and TCP. Durability and transport rules are mutation-checked. Next: the native protocol. Known gaps are listed at the end of [README.md](README.md).
+`lotse-server` has `Replica`, a durable Raft group on `lotse-log`, and `Node`, which runs many groups over one transport with Multi-Raft batching ([ADR 0025](docs/adr/0025-frame-oriented-network-seam-and-raft-wire-format.md)) and serves clients over the first cut of the native protocol: `ApiVersions`, `Metadata`, `Produce`, `Fetch` ([ADR 0026](docs/adr/0026-native-protocol-first-cut.md)). `lotse-client` speaks it. `lotse-rt-tokio` runs everything on real disks and TCP. Durability, transport and protocol rules are mutation-checked. Next: idempotent producers (producer ids and sequences), then transactions. Known gaps are listed at the end of [README.md](README.md).

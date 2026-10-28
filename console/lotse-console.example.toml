@@ -16,7 +16,7 @@ retention_hours = 24
 [live]
 interval_ms = 2000
 
-# A built-in cluster with sample data, until lotse-client exists.
+# A built-in cluster with sample data, until the native protocol has its admin API.
 [[clusters]]
 id = "prod-hamburg-1"
 kind = "demo"

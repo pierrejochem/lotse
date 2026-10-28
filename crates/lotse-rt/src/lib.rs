@@ -141,7 +141,8 @@ pub trait Spawn: Clone + Send + Sync + 'static {
     /// Handle to a spawned task.
     type JoinHandle<T: Send + 'static>: Future<Output = T> + Send;
 
-    /// Runs `future` concurrently with the caller.
+    /// Runs `future` concurrently with the caller. Dropping the handle
+    /// detaches the task; it keeps running.
     fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,

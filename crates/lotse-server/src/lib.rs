@@ -3,16 +3,17 @@
 //! - [`Replica`]: one Raft group (a partition, a queue or a priority level)
 //!   persisted on its own [`lotse_log::Log`];
 //! - [`Node`]: many replicas on one node behind one transport, with all
-//!   messages for a peer bundled into one frame ([`wire`]).
-//!
-//! Next: the native protocol for clients.
+//!   messages for a peer bundled into one frame ([`wire`]), serving clients
+//!   over the native protocol ([`lotse_proto`]).
 
 #![warn(missing_docs)]
 
+mod client;
 mod node;
 mod replica;
 mod signal;
 pub mod wire;
 
+pub use client::StreamConfig;
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle};
 pub use replica::{Error, Output, ProposeError, Replica, StateMachine};

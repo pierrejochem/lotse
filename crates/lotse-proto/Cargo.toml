@@ -1,0 +1,16 @@
+[package]
+name = "lotse-proto"
+description = "The Lotse native protocol: frames, error codes and the request and response types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lotse-record.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -571,6 +571,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lotse-client"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "lotse-proto",
+ "lotse-record",
+ "lotse-rt",
+ "thiserror",
+]
+
+[[package]]
 name = "lotse-console"
 version = "0.0.1"
 dependencies = [
@@ -600,6 +611,15 @@ dependencies = [
  "lotse-record",
  "lotse-rt",
  "lotse-sim",
+ "thiserror",
+]
+
+[[package]]
+name = "lotse-proto"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "lotse-record",
  "thiserror",
 ]
 
@@ -644,7 +664,9 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "crc32c",
+ "lotse-client",
  "lotse-log",
+ "lotse-proto",
  "lotse-raft",
  "lotse-record",
  "lotse-rt",

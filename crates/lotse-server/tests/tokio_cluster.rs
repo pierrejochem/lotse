@@ -1,4 +1,5 @@
-//! Three real nodes on localhost: Tokio, TCP and the local disk.
+//! Three real nodes on localhost: Tokio, TCP and the local disk, with a
+//! client speaking the native protocol.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -6,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use lotse_client::{Client, ClientConfig};
 use lotse_log::LogConfig;
 use lotse_raft::{NodeId, Role};
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt_tokio::TokioRuntime;
 use lotse_server::wire::GroupId;
-use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine};
+use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine, StreamConfig};
 
 #[derive(Debug, Clone, Default)]
 struct Recorder(Arc<Mutex<Vec<Bytes>>>);
@@ -86,6 +88,9 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
     let root = std::env::temp_dir().join(format!("lotse-tokio-cluster-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let peers: BTreeMap<NodeId, String> = (1..=3).map(|id| (id, format!("127.0.0.1:{}", free_port()))).collect();
+    let clients: BTreeMap<NodeId, String> = (1..=3).map(|id| (id, format!("127.0.0.1:{}", free_port()))).collect();
+    // Partition 0 is group 1, partition 1 is group 2.
+    let streams = vec![StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![1, 2] }];
     let cfgs = peers
         .keys()
         .map(|&id| {
@@ -99,6 +104,9 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     tick: Duration::from_millis(10),
                     pre_vote: true,
                     log: LogConfig::default(),
+                    client_listen: Some(clients[&id].clone()),
+                    client_addrs: clients.clone(),
+                    streams: streams.clone(),
                 },
             )
         })
@@ -112,6 +120,13 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
         leader.propose(g, batch(&format!("first-{g}"))).await.unwrap();
         c.everywhere(g, &format!("first-{g}")).await;
     }
+    let client =
+        Client::new(TokioRuntime::new(std::env::temp_dir()), ClientConfig::new(clients.values().cloned().collect()));
+    let mut acked = Vec::new();
+    for p in 0..2 {
+        let at = client.produce("orders", p, batch(&format!("client-{p}"))).await.unwrap();
+        acked.push((p, at, format!("client-{p}")));
+    }
 
     // Stop group 1's leader; the others elect a new one and keep writing.
     let (old, _) = c.leader(1).await;
@@ -121,6 +136,9 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
     let (new, leader) = c.leader(1).await;
     assert_ne!(new, old);
     leader.propose(1, batch("while-down")).await.unwrap();
+    // The client finds the new leader by itself.
+    let at = client.produce("orders", 0, batch("client-while-down")).await.unwrap();
+    acked.push((0, at, "client-while-down".into()));
 
     // The old leader comes back from its disk and catches up.
     c.start(old).await;
@@ -129,6 +147,13 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
         c.nodes[&old].2[&1].0.lock().unwrap().iter().any(|v| v == &b"first-1"[..]),
         "the restarted node re-applied its log from disk"
     );
+    for (p, at, value) in acked {
+        let f = client.fetch("orders", p, at, Duration::from_secs(1)).await.unwrap();
+        let (b, _) = Batch::parse(&f.records).unwrap();
+        assert_eq!(b.base_offset(), at);
+        assert_eq!(b.records().unwrap()[0].value.as_deref(), Some(value.as_bytes()), "read back over TCP");
+    }
+    drop(client);
 
     for (_, (node, handle, _)) in std::mem::take(&mut c.nodes) {
         handle.stop();

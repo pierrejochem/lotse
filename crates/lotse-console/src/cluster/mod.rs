@@ -2,7 +2,8 @@
 //!
 //! Handlers and the live-update hub only talk to [`Cluster`]. Today the only
 //! implementation is [`demo::DemoCluster`]; a `NativeCluster` built on
-//! `lotse-client` takes its place once the native protocol exists. Every
+//! `lotse-client` takes its place once the native protocol has the admin
+//! and metrics API keys. Every
 //! method takes the caller's [`Identity`] so that implementation can
 //! authenticate as the user and let the broker's RBAC decide.
 

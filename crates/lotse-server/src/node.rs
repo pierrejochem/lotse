@@ -13,6 +13,8 @@
 //!   its queue keeps only the newest frames: Raft resends what matters.
 //! - An **accept** task takes incoming connections; each gets a **reader**
 //!   task that decodes frames into the node's inbox.
+//! - With [`NodeConfig::client_listen`] set, a second accept task serves
+//!   clients over the native protocol ([`crate::client`]).
 //!
 //! On stop (or when a replica fails, e.g. its disk lost power) every task
 //! ends and the listener is closed before [`Node::start`]'s task finishes, so
@@ -29,6 +31,7 @@ use lotse_log::LogConfig;
 use lotse_raft::{Config, Message, NodeId, Role};
 use lotse_rt::{Conn, Listener, Runtime, Spawn};
 
+use crate::client::{ClientRequest, Clients, ClusterView, StreamConfig};
 use crate::replica::{Error, ProposeError, Replica, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
@@ -53,6 +56,12 @@ pub struct NodeConfig {
     pub pre_vote: bool,
     /// Log segment settings.
     pub log: LogConfig,
+    /// Where clients connect (`host:port`); `None` serves no clients.
+    pub client_listen: Option<String>,
+    /// Every node's client address, as `Metadata` reports it.
+    pub client_addrs: BTreeMap<NodeId, String>,
+    /// Streams and the groups of their partitions.
+    pub streams: Vec<StreamConfig>,
 }
 
 /// What a group looks like from outside.
@@ -77,6 +86,7 @@ type Reply = Arc<Mutex<(Option<Result<(u64, u64), String>>, Option<std::task::Wa
 
 enum Command {
     Propose { group: GroupId, batch: Bytes, reply: Reply },
+    Client(ClientRequest),
 }
 
 #[derive(Default)]
@@ -169,9 +179,13 @@ impl<R: Runtime> Node<R> {
             groups.insert(g, Replica::open(rt.clone(), dir, raft, state_machine(g), cfg.log).await?);
         }
         let listener = rt.listen(&cfg.listen).await?;
+        let client_listener = match &cfg.client_listen {
+            Some(addr) => Some(rt.listen(addr).await?),
+            None => None,
+        };
         let shared = Arc::new(Shared::default());
         let handle = NodeHandle { shared: shared.clone() };
-        let task = rt.clone().spawn(run(rt, cfg, groups, listener, shared));
+        let task = rt.clone().spawn(run(rt, cfg, groups, listener, client_listener, shared));
         Ok(Node { handle, task })
     }
 
@@ -192,10 +206,14 @@ async fn run<R: Runtime, S: StateMachine>(
     cfg: NodeConfig,
     mut groups: BTreeMap<GroupId, Replica<R, S>>,
     listener: R::Listener,
+    client_listener: Option<R::Listener>,
     shared: Arc<Shared>,
 ) -> Result<(), Error> {
     let mut tasks = Vec::new();
     tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone())));
+    if let Some(l) = client_listener {
+        tasks.push(rt.spawn(accept_clients(rt.clone(), l, shared.clone())));
+    }
     let mut peers = BTreeMap::new();
     for (&id, addr) in cfg.peers.iter().filter(|(id, _)| **id != cfg.id) {
         let peer = Arc::new(Peer { queue: Mutex::new(VecDeque::new()), ready: Signal::default() });
@@ -222,6 +240,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     shared: &Shared,
 ) -> Result<(), Error> {
     let mut next_tick = rt.now() + cfg.tick;
+    let mut clients = Clients::default();
     while !shared.stop.is_set() {
         let wait = next_tick - rt.now();
         if !wait.is_zero() && !shared.work.take() {
@@ -232,8 +251,16 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             next_tick = rt.now() + cfg.tick;
             groups.values_mut().for_each(|g| g.raft().tick());
         }
+        let view = ClusterView { streams: &cfg.streams, client_addrs: &cfg.client_addrs, now: rt.now() };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
-        for Command::Propose { group, batch, reply } in commands {
+        for command in commands {
+            let (group, batch, reply) = match command {
+                Command::Propose { group, batch, reply } => (group, batch, reply),
+                Command::Client(req) => {
+                    clients.handle(req, &view, groups).await?;
+                    continue;
+                }
+            };
             let res = match groups.get_mut(&group) {
                 Some(g) => g.propose(batch).map_err(|e: ProposeError| e.to_string()),
                 None => Err(format!("group {group} is not hosted here")),
@@ -259,6 +286,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 outbound.entry(s.to).or_default().push((g, s.msg));
             }
         }
+        clients.after_round(&view, groups).await?;
         for (to, messages) in outbound {
             let Some(peer) = peers.get(&to) else { continue };
             let frame = wire::encode(cfg.id, &messages);
@@ -296,6 +324,39 @@ async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
     drop(listener);
     for r in readers {
         r.await;
+    }
+}
+
+async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
+    let to_main = shared.clone();
+    let commands: Arc<dyn Fn(ClientRequest) + std::marker::Send + Sync> = Arc::new(move |req| {
+        to_main.commands.lock().expect("commands lock").push_back(Command::Client(req));
+        to_main.work.set();
+    });
+    // Connections come and go for as long as the node runs: count the live
+    // ones instead of keeping a handle per connection, and wait for them at
+    // the end.
+    let live = Arc::new((Mutex::new(0usize), Signal::default()));
+    while let Some(Ok((conn, _peer))) = race(listener.accept(), &[&shared.stop]).await {
+        *live.0.lock().expect("live lock") += 1;
+        let (rt2, commands, stop, live) = (rt.clone(), commands.clone(), shared.stop.clone(), live.clone());
+        // Dropping the handle detaches the task; `live` tracks it.
+        drop(rt.spawn(async move {
+            crate::client::serve(rt2, conn, commands, stop).await;
+            let mut n = live.0.lock().expect("live lock");
+            *n -= 1;
+            if *n == 0 {
+                live.1.set();
+            }
+        }));
+    }
+    drop(listener);
+    loop {
+        live.1.take();
+        if *live.0.lock().expect("live lock") == 0 {
+            break;
+        }
+        live.1.wait().await;
     }
 }
 
