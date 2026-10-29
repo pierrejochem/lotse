@@ -259,7 +259,7 @@ async fn admin(
     rt: SimRuntime,
     n: u64,
     h: Arc<Mutex<History>>,
-    generation: Arc<Mutex<Vec<u32>>>,
+    generation: Arc<Mutex<Vec<(u32, bool)>>>,
     stop: Arc<AtomicBool>,
 ) {
     let root = client(&rt, "admin", "root", "root-pw".into(), TENANTS[0], n);
@@ -286,9 +286,12 @@ async fn admin(
         if rt.chance(1, 10) {
             // A new password: sessions on the old one end, new logins need it.
             let u = rt.below(USERS.len() as u64) as usize;
-            let next = generation.lock().unwrap()[u] + 1;
-            if root.set_user_password(USERS[u], &password(USERS[u], next)).await.is_ok() {
-                generation.lock().unwrap()[u] = next;
+            let next = generation.lock().unwrap()[u].0 + 1;
+            match root.set_user_password(USERS[u], &password(USERS[u], next)).await {
+                Ok(_) => generation.lock().unwrap()[u] = (next, false),
+                // Applied or not: the next password may already be in force.
+                Err(ClientError::Unknown(_) | ClientError::GaveUp(..)) => generation.lock().unwrap()[u].1 = true,
+                Err(_) => {}
             }
         } else {
             let binding = RoleBinding {
@@ -317,12 +320,12 @@ async fn user(
     u: usize,
     n: u64,
     h: Arc<Mutex<History>>,
-    generation: Arc<Mutex<Vec<u32>>>,
+    generation: Arc<Mutex<Vec<(u32, bool)>>>,
     stop: Arc<AtomicBool>,
 ) {
     let mut serial = 0;
     while !stop.load(Ordering::Relaxed) {
-        let g = generation.lock().unwrap()[u];
+        let g = generation.lock().unwrap()[u].0;
         let tenant = TENANTS[rt.below(2) as usize];
         // Sometimes the wrong password: never lets anything through.
         let pw = if rt.chance(1, 20) { password(USERS[u], g + 7) } else { password(USERS[u], g) };
@@ -366,6 +369,19 @@ async fn user(
     }
 }
 
+/// Whether `c` logs in: `Ok(Ok)` if it does, `Ok(Err)` if the node refused
+/// its credentials, `Err` if no node answered in time.
+async fn probe(rt: &SimRuntime, c: &Client<SimRuntime>, deadline: Instant) -> Result<Result<(), ()>, ()> {
+    loop {
+        match c.who_am_i().await {
+            Ok(_) => return Ok(Ok(())),
+            Err(ClientError::Authentication(_)) => return Ok(Err(())),
+            Err(_) if rt.now() < deadline => continue,
+            Err(_) => return Err(()),
+        }
+    }
+}
+
 async fn run(rt: SimRuntime) {
     let n = if rt.chance(1, 2) { 3 } else { 5 };
     rt.net().verify_peers(true);
@@ -379,7 +395,9 @@ async fn run(rt: SimRuntime) {
         users.insert(u.into(), ScramCredential::new(&password(u, 0), u.as_bytes(), 4096));
     }
     let h = Arc::new(Mutex::new(History::default()));
-    let generation = Arc::new(Mutex::new(vec![0u32; USERS.len()]));
+    // Per user: the password generation certainly in force, and whether the
+    // next one may be (a change whose outcome is unknown).
+    let generation = Arc::new(Mutex::new(vec![(0u32, false); USERS.len()]));
     let stop = Arc::new(AtomicBool::new(false));
     // The users' first passwords, set like any other.
     let root = client(&rt, "boot", "root", "root-pw".into(), TENANTS[0], n);
@@ -459,7 +477,16 @@ async fn run(rt: SimRuntime) {
     rt.sleep(TICK * 100).await;
     let generation = generation.lock().unwrap().clone();
     for (u, user) in USERS.iter().enumerate() {
-        let c = client(&rt, &format!("final-{u}"), user, password(user, generation[u]), TENANTS[0], n);
+        let (sure_gen, next_maybe) = generation[u];
+        let mut c = client(&rt, &format!("final-{u}"), user, password(user, sure_gen), TENANTS[0], n);
+        if next_maybe {
+            // Which of the two passwords is in force is unknown: the one
+            // that logs in.
+            let next = client(&rt, &format!("final-{u}-next"), user, password(user, sure_gen + 1), TENANTS[0], n);
+            if let Ok(Ok(_)) = probe(&rt, &next, deadline).await {
+                c = next;
+            }
+        }
         for (stream, t) in &h.tenant_of {
             let surely = allows(&sure, user, Operation::Write, t, stream);
             let possibly = allows(sure.iter().chain(maybe.iter()), user, Operation::Write, t, stream);
