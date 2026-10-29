@@ -98,6 +98,16 @@ impl Access {
         self.may(p, Operation::ClusterAdmin, "", "")
     }
 
+    /// Whether `p` may see what belongs to the whole cluster: its own
+    /// groups and their metrics.
+    pub(crate) fn sees_cluster(&self, p: &Principal) -> bool {
+        match p {
+            Principal::Anonymous => true,
+            Principal::Node(_) => false,
+            Principal::User { name, groups } => self.grants.sees_cluster(&Who { name, groups }),
+        }
+    }
+
     /// Whether `p` may see that `tenant` exists.
     pub(crate) fn knows_tenant(&self, p: &Principal, tenant: &str) -> bool {
         match p {

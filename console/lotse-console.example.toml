@@ -23,9 +23,9 @@ user = "pierre"
 # session_key_file = "/var/lib/lotse-console/session.key"   # made at the first start if missing; default <data_dir>/session.key
 # session_hours = 12
 
-# The background sampler that feeds the charts uses this identity; bind it a
-# viewer role in every tenant. Each user's chart sums only the streams and
-# queues they may see.
+# The background sampler that feeds the charts uses this identity; bind it
+# the cluster-viewer role (one binding covers every tenant). Each user's
+# chart sums only the streams and queues they may see.
 [metrics]
 principal = "console-metrics"
 # password = "…"                                  # SCRAM, or:

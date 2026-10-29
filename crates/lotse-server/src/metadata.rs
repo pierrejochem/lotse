@@ -247,7 +247,7 @@ impl MetadataState {
                 if self.resources_in(&name) == 0 {
                     self.tenants.remove(&name);
                     self.deleted_tenants.insert(name.clone());
-                    self.bindings_of_roles.retain(|b| b.role == Role::ClusterAdmin || b.tenant != name);
+                    self.bindings_of_roles.retain(|b| b.role.cluster_wide() || b.tenant != name);
                 }
             }
             Change::SetBindings { add, remove } => {

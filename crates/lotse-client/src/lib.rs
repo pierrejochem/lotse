@@ -288,8 +288,7 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     metadata_leader: Mutex<Option<u32>>,
     /// Spreads admin requests over brokers while the leader is unknown.
     admin_turn: AtomicU32,
-    /// Why a request failed for good (a connection could not authenticate,
-    /// or the node refused), until a retry loop reports it.
+    /// A failed login, until a retry loop reports it or a login succeeds.
     fatal: Mutex<Option<ClientError>>,
 }
 
@@ -920,6 +919,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                     match renewed {
                         Ok(times) => {
                             *c.session.lock().expect("session lock") = times;
+                            self.logged_in();
                             return Ok(c);
                         }
                         Err(CallError::Denied(why)) => {
@@ -942,7 +942,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         drop(self.rt.spawn(conn.clone().read_responses()));
         if let Some(creds) = &self.cfg.credentials {
             match conn.authenticate(&self.rt, creds, self.cfg.request_timeout).await {
-                Ok(times) => *conn.session.lock().expect("session lock") = times,
+                Ok(times) => {
+                    *conn.session.lock().expect("session lock") = times;
+                    self.logged_in();
+                }
                 Err(e) => {
                     conn.close();
                     // Nothing else went out on this connection.
@@ -959,14 +962,21 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 }
 
 impl<R: Net + Clock + Spawn + Rng> Client<R> {
-    /// Keeps an error no retry can fix for the retry loop to report.
+    /// Keeps a failed login for the retry loop to report: it is the
+    /// client's credentials that fail, so it holds for every request, also
+    /// one whose attempt only saw a metadata lookup fail. A refused request
+    /// is not kept: its own caller gets the refusal, and keeping it would
+    /// report it for another request.
     fn note_fatal(&self, e: &CallError) {
-        let fatal = match e {
-            CallError::Denied(why) => ClientError::Authentication(why.clone()),
-            CallError::Refused(code, why) => ClientError::Broker { code: *code, message: Some(why.clone()) },
-            _ => return,
-        };
-        *self.fatal.lock().expect("fatal lock") = Some(fatal);
+        if let CallError::Denied(why) = e {
+            *self.fatal.lock().expect("fatal lock") = Some(ClientError::Authentication(why.clone()));
+        }
+    }
+
+    /// The credentials work (again): an earlier failed login no longer
+    /// holds.
+    fn logged_in(&self) {
+        self.fatal.lock().expect("fatal lock").take();
     }
 
     fn drop_connection(&self, addr: &str, conn: &Arc<Connection<R::Conn>>) {

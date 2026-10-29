@@ -21,11 +21,16 @@ pub enum Role {
     Consumer,
     /// Seeing resources: metadata, settings, metrics.
     Viewer,
+    /// Seeing everything, in every tenant: resources, tenants and the
+    /// cluster's own metrics; nothing else. For monitoring, such as the
+    /// console's metrics sampler.
+    ClusterViewer,
 }
 
 impl Role {
     /// Every role, in wire order.
-    pub const ALL: [Role; 5] = [Role::ClusterAdmin, Role::TenantAdmin, Role::Producer, Role::Consumer, Role::Viewer];
+    pub const ALL: [Role; 6] =
+        [Role::ClusterAdmin, Role::TenantAdmin, Role::Producer, Role::Consumer, Role::Viewer, Role::ClusterViewer];
 
     /// The role's code on the wire.
     pub fn code(self) -> u8 {
@@ -45,7 +50,14 @@ impl Role {
             Role::Producer => "producer",
             Role::Consumer => "consumer",
             Role::Viewer => "viewer",
+            Role::ClusterViewer => "cluster-viewer",
         }
+    }
+
+    /// Whether the role holds in every tenant, whatever tenant and prefix
+    /// its binding names.
+    pub fn cluster_wide(self) -> bool {
+        matches!(self, Role::ClusterAdmin | Role::ClusterViewer)
     }
 
     /// Whether the role permits `op` (in its scope).
@@ -55,7 +67,7 @@ impl Role {
             Role::TenantAdmin => op != Operation::ClusterAdmin,
             Role::Producer => matches!(op, Operation::Write | Operation::Describe),
             Role::Consumer => matches!(op, Operation::Read | Operation::Describe),
-            Role::Viewer => op == Operation::Describe,
+            Role::Viewer | Role::ClusterViewer => op == Operation::Describe,
         }
     }
 }
@@ -76,10 +88,11 @@ pub struct RoleBinding {
     pub subject: Subject,
     /// What.
     pub role: Role,
-    /// Where; ignored for [`Role::ClusterAdmin`], which holds everywhere.
+    /// Where; ignored for the cluster-wide roles ([`Role::cluster_wide`]),
+    /// which hold everywhere.
     pub tenant: String,
     /// Only resources whose names start with this; empty for all of the
-    /// tenant's. Ignored for [`Role::ClusterAdmin`].
+    /// tenant's. Ignored for the cluster-wide roles.
     pub prefix: String,
 }
 
@@ -129,7 +142,7 @@ impl Grants {
     pub fn allows(&self, who: &Who<'_>, op: Operation, tenant: &str, name: &str) -> bool {
         self.bindings.iter().filter(|b| who.is(&b.subject)).any(|b| {
             b.role.permits(op)
-                && (b.role == Role::ClusterAdmin
+                && (b.role.cluster_wide()
                     || (op != Operation::ClusterAdmin && b.tenant == tenant && name.starts_with(&b.prefix)))
         })
     }
@@ -142,7 +155,13 @@ impl Grants {
     /// Whether `who` has any role in `tenant` (or everywhere): enough to see
     /// that the tenant exists.
     pub fn knows_tenant(&self, who: &Who<'_>, tenant: &str) -> bool {
-        self.bindings.iter().any(|b| who.is(&b.subject) && (b.role == Role::ClusterAdmin || b.tenant == tenant))
+        self.bindings.iter().any(|b| who.is(&b.subject) && (b.role.cluster_wide() || b.tenant == tenant))
+    }
+
+    /// Whether `who` may see what belongs to the whole cluster rather than
+    /// to a tenant (its own groups and metrics).
+    pub fn sees_cluster(&self, who: &Who<'_>) -> bool {
+        self.bindings.iter().any(|b| who.is(&b.subject) && b.role.cluster_wide())
     }
 
     /// The bindings that apply to `who`.

@@ -55,7 +55,7 @@ const USERS: [&str; 4] = ["u0", "u1", "u2", "u3"];
 const TENANTS: [&str; 2] = ["t1", "t2"];
 /// Streams each tenant gets at the start; users may create more.
 const NAMES: [&str; 2] = ["a-", "b-"];
-const ROLES: [Role; 4] = [Role::TenantAdmin, Role::Producer, Role::Consumer, Role::Viewer];
+const ROLES: [Role; 5] = [Role::TenantAdmin, Role::Producer, Role::Consumer, Role::Viewer, Role::ClusterViewer];
 
 fn batch(value: &str) -> Bytes {
     let mut b = BatchBuilder::new(BatchOptions::default());
@@ -88,7 +88,13 @@ fn permits(role: Role, op: Operation) -> bool {
             | (Role::Producer, Describe | Write)
             | (Role::Consumer, Describe | Read)
             | (Role::Viewer, Describe)
+            | (Role::ClusterViewer, Describe)
     )
+}
+
+/// The roles that hold in every tenant, whatever the binding names.
+fn everywhere(role: Role) -> bool {
+    matches!(role, Role::ClusterAdmin | Role::ClusterViewer)
 }
 
 /// Whether one of `bindings` lets `user` do `op` on `name` in `tenant`.
@@ -102,7 +108,7 @@ fn allows<'a>(
     bindings.into_iter().any(|b| {
         b.subject == Subject::User(user.into())
             && permits(b.role, op)
-            && (b.role == Role::ClusterAdmin || (b.tenant == tenant && name.starts_with(b.prefix.as_str())))
+            && (everywhere(b.role) || (b.tenant == tenant && name.starts_with(b.prefix.as_str())))
     })
 }
 
@@ -121,6 +127,9 @@ struct History {
     done: Vec<(Done, Instant)>,
     /// Every stream that exists, and its tenant.
     tenant_of: BTreeMap<String, String>,
+    /// Streams whose creation had an unknown outcome: by whom and in which
+    /// tenant.
+    maybe_created: BTreeMap<String, (usize, String)>,
 }
 
 impl History {
@@ -303,7 +312,14 @@ async fn admin(
             let add = rt.chance(3, 5);
             let sent = rt.now();
             let at = h.lock().unwrap().asked.len();
-            h.lock().unwrap().asked.push(Asked { binding: binding.clone(), add, sent, acked: false });
+            // A cluster-wide binding is one binding whatever tenant and
+            // prefix the request names: so the history keeps it.
+            let kept = if everywhere(binding.role) {
+                RoleBinding { tenant: String::new(), prefix: String::new(), ..binding.clone() }
+            } else {
+                binding.clone()
+            };
+            h.lock().unwrap().asked.push(Asked { binding: kept, add, sent, acked: false });
             let (a, r) = if add { (vec![subject(&binding)], vec![]) } else { (vec![], vec![subject(&binding)]) };
             match root.alter_role_bindings(a, r).await {
                 Ok(()) => h.lock().unwrap().asked[at].acked = true,
@@ -351,6 +367,10 @@ async fn user(
                         Ok(_) | Err(ClientError::ResourceExists { .. }) => {
                             h.lock().unwrap().tenant_of.insert(name.clone(), tenant.into());
                             Ok(Done::Created { user: u, tenant: tenant.into(), stream: name })
+                        }
+                        Err(e @ (ClientError::Unknown(_) | ClientError::GaveUp(..))) => {
+                            h.lock().unwrap().maybe_created.insert(name.clone(), (u, tenant.into()));
+                            Err(e)
                         }
                         Err(e) => Err(e),
                     }
@@ -462,7 +482,17 @@ async fn run(rt: SimRuntime) {
             }
             Done::Saw { user, names } => {
                 for (name, t) in names {
-                    assert_eq!(t, &tenant(name), "{name} is reported in its tenant");
+                    // A stream whose creation had an unknown outcome exists
+                    // only if its creator was allowed to make it.
+                    let expected = match (h.tenant_of.get(name), h.maybe_created.get(name)) {
+                        (Some(t), _) => t.clone(),
+                        (None, Some((creator, t))) => {
+                            assert!(may(*creator, Operation::Admin, t, name, *at), "{name} made without a binding");
+                            t.clone()
+                        }
+                        (None, None) => String::new(),
+                    };
+                    assert_eq!(t, &expected, "{name} is reported in its tenant");
                     assert!(may(*user, Operation::Describe, t, name, *at), "user {user} saw {name} at {at:?}");
                 }
             }

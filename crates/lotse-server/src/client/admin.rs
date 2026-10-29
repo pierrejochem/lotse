@@ -620,18 +620,15 @@ impl Clients {
                 k => return Err(format!("unknown subject kind {k}")),
             };
             let role = AccessRole::from_code(b.role).ok_or_else(|| format!("unknown role {}", b.role))?;
-            // A cluster admin is one everywhere: no tenant, no prefix.
-            let (tenant, prefix) = match role {
-                AccessRole::ClusterAdmin => (String::new(), String::new()),
-                _ => (b.tenant.clone(), b.prefix.clone()),
-            };
+            // A cluster-wide role holds everywhere: no tenant, no prefix.
+            let (tenant, prefix) =
+                if role.cluster_wide() { (String::new(), String::new()) } else { (b.tenant.clone(), b.prefix.clone()) };
             Ok(RoleBinding { subject, role, tenant, prefix })
         };
         let parsed = (|| -> Result<(Vec<RoleBinding>, Vec<RoleBinding>), String> {
             let add = req.add.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
             let remove = req.remove.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
-            if let Some(b) =
-                add.iter().find(|b| b.role != AccessRole::ClusterAdmin && !view.access.tenants.contains_key(&b.tenant))
+            if let Some(b) = add.iter().find(|b| !b.role.cluster_wide() && !view.access.tenants.contains_key(&b.tenant))
             {
                 return Err(format!("there is no tenant {:?}", b.tenant));
             }

@@ -42,7 +42,7 @@ impl StateMachine for Nothing {
 const TICK: Duration = Duration::from_millis(10);
 const ISSUER: &str = "https://idp.test";
 const JWKS: &str = "https://idp.test/keys";
-const USERS: [&str; 6] = ["root", "ta", "p", "c", "v", "nobody"];
+const USERS: [&str; 7] = ["root", "ta", "p", "c", "v", "nobody", "mon"];
 
 fn batch(value: &str) -> Bytes {
     let mut b = BatchBuilder::new(BatchOptions::default());
@@ -121,6 +121,13 @@ fn refused<T: std::fmt::Debug>(r: Result<T, ClientError>) -> bool {
 /// unknown to it.
 fn kept_out<T: std::fmt::Debug>(r: Result<T, ClientError>) -> bool {
     matches!(r, Err(ClientError::UnknownStream(..))) || refused(r)
+}
+
+/// How many of the cluster's own groups (no resource) `c` sees in the
+/// nodes' metrics.
+async fn own_groups(c: &Client<SimRuntime>) -> usize {
+    let all = c.node_metrics().await.unwrap();
+    all.iter().flat_map(|(_, r)| r.as_ref().unwrap().partitions.iter()).filter(|p| p.resource_id == 0).count()
 }
 
 /// Lets the metadata group's latest change reach every node.
@@ -332,6 +339,109 @@ fn every_request_needs_its_role() {
                 n.join().await.unwrap();
             }
         });
+    });
+}
+
+#[test]
+fn a_cluster_viewer_sees_everything_and_changes_nothing() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "shop");
+            root.create_tenant("shop").await.expect("a cluster admin creates tenants");
+            root.create_stream("orders-eu", 1, 3).await.expect("in the shop");
+            // Named with a tenant and a prefix, the role holds everywhere
+            // all the same.
+            let mon = binding(subject_kind::USER, "mon", role::CLUSTER_VIEWER, "shop", "orders-");
+            let v = binding(subject_kind::USER, "v", role::VIEWER, "shop", "");
+            root.alter_role_bindings(vec![mon, v], Vec::new()).await.expect("grants");
+            settle(&rt).await;
+            let all = root.describe_role_bindings().await.unwrap();
+            assert!(
+                all.iter().any(|(b, _)| b.subject == "mon" && b.tenant.is_empty() && b.prefix.is_empty()),
+                "stored without tenant and prefix: {all:?}"
+            );
+
+            let mon = as_user(&rt, "mon", "shop");
+            let mut seen: Vec<String> =
+                mon.metadata(&[]).await.unwrap().resources.into_iter().map(|r| r.name).collect();
+            seen.sort();
+            assert_eq!(seen, ["orders-eu", "s"], "every tenant's resources");
+            let tenants: Vec<String> = mon.describe_tenants().await.unwrap().into_iter().map(|t| t.name).collect();
+            assert_eq!(tenants, [lotse_server::DEFAULT_TENANT, "shop"]);
+            assert!(own_groups(&mon).await > 0, "and the cluster's own groups");
+            assert_eq!(own_groups(&as_user(&rt, "v", "shop")).await, 0, "which a tenant's viewer does not see");
+
+            // Seeing is all it does.
+            assert!(refused(mon.fetch("s", 0, 0, TICK).await), "no reading");
+            assert!(refused(mon.produce("orders-eu", 0, batch("x")).await), "no writing");
+            assert!(refused(mon.create_stream("orders-us", 1, 3).await), "no creating");
+            assert!(refused(mon.delete("orders-eu").await), "no deleting");
+            assert!(refused(mon.create_tenant("other").await), "no tenants");
+            assert!(refused(mon.describe_role_bindings().await), "no one else's bindings");
+            let grab = binding(subject_kind::USER, "mon", role::CLUSTER_ADMIN, "", "");
+            assert!(refused(mon.alter_role_bindings(vec![grab], Vec::new()).await), "no promoting itself");
+            assert!(refused(mon.set_user_password("root", "mine").await), "no users");
+
+            drop((root, mon));
+            for node in nodes {
+                node.handle().stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+#[test]
+fn a_refusal_is_reported_for_its_own_request_only() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", lotse_server::DEFAULT_TENANT);
+            let p = binding(subject_kind::USER, "p", role::PRODUCER, lotse_server::DEFAULT_TENANT, "");
+            root.alter_role_bindings(vec![p], Vec::new()).await.expect("grants");
+            settle(&rt).await;
+            let p = as_user(&rt, "p", lotse_server::DEFAULT_TENANT);
+            p.produce("s", 0, batch("first")).await.expect("a producer writes");
+            assert!(refused(p.create_stream("mine", 1, 3).await), "but creates nothing");
+
+            // A login that failed no longer holds once the password is set.
+            let late = as_user(&rt, "late", lotse_server::DEFAULT_TENANT);
+            // Asked of every node at once, outside any retry: each answer fails.
+            let early = late.node_metrics().await;
+            assert!(
+                matches!(&early, Err(ClientError::Authentication(_)))
+                    || early.as_ref().is_ok_and(|all| all.iter().all(|(_, r)| r.is_err())),
+                "no such user yet: {early:?}"
+            );
+            root.set_user_password("late", "late-pw").await.expect("creates the user");
+            settle(&rt).await;
+            late.describe_tenants().await.expect("logs in now");
+
+            // The metadata group's leader goes away: the next admin request
+            // has to try again, and must not come back with the create's
+            // refusal.
+            let all = root.node_metrics().await.unwrap();
+            let leader = all
+                .iter()
+                .filter_map(|(n, r)| r.as_ref().ok().map(|m| (n, m)))
+                .find(|(_, m)| m.partitions.iter().any(|g| g.leader && g.group == m.metadata_group))
+                .map(|(n, _)| *n as usize)
+                .expect("the metadata group has a leader");
+            // Nodes 1 to 3, in order.
+            let gone = nodes.remove(leader - 1);
+            gone.handle().stop();
+            let _ = gone.join().await;
+            let tenants = p.describe_tenants().await.expect("answered once a new leader is elected");
+            assert_eq!(tenants.len(), 1, "{tenants:?}");
+            late.describe_tenants().await.expect("and not with the old failed login");
+
+            drop((root, p, late));
+            for node in nodes {
+                node.handle().stop();
+                let _ = node.join().await;
+            }
+        })
     });
 }
 

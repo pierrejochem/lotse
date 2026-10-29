@@ -2637,6 +2637,8 @@ pub mod role {
     pub const CONSUMER: u8 = 3;
     /// Seeing resources.
     pub const VIEWER: u8 = 4;
+    /// Seeing everything, everywhere, and nothing else.
+    pub const CLUSTER_VIEWER: u8 = 5;
 }
 
 /// A role granted to a user or group, in a tenant, for the resources whose
@@ -2649,7 +2651,8 @@ pub struct RoleBindingData {
     pub subject: String,
     /// [`role`].
     pub role: u8,
-    /// The tenant; empty for [`role::CLUSTER_ADMIN`].
+    /// The tenant; empty for [`role::CLUSTER_ADMIN`] and
+    /// [`role::CLUSTER_VIEWER`].
     pub tenant: String,
     /// Only resources whose names start with this; empty for all.
     pub prefix: String,

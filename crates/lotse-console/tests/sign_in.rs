@@ -512,15 +512,16 @@ async fn the_console_acts_as_whoever_signed_in() {
     assert!(r.json["message"].as_str().unwrap().contains("did not accept your sign-in"), "{r:?}");
 
     // --- The metrics sampler, with client credentials ---
-    // It may see both tenants; Bob, with a password now, only the shop.
-    let sampler_sees = |tenant: &str| RoleBindingData {
+    // As a cluster viewer it sees every tenant; Bob, with a password now,
+    // only the shop.
+    let sampler_sees = RoleBindingData {
         subject_kind: subject_kind::USER,
         subject: "console-metrics".into(),
-        role: role::VIEWER,
-        tenant: tenant.into(),
+        role: role::CLUSTER_VIEWER,
+        tenant: String::new(),
         prefix: String::new(),
     };
-    admin.alter_role_bindings(vec![sampler_sees("shop"), sampler_sees("default")], Vec::new()).await.unwrap();
+    admin.alter_role_bindings(vec![sampler_sees], Vec::new()).await.unwrap();
     admin.set_user_password("bob", "bob-pw").await.unwrap();
     let creds = ServiceCredentials {
         issuer: issuer.clone(),
@@ -569,6 +570,9 @@ async fn the_console_acts_as_whoever_signed_in() {
     let p99 = "/api/v1/clusters/local/metrics?series=commit_p99_ms&range=15m";
     assert_eq!(call(&bob(), "GET", p99, None, None).await.status, StatusCode::FORBIDDEN, "cluster-wide");
     assert_eq!(call(&everyone(), "GET", p99, None, None).await.status, StatusCode::OK);
+    admin.set_user_password("console-metrics", "m-pw").await.unwrap();
+    let viewer = dev_with("console-metrics", "m-pw", history.clone());
+    assert_eq!(call(&viewer, "GET", p99, None, None).await.status, StatusCode::OK, "a cluster viewer sees it too");
 
     drop(admin);
     node.handle().stop();

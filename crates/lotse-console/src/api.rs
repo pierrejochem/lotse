@@ -250,7 +250,7 @@ pub struct MetricsParams {
 
 /// Chart history from the console's in-memory buffer (at most 180 points):
 /// the sum over the streams and queues the caller may see; the commit
-/// latency only for cluster admins.
+/// latency only for cluster admins and cluster viewers.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/metrics",
     params(("cluster" = String, Path, description = "Cluster ID"), MetricsParams),
     responses((status = 200, body = Series), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]

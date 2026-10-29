@@ -227,6 +227,7 @@ mod roles {
                 bind(user("p"), Role::Producer, "shop", "orders-"),
                 bind(user("c"), Role::Consumer, "shop", ""),
                 bind(user("v"), Role::Viewer, "shop", ""),
+                bind(user("mon"), Role::ClusterViewer, "", ""),
                 bind(Subject::Group("ops".into()), Role::Consumer, "logs", ""),
             ]
             .into_iter()
@@ -261,6 +262,12 @@ mod roles {
         assert!(!may("ops", &[], Read, "logs", "x"), "a user named like a group is not the group");
         assert!(!may("eve", &["c"], Read, "shop", "x"), "nor is a group named like a user that user");
         assert!(!may("nobody", &[], Describe, "shop", "x"));
+        for t in ["shop", "logs", "anything"] {
+            assert!(may("mon", &[], Describe, t, "x"), "a cluster viewer sees every tenant");
+            for op in [Read, Write, Admin, ClusterAdmin] {
+                assert!(!may("mon", &[], op, t, "x"), "and does nothing else: {op:?}");
+            }
+        }
     }
 
     #[test]
@@ -270,10 +277,12 @@ mod roles {
         assert!(g.knows_tenant(&w("v"), "shop") && !g.knows_tenant(&w("v"), "logs"));
         assert!(g.knows_tenant(&w("root"), "logs"));
         assert!(g.is_cluster_admin(&w("root")) && !g.is_cluster_admin(&w("ta")));
+        assert!(g.knows_tenant(&w("mon"), "logs") && !g.is_cluster_admin(&w("mon")));
+        assert!(g.sees_cluster(&w("mon")) && g.sees_cluster(&w("root")) && !g.sees_cluster(&w("ta")));
         assert_eq!(g.of(&w("p")).count(), 1);
         for r in Role::ALL {
             assert_eq!(Role::from_code(r.code()), Some(r));
         }
-        assert_eq!(Role::from_code(5), None);
+        assert_eq!(Role::from_code(6), None);
     }
 }

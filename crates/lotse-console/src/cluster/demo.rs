@@ -792,7 +792,7 @@ impl Cluster for DemoCluster {
     }
 
     async fn visibility(&self, _who: &Identity) -> ApiResult<Visibility> {
-        Ok(Visibility { resources: [DEMO_RESOURCE].into(), cluster_admin: true })
+        Ok(Visibility { resources: [DEMO_RESOURCE].into(), cluster_wide: true })
     }
 
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {

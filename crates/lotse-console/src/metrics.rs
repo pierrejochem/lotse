@@ -5,8 +5,8 @@
 //! commit latency, so history exists even while nobody is signed in. A
 //! user's chart is the sum over the resources that user may see at the
 //! time they ask; the commit latency covers the whole cluster and is shown
-//! only to cluster admins (ADR 0041). A restart loses the history; longer
-//! history and alerting belong in Prometheus.
+//! only to cluster admins and cluster viewers (ADR 0041, 0043). A restart
+//! loses the history; longer history and alerting belong in Prometheus.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -43,8 +43,9 @@ pub struct ChartSample {
 pub struct Visibility {
     /// The resources they may see now.
     pub resources: BTreeSet<u64>,
-    /// Whether they may see cluster-wide series.
-    pub cluster_admin: bool,
+    /// Whether they may see cluster-wide series: cluster admins and
+    /// cluster viewers.
+    pub cluster_wide: bool,
 }
 
 /// Why a series is not shown.
@@ -53,8 +54,8 @@ pub enum QueryError {
     /// No such series.
     #[error("Unknown series \"{0}\".")]
     Unknown(String),
-    /// The series covers the whole cluster and the user is no cluster admin.
-    #[error("{0} covers the whole cluster; only cluster admins see its history.")]
+    /// The series covers the whole cluster and the user may not see it.
+    #[error("{0} covers the whole cluster; only cluster admins and viewers see its history.")]
     ClusterWide(String),
 }
 
@@ -187,7 +188,7 @@ impl MetricsStore {
         vis: &Visibility,
     ) -> Result<Vec<Point>, QueryError> {
         let k = SERIES.iter().position(|(n, _)| *n == series).ok_or_else(|| QueryError::Unknown(series.into()))?;
-        if k == PER_RESOURCE && !vis.cluster_admin {
+        if k == PER_RESOURCE && !vis.cluster_wide {
             return Err(QueryError::ClusterWide("Commit latency".into()));
         }
         let since = now_ms().saturating_sub(range.as_millis() as u64);
@@ -262,7 +263,7 @@ mod tests {
     }
 
     fn sees(ids: &[u64], admin: bool) -> Visibility {
-        Visibility { resources: ids.iter().copied().collect(), cluster_admin: admin }
+        Visibility { resources: ids.iter().copied().collect(), cluster_wide: admin }
     }
 
     #[test]

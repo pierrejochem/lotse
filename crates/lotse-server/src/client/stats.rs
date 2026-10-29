@@ -228,12 +228,12 @@ impl Clients {
         }
         // Only what `who` may see: resources by their tenant and role, and
         // a consumer group only if every resource it touches is visible
-        // (one that touches none, only to cluster admins).
+        // (one that touches none, only to who sees the whole cluster).
         // The cluster's own groups (metadata, coordinator) belong to no
-        // resource: only cluster admins see them.
+        // resource: only cluster admins and viewers see them.
         let visible = |r: u64| match view.access.resources.get(&r) {
             Some((name, tenant)) => view.access.may(who, Operation::Describe, tenant, name),
-            None => view.access.cluster_admin(who),
+            None => view.access.sees_cluster(who),
         };
         resp.partitions.retain(|p| visible(p.resource_id));
         resp.queues.retain(|q| visible(q.resource_id));
@@ -241,7 +241,7 @@ impl Clients {
             let owned = g.members.iter().flat_map(|m| m.owned.iter().map(|t| t.resource_id));
             let mut touched = owned.chain(g.offsets.iter().map(|o| o.resource_id)).peekable();
             if touched.peek().is_none() {
-                return view.access.cluster_admin(who);
+                return view.access.sees_cluster(who);
             }
             touched.all(visible)
         });

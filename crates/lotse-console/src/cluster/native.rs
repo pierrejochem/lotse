@@ -42,7 +42,8 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(5);
 const HISTORY: Duration = Duration::from_secs(300);
 /// A sample this young is used again instead of asking the nodes.
 const FRESH: Duration = Duration::from_secs(1);
-/// Whether a principal is a cluster admin is asked again after this long.
+/// Whether a principal may see the whole cluster is asked again after this
+/// long.
 const ADMIN_FRESH: Duration = Duration::from_secs(30);
 /// A seat unused this long is closed.
 pub const SEAT_IDLE: Duration = Duration::from_secs(900);
@@ -172,7 +173,7 @@ struct Seat {
     /// One sample at a time: concurrent callers wait and share it.
     sampling: tokio::sync::Mutex<()>,
     used: Mutex<Instant>,
-    /// Whether the principal is a cluster admin, and since when known.
+    /// Whether the principal may see the whole cluster, and since when known.
     admin: Mutex<Option<(Instant, bool)>>,
 }
 
@@ -215,16 +216,17 @@ impl Seat {
         Ok((sample, base))
     }
 
-    /// Whether the principal holds the cluster-admin role (anonymous
-    /// clients, on a cluster without authentication, may do everything).
-    async fn is_cluster_admin(&self) -> ApiResult<bool> {
+    /// Whether the principal may see what belongs to the whole cluster: a
+    /// cluster admin or cluster viewer (anonymous clients, on a cluster
+    /// without authentication, may do everything).
+    async fn sees_cluster(&self) -> ApiResult<bool> {
         if let Some((at, known)) = *lock(&self.admin) {
             if at.elapsed() < ADMIN_FRESH {
                 return Ok(known);
             }
         }
         let me = self.client.who_am_i().await.map_err(failed)?;
-        let known = me.kind == principal_kind::ANONYMOUS || me.bindings.iter().any(|b| b.role == role::CLUSTER_ADMIN);
+        let known = me.kind == principal_kind::ANONYMOUS || me.bindings.iter().any(|b| cluster_wide(b.role));
         *lock(&self.admin) = Some((Instant::now(), known));
         Ok(known)
     }
@@ -841,7 +843,7 @@ impl Cluster for NativeCluster {
             }
             Err(e) => return Err(failed(e)),
         };
-        let applies = |b: &RoleBindingData, t: &str| b.role == role::CLUSTER_ADMIN || b.tenant == t;
+        let applies = |b: &RoleBindingData, t: &str| cluster_wide(b.role) || b.tenant == t;
         let rows = tenants
             .iter()
             .map(|t| {
@@ -897,12 +899,17 @@ impl Cluster for NativeCluster {
         let seat = self.seat(who);
         let (s, _) = seat.window().await?;
         let resources = s.resources(kind::STREAM).chain(s.resources(kind::QUEUE)).map(|r| r.resource_id).collect();
-        Ok(Visibility { resources, cluster_admin: seat.is_cluster_admin().await? })
+        Ok(Visibility { resources, cluster_wide: seat.sees_cluster().await? })
     }
 
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         Err(ApiError::BadRequest(format!("No upgrade is running on {}: it has no operator yet.", self.id)))
     }
+}
+
+/// Whether a role holds in every tenant.
+fn cluster_wide(r: u8) -> bool {
+    r == role::CLUSTER_ADMIN || r == role::CLUSTER_VIEWER
 }
 
 /// A binding as the tenants screen lists it.
@@ -913,13 +920,14 @@ fn binding_row(b: &RoleBindingData) -> RoleBinding {
         role::PRODUCER => "producer",
         role::CONSUMER => "consumer",
         role::VIEWER => "viewer",
+        role::CLUSTER_VIEWER => "cluster-viewer",
         _ => "unknown",
     };
     RoleBinding {
         principal: b.subject.clone(),
         auth: if b.subject_kind == subject_kind::GROUP { "group" } else { "user" }.into(),
         role: name(b.role).into(),
-        resources: vec![if b.role == role::CLUSTER_ADMIN {
+        resources: vec![if cluster_wide(b.role) {
             "every tenant".into()
         } else if b.prefix.is_empty() {
             "*".into()
