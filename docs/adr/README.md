@@ -48,5 +48,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0041 | [Console sessions in a sealed cookie, the sampler's client credentials, charts per user](0041-console-sessions-sampler-sign-in-and-charts-per-user.md) | Accepted |
 | 0042 | [The console keeps its session key](0042-the-console-keeps-its-session-key.md) | Accepted |
 | 0043 | [A cluster-wide viewer role](0043-cluster-viewer-role.md) | Accepted |
+| 0044 | [Sign-ins in progress in a sealed cookie](0044-sign-ins-in-progress-in-a-sealed-cookie.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

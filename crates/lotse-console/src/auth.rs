@@ -37,11 +37,14 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::time::now_ms;
 use provider::Provider;
-use sealed::Sealed;
 pub use sealed::SessionKey;
+use sealed::{Sealed, SigningIn};
 
 /// The session cookie's name.
 pub const COOKIE: &str = "lotse_session";
+
+/// The cookie that carries a sign-in in progress; sent only to `/auth`.
+pub const SIGN_IN_COOKIE: &str = "lotse_sign_in";
 
 /// A sign-in that has not come back from the identity provider within this
 /// long is dropped.
@@ -206,15 +209,6 @@ impl Live {
     }
 }
 
-/// A sign-in on its way through the identity provider.
-#[derive(Debug, Clone)]
-struct Pending {
-    verifier: String,
-    nonce: String,
-    return_to: String,
-    started: Instant,
-}
-
 /// A session found in a request's cookie.
 #[derive(Debug, Clone)]
 pub struct Resolved {
@@ -232,7 +226,9 @@ pub struct Sessions {
     cfg: OidcLogin,
     provider: Provider,
     key: SessionKey,
-    pending: Mutex<BTreeMap<String, Pending>>,
+    /// Sign-ins finished here, by their state, until they would have
+    /// expired: a callback is used once.
+    finished: Mutex<BTreeMap<String, u64>>,
     /// By the hash of a cookie value; a rotated cookie and its successor
     /// share one entry.
     live: Mutex<BTreeMap<[u8; 32], Live>>,
@@ -286,7 +282,7 @@ impl Sessions {
             provider: Provider::new(&cfg.issuer, rt),
             cfg,
             key,
-            pending: Mutex::new(BTreeMap::new()),
+            finished: Mutex::new(BTreeMap::new()),
             live: Mutex::new(BTreeMap::new()),
             ended: Mutex::new(BTreeMap::new()),
             renewing: tokio::sync::Mutex::new(()),
@@ -310,8 +306,9 @@ impl Sessions {
         c
     }
 
-    /// Starts a sign-in: where to send the browser.
-    pub async fn start(&self, return_to: &str) -> Result<String, SignInError> {
+    /// Starts a sign-in: where to send the browser, and the cookie that
+    /// carries the sign-in until the browser comes back.
+    pub async fn start(&self, return_to: &str) -> Result<(String, String), SignInError> {
         let e = self.provider.endpoints().await?;
         let authorize = e
             .authorization_endpoint
@@ -321,16 +318,16 @@ impl Sessions {
         let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
         // Only paths on this console: never send a user elsewhere.
         let return_to = if return_to.starts_with('/') && !return_to.starts_with("//") { return_to } else { "/" };
-        {
-            let mut p = self.pending.lock().expect("pending lock");
-            p.retain(|_, x| x.started.elapsed() < LOGIN_TIMEOUT);
-            p.insert(
-                state.clone(),
-                Pending { verifier, nonce: nonce.clone(), return_to: return_to.into(), started: Instant::now() },
-            );
-        }
+        let signing_in = SigningIn {
+            state: state.clone(),
+            verifier,
+            nonce: nonce.clone(),
+            return_to: return_to.into(),
+            started_ms: now_ms(),
+        };
+        let cookie = self.key.seal_sign_in(self.rt(), &signing_in);
         let q = |s: &str| url_encode(s);
-        Ok(format!(
+        let url = format!(
             "{}{}response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
             authorize,
             if authorize.contains('?') { '&' } else { '?' },
@@ -340,14 +337,26 @@ impl Sessions {
             q(&state),
             q(&nonce),
             q(&challenge),
-        ))
+        );
+        Ok((url, cookie))
     }
 
-    /// Finishes a sign-in: the new session's cookie and where to go.
-    pub async fn finish(&self, code: &str, state: &str) -> Result<(String, String), SignInError> {
-        let pending = self.pending.lock().expect("pending lock").remove(state).ok_or(SignInError::Unknown)?;
-        if pending.started.elapsed() >= LOGIN_TIMEOUT {
+    /// Finishes the sign-in in `signing_in` (its cookie): the new session's
+    /// cookie and where to go.
+    pub async fn finish(&self, code: &str, state: &str, signing_in: &str) -> Result<(String, String), SignInError> {
+        let pending = self.key.open_sign_in(signing_in).ok_or(SignInError::Unknown)?;
+        let until = pending.started_ms + LOGIN_TIMEOUT.as_millis() as u64;
+        if pending.state != state || until <= now_ms() {
             return Err(SignInError::Unknown);
+        }
+        {
+            // Once per sign-in, also if its cookie was copied.
+            let mut finished = self.finished.lock().expect("finished lock");
+            let now = now_ms();
+            finished.retain(|_, u| *u > now);
+            if finished.insert(pending.state.clone(), until).is_some() {
+                return Err(SignInError::Unknown);
+            }
         }
         let issuer = self.provider.endpoints().await?.issuer.clone();
         let mut form = vec![
@@ -605,10 +614,14 @@ pub fn url_encode(s: &str) -> String {
 
 /// The session cookie's value in a request's headers.
 pub fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    cookie_value(headers, COOKIE)
+}
+
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
     headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).find_map(|c| {
         c.split(';')
             .map(str::trim)
-            .find_map(|kv| kv.strip_prefix(COOKIE).and_then(|v| v.strip_prefix('=')).map(String::from))
+            .find_map(|kv| kv.strip_prefix(name).and_then(|v| v.strip_prefix('=')).map(String::from))
     })
 }
 
@@ -654,9 +667,13 @@ fn see_other(to: &str) -> Response {
 }
 
 fn cookie(state: &AppState, value: &str, max_age: Option<u64>) -> Option<HeaderValue> {
+    set_cookie(state, COOKIE, "/", value, max_age)
+}
+
+fn set_cookie(state: &AppState, name: &str, path: &str, value: &str, max_age: Option<u64>) -> Option<HeaderValue> {
     // Secure whenever the console is reached over HTTPS, as its callback says.
     let secure = matches!(&*state.auth, AuthConfig::Oidc(o) if o.redirect_url.starts_with("https://"));
-    let mut c = format!("{COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax");
+    let mut c = format!("{name}={value}; Path={path}; HttpOnly; SameSite=Lax");
     if secure {
         c.push_str("; Secure");
     }
@@ -690,7 +707,14 @@ pub async fn login(State(state): State<AppState>, Query(q): Query<LoginParams>) 
     let return_to = q.return_to.as_deref().unwrap_or("/");
     match (&*state.auth, &state.sessions) {
         (AuthConfig::Oidc(_), Some(sessions)) => match sessions.start(return_to).await {
-            Ok(url) => see_other(&url),
+            Ok((url, signing_in)) => {
+                let mut r = see_other(&url);
+                if let Some(c) = set_cookie(&state, SIGN_IN_COOKIE, "/auth", &signing_in, Some(LOGIN_TIMEOUT.as_secs()))
+                {
+                    r.headers_mut().insert(header::SET_COOKIE, c);
+                }
+                r
+            }
             Err(e) => sign_in_failed(&e),
         },
         _ => see_other("/"),
@@ -698,23 +722,34 @@ pub async fn login(State(state): State<AppState>, Query(q): Query<LoginParams>) 
 }
 
 /// `GET /auth/callback`: the identity provider sends the browser back here.
-pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackParams>) -> Response {
+pub async fn callback(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<CallbackParams>,
+) -> Response {
     let Some(sessions) = &state.sessions else { return see_other("/") };
-    if let Some(e) = q.error {
-        let why = q.error_description.map_or(e.clone(), |d| format!("{e}: {d}"));
-        return sign_in_failed(&SignInError::Refused(why));
-    }
-    let (Some(code), Some(st)) = (q.code, q.state) else { return sign_in_failed(&SignInError::Unknown) };
-    match sessions.finish(&code, &st).await {
-        Ok((value, to)) => {
-            let mut r = see_other(&to);
-            if let Some(c) = cookie(&state, &value, Some(sessions.lifetime().as_secs())) {
-                r.headers_mut().insert(header::SET_COOKIE, c);
-            }
-            r
+    let mut r = match (q.error, q.code, q.state, cookie_value(&headers, SIGN_IN_COOKIE)) {
+        (Some(e), ..) => {
+            let why = q.error_description.map_or(e.clone(), |d| format!("{e}: {d}"));
+            sign_in_failed(&SignInError::Refused(why))
         }
-        Err(e) => sign_in_failed(&e),
+        (None, Some(code), Some(st), Some(signing_in)) => match sessions.finish(&code, &st, &signing_in).await {
+            Ok((value, to)) => {
+                let mut r = see_other(&to);
+                if let Some(c) = cookie(&state, &value, Some(sessions.lifetime().as_secs())) {
+                    r.headers_mut().append(header::SET_COOKIE, c);
+                }
+                r
+            }
+            Err(e) => sign_in_failed(&e),
+        },
+        _ => sign_in_failed(&SignInError::Unknown),
+    };
+    // The sign-in is over, one way or the other.
+    if let Some(c) = set_cookie(&state, SIGN_IN_COOKIE, "/auth", "", Some(0)) {
+        r.headers_mut().append(header::SET_COOKIE, c);
     }
+    r
 }
 
 /// `POST /auth/logout`: ends the session, and at the identity provider
@@ -802,5 +837,23 @@ mod tests {
         assert_eq!(r.identity.principal, "bob");
         let over = key.seal(&rt, &sealed(now_ms() - 1));
         assert!(sessions.resolve(&over).await.is_none(), "the session's end comes first");
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_is_finished_within_ten_minutes_or_not_at_all() {
+        let rt = TokioRuntime::new(std::env::temp_dir());
+        let key = SessionKey::from_bytes(&[4; 32]);
+        let sessions = Sessions::new(login(), rt.clone(), SessionKey::from_bytes(&[4; 32]));
+        let started = now_ms() - LOGIN_TIMEOUT.as_millis() as u64 - 1;
+        let late = SigningIn {
+            state: "st".into(),
+            verifier: "v".into(),
+            nonce: "n".into(),
+            return_to: "/".into(),
+            started_ms: started,
+        };
+        let cookie = key.seal_sign_in(&rt, &late);
+        // Refused before the provider is asked (which here is not there).
+        assert!(matches!(sessions.finish("code", "st", &cookie).await, Err(SignInError::Unknown)));
     }
 }

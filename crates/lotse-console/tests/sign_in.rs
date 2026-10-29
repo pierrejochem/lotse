@@ -168,17 +168,28 @@ async fn call(app: &axum::Router, method: &str, uri: &str, cookie: Option<&str>,
     };
     let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
     let status = res.status();
-    let header = |h| res.headers().get(h).map(|v: &header::HeaderValue| v.to_str().unwrap().to_owned());
-    let (location, set_cookie) = (header(header::LOCATION), header(header::SET_COOKIE));
+    let location = res.headers().get(header::LOCATION).map(|v| v.to_str().unwrap().to_owned());
+    let cookies: Vec<String> =
+        res.headers().get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap().to_owned()).collect();
+    let named = |n: &str| cookies.iter().find(|c| c.starts_with(&format!("{n}="))).cloned();
+    let (set_cookie, sign_in) = (named("lotse_session"), named("lotse_sign_in"));
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    Reply { status, location, set_cookie, json: serde_json::from_slice(&bytes).unwrap_or(Value::Null) }
+    Reply { status, location, set_cookie, sign_in, json: serde_json::from_slice(&bytes).unwrap_or(Value::Null) }
+}
+
+/// The `name=value` part of a Set-Cookie header.
+fn pair(set: &str) -> String {
+    set.split(';').next().unwrap().to_owned()
 }
 
 #[derive(Debug)]
 struct Reply {
     status: StatusCode,
     location: Option<String>,
+    /// The session cookie set, if any.
     set_cookie: Option<String>,
+    /// The sign-in cookie set, if any.
+    sign_in: Option<String>,
     json: Value,
 }
 
@@ -313,6 +324,9 @@ async fn the_console_acts_as_whoever_signed_in() {
     // The browser goes to the identity provider with a PKCE challenge…
     let r = call(&app, "GET", "/auth/login?return_to=/clusters/local/streams", None, None).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let set = r.sign_in.expect("the sign-in travels in a cookie");
+    assert!(set.contains("Path=/auth") && set.contains("HttpOnly") && set.contains("Max-Age=600"), "{set}");
+    let signing_in = pair(&set);
     let to = r.location.unwrap();
     assert!(to.starts_with(&format!("{issuer}/authorize?")), "{to}");
     let q = query(&to);
@@ -335,15 +349,23 @@ async fn the_console_acts_as_whoever_signed_in() {
         }));
         t.answers.push_back(json!({"access_token": idp.token("bob", &[], "lotse", now + 300), "expires_in": 300}));
     }
-    let r = call(&app, "GET", "/auth/callback?code=c1&state=forged", None, None).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN, "a state this console did not issue");
+    let r = call(&app, "GET", "/auth/callback?code=c1&state=forged", Some(&signing_in), None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "a state this sign-in did not send");
     let callback = format!("/auth/callback?code=c1&state={}", q["state"]);
     let r = call(&app, "GET", &callback, None, None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "a callback without its sign-in cookie");
+    let r = call(&console(2), "GET", &callback, Some(&signing_in), None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "a sign-in sealed with another key");
+    // The console restarts while Bob is at the provider: the sign-in is in
+    // his cookie, so it finishes all the same.
+    let app = console(1);
+    let r = call(&app, "GET", &callback, Some(&signing_in), None).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{r:?}");
     assert_eq!(r.location.as_deref(), Some("/clusters/local/streams"));
     let set = r.set_cookie.unwrap();
     assert!(set.contains("HttpOnly") && set.contains("SameSite=Lax"), "{set}");
     assert!(set.contains("Max-Age=43200"), "kept for the session's lifetime: {set}");
+    assert!(r.sign_in.is_some_and(|c| c.contains("Max-Age=0")), "the sign-in cookie is cleared");
     let mut cookie = set.split(';').next().unwrap().to_owned();
     let exchange = token_endpoint.lock().unwrap().forms[0].clone();
     assert_eq!((exchange["grant_type"].as_str(), exchange["code"].as_str()), ("authorization_code", "c1"));
@@ -352,8 +374,8 @@ async fn the_console_acts_as_whoever_signed_in() {
         q["code_challenge"],
         "the verifier matches the challenge"
     );
-    let r = call(&app, "GET", &callback, None, None).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN, "a sign-in is finished once");
+    let r = call(&app, "GET", &callback, Some(&signing_in), None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "a sign-in is finished once, also with a copy of its cookie");
 
     let r = call(&app, "GET", "/api/v1/me", Some(&cookie), None).await;
     assert_eq!((r.json["principal"].as_str(), r.json["display_name"].as_str()), (Some("bob"), Some("Bob")), "{r:?}");
@@ -414,13 +436,14 @@ async fn the_console_acts_as_whoever_signed_in() {
     // Carol, signed in at the same time, has no role: she sees nothing,
     // and Bob still sees what he may.
     let r = call(&app, "GET", "/auth/login", None, None).await;
+    let carol_in = pair(&r.sign_in.unwrap());
     let q = query(&r.location.unwrap());
     token_endpoint.lock().unwrap().answers.push_back(json!({
         "access_token": idp.token("carol", &[], "lotse", now + 600),
         "id_token": id_token(json!({"iss": issuer, "aud": "lotse-console", "sub": "carol", "nonce": q["nonce"]})),
         "expires_in": 600,
     }));
-    let r = call(&app, "GET", &format!("/auth/callback?code=c4&state={}", q["state"]), None, None).await;
+    let r = call(&app, "GET", &format!("/auth/callback?code=c4&state={}", q["state"]), Some(&carol_in), None).await;
     let carol = r.set_cookie.expect("carol signs in").split(';').next().unwrap().to_owned();
     let r = call(&app, "GET", "/api/v1/clusters/local/streams", Some(&carol), None).await;
     assert_eq!((r.status, names(&r.json)), (StatusCode::OK, Vec::<String>::new()), "{r:?}");
@@ -457,6 +480,7 @@ async fn the_console_acts_as_whoever_signed_in() {
     wrong_iss["iss"] = json!("https://elsewhere.example");
     for (what, bad) in [("nonce", wrong_nonce), ("aud", wrong_aud), ("iss", wrong_iss)] {
         let r = call(&app, "GET", "/auth/login", None, None).await;
+        let signing_in = pair(&r.sign_in.unwrap());
         let q = query(&r.location.unwrap());
         let mut bad = bad;
         if what != "nonce" {
@@ -467,7 +491,8 @@ async fn the_console_acts_as_whoever_signed_in() {
             "id_token": id_token(bad),
             "expires_in": 300,
         }));
-        let r = call(&app, "GET", &format!("/auth/callback?code=c2&state={}", q["state"]), None, None).await;
+        let r =
+            call(&app, "GET", &format!("/auth/callback?code=c2&state={}", q["state"]), Some(&signing_in), None).await;
         assert_eq!(r.status, StatusCode::FORBIDDEN, "wrong {what}: {r:?}");
         assert!(r.set_cookie.is_none(), "wrong {what}");
     }
@@ -475,13 +500,15 @@ async fn the_console_acts_as_whoever_signed_in() {
     // A sign-in returns only to a path on this console.
     for elsewhere in ["https://evil.example/", "//evil.example/"] {
         let r = call(&app, "GET", &format!("/auth/login?return_to={elsewhere}"), None, None).await;
+        let signing_in = pair(&r.sign_in.unwrap());
         let q = query(&r.location.unwrap());
         token_endpoint.lock().unwrap().answers.push_back(json!({
             "access_token": idp.token("bob", &[], "lotse", now + 300),
             "id_token": id_token(claims(&q["nonce"])),
             "expires_in": 300,
         }));
-        let r = call(&app, "GET", &format!("/auth/callback?code=c3&state={}", q["state"]), None, None).await;
+        let r =
+            call(&app, "GET", &format!("/auth/callback?code=c3&state={}", q["state"]), Some(&signing_in), None).await;
         assert_eq!(r.location.as_deref(), Some("/"), "not to {elsewhere}");
     }
 

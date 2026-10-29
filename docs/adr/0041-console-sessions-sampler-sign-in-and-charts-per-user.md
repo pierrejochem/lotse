@@ -14,7 +14,7 @@ ADR 0040 left three gaps. Sessions lived in the console's memory, so a restart s
 - The console keeps only a cache of access tokens, by the hash of the cookie value. A console that has not seen a cookie, after a restart or behind a load balancer, renews the access token from the refresh token in it.
 - Renewals run one at a time, and the cache answers for the old and the new cookie value alike, so a refresh token that the provider rotates is used once. A rotated refresh token reaches the browser in a new cookie on the response; a cookie that holds no session (another key, changed, ended) is cleared.
 - Signing out revokes the refresh token at the provider's revocation endpoint (RFC 7009) if it has one, refuses the session's cookies on this console until the session would have ended, and sends the browser to the provider's end-session endpoint.
-- Sign-ins in progress (state, PKCE verifier, nonce) stay in memory for ten minutes: a restart in the middle of one makes the user start again.
+- Sign-ins in progress (state, PKCE verifier, nonce) stay in memory for ten minutes: a restart in the middle of one makes the user start again (since ADR 0044 they travel in a sealed cookie too).
 
 **The sampler signs in with client credentials** (maintainer's choice). `metrics.client_id` and `metrics.client_secret_file` let the sampler get its own access token from the issuer the brokers trust (`metrics.issuer`, by default `auth.issuer`) with the OAuth client credentials grant, and pass it to the clusters with OAUTHBEARER. It renews the token 30 s before it expires. If the token's subject is not `metrics.principal`, the console warns: the brokers decide by the token. A password stays possible; both at once is refused.
 

@@ -4,7 +4,8 @@
 //! AES-256-GCM under a key only the console has: who signed in, until
 //! when, and the refresh token (or, if the provider gives none, the access
 //! token). A console that restarts, or another console with the same key,
-//! reads it back and renews the access token from it (ADR 0041).
+//! reads it back and renews the access token from it (ADR 0041). A sign-in
+//! in progress travels the same way, in a cookie of its own (ADR 0044).
 
 use std::path::Path;
 
@@ -15,9 +16,31 @@ use lotse_rt_tokio::TokioRuntime;
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use serde::{Deserialize, Serialize};
 
-/// Binds a sealed value to its use: a value sealed for something else
-/// does not open as a session.
-const AAD: &[u8] = b"lotse-console-session-v1";
+/// Binds a sealed value to its use: a sign-in in progress does not open
+/// as a session, nor the other way round.
+const SESSION: &[u8] = b"lotse-console-session-v1";
+const SIGN_IN: &[u8] = b"lotse-console-sign-in-v1";
+
+/// A sign-in on its way through the identity provider, sealed into a
+/// short-lived cookie so that any console with the key can finish it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SigningIn {
+    /// The `state` sent to the provider; the callback must bring it back.
+    #[serde(rename = "s")]
+    pub(crate) state: String,
+    /// The PKCE verifier.
+    #[serde(rename = "v")]
+    pub(crate) verifier: String,
+    /// The `nonce` the ID token must carry.
+    #[serde(rename = "o")]
+    pub(crate) nonce: String,
+    /// Where to go once signed in: a path on this console.
+    #[serde(rename = "r")]
+    pub(crate) return_to: String,
+    /// When it started, ms since the epoch.
+    #[serde(rename = "t")]
+    pub(crate) started_ms: u64,
+}
 
 /// What the cookie holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,19 +128,37 @@ impl SessionKey {
 
     /// `s`, sealed for a cookie.
     pub(crate) fn seal(&self, rt: &TokioRuntime, s: &Sealed) -> String {
+        self.seal_as(rt, SESSION, s)
+    }
+
+    /// The session in a cookie, if this key sealed it and nobody changed it.
+    pub(crate) fn open(&self, cookie: &str) -> Option<Sealed> {
+        self.open_as(SESSION, cookie)
+    }
+
+    /// A sign-in in progress, sealed for its cookie.
+    pub(crate) fn seal_sign_in(&self, rt: &TokioRuntime, s: &SigningIn) -> String {
+        self.seal_as(rt, SIGN_IN, s)
+    }
+
+    /// The sign-in in a cookie, if this key sealed it for one.
+    pub(crate) fn open_sign_in(&self, cookie: &str) -> Option<SigningIn> {
+        self.open_as(SIGN_IN, cookie)
+    }
+
+    fn seal_as<T: Serialize>(&self, rt: &TokioRuntime, aad: &'static [u8], value: &T) -> String {
         let mut nonce = [0u8; NONCE_LEN];
         rt.fill_secret(&mut nonce);
-        let mut buf = serde_json::to_vec(s).expect("a session serialises");
+        let mut buf = serde_json::to_vec(value).expect("a sealed value serialises");
         self.0
-            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(AAD), &mut buf)
-            .expect("a session fits AES-GCM");
+            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut buf)
+            .expect("a sealed value fits AES-GCM");
         let mut out = nonce.to_vec();
         out.extend_from_slice(&buf);
         B64URL.encode(out)
     }
 
-    /// The session in a cookie, if this key sealed it and nobody changed it.
-    pub(crate) fn open(&self, cookie: &str) -> Option<Sealed> {
+    fn open_as<T: for<'de> Deserialize<'de>>(&self, aad: &'static [u8], cookie: &str) -> Option<T> {
         let raw = B64URL.decode(cookie).ok()?;
         if raw.len() < NONCE_LEN {
             return None;
@@ -125,7 +166,7 @@ impl SessionKey {
         let (nonce, sealed) = raw.split_at(NONCE_LEN);
         let nonce = Nonce::try_assume_unique_for_key(nonce).ok()?;
         let mut buf = sealed.to_vec();
-        let plain = self.0.open_in_place(nonce, Aad::from(AAD), &mut buf).ok()?;
+        let plain = self.0.open_in_place(nonce, Aad::from(aad), &mut buf).ok()?;
         serde_json::from_slice(plain).ok()
     }
 }
@@ -160,6 +201,17 @@ mod tests {
         raw[last] ^= 1;
         assert_eq!(key.open(&B64URL.encode(raw)), None, "a changed byte");
         assert_eq!(key.open("not a cookie"), None);
+        assert_eq!(key.open_sign_in(&cookie), None, "a session is no sign-in");
+        let sign_in = SigningIn {
+            state: "st".into(),
+            verifier: "v".into(),
+            nonce: "n".into(),
+            return_to: "/".into(),
+            started_ms: 1,
+        };
+        let sealed = key.seal_sign_in(&rt, &sign_in);
+        assert_eq!(key.open_sign_in(&sealed), Some(sign_in));
+        assert_eq!(key.open(&sealed), None, "nor a sign-in a session");
     }
 
     #[test]
