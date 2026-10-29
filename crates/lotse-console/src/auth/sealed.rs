@@ -75,11 +75,32 @@ impl SessionKey {
         Ok(SessionKey::from_bytes(&bytes))
     }
 
-    /// A key that lives as long as this process.
-    pub fn random(rt: &TokioRuntime) -> SessionKey {
-        let mut b = [0u8; 32];
-        rt.fill_secret(&mut b);
-        SessionKey::from_bytes(&b)
+    /// The key in `path`; if there is no such file, a new key, written
+    /// there first (readable by this user only). Returns whether it was
+    /// made now.
+    pub fn load_or_create(path: &Path, rt: &TokioRuntime) -> Result<(SessionKey, bool), String> {
+        let mut bytes = [0u8; 32];
+        rt.fill_secret(&mut bytes);
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let mut open = std::fs::OpenOptions::new();
+        // Never over an existing key: the one made at the first start, or
+        // by another console starting at the same time.
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        match open.open(path) {
+            Ok(mut f) => {
+                use std::io::Write as _;
+                f.write_all(format!("{}\n", B64.encode(bytes)).as_bytes())
+                    .and_then(|()| f.sync_all())
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                Ok((SessionKey::from_bytes(&bytes), true))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => SessionKey::from_file(path).map(|k| (k, false)),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
     }
 
     /// `s`, sealed for a cookie.
@@ -150,6 +171,23 @@ mod tests {
         let rt = TokioRuntime::new(&dir);
         let cookie = SessionKey::from_file(&good).unwrap().seal(&rt, &session());
         assert_eq!(SessionKey::from_bytes(&[9; 32]).open(&cookie), Some(session()));
+        // Made once, then kept.
+        let made = dir.join("data").join("session.key");
+        let (first, created) = SessionKey::load_or_create(&made, &rt).unwrap();
+        assert!(created);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&made).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "only its owner reads it"
+            );
+        }
+        let cookie = first.seal(&rt, &session());
+        let (again, created) = SessionKey::load_or_create(&made, &rt).unwrap();
+        assert!(!created);
+        assert_eq!(again.open(&cookie), Some(session()), "the same key after a restart");
         let short = dir.join("short");
         std::fs::write(&short, B64.encode([9u8; 16])).unwrap();
         assert!(SessionKey::from_file(&short).unwrap_err().contains("16 bytes"));

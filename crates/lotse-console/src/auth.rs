@@ -93,9 +93,9 @@ pub struct OidcLogin {
     /// system's: for a private one.
     #[serde(default)]
     pub ca_file: Option<std::path::PathBuf>,
-    /// The key sessions are sealed with: 32 random bytes in base64
-    /// (`openssl rand -base64 32`). Without it the console makes one at
-    /// start, and a restart signs everyone out.
+    /// The key sessions are sealed with: 32 random bytes in base64. If the
+    /// file does not exist, the console makes it. Default: `session.key`
+    /// in the data directory.
     #[serde(default)]
     pub session_key_file: Option<std::path::PathBuf>,
     /// A session ends after this many hours at the latest.

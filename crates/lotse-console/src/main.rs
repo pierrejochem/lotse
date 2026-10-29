@@ -131,17 +131,16 @@ async fn main() -> ExitCode {
     match &cfg.auth {
         AuthConfig::Dev { user, .. } => tracing::warn!(%user, "dev auth: every request acts as this user"),
         AuthConfig::Oidc(o) => {
-            let key = match &o.session_key_file {
-                Some(path) => match SessionKey::from_file(path) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        eprintln!("lotse-console: auth.session_key_file {e}");
-                        return ExitCode::FAILURE;
-                    }
-                },
-                None => {
-                    tracing::warn!("no auth.session_key_file: sessions end when the console restarts");
-                    SessionKey::random(&idp_rt)
+            let path = cfg.session_key_file().expect("oidc mode");
+            let key = match SessionKey::load_or_create(&path, &idp_rt) {
+                Ok((k, true)) => {
+                    tracing::info!(path = %path.display(), "made a session key; consoles that share sessions need a copy");
+                    k
+                }
+                Ok((k, false)) => k,
+                Err(e) => {
+                    eprintln!("lotse-console: session key {e}");
+                    return ExitCode::FAILURE;
                 }
             };
             tracing::info!(issuer = %o.issuer, "users sign in with OpenID Connect");

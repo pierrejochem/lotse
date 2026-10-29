@@ -48,6 +48,11 @@ use crate::auth::AuthConfig;
 pub struct Config {
     /// Address to serve the UI and API on.
     pub listen: SocketAddr,
+    /// Where the console keeps what must outlive a restart (the session
+    /// key); relative paths are relative to the config file. Default:
+    /// `data` next to the config file.
+    #[serde(default)]
+    pub data_dir: Option<std::path::PathBuf>,
     /// How users sign in.
     pub auth: AuthConfig,
     /// Background sampling for chart history.
@@ -185,7 +190,27 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|source| ConfigError::Read { path: path.display().to_string(), source })?;
-        Config::parse(&text)
+        let mut cfg = Config::parse(&text)?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        let data = cfg.data_dir.take().unwrap_or_else(|| "data".into());
+        cfg.data_dir = Some(if data.is_absolute() { data } else { base.join(data) });
+        Ok(cfg)
+    }
+
+    /// The data directory: as configured, or `data` here.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.data_dir.clone().unwrap_or_else(|| "data".into())
+    }
+
+    /// The session key's file: as configured, or `session.key` in the data
+    /// directory.
+    pub fn session_key_file(&self) -> Option<std::path::PathBuf> {
+        match &self.auth {
+            AuthConfig::Oidc(o) => {
+                Some(o.session_key_file.clone().unwrap_or_else(|| self.data_dir().join("session.key")))
+            }
+            AuthConfig::Dev { .. } => None,
+        }
     }
 
     /// Parses and checks config text.
@@ -291,6 +316,7 @@ mod tests {
         let public = oidc("http://console/auth/callback").replace("127.0.0.1:8080", "0.0.0.0:8080");
         assert!(Config::parse(&public).unwrap_err().to_string().contains("https"));
         assert!(matches!(&c.auth, AuthConfig::Oidc(o) if o.session_hours == 12 && o.session_key_file.is_none()));
+        assert_eq!(c.session_key_file(), Some("data/session.key".into()), "the key's default place");
 
         // The sampler with client credentials: a secret, and an issuer.
         let sampler = |auth: &str, extra: &str| {
@@ -305,6 +331,20 @@ mod tests {
         assert!(Config::parse(&sampler(OK, "client_secret_file = \"/s\"\nissuer = \"https://id\"")).is_ok());
         let both = sampler(&with_oidc, "client_secret_file = \"/s\"\npassword = \"p\"");
         assert!(Config::parse(&both).unwrap_err().to_string().contains("not both"));
+    }
+
+    #[test]
+    fn the_data_dir_is_relative_to_the_config_file() {
+        let dir = std::env::temp_dir().join(format!("lotse-console-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("console.toml");
+        std::fs::write(&path, OK).unwrap();
+        assert_eq!(Config::load(&path).unwrap().data_dir(), dir.join("data"));
+        std::fs::write(&path, format!("data_dir = \"state\"\n{OK}")).unwrap();
+        assert_eq!(Config::load(&path).unwrap().data_dir(), dir.join("state"));
+        std::fs::write(&path, format!("data_dir = \"/var/lib/lotse-console\"\n{OK}")).unwrap();
+        assert_eq!(Config::load(&path).unwrap().data_dir(), std::path::PathBuf::from("/var/lib/lotse-console"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

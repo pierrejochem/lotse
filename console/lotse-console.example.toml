@@ -1,5 +1,6 @@
 # Copy to lotse-console.toml and adjust.
 listen = "127.0.0.1:8080"
+# data_dir = "data"   # what outlives a restart (the session key); relative to this file
 
 # Every request acts as this user. Only for a machine only you can reach.
 # `password` is the user's SCRAM password where the cluster requires
@@ -19,7 +20,7 @@ user = "pierre"
 # redirect_url = "https://console.example.com/auth/callback"
 # principal_claim = "sub"       # the same claim the brokers use
 # ca_file = "/etc/lotse/idp-ca.pem"   # a private issuer's CA
-# session_key_file = "/etc/lotse/console-session.key"   # `openssl rand -base64 32`; keeps users signed in across restarts
+# session_key_file = "/var/lib/lotse-console/session.key"   # made at the first start if missing; default <data_dir>/session.key
 # session_hours = 12
 
 # The background sampler that feeds the charts uses this identity; bind it a
