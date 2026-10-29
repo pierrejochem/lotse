@@ -488,6 +488,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         loop {
             let why = match attempt().await {
                 Ok(v) => return Ok(v),
+                // A failed login or a refusal now says nothing of an earlier
+                // attempt whose answer was lost: that one may have been
+                // carried out. (An answer about the request itself, such as
+                // RESOURCE_EXISTS, is the caller's to read.)
+                Err(Attempt::Fail(
+                    e @ (ClientError::Authentication(_) | ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. }),
+                )) if maybe_done => {
+                    return Err(ClientError::Unknown(format!(
+                        "an earlier attempt may have been carried out; then {e}"
+                    )));
+                }
                 Err(Attempt::Fail(e)) => return Err(e),
                 Err(Attempt::Retry(why)) => why,
                 Err(Attempt::RetryMaybeDone(why)) => {
