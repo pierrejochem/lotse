@@ -615,7 +615,22 @@ async fn run(rt: SimRuntime) {
     // acknowledged.
     for ((stream, partition, offset), value) in out.produced.iter().filter(|((s, ..), _)| !out.delete_tried.contains(s))
     {
-        let f = checker.fetch(stream, *partition, *offset, TICK * 20).await.expect("the healed cluster serves reads");
+        // A transaction the workload left open when it stopped holds the
+        // last stable offset back until it ends (its timeout, then the
+        // markers): read once it has.
+        let deadline = rt.now() + Duration::from_secs(10);
+        let f = loop {
+            let f =
+                checker.fetch(stream, *partition, *offset, TICK * 20).await.expect("the healed cluster serves reads");
+            if !f.records.is_empty() || f.last_stable_offset > *offset {
+                break f;
+            }
+            assert!(
+                rt.now() < deadline,
+                "{stream}/{partition}: stable offset stuck at {} below {offset}",
+                f.last_stable_offset
+            );
+        };
         let (b, _) = Batch::parse(&f.records).expect("the batch is there");
         let got = String::from_utf8(b.records().unwrap()[0].value.clone().unwrap().to_vec()).unwrap();
         assert_eq!((b.base_offset(), &got), (*offset, value), "{stream}/{partition}: acknowledged {value} at {offset}");
