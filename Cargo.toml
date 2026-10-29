@@ -45,7 +45,7 @@ serde_json = "1"
 jsonwebtoken = { version = "9", default-features = false }
 # Roots for fetching an identity provider's keys over HTTPS.
 webpki-roots = "1"
-# Signing test tokens (lotse-auth's testing feature); already in the tree through rustls.
+# Signing test tokens (lotse-auth's testing feature) and sealing console sessions; already in the tree through rustls.
 ring = "0.17"
 # Host metrics in lotse-rt-tokio; 0.36 is the newest that builds on rust-version 1.85.
 sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }

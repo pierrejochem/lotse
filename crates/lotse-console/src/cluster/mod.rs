@@ -14,6 +14,7 @@ use async_trait::async_trait;
 
 use crate::auth::Identity;
 use crate::error::ApiResult;
+use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
     ClusterRef, CreateQueue, Isolation, NodesView, Overview, QueueDetail, QueueRow, RecordView, StreamDetail,
     StreamRow, TenantsView,
@@ -65,6 +66,12 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Asks the operator to stop after the node it is upgrading.
     async fn pause_upgrade(&self, who: &Identity) -> ApiResult<()>;
+
+    /// One sample for chart history, as `who` sees the cluster.
+    async fn chart_sample(&self, who: &Identity) -> ApiResult<ChartSample>;
+
+    /// What of the chart history `who` may see now.
+    async fn visibility(&self, who: &Identity) -> ApiResult<Visibility>;
 }
 
 impl std::fmt::Debug for dyn Cluster {

@@ -35,7 +35,7 @@
     "/api/v1/clusters/{cluster}/metrics": {
       "get": {
         "tags": [],
-        "summary": "Chart history from the console's in-memory buffer (at most 180 points).",
+        "summary": "Chart history from the console's in-memory buffer (at most 180 points):\nthe sum over the streams and queues the caller may see; the commit\nlatency only for cluster admins.",
         "operationId": "metrics",
         "parameters": [
           {
@@ -78,6 +78,16 @@
             }
           },
           "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
             "description": "",
             "content": {
               "application/json": {

@@ -16,14 +16,16 @@ use http_body_util::BodyExt;
 use lotse_auth::scram::ScramCredential;
 use lotse_auth::testing::TestIssuer;
 use lotse_client::{Client, ClientConfig, Credentials};
-use lotse_console::auth::{AuthConfig, OidcLogin, Sessions};
+use lotse_console::auth::{
+    AuthConfig, OidcLogin, SamplerLogin, Secret, ServiceCredentials, ServiceLogin, SessionKey, Sessions,
+};
 use lotse_console::cluster::Cluster;
 use lotse_console::cluster::native::NativeCluster;
 use lotse_console::metrics::MetricsStore;
 use lotse_console::{AppState, router};
 use lotse_log::LogConfig;
 use lotse_proto::{RoleBindingData, role, subject_kind};
-use lotse_record::Batch;
+use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::Clock;
 use lotse_rt_tokio::TokioRuntime;
 use lotse_rt_tokio::dev_certs::DevCa;
@@ -46,6 +48,12 @@ impl StateMachine for Nothing {
     }
 }
 
+fn batch(value: &str) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(value.as_bytes()), &[]);
+    b.finish().unwrap()
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -56,6 +64,7 @@ fn free_port() -> u16 {
 struct TokenEndpoint {
     answers: VecDeque<Value>,
     forms: Vec<BTreeMap<String, String>>,
+    revoked: Vec<BTreeMap<String, String>>,
 }
 
 fn form(body: &str) -> BTreeMap<String, String> {
@@ -116,6 +125,10 @@ async fn identity_provider(port: u16, docs: BTreeMap<String, Vec<u8>>, token: Ar
                         let mut t = token.lock().unwrap();
                         t.forms.push(form(&body));
                         t.answers.pop_front().map(|v| v.to_string().into_bytes())
+                    }
+                    ("POST", "/revoke") => {
+                        token.lock().unwrap().revoked.push(form(&body));
+                        Some(Vec::new())
                     }
                     ("GET", p) => docs.get(p).cloned(),
                     _ => None,
@@ -194,6 +207,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "end_session_endpoint": format!("{issuer}/logout"),
+        "revocation_endpoint": format!("{issuer}/revoke"),
         "jwks_uri": format!("{issuer}/keys"),
     });
     let mut docs = BTreeMap::new();
@@ -281,11 +295,17 @@ async fn the_console_acts_as_whoever_signed_in() {
         scopes: vec!["openid".into(), "offline_access".into()],
         principal_claim: "sub".into(),
         ca_file: None,
+        session_key_file: None,
+        session_hours: 12,
     };
-    let sessions = Arc::new(Sessions::new(login.clone(), TokioRuntime::new(&root)));
-    let app = router(
-        AppState::new(cluster(), AuthConfig::Oidc(login), store(), Duration::from_secs(1)).with_sessions(sessions),
-    );
+    // A console signing users in, with its session key: a new one is what a
+    // restarted console is.
+    let console = |key: u8| {
+        let sessions = Sessions::new(login.clone(), TokioRuntime::new(&root), SessionKey::from_bytes(&[key; 32]));
+        let state = AppState::new(cluster(), AuthConfig::Oidc(login.clone()), store(), Duration::from_secs(1));
+        router(state.with_sessions(Arc::new(sessions)))
+    };
+    let app = console(1);
 
     let r = call(&app, "GET", "/api/v1/me", None, None).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "nobody signed in: {r:?}");
@@ -323,7 +343,8 @@ async fn the_console_acts_as_whoever_signed_in() {
     assert_eq!(r.location.as_deref(), Some("/clusters/local/streams"));
     let set = r.set_cookie.unwrap();
     assert!(set.contains("HttpOnly") && set.contains("SameSite=Lax"), "{set}");
-    let cookie = set.split(';').next().unwrap().to_owned();
+    assert!(set.contains("Max-Age=43200"), "kept for the session's lifetime: {set}");
+    let mut cookie = set.split(';').next().unwrap().to_owned();
     let exchange = token_endpoint.lock().unwrap().forms[0].clone();
     assert_eq!((exchange["grant_type"].as_str(), exchange["code"].as_str()), ("authorization_code", "c1"));
     assert_eq!(
@@ -339,6 +360,42 @@ async fn the_console_acts_as_whoever_signed_in() {
     assert_eq!(r.json["auth_mode"], "oidc");
     let renewal = token_endpoint.lock().unwrap().forms.get(1).cloned().expect("the token was renewed");
     assert_eq!((renewal["grant_type"].as_str(), renewal["refresh_token"].as_str()), ("refresh_token", "refresh-1"));
+
+    // The console restarts: the session is in the cookie, so Bob stays
+    // signed in. The provider rotates his refresh token on the way, and the
+    // browser gets the new cookie.
+    let app = console(1);
+    token_endpoint.lock().unwrap().answers.push_back(json!({
+        "access_token": idp.token("bob", &[], "lotse", now + 300),
+        "refresh_token": "refresh-2",
+        "expires_in": 300,
+    }));
+    // Two requests at once: one renewal, so the rotating token is spent once.
+    let (r, twin) = tokio::join!(
+        call(&app, "GET", "/api/v1/me", Some(&cookie), None),
+        call(&app, "GET", "/api/v1/me", Some(&cookie), None)
+    );
+    assert_eq!((r.status, r.json["principal"].as_str()), (StatusCode::OK, Some("bob")), "after a restart: {r:?}");
+    assert_eq!(twin.status, StatusCode::OK, "{twin:?}");
+    let renewal = token_endpoint.lock().unwrap().forms.last().cloned().unwrap();
+    assert_eq!(renewal["refresh_token"], "refresh-1", "renewed from the cookie");
+    let rotated = r.set_cookie.expect("a rotated refresh token reaches the browser");
+    let old_cookie = std::mem::replace(&mut cookie, rotated.split(';').next().unwrap().to_owned());
+    assert_ne!(old_cookie, cookie);
+    let forms = token_endpoint.lock().unwrap().forms.len();
+    for c in [&cookie, &old_cookie] {
+        let r = call(&app, "GET", "/api/v1/me", Some(c), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    }
+    assert_eq!(token_endpoint.lock().unwrap().forms.len(), forms, "renewed once, the rotated token used once");
+
+    // A cookie sealed with another key, or changed, holds no session.
+    let r = call(&console(2), "GET", "/api/v1/me", Some(&cookie), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "another console's key");
+    assert!(r.set_cookie.is_some_and(|c| c.contains("Max-Age=0")), "and the browser forgets it");
+    let tampered = format!("{}A", &cookie[..cookie.len() - 1]);
+    let r = call(&app, "GET", "/api/v1/me", Some(&tampered), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "a changed cookie");
 
     // Bob sees the shop's stream and tenant, nothing of the default tenant,
     // and may not create anything.
@@ -377,6 +434,18 @@ async fn the_console_acts_as_whoever_signed_in() {
     assert!(r.set_cookie.unwrap().contains("Max-Age=0"));
     let r = call(&app, "GET", "/api/v1/me", Some(&cookie), None).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "the session is gone");
+    // Even where the provider would still renew it.
+    token_endpoint.lock().unwrap().answers.push_back(json!({"access_token": "x", "expires_in": 300}));
+    let r = call(&app, "GET", "/api/v1/me", Some(&old_cookie), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "with every cookie it had");
+    assert!(token_endpoint.lock().unwrap().answers.pop_front().is_some(), "not even asked");
+    let revoked = token_endpoint.lock().unwrap().revoked.clone();
+    assert_eq!(revoked.len(), 1, "{revoked:?}");
+    assert_eq!((revoked[0]["token"].as_str(), revoked[0]["token_type_hint"].as_str()), ("refresh-2", "refresh_token"));
+    // A console restarted since cannot renew it either: the provider
+    // refuses the revoked token (here: it has no answer).
+    let r = call(&console(1), "GET", "/api/v1/me", Some(&cookie), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "revoked at the provider");
 
     // ID tokens for another sign-in, another client or from another issuer
     // are refused.
@@ -417,10 +486,11 @@ async fn the_console_acts_as_whoever_signed_in() {
     }
 
     // --- Dev mode with a password ---
-    let dev = |password: &str| {
-        let auth = AuthConfig::Dev { user: "admin".into(), password: Some(password.into()) };
-        router(AppState::new(cluster(), auth, store(), Duration::from_secs(1)))
+    let dev_with = |user: &str, password: &str, store: Arc<MetricsStore>| {
+        let auth = AuthConfig::Dev { user: user.into(), password: Some(password.into()) };
+        router(AppState::new(cluster(), auth, store, Duration::from_secs(1)))
     };
+    let dev = |password: &str| dev_with("admin", password, store());
     let app = dev("admin-pw");
     let r = call(&app, "GET", "/api/v1/clusters/local/streams", None, None).await;
     assert_eq!(r.status, StatusCode::OK, "{r:?}");
@@ -440,6 +510,65 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&dev("wrong"), "GET", "/api/v1/clusters/local/streams", None, None).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
     assert!(r.json["message"].as_str().unwrap().contains("did not accept your sign-in"), "{r:?}");
+
+    // --- The metrics sampler, with client credentials ---
+    // It may see both tenants; Bob, with a password now, only the shop.
+    let sampler_sees = |tenant: &str| RoleBindingData {
+        subject_kind: subject_kind::USER,
+        subject: "console-metrics".into(),
+        role: role::VIEWER,
+        tenant: tenant.into(),
+        prefix: String::new(),
+    };
+    admin.alter_role_bindings(vec![sampler_sees("shop"), sampler_sees("default")], Vec::new()).await.unwrap();
+    admin.set_user_password("bob", "bob-pw").await.unwrap();
+    let creds = ServiceCredentials {
+        issuer: issuer.clone(),
+        client_id: "lotse-console-metrics".into(),
+        client_secret: Secret::new("metrics-secret"),
+        scope: None,
+    };
+    let sampler =
+        SamplerLogin::Service(Arc::new(ServiceLogin::new("console-metrics", creds, TokioRuntime::new(&root))));
+    token_endpoint.lock().unwrap().answers.push_back(json!({
+        "access_token": idp.token("console-metrics", &[], "lotse", now + 600),
+        "expires_in": 600,
+    }));
+    let history = store();
+    let sample = || async {
+        let who = sampler.identity().await.expect("the sampler signs in");
+        history.record("local", lotse_console::time::now_ms(), &native.chart_sample(&who).await.expect("samples"));
+    };
+    sample().await;
+    let grant = token_endpoint.lock().unwrap().forms.last().cloned().unwrap();
+    assert_eq!(
+        (grant["grant_type"].as_str(), grant["client_id"].as_str(), grant["client_secret"].as_str()),
+        ("client_credentials", "lotse-console-metrics", "metrics-secret")
+    );
+    let forms = token_endpoint.lock().unwrap().forms.len();
+    // Traffic: a little to the shop's stream, much more to the default
+    // tenant's.
+    admin.produce("orders", 0, batch("order")).await.unwrap();
+    for i in 0..20 {
+        admin.produce("audit", 0, batch(&format!("audit entry {i} {}", "x".repeat(200)))).await.unwrap();
+    }
+    tokio::time::sleep(lotse_console::cluster::native::RATE_WINDOW + Duration::from_millis(300)).await;
+    sample().await;
+    assert_eq!(token_endpoint.lock().unwrap().forms.len(), forms, "the token is used until it is about to expire");
+    assert!(history.resources("local") >= 2, "the sampler saw both tenants' streams");
+
+    let last_in = |app: axum::Router| async move {
+        let r = call(&app, "GET", "/api/v1/clusters/local/metrics?series=in_bytes_per_sec&range=15m", None, None).await;
+        assert_eq!(r.status, StatusCode::OK, "{r:?}");
+        r.json["points"].as_array().unwrap().last().map_or(0.0, |p| p["v"].as_f64().unwrap())
+    };
+    let bob = || dev_with("bob", "bob-pw", history.clone());
+    let everyone = || dev_with("admin", "admin-pw", history.clone());
+    let (bobs, all) = (last_in(bob()).await, last_in(everyone()).await);
+    assert!(bobs > 0.0 && all > bobs * 5.0, "Bob's chart holds the shop's traffic only: {bobs} of {all}");
+    let p99 = "/api/v1/clusters/local/metrics?series=commit_p99_ms&range=15m";
+    assert_eq!(call(&bob(), "GET", p99, None, None).await.status, StatusCode::FORBIDDEN, "cluster-wide");
+    assert_eq!(call(&everyone(), "GET", p99, None, None).await.status, StatusCode::OK);
 
     drop(admin);
     node.handle().stop();

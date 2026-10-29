@@ -19,12 +19,18 @@ user = "pierre"
 # redirect_url = "https://console.example.com/auth/callback"
 # principal_claim = "sub"       # the same claim the brokers use
 # ca_file = "/etc/lotse/idp-ca.pem"   # a private issuer's CA
+# session_key_file = "/etc/lotse/console-session.key"   # `openssl rand -base64 32`; keeps users signed in across restarts
+# session_hours = 12
 
-# The background sampler that feeds the charts uses this identity; give it a
-# viewer role. Everyone signed in sees the charts it collects.
+# The background sampler that feeds the charts uses this identity; bind it a
+# viewer role in every tenant. Each user's chart sums only the streams and
+# queues they may see.
 [metrics]
 principal = "console-metrics"
-# password = "…"
+# password = "…"                                  # SCRAM, or:
+# client_id = "lotse-console-metrics"             # OAuth client credentials
+# client_secret_file = "/etc/lotse/metrics-secret"
+# issuer = "https://id.example.com/realms/ops"    # default: auth.issuer
 sample_secs = 10
 retention_hours = 24
 

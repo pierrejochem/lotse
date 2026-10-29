@@ -15,6 +15,7 @@ lotse-proto.workspace = true
 lotse-record.workspace = true
 lotse-route.workspace = true
 lotse-rt.workspace = true
+ring.workspace = true
 lotse-rt-tokio.workspace = true
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }

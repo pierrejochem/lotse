@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use lotse_console::auth::{AuthConfig, Identity, Login, Secret, Sessions};
+use lotse_console::auth::{
+    AuthConfig, Identity, Login, SamplerLogin, Secret, ServiceCredentials, ServiceLogin, SessionKey, Sessions,
+};
 use lotse_console::cluster::Cluster;
 use lotse_console::cluster::demo::DemoCluster;
 use lotse_console::cluster::native::NativeCluster;
@@ -75,35 +77,75 @@ async fn main() -> ExitCode {
     }
 
     // The sampler is the only thing that uses the console's own identity,
-    // a read-only metrics role on the brokers.
-    let sampler_identity = Identity {
-        principal: cfg.metrics.principal.clone(),
-        display_name: "metrics sampler".into(),
-        login: cfg.metrics.password.clone().map_or(Login::None, |p| Login::Password(Secret::new(p))),
+    // a viewer role on the brokers.
+    let http_rt = |ca: Option<&std::path::Path>| -> Result<TokioRuntime, String> {
+        let rt = TokioRuntime::new(std::env::temp_dir());
+        match ca {
+            None => Ok(rt),
+            Some(path) => std::fs::read(path)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| rt.with_http_ca(&pem).map_err(|e| e.to_string()))
+                .map_err(|e| format!("{}: {e}", path.display())),
+        }
     };
-    tokio::spawn(run_sampler(clusters.clone(), Arc::clone(&store), sampler_identity, cfg.metrics.step()));
+    let oidc = match &cfg.auth {
+        AuthConfig::Oidc(o) => Some(o),
+        AuthConfig::Dev { .. } => None,
+    };
+    let idp_rt = match http_rt(oidc.and_then(|o| o.ca_file.as_deref())) {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("lotse-console: auth.ca_file {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let m = &cfg.metrics;
+    let sampler = match (&m.client_id, &m.client_secret_file) {
+        (Some(client_id), Some(secret_file)) => {
+            let secret = match std::fs::read_to_string(secret_file) {
+                Ok(s) => s.trim().to_owned(),
+                Err(e) => {
+                    eprintln!("lotse-console: metrics.client_secret_file {}: {e}", secret_file.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let issuer = m.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).expect("checked when loaded");
+            let creds = ServiceCredentials {
+                issuer,
+                client_id: client_id.clone(),
+                client_secret: Secret::new(secret),
+                scope: m.scope.clone(),
+            };
+            SamplerLogin::Service(Arc::new(ServiceLogin::new(&m.principal, creds, idp_rt.clone())))
+        }
+        _ => SamplerLogin::Fixed(Identity {
+            principal: m.principal.clone(),
+            display_name: "metrics sampler".into(),
+            login: m.password.clone().map_or(Login::None, |p| Login::Password(Secret::new(p))),
+        }),
+    };
+    tokio::spawn(run_sampler(clusters.clone(), Arc::clone(&store), sampler, cfg.metrics.step()));
 
     let mut state =
         AppState::new(clusters, cfg.auth.clone(), store, Duration::from_millis(cfg.live.interval_ms.max(250)));
     match &cfg.auth {
         AuthConfig::Dev { user, .. } => tracing::warn!(%user, "dev auth: every request acts as this user"),
         AuthConfig::Oidc(o) => {
-            let rt = TokioRuntime::new(std::env::temp_dir());
-            let rt = match &o.ca_file {
-                None => rt,
-                Some(path) => match std::fs::read(path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|pem| rt.with_http_ca(&pem).map_err(|e| e.to_string()))
-                {
-                    Ok(rt) => rt,
+            let key = match &o.session_key_file {
+                Some(path) => match SessionKey::from_file(path) {
+                    Ok(k) => k,
                     Err(e) => {
-                        eprintln!("lotse-console: auth.ca_file {}: {e}", path.display());
+                        eprintln!("lotse-console: auth.session_key_file {e}");
                         return ExitCode::FAILURE;
                     }
                 },
+                None => {
+                    tracing::warn!("no auth.session_key_file: sessions end when the console restarts");
+                    SessionKey::random(&idp_rt)
+                }
             };
             tracing::info!(issuer = %o.issuer, "users sign in with OpenID Connect");
-            state = state.with_sessions(Arc::new(Sessions::new(o.clone(), rt)));
+            state = state.with_sessions(Arc::new(Sessions::new(o.clone(), idp_rt.clone(), key)));
         }
     }
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {

@@ -81,7 +81,8 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/queues/{name}", get(api::queue))
         .route("/clusters/{cluster}/tenants", get(api::tenants))
         .route("/clusters/{cluster}/metrics", get(api::metrics))
-        .route("/ws", get(ws::upgrade));
+        .route("/ws", get(ws::upgrade))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::session_layer));
     Router::new()
         .nest("/api/v1", api)
         .route("/auth/login", get(auth::login))

@@ -70,6 +70,19 @@ pub struct MetricsConfig {
     /// Its SCRAM password, where the clusters require authentication.
     #[serde(default)]
     pub password: Option<String>,
+    /// Or: its client id at the issuer, to sign in with the OAuth client
+    /// credentials grant.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// The file that holds that client's secret.
+    #[serde(default)]
+    pub client_secret_file: Option<std::path::PathBuf>,
+    /// The issuer; by default the one users sign in at.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// Scopes to ask for, space-separated, if the issuer wants any.
+    #[serde(default)]
+    pub scope: Option<String>,
     /// Seconds between samples.
     pub sample_secs: u64,
     /// Hours of history to keep in memory.
@@ -78,7 +91,16 @@ pub struct MetricsConfig {
 
 impl Default for MetricsConfig {
     fn default() -> Self {
-        MetricsConfig { principal: "console-metrics".into(), password: None, sample_secs: 10, retention_hours: 24 }
+        MetricsConfig {
+            principal: "console-metrics".into(),
+            password: None,
+            client_id: None,
+            client_secret_file: None,
+            issuer: None,
+            scope: None,
+            sample_secs: 10,
+            retention_hours: 24,
+        }
     }
 }
 
@@ -198,6 +220,23 @@ impl Config {
                 ));
             }
         }
+        let m = &cfg.metrics;
+        if m.client_id.is_some() {
+            if m.password.is_some() {
+                return Err(ConfigError::Invalid("metrics: give either a password or a client_id, not both.".into()));
+            }
+            if m.client_secret_file.is_none() {
+                return Err(ConfigError::Invalid(
+                    "metrics.client_id needs metrics.client_secret_file, the file that holds the client's secret."
+                        .into(),
+                ));
+            }
+            if m.issuer.is_none() && !matches!(cfg.auth, AuthConfig::Oidc(_)) {
+                return Err(ConfigError::Invalid(
+                    "metrics.client_id needs an issuer: set metrics.issuer, or sign users in with auth.mode = \"oidc\".".into(),
+                ));
+            }
+        }
         if !cfg.listen.ip().is_loopback() && matches!(cfg.auth, AuthConfig::Dev { .. }) {
             tracing::warn!(listen = %cfg.listen, "dev auth on a non-loopback address: anyone who can reach it acts as the dev user");
         }
@@ -251,6 +290,21 @@ mod tests {
         assert!(Config::parse(&oidc("http://127.0.0.1:8080/auth/callback")).is_ok());
         let public = oidc("http://console/auth/callback").replace("127.0.0.1:8080", "0.0.0.0:8080");
         assert!(Config::parse(&public).unwrap_err().to_string().contains("https"));
+        assert!(matches!(&c.auth, AuthConfig::Oidc(o) if o.session_hours == 12 && o.session_key_file.is_none()));
+
+        // The sampler with client credentials: a secret, and an issuer.
+        let sampler = |auth: &str, extra: &str| {
+            format!(
+                "{auth}\n[metrics]\nprincipal = \"m\"\nsample_secs = 10\nretention_hours = 1\nclient_id = \"m\"\n{extra}"
+            )
+        };
+        let with_oidc = oidc("https://console/auth/callback");
+        assert!(Config::parse(&sampler(&with_oidc, "client_secret_file = \"/s\"")).is_ok());
+        assert!(Config::parse(&sampler(&with_oidc, "")).unwrap_err().to_string().contains("client_secret_file"));
+        assert!(Config::parse(&sampler(OK, "client_secret_file = \"/s\"")).unwrap_err().to_string().contains("issuer"));
+        assert!(Config::parse(&sampler(OK, "client_secret_file = \"/s\"\nissuer = \"https://id\"")).is_ok());
+        let both = sampler(&with_oidc, "client_secret_file = \"/s\"\npassword = \"p\"");
+        assert!(Config::parse(&both).unwrap_err().to_string().contains("not both"));
     }
 
     #[test]

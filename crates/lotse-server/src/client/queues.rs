@@ -429,8 +429,10 @@ impl Clients {
             }
 
             let s = self.queues.get_mut(&g).expect("serving");
-            let delivered = deliver(s, replica, limit, view.now).await?;
-            self.stats.group(g).delivered += delivered;
+            let (delivered, bytes) = deliver(s, replica, limit, view.now).await?;
+            let stats = self.stats.group(g);
+            stats.delivered += delivered;
+            stats.fetch_bytes += bytes;
             let live: Vec<ConnId> = s.dispatcher.subscriptions().map(|(_, c)| c).collect();
             s.conns.retain(|c, _| live.contains(c));
         }
@@ -438,21 +440,23 @@ impl Clients {
     }
 }
 
-/// Hands out what credit allows, one stored batch at a time.
+/// Hands out what credit allows, one stored batch at a time; returns how
+/// many messages it delivered and how many bytes it sent.
 async fn deliver<R: Runtime, S: StateMachine>(
     s: &mut Serving,
     replica: &Replica<R, S>,
     limit: u64,
     now: Instant,
-) -> Result<u64, Error> {
+) -> Result<(u64, u64), Error> {
     let q: &QueueLog = replica.queue().expect("a queue group");
     let mut budget = DELIVER_PER_ROUND;
     let mut total = 0;
+    let mut bytes = 0u64;
     while budget > 0 {
         let max = (s.dispatcher.open_credit() as usize).min(budget);
         let offsets = s.dispatcher.candidates(q, limit, max);
         if offsets.is_empty() {
-            return Ok(total);
+            return Ok((total, bytes));
         }
         let owners: BTreeMap<SubscriptionId, ConnId> = s.dispatcher.subscriptions().collect();
         let mut delivered = 0;
@@ -478,14 +482,15 @@ async fn deliver<R: Runtime, S: StateMachine>(
                 };
                 if let Some(outbox) = owners.get(&id).and_then(|c| s.conns.get(c)) {
                     outbox.push_frame(lotse_proto::encode_push(&push));
+                    bytes += raw.len() as u64;
                 }
             }
         }
         if delivered == 0 {
-            return Ok(total); // credit in messages, but none in bytes
+            return Ok((total, bytes)); // credit in messages, but none in bytes
         }
         total += delivered as u64;
         budget = budget.saturating_sub(delivered);
     }
-    Ok(total)
+    Ok((total, bytes))
 }

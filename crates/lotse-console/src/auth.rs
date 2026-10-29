@@ -5,14 +5,16 @@
 //! (ADR 0019).
 //!
 //! - `oidc`: the user signs in at the organisation's identity provider
-//!   (Authorization Code with PKCE). The console keeps the session on the
-//!   server, behind an HttpOnly cookie, and passes the user's access token
-//!   to the clusters with SASL OAUTHBEARER. When the token expires, the
-//!   console renews it with the refresh token or asks the user to sign in
-//!   again.
+//!   (Authorization Code with PKCE). The session lives in an HttpOnly
+//!   cookie, sealed with a key only the console has, so it survives a
+//!   restart (ADR 0041); the console passes the user's access token to the
+//!   clusters with SASL OAUTHBEARER and renews it with the refresh token.
 //! - `dev`: everyone is one fixed user, signed in to the clusters with that
 //!   user's SCRAM password if one is configured. For a machine only you can
 //!   reach.
+
+mod provider;
+mod sealed;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,7 +27,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use lotse_rt::{Http as _, Rng as _};
+use lotse_rt::Rng as _;
 use lotse_rt_tokio::TokioRuntime;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -33,6 +35,10 @@ use tokio::time::Instant;
 
 use crate::AppState;
 use crate::error::ApiError;
+use crate::time::now_ms;
+use provider::Provider;
+use sealed::Sealed;
+pub use sealed::SessionKey;
 
 /// The session cookie's name.
 pub const COOKIE: &str = "lotse_session";
@@ -87,6 +93,18 @@ pub struct OidcLogin {
     /// system's: for a private one.
     #[serde(default)]
     pub ca_file: Option<std::path::PathBuf>,
+    /// The key sessions are sealed with: 32 random bytes in base64
+    /// (`openssl rand -base64 32`). Without it the console makes one at
+    /// start, and a restart signs everyone out.
+    #[serde(default)]
+    pub session_key_file: Option<std::path::PathBuf>,
+    /// A session ends after this many hours at the latest.
+    #[serde(default = "default_session_hours")]
+    pub session_hours: u64,
+}
+
+fn default_session_hours() -> u64 {
+    12
 }
 
 fn default_scopes() -> Vec<String> {
@@ -166,14 +184,26 @@ impl Identity {
     }
 }
 
-/// One signed-in browser.
+/// A session as the console holds it while in use: the access token and
+/// the newest cookie.
 #[derive(Debug, Clone)]
-struct Session {
+struct Live {
+    sid: String,
     principal: String,
     display_name: String,
     access_token: Secret,
-    refresh_token: Option<Secret>,
     expires: Instant,
+    cookie: String,
+}
+
+impl Live {
+    fn identity(&self) -> Identity {
+        Identity {
+            principal: self.principal.clone(),
+            display_name: self.display_name.clone(),
+            login: Login::Token { token: self.access_token.clone(), expires: self.expires },
+        }
+    }
 }
 
 /// A sign-in on its way through the identity provider.
@@ -185,36 +215,31 @@ struct Pending {
     started: Instant,
 }
 
-/// The identity provider's endpoints, from its discovery document.
-#[derive(Debug, Clone, Deserialize)]
-struct Endpoints {
-    issuer: String,
-    authorization_endpoint: String,
-    token_endpoint: String,
-    #[serde(default)]
-    end_session_endpoint: Option<String>,
+/// A session found in a request's cookie.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// Who it is.
+    pub identity: Identity,
+    /// A new cookie value, when the provider rotated the refresh token.
+    pub reissue: Option<String>,
 }
 
-/// What a token endpoint answers.
-#[derive(Debug, Deserialize)]
-struct Tokens {
-    access_token: String,
-    #[serde(default)]
-    id_token: Option<String>,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-}
-
-/// Signed-in browsers and sign-ins in progress, for `oidc` mode.
+/// Sign-ins and signed-in browsers, for `oidc` mode. The sessions
+/// themselves live in the browsers' cookies, sealed; this only caches
+/// access tokens.
 #[derive(Debug)]
 pub struct Sessions {
     cfg: OidcLogin,
-    rt: TokioRuntime,
-    endpoints: tokio::sync::OnceCell<Endpoints>,
-    sessions: Mutex<BTreeMap<String, Session>>,
+    provider: Provider,
+    key: SessionKey,
     pending: Mutex<BTreeMap<String, Pending>>,
+    /// By the hash of a cookie value; a rotated cookie and its successor
+    /// share one entry.
+    live: Mutex<BTreeMap<[u8; 32], Live>>,
+    /// Sessions signed out here, until they would have ended anyway.
+    ended: Mutex<BTreeMap<String, u64>>,
+    /// One renewal at a time, so a rotating refresh token is used once.
+    renewing: tokio::sync::Mutex<()>,
 }
 
 /// Why signing in failed, for the user.
@@ -244,37 +269,55 @@ fn claims(jwt: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&B64URL.decode(payload).ok()?).ok()
 }
 
+fn hash(cookie: &str) -> [u8; 32] {
+    Sha256::digest(cookie.as_bytes()).into()
+}
+
+/// `ms` since the epoch, as an instant of this process.
+fn instant_at(ms: u64) -> Instant {
+    Instant::now() + Duration::from_millis(ms.saturating_sub(now_ms()))
+}
+
 impl Sessions {
-    /// Sessions for `cfg`, reaching the identity provider through `rt`.
-    pub fn new(cfg: OidcLogin, rt: TokioRuntime) -> Sessions {
+    /// Sessions for `cfg`, sealed with `key`, reaching the identity
+    /// provider through `rt`.
+    pub fn new(cfg: OidcLogin, rt: TokioRuntime, key: SessionKey) -> Sessions {
         Sessions {
+            provider: Provider::new(&cfg.issuer, rt),
             cfg,
-            rt,
-            endpoints: tokio::sync::OnceCell::new(),
-            sessions: Mutex::new(BTreeMap::new()),
+            key,
             pending: Mutex::new(BTreeMap::new()),
+            live: Mutex::new(BTreeMap::new()),
+            ended: Mutex::new(BTreeMap::new()),
+            renewing: tokio::sync::Mutex::new(()),
         }
     }
 
-    async fn endpoints(&self) -> Result<&Endpoints, SignInError> {
-        self.endpoints
-            .get_or_try_init(|| async {
-                let url = format!("{}/.well-known/openid-configuration", self.cfg.issuer.trim_end_matches('/'));
-                let body = self.rt.get(&url).await.map_err(|e| SignInError::Provider(format!("{url}: {e}")))?;
-                let e: Endpoints =
-                    serde_json::from_slice(&body).map_err(|e| SignInError::Provider(format!("{url}: {e}")))?;
-                if e.issuer != self.cfg.issuer {
-                    return Err(SignInError::Provider(format!("{url} names another issuer, {}", e.issuer)));
-                }
-                Ok(e)
-            })
-            .await
+    fn rt(&self) -> &TokioRuntime {
+        &self.provider.rt
+    }
+
+    /// How long a session lasts at most.
+    pub fn lifetime(&self) -> Duration {
+        Duration::from_secs(self.cfg.session_hours.max(1) * 3600)
+    }
+
+    fn client(&self) -> Vec<(&str, &str)> {
+        let mut c = vec![("client_id", self.cfg.client_id.as_str())];
+        if let Some(s) = &self.cfg.client_secret {
+            c.push(("client_secret", s.as_str()));
+        }
+        c
     }
 
     /// Starts a sign-in: where to send the browser.
     pub async fn start(&self, return_to: &str) -> Result<String, SignInError> {
-        let e = self.endpoints().await?;
-        let (state, verifier, nonce) = (random(&self.rt, 24), random(&self.rt, 48), random(&self.rt, 24));
+        let e = self.provider.endpoints().await?;
+        let authorize = e
+            .authorization_endpoint
+            .as_deref()
+            .ok_or_else(|| SignInError::Provider("the discovery document names no authorization endpoint".into()))?;
+        let (state, verifier, nonce) = (random(self.rt(), 24), random(self.rt(), 48), random(self.rt(), 24));
         let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
         // Only paths on this console: never send a user elsewhere.
         let return_to = if return_to.starts_with('/') && !return_to.starts_with("//") { return_to } else { "/" };
@@ -289,8 +332,8 @@ impl Sessions {
         let q = |s: &str| url_encode(s);
         Ok(format!(
             "{}{}response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
-            e.authorization_endpoint,
-            if e.authorization_endpoint.contains('?') { '&' } else { '?' },
+            authorize,
+            if authorize.contains('?') { '&' } else { '?' },
             q(&self.cfg.client_id),
             q(&self.cfg.redirect_url),
             q(&self.cfg.scopes.join(" ")),
@@ -300,28 +343,25 @@ impl Sessions {
         ))
     }
 
-    /// Finishes a sign-in: the new session's id and where to go.
+    /// Finishes a sign-in: the new session's cookie and where to go.
     pub async fn finish(&self, code: &str, state: &str) -> Result<(String, String), SignInError> {
         let pending = self.pending.lock().expect("pending lock").remove(state).ok_or(SignInError::Unknown)?;
         if pending.started.elapsed() >= LOGIN_TIMEOUT {
             return Err(SignInError::Unknown);
         }
-        let e = self.endpoints().await?;
+        let issuer = self.provider.endpoints().await?.issuer.clone();
         let mut form = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", self.cfg.redirect_url.as_str()),
-            ("client_id", self.cfg.client_id.as_str()),
             ("code_verifier", pending.verifier.as_str()),
         ];
-        if let Some(s) = &self.cfg.client_secret {
-            form.push(("client_secret", s.as_str()));
-        }
-        let tokens = self.exchange(&e.token_endpoint, &form).await?;
+        form.extend(self.client());
+        let tokens = self.provider.token(&form).await?;
         let id =
             tokens.id_token.as_deref().and_then(claims).ok_or_else(|| SignInError::Refused("no ID token".into()))?;
         let claim = |k: &str| id.get(k).and_then(|v| v.as_str());
-        if claim("iss") != Some(e.issuer.as_str()) {
+        if claim("iss") != Some(issuer.as_str()) {
             return Err(SignInError::Refused("the ID token is from another issuer".into()));
         }
         let aud_ok = match id.get("aud") {
@@ -338,76 +378,215 @@ impl Sessions {
             .to_owned();
         let display_name =
             ["name", "preferred_username", "email"].iter().find_map(|k| claim(k)).unwrap_or(&principal).to_owned();
-        let sid = random(&self.rt, 32);
-        let session = Session {
+        let lifetime = tokens.lifetime();
+        let sealed = Sealed {
+            sid: random(self.rt(), 18),
             principal,
             display_name,
-            access_token: Secret(tokens.access_token),
-            refresh_token: tokens.refresh_token.map(Secret),
-            expires: Instant::now() + Duration::from_secs(tokens.expires_in.unwrap_or(300)),
+            // Without a refresh token the session keeps the access token
+            // and ends with it.
+            access_token: tokens.refresh_token.is_none().then(|| tokens.access_token.clone()),
+            access_expires_ms: tokens.refresh_token.is_none().then(|| now_ms() + lifetime.as_millis() as u64),
+            refresh_token: tokens.refresh_token,
+            expires_ms: now_ms() + self.lifetime().as_millis() as u64,
         };
-        self.sessions.lock().expect("sessions lock").insert(sid.clone(), session);
-        Ok((sid, pending.return_to))
+        let cookie = self.key.seal(self.rt(), &sealed);
+        if cookie.len() > 3800 {
+            tracing::warn!(
+                bytes = cookie.len(),
+                "the session cookie is near the 4 KiB browsers keep; tokens this long may be dropped"
+            );
+        }
+        let live = Live {
+            sid: sealed.sid,
+            principal: sealed.principal,
+            display_name: sealed.display_name,
+            access_token: Secret(tokens.access_token),
+            expires: Instant::now() + lifetime,
+            cookie: cookie.clone(),
+        };
+        self.remember(&[&cookie], live);
+        Ok((cookie, pending.return_to))
     }
 
-    async fn exchange(&self, url: &str, form: &[(&str, &str)]) -> Result<Tokens, SignInError> {
-        let body = self.rt.post_form(url, form).await.map_err(|e| SignInError::Refused(format!("{url}: {e}")))?;
-        serde_json::from_slice(&body).map_err(|e| SignInError::Provider(format!("{url}: {e}")))
+    fn remember(&self, cookies: &[&str], live: Live) {
+        let mut all = self.live.lock().expect("live lock");
+        let now = Instant::now();
+        all.retain(|_, l| l.expires > now);
+        for c in cookies {
+            all.insert(hash(c), live.clone());
+        }
     }
 
-    /// The identity behind session `sid`, renewing its token when it is
-    /// about to expire; `None` if the user must sign in again.
-    pub async fn identity(&self, sid: &str) -> Option<Identity> {
-        let s = self.sessions.lock().expect("sessions lock").get(sid).cloned()?;
-        let s = if s.expires.saturating_duration_since(Instant::now()) > RENEW_BEFORE {
-            s
-        } else {
-            let renewed = self.renew(&s).await;
-            let mut all = self.sessions.lock().expect("sessions lock");
-            match renewed {
-                Some(r) => {
-                    all.insert(sid.to_owned(), r.clone());
-                    r
+    fn cached(&self, cookie: &str) -> Option<Live> {
+        self.live.lock().expect("live lock").get(&hash(cookie)).cloned()
+    }
+
+    /// The session in `cookie`, renewing its access token when it is about
+    /// to expire; `None` if the user must sign in again.
+    pub async fn resolve(&self, cookie: &str) -> Option<Resolved> {
+        let sealed = self.key.open(cookie)?;
+        if sealed.expires_ms <= now_ms() || self.ended.lock().expect("ended lock").contains_key(&sealed.sid) {
+            return None;
+        }
+        let fresh = |l: &Live| l.expires.saturating_duration_since(Instant::now()) > RENEW_BEFORE;
+        let answer = |l: Live| {
+            let reissue = (l.cookie != cookie).then(|| l.cookie.clone());
+            Some(Resolved { identity: l.identity(), reissue })
+        };
+        if let Some(l) = self.cached(cookie).filter(fresh) {
+            return answer(l);
+        }
+        let _turn = self.renewing.lock().await;
+        let known = self.cached(cookie);
+        if let Some(l) = known.clone().filter(fresh) {
+            return answer(l);
+        }
+        // The newest state of this session: a rotated cookie supersedes
+        // the one the browser sent.
+        let newest = known.as_ref().map_or(cookie, |l| l.cookie.as_str());
+        let current = self.key.open(newest)?;
+        let live = match &current.refresh_token {
+            Some(refresh) => {
+                let mut form = vec![("grant_type", "refresh_token"), ("refresh_token", refresh.as_str())];
+                form.extend(self.client());
+                let t = self.provider.token(&form).await.ok()?;
+                let lifetime = t.lifetime();
+                let rotated = t.refresh_token.filter(|r| r != refresh);
+                let next = match rotated {
+                    Some(r) => self.key.seal(self.rt(), &Sealed { refresh_token: Some(r), ..current.clone() }),
+                    None => newest.to_owned(),
+                };
+                Live {
+                    sid: current.sid.clone(),
+                    principal: current.principal.clone(),
+                    display_name: current.display_name.clone(),
+                    access_token: Secret(t.access_token),
+                    expires: Instant::now() + lifetime,
+                    cookie: next,
                 }
-                None => {
-                    all.remove(sid);
+            }
+            None => {
+                let (token, until) = (current.access_token.clone()?, current.access_expires_ms?);
+                if until <= now_ms() {
                     return None;
+                }
+                Live {
+                    sid: current.sid.clone(),
+                    principal: current.principal.clone(),
+                    display_name: current.display_name.clone(),
+                    access_token: Secret(token),
+                    expires: instant_at(until),
+                    cookie: newest.to_owned(),
                 }
             }
         };
-        Some(Identity {
-            principal: s.principal,
-            display_name: s.display_name,
-            login: Login::Token { token: s.access_token, expires: s.expires },
-        })
+        self.remember(&[cookie, newest, &live.cookie.clone()], live.clone());
+        answer(live)
     }
 
-    async fn renew(&self, s: &Session) -> Option<Session> {
-        let refresh = s.refresh_token.as_ref()?;
-        let e = self.endpoints().await.ok()?;
-        let mut form = vec![
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh.expose()),
-            ("client_id", self.cfg.client_id.as_str()),
-        ];
-        if let Some(sec) = &self.cfg.client_secret {
-            form.push(("client_secret", sec.as_str()));
+    /// Ends the session in `cookie`: here, and its refresh token at the
+    /// identity provider. Returns where to send the browser to sign out
+    /// there too, if the provider says.
+    pub async fn end(&self, cookie: &str) -> Option<String> {
+        let sealed = self.key.open(cookie)?;
+        let newest = self.cached(cookie).and_then(|l| self.key.open(&l.cookie)).unwrap_or(sealed.clone());
+        {
+            let mut ended = self.ended.lock().expect("ended lock");
+            let now = now_ms();
+            ended.retain(|_, until| *until > now);
+            ended.insert(sealed.sid.clone(), sealed.expires_ms);
         }
-        let t = self.exchange(&e.token_endpoint, &form).await.ok()?;
-        Some(Session {
-            access_token: Secret(t.access_token),
-            refresh_token: t.refresh_token.map(Secret).or_else(|| s.refresh_token.clone()),
-            expires: Instant::now() + Duration::from_secs(t.expires_in.unwrap_or(300)),
-            ..s.clone()
-        })
+        self.live.lock().expect("live lock").retain(|_, l| l.sid != sealed.sid);
+        if let Some(r) = &newest.refresh_token {
+            self.provider.revoke(r, &self.client()).await;
+        }
+        self.provider.endpoints().await.ok()?.end_session_endpoint.clone()
+    }
+}
+
+/// How a service signs in: the OAuth client credentials grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceCredentials {
+    /// The issuer the brokers trust.
+    pub issuer: String,
+    /// The service's client id.
+    pub client_id: String,
+    /// Its secret.
+    pub client_secret: Secret,
+    /// Scopes to ask for, if the issuer wants any.
+    pub scope: Option<String>,
+}
+
+/// A service signed in with client credentials, its token renewed before
+/// it expires: the metrics sampler.
+#[derive(Debug)]
+pub struct ServiceLogin {
+    principal: String,
+    creds: ServiceCredentials,
+    provider: Provider,
+    token: tokio::sync::Mutex<Option<(Secret, Instant)>>,
+}
+
+impl ServiceLogin {
+    /// `principal` signing in with `creds` through `rt`.
+    pub fn new(principal: &str, creds: ServiceCredentials, rt: TokioRuntime) -> ServiceLogin {
+        ServiceLogin {
+            principal: principal.into(),
+            provider: Provider::new(&creds.issuer, rt),
+            creds,
+            token: tokio::sync::Mutex::new(None),
+        }
     }
 
-    /// Ends session `sid`; where to send the browser to sign out at the
-    /// identity provider too, if it says.
-    pub async fn end(&self, sid: &str) -> Option<String> {
-        self.sessions.lock().expect("sessions lock").remove(sid);
-        let e = self.endpoints().await.ok()?;
-        e.end_session_endpoint.clone()
+    /// The service's identity with a token valid for a while yet.
+    pub async fn identity(&self) -> Result<Identity, SignInError> {
+        let mut held = self.token.lock().await;
+        let fresh = |(_, e): &(Secret, Instant)| e.saturating_duration_since(Instant::now()) > RENEW_BEFORE;
+        if !held.as_ref().is_some_and(fresh) {
+            let mut form = vec![
+                ("grant_type", "client_credentials"),
+                ("client_id", self.creds.client_id.as_str()),
+                ("client_secret", self.creds.client_secret.expose()),
+            ];
+            if let Some(s) = &self.creds.scope {
+                form.push(("scope", s.as_str()));
+            }
+            let t = self.provider.token(&form).await?;
+            if let Some(sub) =
+                claims(&t.access_token).and_then(|c| c.get("sub").and_then(|s| s.as_str()).map(String::from))
+            {
+                if sub != self.principal {
+                    tracing::warn!(%sub, principal = %self.principal, "the sampler's token names another subject than metrics.principal");
+                }
+            }
+            *held = Some((Secret(t.access_token.clone()), Instant::now() + t.lifetime()));
+        }
+        let (token, expires) = held.clone().expect("a token");
+        Ok(Identity {
+            principal: self.principal.clone(),
+            display_name: "metrics sampler".into(),
+            login: Login::Token { token, expires },
+        })
+    }
+}
+
+/// How the metrics sampler signs in.
+#[derive(Debug, Clone)]
+pub enum SamplerLogin {
+    /// With nothing, or a password.
+    Fixed(Identity),
+    /// With client credentials.
+    Service(std::sync::Arc<ServiceLogin>),
+}
+
+impl SamplerLogin {
+    /// The identity to sample with now.
+    pub async fn identity(&self) -> Result<Identity, SignInError> {
+        match self {
+            SamplerLogin::Fixed(i) => Ok(i.clone()),
+            SamplerLogin::Service(s) => s.identity().await,
+        }
     }
 }
 
@@ -424,8 +603,8 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
-/// The session id in a request's cookies.
-pub fn session_id(headers: &axum::http::HeaderMap) -> Option<String> {
+/// The session cookie's value in a request's headers.
+pub fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
     headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).find_map(|c| {
         c.split(';')
             .map(str::trim)
@@ -443,11 +622,8 @@ impl FromRequestParts<AppState> for Identity {
                 display_name: user.clone(),
                 login: password.clone().map_or(Login::None, |p| Login::Password(Secret(p))),
             }),
-            AuthConfig::Oidc(_) => {
-                let sessions = state.sessions.as_ref().ok_or(ApiError::Unauthorized)?;
-                let sid = session_id(&parts.headers).ok_or(ApiError::Unauthorized)?;
-                sessions.identity(&sid).await.ok_or(ApiError::Unauthorized)
-            }
+            // Found by [`session_layer`] before the handler runs.
+            AuthConfig::Oidc(_) => parts.extensions.get::<Identity>().cloned().ok_or(ApiError::Unauthorized),
         }
     }
 }
@@ -530,9 +706,9 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackPar
     }
     let (Some(code), Some(st)) = (q.code, q.state) else { return sign_in_failed(&SignInError::Unknown) };
     match sessions.finish(&code, &st).await {
-        Ok((sid, to)) => {
+        Ok((value, to)) => {
             let mut r = see_other(&to);
-            if let Some(c) = cookie(&state, &sid, None) {
+            if let Some(c) = cookie(&state, &value, Some(sessions.lifetime().as_secs())) {
                 r.headers_mut().insert(header::SET_COOKIE, c);
             }
             r
@@ -545,8 +721,8 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackPar
 /// too if it offers that.
 pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let mut to = "/".to_owned();
-    if let (Some(sessions), Some(sid)) = (&state.sessions, session_id(&headers)) {
-        if let (Some(end), AuthConfig::Oidc(o)) = (sessions.end(&sid).await, &*state.auth) {
+    if let (Some(sessions), Some(value)) = (&state.sessions, session_cookie(&headers)) {
+        if let (Some(end), AuthConfig::Oidc(o)) = (sessions.end(&value).await, &*state.auth) {
             let back = o.redirect_url.trim_end_matches("/auth/callback");
             to = format!(
                 "{end}{}client_id={}&post_logout_redirect_uri={}",
@@ -561,4 +737,70 @@ pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMa
         r.headers_mut().insert(header::SET_COOKIE, c);
     }
     r
+}
+
+/// Finds the session in the cookie for the handlers behind it, and passes
+/// a rotated cookie back to the browser; a cookie that no longer holds a
+/// session is cleared.
+pub async fn session_layer(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let (Some(sessions), Some(value)) = (&state.sessions, session_cookie(req.headers())) else {
+        return next.run(req).await;
+    };
+    let resolved = sessions.resolve(&value).await;
+    let set = match &resolved {
+        Some(r) => r.reissue.as_deref().and_then(|v| cookie(&state, v, Some(sessions.lifetime().as_secs()))),
+        None => cookie(&state, "", Some(0)),
+    };
+    if let Some(r) = resolved {
+        req.extensions_mut().insert(r.identity);
+    }
+    let mut res = next.run(req).await;
+    if let Some(c) = set {
+        res.headers_mut().append(header::SET_COOKIE, c);
+    }
+    res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login() -> OidcLogin {
+        OidcLogin {
+            issuer: "http://127.0.0.1:9/".into(),
+            client_id: "c".into(),
+            client_secret: None,
+            redirect_url: "http://127.0.0.1:8080/auth/callback".into(),
+            scopes: default_scopes(),
+            principal_claim: default_principal_claim(),
+            ca_file: None,
+            session_key_file: None,
+            session_hours: 12,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_past_its_end_is_over_whatever_it_holds() {
+        let rt = TokioRuntime::new(std::env::temp_dir());
+        let key = SessionKey::from_bytes(&[3; 32]);
+        let sealed = |expires_ms| Sealed {
+            sid: "s".into(),
+            principal: "bob".into(),
+            display_name: "Bob".into(),
+            refresh_token: None,
+            access_token: Some("token".into()),
+            access_expires_ms: Some(now_ms() + 3_600_000),
+            expires_ms,
+        };
+        let sessions = Sessions::new(login(), rt.clone(), SessionKey::from_bytes(&[3; 32]));
+        let alive = key.seal(&rt, &sealed(now_ms() + 60_000));
+        let r = sessions.resolve(&alive).await.expect("an access token valid for an hour");
+        assert_eq!(r.identity.principal, "bob");
+        let over = key.seal(&rt, &sealed(now_ms() - 1));
+        assert!(sessions.resolve(&over).await.is_none(), "the session's end comes first");
+    }
 }

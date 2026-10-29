@@ -21,7 +21,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lotse_client::{Client, ClientConfig, ClientError, Credentials, DEFAULT_TENANT};
 use lotse_proto::{
-    DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind, role, subject_kind,
+    DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind, principal_kind,
+    role, subject_kind,
 };
 use lotse_record::{Batch, Control, ControlType};
 use lotse_rt_tokio::TokioRuntime;
@@ -31,6 +32,7 @@ use tokio::time::Instant;
 use super::Cluster;
 use crate::auth::{Identity, Login};
 use crate::error::{ApiError, ApiResult};
+use crate::metrics::{ChartSample, Visibility};
 use crate::model::*;
 use crate::time::rfc3339;
 
@@ -40,6 +42,8 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(5);
 const HISTORY: Duration = Duration::from_secs(300);
 /// A sample this young is used again instead of asking the nodes.
 const FRESH: Duration = Duration::from_secs(1);
+/// Whether a principal is a cluster admin is asked again after this long.
+const ADMIN_FRESH: Duration = Duration::from_secs(30);
 /// A seat unused this long is closed.
 pub const SEAT_IDLE: Duration = Duration::from_secs(900);
 
@@ -168,6 +172,8 @@ struct Seat {
     /// One sample at a time: concurrent callers wait and share it.
     sampling: tokio::sync::Mutex<()>,
     used: Mutex<Instant>,
+    /// Whether the principal is a cluster admin, and since when known.
+    admin: Mutex<Option<(Instant, bool)>>,
 }
 
 impl std::fmt::Debug for Seat {
@@ -207,6 +213,20 @@ impl Seat {
         };
         let base = self.samples().iter().rev().find(|b| sample.at - b.at >= RATE_WINDOW).cloned();
         Ok((sample, base))
+    }
+
+    /// Whether the principal holds the cluster-admin role (anonymous
+    /// clients, on a cluster without authentication, may do everything).
+    async fn is_cluster_admin(&self) -> ApiResult<bool> {
+        if let Some((at, known)) = *lock(&self.admin) {
+            if at.elapsed() < ADMIN_FRESH {
+                return Ok(known);
+            }
+        }
+        let me = self.client.who_am_i().await.map_err(failed)?;
+        let known = me.kind == principal_kind::ANONYMOUS || me.bindings.iter().any(|b| b.role == role::CLUSTER_ADMIN);
+        *lock(&self.admin) = Some((Instant::now(), known));
+        Ok(known)
     }
 }
 
@@ -283,6 +303,7 @@ impl NativeCluster {
                 samples: Mutex::new(VecDeque::new()),
                 sampling: tokio::sync::Mutex::new(()),
                 used: Mutex::new(now),
+                admin: Mutex::new(None),
             })
         });
         *lock(&seat.used) = now;
@@ -853,6 +874,30 @@ impl Cluster for NativeCluster {
             })
             .collect();
         Ok(TenantsView { tenants: rows, bindings: per_tenant })
+    }
+
+    async fn chart_sample(&self, who: &Identity) -> ApiResult<ChartSample> {
+        let (s, base) = self.seat(who).window().await?;
+        let w = Window { now: &s, base: base.as_deref() };
+        let resources = s
+            .resources(kind::STREAM)
+            .chain(s.resources(kind::QUEUE))
+            .map(|r| {
+                let id = r.resource_id;
+                let per = |f: fn(&lotse_proto::PartitionMetrics) -> u64| {
+                    w.rate(move |n| n.partitions.iter().filter(|p| p.resource_id == id).map(f).sum())
+                };
+                (id, [per(|p| p.produce_bytes), per(|p| p.fetch_bytes), per(|p| p.produce_records)])
+            })
+            .collect();
+        Ok(ChartSample { resources, commit_p99_ms: w.commit_p99_ms() })
+    }
+
+    async fn visibility(&self, who: &Identity) -> ApiResult<Visibility> {
+        let seat = self.seat(who);
+        let (s, _) = seat.window().await?;
+        let resources = s.resources(kind::STREAM).chain(s.resources(kind::QUEUE)).map(|r| r.resource_id).collect();
+        Ok(Visibility { resources, cluster_admin: seat.is_cluster_admin().await? })
     }
 
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {

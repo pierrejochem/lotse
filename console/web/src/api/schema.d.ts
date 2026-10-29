@@ -28,7 +28,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chart history from the console's in-memory buffer (at most 180 points). */
+        /** Chart history from the console's in-memory buffer (at most 180 points):
+         *     the sum over the streams and queues the caller may see; the commit
+         *     latency only for cluster admins. */
         get: operations["metrics"];
         put?: never;
         post?: never;
@@ -1107,6 +1109,14 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

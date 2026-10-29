@@ -2043,7 +2043,7 @@ pub struct PartitionMetrics {
     pub produce_bytes: u64,
     /// Acknowledged produce records, likewise.
     pub produce_records: u64,
-    /// Bytes fetched, likewise.
+    /// Bytes fetched, or for a queue delivered, likewise.
     pub fetch_bytes: u64,
     /// On the leader: the last offset each replica holds (plus one).
     pub replicas: Vec<ReplicaProgress>,

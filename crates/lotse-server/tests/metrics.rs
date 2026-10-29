@@ -101,8 +101,11 @@ async fn run(rt: SimRuntime) {
         records += n as u64;
         client.produce("s", 0, b).await.expect("a healthy cluster takes produces");
     }
+    let mut smallest_job = u64::MAX;
     for i in 0..10 {
-        client.produce("q", 0, batch(&format!("job{i}"), 1)).await.expect("and queue messages");
+        let b = batch(&format!("job{i}"), 1);
+        smallest_job = smallest_job.min(b.len() as u64);
+        client.produce("q", 0, b).await.expect("and queue messages");
     }
     let fetched = client.fetch("s", 0, 0, TICK * 10).await.expect("reads").records.len() as u64;
 
@@ -141,6 +144,8 @@ async fn run(rt: SimRuntime) {
     assert_eq!(sum(&|p| p.produce_records, STREAM), records, "produce records");
     assert_eq!(sum(&|p| p.produce_records, QUEUE), 10, "queue messages");
     assert!(sum(&|p| p.fetch_bytes, STREAM) >= fetched, "fetch bytes");
+    // Each message taken came in a delivery of its batch.
+    assert!(sum(&|p| p.fetch_bytes, QUEUE) >= taken.len() as u64 * smallest_job, "delivered bytes");
     let latencies: u64 = all.iter().flat_map(|m| &m.commit_latency).sum();
     assert_eq!(latencies, 12 + 10, "every acknowledged produce has a latency");
 

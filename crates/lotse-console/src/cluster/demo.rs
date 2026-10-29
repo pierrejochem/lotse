@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use super::Cluster;
 use crate::auth::Identity;
 use crate::error::{ApiError, ApiResult};
-use crate::metrics::MetricsStore;
+use crate::metrics::{ChartSample, MetricsStore, Visibility};
 use crate::model::*;
 use crate::time::{now_ms, rfc3339};
 
@@ -77,15 +77,7 @@ impl DemoCluster {
             let ago = i * step_s;
             let s = -(ago as f64);
             let t = now - ago * 1000;
-            let in_rate = in_rate_at(s);
-            for (name, v) in [
-                ("in_bytes_per_sec", in_rate),
-                ("out_bytes_per_sec", in_rate * 2.73),
-                ("records_per_sec", in_rate / 238.0),
-                ("commit_p99_ms", 7.8 * wave(s, 900.0, 0.08)),
-            ] {
-                store.record(&self.id, name, Point { t, v });
-            }
+            store.record(&self.id, t, &sample_at(s));
         }
     }
 
@@ -795,6 +787,14 @@ impl Cluster for DemoCluster {
         })
     }
 
+    async fn chart_sample(&self, _who: &Identity) -> ApiResult<ChartSample> {
+        Ok(sample_at(self.secs()))
+    }
+
+    async fn visibility(&self, _who: &Identity) -> ApiResult<Visibility> {
+        Ok(Visibility { resources: [DEMO_RESOURCE].into(), cluster_admin: true })
+    }
+
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         self.lock().paused = true;
         Ok(())
@@ -814,6 +814,18 @@ fn wave(t: f64, period: f64, amp: f64) -> f64 {
 
 /// Produce rate `s` seconds after start (negative: before), with a daily
 /// swing so a 24 h chart has a shape.
+/// The demo's history has one resource that stands for all of its traffic,
+/// and everyone may see it.
+const DEMO_RESOURCE: u64 = 1;
+
+fn sample_at(s: f64) -> ChartSample {
+    let in_rate = in_rate_at(s);
+    ChartSample {
+        resources: [(DEMO_RESOURCE, [Some(in_rate), Some(in_rate * 2.73), Some(in_rate / 238.0)])].into(),
+        commit_p99_ms: Some(7.8 * wave(s, 900.0, 0.08)),
+    }
+}
+
 fn in_rate_at(s: f64) -> f64 {
     48.2 * MIB * wave(s, 1_800.0, 0.05) * wave(s, 420.0, 0.02) * wave(s, 86_400.0, 0.22)
 }

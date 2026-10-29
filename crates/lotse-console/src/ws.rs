@@ -23,7 +23,7 @@ pub async fn upgrade(State(st): State<AppState>, who: Identity, headers: HeaderM
     if !same_origin(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin WebSocket refused").into_response();
     }
-    let sid = crate::auth::session_id(&headers);
+    let sid = crate::auth::session_cookie(&headers);
     ws.on_upgrade(move |socket| session(st, who, sid, socket))
 }
 
@@ -57,7 +57,7 @@ async fn session(st: AppState, who: Identity, sid: Option<String>, socket: WebSo
             _ = recheck.tick() => {
                 // A socket outlives neither a sign-out nor an expired session.
                 if let (Some(sessions), Some(sid)) = (&st.sessions, &sid) {
-                    if sessions.identity(sid).await.is_none() {
+                    if sessions.resolve(sid).await.is_none() {
                         break;
                     }
                 }

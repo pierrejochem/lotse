@@ -111,7 +111,7 @@ async fn main() {
 
     let store = Arc::new(MetricsStore::new(Duration::from_secs(3600), Duration::from_secs(10)));
     let clusters: Vec<Arc<dyn Cluster>> = vec![Arc::new(NativeCluster::new("local", bootstrap))];
-    let who = lotse_console::auth::Identity::anonymous("console-metrics");
+    let who = lotse_console::auth::SamplerLogin::Fixed(lotse_console::auth::Identity::anonymous("console-metrics"));
     tokio::spawn(run_sampler(clusters.clone(), Arc::clone(&store), who, Duration::from_secs(10)));
     let state = AppState::new(
         clusters,

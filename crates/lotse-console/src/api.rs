@@ -18,7 +18,7 @@ use crate::auth::Identity;
 use crate::cli;
 use crate::cluster::Cluster;
 use crate::error::{ApiError, ApiResult};
-use crate::metrics::SERIES;
+use crate::metrics::{QueryError, SERIES};
 use crate::model::*;
 
 /// The OpenAPI document.
@@ -248,21 +248,28 @@ pub struct MetricsParams {
     pub range: Range,
 }
 
-/// Chart history from the console's in-memory buffer (at most 180 points).
+/// Chart history from the console's in-memory buffer (at most 180 points):
+/// the sum over the streams and queues the caller may see; the commit
+/// latency only for cluster admins.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/metrics",
     params(("cluster" = String, Path, description = "Cluster ID"), MetricsParams),
-    responses((status = 200, body = Series), (status = 400, body = ErrorBody)))]
+    responses((status = 200, body = Series), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
 pub async fn metrics(
     State(st): State<AppState>,
-    _who: Identity,
+    who: Identity,
     Path(id): Path<String>,
     Query(q): Query<MetricsParams>,
 ) -> ApiResult<Json<Series>> {
-    cluster(&st, &id)?;
+    let c = cluster(&st, &id)?;
     let (name, unit) = SERIES
         .iter()
         .find(|(n, _)| *n == q.series)
         .ok_or_else(|| ApiError::BadRequest(format!("Unknown series \"{}\".", q.series)))?;
-    let points = st.metrics.query(&id, name, q.range.duration(), 180);
+    // The resources the user may see now, as the cluster tells them.
+    let vis = c.visibility(&who).await?;
+    let points = st.metrics.query(&id, name, q.range.duration(), 180, &vis).map_err(|e| match e {
+        QueryError::Unknown(_) => ApiError::BadRequest(e.to_string()),
+        QueryError::ClusterWide(_) => ApiError::Forbidden(e.to_string()),
+    })?;
     Ok(Json(Series { name: (*name).into(), unit: (*unit).into(), points }))
 }
