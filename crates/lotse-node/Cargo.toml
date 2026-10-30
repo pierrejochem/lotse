@@ -1,0 +1,34 @@
+[package]
+name = "lotse-node"
+description = "The lotse binary: runs one node of a cluster from a cluster file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lotse"
+path = "src/main.rs"
+
+[dependencies]
+lotse-server.workspace = true
+lotse-rt-tokio.workspace = true
+lotse-log.workspace = true
+lotse-record.workspace = true
+lotse-rt.workspace = true
+bytes.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+
+[dev-dependencies]
+lotse-client.workspace = true
+
+[lints]
+workspace = true

@@ -28,9 +28,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
-toml = "0.8"
+toml.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true
 utoipa = "5"
 
 [dev-dependencies]

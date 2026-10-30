@@ -4,7 +4,7 @@
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
-Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues). What comes next is open: a node binary is a candidate.
+Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues). The `lotse` binary runs a node from a cluster file.
 
 ## Documentation
 
@@ -34,7 +34,52 @@ Status: foundation. The runtime seam with its Tokio implementation, the record f
 | `lotse-server` | Broker node. `Replica`: one Raft group persisted on its own log (atomic hard state and snapshot files, fsync before any acknowledgement, recovery on open). `Node`: many replicas behind one transport, all messages for a peer bundled into one frame per round (`wire`), and clients served over the native protocol: produce answered once committed and deduplicated per producer, fetch cut at the high watermark (read_committed: the last stable offset, with aborted ranges), streams, queues, exchanges and bindings created, changed and deleted at runtime through a metadata group, each new group placed on as many nodes as asked and each deleted one closed and removed from every replica, producer ids, transactions and consumer groups from a coordinator group that writes markers through the protocol, and queues: the leader pushes unsettled messages within each subscription's credit, acks are batches in the queue's log, and whatever is not acknowledged goes out again after a nack, a disconnect, a leader change or the ack timeout; every node counts its traffic, produces, fetches, deliveries, acks and commit latencies and answers `DescribeMetrics` for itself |
 | `lotse-client` | Rust client on `lotse-rt`: logs in with SCRAM or a bearer token (or a client certificate) and renews its sessions; metadata, produce and fetch, following leader changes; idempotent by default, so it retries unknown outcomes without duplicates; transactions across partitions; read_committed filtering; consumer groups that follow cooperative rebalances and commit offsets plainly or within a transaction; admin calls to create, describe, change and delete streams, queues and exchanges, to bind queues and to set and remove users; queue consumers that refill credit and subscribe again on their own; publishing through exchanges, routed in the client, per queue or atomically in a transaction |
 | `lotse-sim` | Deterministic simulation: seeded executor with virtual time, a disk that loses unsynced data and tears writes on crash, a network with latency, partitions and broken connections |
+| `lotse-node` | The `lotse` binary: reads the cluster file, makes the CA and the node and client certificates, runs one node until Ctrl-C or SIGTERM |
 | `lotse-console` | Management console for a dedicated node: serves the web app, REST/JSON (OpenAPI) and one WebSocket for live updates, against real clusters (through `lotse-client`) or a demo cluster |
+
+## Running a cluster
+
+`lotse` runs one node from a cluster file that is the same on every node (ADR 0047). Streams, queues and exchanges are not in the file; clients create them.
+
+```toml
+# cluster.toml
+[cluster]
+data_dir = "/var/lib/lotse"
+
+[[node]]
+id = 1
+peer = "10.0.0.1:7000"     # where the other nodes reach it
+client = "10.0.0.1:9000"   # where clients reach it
+[[node]]
+id = 2
+peer = "10.0.0.2:7000"
+client = "10.0.0.2:9000"
+[[node]]
+id = 3
+peer = "10.0.0.3:7000"
+client = "10.0.0.3:9000"
+
+[tls]
+ca = "/etc/lotse/ca.pem"
+cert = "/etc/lotse/node-{id}.pem"
+key = "/etc/lotse/node-{id}.key"
+
+[retention]
+ms = 604800000             # 7 days, the default; -1 keeps everything
+
+[auth]
+admins = ["alice"]         # signs in with the certificate below
+```
+
+```sh
+cargo build --release -p lotse-node                               # target/release/lotse
+lotse check --config cluster.toml                                 # what the file describes
+lotse certs --config cluster.toml                                 # a CA and a certificate per node, at the [tls] paths
+lotse certs --config cluster.toml --client alice --out ./alice    # the first admin's client certificate
+lotse run --config cluster.toml --node 1                          # on each machine, its own id
+```
+
+`lotse certs` keeps what exists, so it can run again after a node is added to the file; keep `ca.key` off the nodes. Larger setups put certificates from their own CA at the same paths. Clients authenticate with a certificate, SCRAM-SHA-512 (users set at runtime) or OAUTHBEARER (`[auth.oidc]`); `auth.required = false` with `[tls] plaintext_on_loopback = true` runs a cluster on one machine without either. `LOTSE_LOG` sets the log filter; the node stops cleanly on Ctrl-C or SIGTERM.
 
 ## Management console
 
@@ -99,5 +144,6 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 - Queues: exchanges are routed by the client (no `Publish` wire key), with bindings it may have cached for up to `metadata_max_age`, one message per publish; no dead-letter queues, TTL, delay, priorities, single active consumer or transactional acks. Delivery counts are written only on requeue and ack timeout, so after a failover they may start over. Settled offsets stay in the ack index as ranges even below the log start, which retention moves up to the ack floor.
 - Consumer groups: one coordinator group serves all groups and transactional ids; no `ListOffsets` (a partition without a committed offset is read from its log start), no static membership or regex subscriptions; every heartbeat that changes a group writes the whole group.
 - Retention: whole segments only, so a partition keeps up to a segment more than its limits; age goes by the timestamps producers write; streams from the node configuration take the node's defaults and cannot be changed at runtime; no compaction.
+- The binary: every node is a voter of the metadata and coordinator groups, and nodes cannot be added to a running cluster; nothing checks that every node has the same cluster file; certificates from `lotse certs` do not expire and are read once at start.
 - Metadata: only a queue's ack timeout and a stream's retention can change; no conditional delete (`if_empty`), no authorisation; tombstones of deleted resources are kept for ever; right after a change some brokers do not know it yet.
 - Console: chart history (about 10 KiB per stream or queue for 24 h) covers only what the sampler may see. The oldest record's age, open transactions per stream, bytes in flight per consumer, zones and disk limits are not reported. Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

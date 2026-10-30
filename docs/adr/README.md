@@ -51,5 +51,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0044 | [Sign-ins in progress in a sealed cookie](0044-sign-ins-in-progress-in-a-sealed-cookie.md) | Accepted |
 | 0045 | [Chart history coarser with age](0045-chart-history-coarser-with-age.md) | Accepted |
 | 0046 | [Retention: trimming the log at snapshot points](0046-retention.md) | Accepted |
+| 0047 | [The `lotse` binary: one cluster file, resources at runtime](0047-the-lotse-binary.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
