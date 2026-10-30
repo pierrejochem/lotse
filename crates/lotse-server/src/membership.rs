@@ -65,6 +65,38 @@ pub(crate) fn next_step(current: &Membership, target: &BTreeSet<NodeId>, learner
     Step::Settled
 }
 
+/// What a group's leader does next, given the membership it has, the
+/// voters and learners its view of the metadata group wants, and the
+/// metadata index of that decision (`tag`, 0 if never changed). A group
+/// that already carries out a newer decision than this view knows waits
+/// for the view to catch up rather than undo it; one that already has what
+/// is wanted under an older decision records the newer one, so that no
+/// stale view undoes it either.
+pub(crate) fn leader_step(
+    current: &Membership,
+    target: &BTreeSet<NodeId>,
+    learners: &BTreeSet<NodeId>,
+    tag: u64,
+) -> Step {
+    if current.tag > tag {
+        return Step::Wait;
+    }
+    match next_step(current, target, learners) {
+        Step::Settled if current.tag < tag => {
+            Step::Propose { voters: current.voters.clone(), learners: current.learners.clone() }
+        }
+        step => step,
+    }
+}
+
+/// Whether this node (`me`) may close and delete its replica of `g`: only
+/// once it is no voter of what the metadata group wants and the group's
+/// leader reported those voters in place. Before that the replica may still
+/// be one of the copies the group's commits rest on.
+pub(crate) fn replica_may_go(state: &MetadataState, g: GroupId, voters: &[NodeId], me: NodeId) -> bool {
+    !voters.contains(&me) && state.is_settled(g, voters)
+}
+
 /// How many voters the metadata and coordinator groups should have with
 /// `nodes` active nodes: up to five, and odd where it can be.
 pub(crate) fn core_size(nodes: usize) -> usize {

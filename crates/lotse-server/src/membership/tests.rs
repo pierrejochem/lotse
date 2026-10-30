@@ -136,3 +136,55 @@ fn a_new_node_joins_the_core_groups_while_they_are_short_and_never_returns_to_a_
     });
     assert_eq!(to, Some(vec![1, 3, 5]), "node 2 left this group, so node 5 takes it: {next:?}");
 }
+
+#[test]
+fn a_leader_with_an_older_view_never_undoes_a_newer_change() {
+    let tagged = |voters: &[NodeId], tag| Membership { tag, ..m(voters, &[]) };
+    // The group carries out decision 9; this leader's view knows only 5,
+    // which wanted node 2 back.
+    assert_eq!(leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 2, 3]), &BTreeSet::new(), 5), Step::Wait);
+    // The same view, as new as the group: it goes ahead, tagging the change.
+    assert_eq!(
+        leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 3, 5]), &BTreeSet::new(), 9),
+        Step::Propose { voters: set(&[1, 3, 4]), learners: set(&[5]) }
+    );
+    // Already the wanted voters, under an older decision: record the newer.
+    assert_eq!(
+        leader_step(&tagged(&[1, 3, 4], 2), &set(&[1, 3, 4]), &BTreeSet::new(), 7),
+        Step::Propose { voters: set(&[1, 3, 4]), learners: set(&[]) }
+    );
+    assert_eq!(leader_step(&tagged(&[1, 3, 4], 7), &set(&[1, 3, 4]), &BTreeSet::new(), 7), Step::Settled);
+}
+
+#[test]
+fn a_replica_goes_only_after_its_group_settled_without_it() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    let voters = s.voters_of(g).unwrap().to_vec();
+    assert!(!replica_may_go(&s, g, &voters, 2), "node 2 may still be one of the copies commits rest on");
+    assert!(!replica_may_go(&s, g, &voters, 1), "a voter keeps its replica");
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
+    assert!(replica_may_go(&s, g, &voters, 2));
+    assert!(!replica_may_go(&s, g, &voters, 3));
+}
+
+#[test]
+fn a_node_that_left_a_group_is_not_chosen_for_it_even_when_least_loaded() {
+    // Node 5 left the group and carries nothing; node 6 carries a group.
+    let mut s = with_stream(&[&[1, 2, 5], &[6, 7, 8]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 2, 3] }]);
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 2, 3] }]);
+    apply_all(&mut s, &mut at, &[Change::DrainNode { id: 3 }]);
+    let next = plan(&s, &[], &[], &[1, 2, 5, 6, 7, 8]);
+    let to = next.iter().find_map(|c| match c {
+        Change::SetVoters { group, voters } if *group == g => Some(voters.clone()),
+        _ => None,
+    });
+    let to = to.unwrap_or_else(|| panic!("no move for the group: {next:?}"));
+    assert!(!to.contains(&5), "node 5 left this group: {to:?}");
+    assert_eq!(to.len(), 3);
+}

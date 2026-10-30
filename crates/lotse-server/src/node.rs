@@ -206,21 +206,8 @@ fn membership_pass<R: Runtime, S: StateMachine>(
             None => continue,
         };
         let learners = if Some(g) == cfg.metadata { everyone.clone() } else { BTreeSet::new() };
-        // The group already carries out a newer decision than this node's
-        // view of the metadata group knows: wait for the view to catch up
-        // rather than undo it.
         let tag = state.target_at.get(&g).copied().unwrap_or(0);
-        if current.tag > tag {
-            continue;
-        }
-        let step = match crate::membership::next_step(&current, &target, &learners) {
-            crate::membership::Step::Settled if current.tag < tag => {
-                // Already what is wanted, under an older decision: record
-                // the newer one, so no stale view undoes it.
-                crate::membership::Step::Propose { voters: current.voters.clone(), learners: current.learners.clone() }
-            }
-            step => step,
-        };
+        let step = crate::membership::leader_step(&current, &target, &learners, tag);
         match step {
             crate::membership::Step::Propose { voters, learners } => {
                 // Refused while a learner catches up or a change commits:
@@ -1052,7 +1039,7 @@ impl Known {
             // Moved off this node: once the group's leader reported the new
             // voters in place, this replica is no member any more and goes.
             // Nothing places it here again (`left`).
-            if !voters.contains(&cfg.id) && groups.contains_key(&g) && state.is_settled(g, voters) {
+            if groups.contains_key(&g) && crate::membership::replica_may_go(&state, g, voters, cfg.id) {
                 closed |= groups.remove(&g).is_some();
                 remove_group_files(rt, &group_dir(g)).await?;
             }
