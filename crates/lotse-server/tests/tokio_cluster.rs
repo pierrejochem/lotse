@@ -119,6 +119,7 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     metadata: None,
                     coordinator: Some(3),
                     max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+                    retention: lotse_server::RetentionConfig::keep(),
                     auth: lotse_server::AuthConfig::none(),
                 },
             )

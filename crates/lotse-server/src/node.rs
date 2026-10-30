@@ -40,7 +40,7 @@ use crate::client::{
     AdminView, ClientRequest, Clients, ClusterView, MarkerJob, NetStats, NodeView, QueueConfig, StreamConfig,
 };
 use crate::metadata::MetadataState;
-use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, StateMachine};
+use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, Retention, StateMachine};
 use crate::signal::{Signal, race};
 use crate::wire::{self, GroupId};
 
@@ -95,6 +95,48 @@ pub struct NodeConfig {
     pub max_producers: usize,
     /// How clients authenticate.
     pub auth: AuthConfig,
+    /// What streams keep unless they say otherwise (ADR 0046).
+    pub retention: RetentionConfig,
+}
+
+/// What streams keep by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Records are kept this many ms (by their timestamps); `None`: for
+    /// ever.
+    pub ms: Option<u64>,
+    /// Each partition keeps this many bytes of log; `None`: no limit.
+    pub bytes: Option<u64>,
+}
+
+impl Default for RetentionConfig {
+    /// Seven days, no size limit.
+    fn default() -> Self {
+        RetentionConfig { ms: Some(7 * 24 * 3600 * 1000), bytes: None }
+    }
+}
+
+impl RetentionConfig {
+    /// Keep everything.
+    pub fn keep() -> Self {
+        RetentionConfig { ms: None, bytes: None }
+    }
+}
+
+/// How often each replica looks whether retention lets something go.
+const RETAIN_EVERY: Duration = Duration::from_secs(1);
+
+/// What group `g` may delete: the metadata and coordinator groups hold
+/// everything in their state; a queue what is settled; a stream by age and
+/// size.
+fn retention_of(cfg: &NodeConfig, g: GroupId, queue: bool) -> Retention {
+    if cfg.metadata == Some(g) || cfg.coordinator == Some(g) {
+        Retention::State
+    } else if queue {
+        Retention::Queue
+    } else {
+        Retention::Stream { ms: cfg.retention.ms, bytes: cfg.retention.bytes }
+    }
 }
 
 /// What a group looks like from outside.
@@ -221,8 +263,9 @@ impl<R: Runtime> Node<R> {
         let mut groups = BTreeMap::new();
         for &g in &cfg.groups {
             let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
+            let queue = cfg.queues.iter().any(|q| q.group == g);
             let options =
-                ReplicaOptions { max_producers: cfg.max_producers, queue: cfg.queues.iter().any(|q| q.group == g) };
+                ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(&cfg, g, queue) };
             let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
             groups.insert(g, replica.await?);
         }
@@ -418,6 +461,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // The host is read every few seconds, not per request: CPU use is
     // measured between two reads.
     let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
+    let mut next_retain = started + RETAIN_EVERY;
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
@@ -495,6 +539,13 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             let out = group.process().await?;
             for s in out.messages {
                 outbound.entry(s.to).or_default().push((g, s.msg));
+            }
+        }
+        if rt.now() >= next_retain {
+            next_retain = rt.now() + RETAIN_EVERY;
+            let now_ms = rt.unix_time().as_millis() as u64;
+            for group in groups.values_mut() {
+                group.retain(now_ms).await?;
             }
         }
         for job in clients.after_round(&view, groups).await? {
@@ -773,7 +824,8 @@ impl Known {
             if voters.contains(&cfg.id) && !groups.contains_key(&g) {
                 let raft =
                     Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.to_vec()) };
-                let options = ReplicaOptions { max_producers: cfg.max_producers, queue };
+                let options =
+                    ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(cfg, g, queue) };
                 let replica = Replica::open_with(rt.clone(), group_dir(g), raft, factory(g), cfg.log, options).await?;
                 groups.insert(g, replica);
             }

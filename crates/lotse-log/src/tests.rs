@@ -141,3 +141,50 @@ fn reset_restarts_the_log_at_an_offset_and_survives_a_crash() {
         assert_eq!((log.start_offset(), log.next_offset()), (57, 58));
     });
 }
+
+fn batch_at(base_offset: u64, timestamp: i64) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(timestamp, None, Some(b"value"), &[]);
+    let mut owned = BytesMut::from(&b.finish().unwrap()[..]);
+    lotse_record::stamp(&mut owned, base_offset, 1).unwrap();
+    owned.freeze()
+}
+
+#[test]
+fn trimming_deletes_whole_segments_below_an_offset() {
+    Sim::new(9).run(|rt| async move {
+        let mut log = Log::open(rt.clone(), "p0", SMALL).await.unwrap();
+        for i in 0..30u64 {
+            log.append(batch_at(i, 1_000 + i as i64)).await.unwrap();
+        }
+        log.sync().await.unwrap();
+        let segs: Vec<SegmentInfo> = log.segments().collect();
+        assert!(segs.len() >= 4, "{segs:?}");
+        assert!(segs.windows(2).all(|w| w[0].next_offset == w[1].base_offset), "contiguous: {segs:?}");
+        assert!(segs.windows(2).all(|w| w[0].max_timestamp < w[1].max_timestamp), "newest per segment: {segs:?}");
+        assert_eq!(segs.last().unwrap().max_timestamp, 1_029);
+        assert_eq!(segs.iter().map(|s| s.bytes).sum::<u64>(), log.size_bytes());
+
+        // Inside the third segment: the two before it go, it stays whole.
+        let cut = segs[2].base_offset + 1;
+        log.trim_before(cut).await.unwrap();
+        assert_eq!(log.start_offset(), cut);
+        assert_eq!(log.segments().next().unwrap().base_offset, segs[2].base_offset);
+        assert!(matches!(log.read(cut - 1, 100).await, Err(Error::OffsetOutOfRange { .. })), "below the start");
+        assert!(!log.read(cut, 100).await.unwrap().is_empty());
+        assert!(matches!(log.trim_before(cut - 1).await, Err(Error::OffsetOutOfRange { .. })), "never backwards");
+
+        // Trimming everything keeps the active segment, and the log goes on.
+        let end = log.next_offset();
+        log.trim_before(end).await.unwrap();
+        assert_eq!((log.start_offset(), log.segment_count()), (end, 1));
+        log.append(batch_at(end, 2_000)).await.unwrap();
+        log.sync().await.unwrap();
+        drop(log);
+
+        // After a restart the log starts at its first segment's base.
+        let log = Log::open(rt, "p0", SMALL).await.unwrap();
+        assert!(log.start_offset() <= end && log.next_offset() == end + 1, "{log:?}");
+        assert!(!log.read(end, 100).await.unwrap().is_empty());
+    });
+}

@@ -93,6 +93,7 @@ async fn every_way_in_on_real_sockets() {
             metadata: Some(1),
             coordinator: Some(2),
             max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+            retention: lotse_server::RetentionConfig::keep(),
             auth: auth.clone(),
         };
         let rt = TokioRuntime::new(root.join(format!("node-{id}"))).with_tls(ca.node_tls(id, &["127.0.0.1"]).unwrap());

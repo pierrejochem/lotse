@@ -1024,6 +1024,17 @@ impl RaftGroup {
         self.configs.iter().rev().find(|c| c.0 <= index).map_or_else(|| self.base_membership.clone(), |c| c.1.clone())
     }
 
+    /// What a snapshot at `index` would say: its term and the membership
+    /// in force there. `None` if the log no longer (or not yet) knows the
+    /// index.
+    pub fn meta_at(&self, index: u64) -> Option<SnapshotMeta> {
+        if index < self.log.snapshot_index() || index > self.log.last_index() {
+            return None;
+        }
+        let term = self.log.term_at(index)?;
+        Some(SnapshotMeta { index, term, membership: self.membership_at(index) })
+    }
+
     /// Where this node's snapshot stands.
     pub fn snapshot_meta(&self) -> SnapshotMeta {
         SnapshotMeta {

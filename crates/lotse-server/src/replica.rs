@@ -135,12 +135,38 @@ pub struct ReplicaOptions {
     pub max_producers: usize,
     /// The group is a queue: keep its ack index.
     pub queue: bool,
+    /// What [`Replica::retain`] may delete.
+    pub retention: Retention,
 }
 
 impl Default for ReplicaOptions {
     fn default() -> Self {
-        ReplicaOptions { max_producers: DEFAULT_MAX_PRODUCERS, queue: false }
+        ReplicaOptions { max_producers: DEFAULT_MAX_PRODUCERS, queue: false, retention: Retention::Keep }
     }
+}
+
+/// What a replica may delete from its log (ADR 0046). Old data goes in
+/// whole segments, and only up to a snapshot of the replica's state taken
+/// exactly where the log then starts, so a follower that has fallen behind
+/// installs that snapshot and misses nothing still kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Retention {
+    /// Keep everything.
+    #[default]
+    Keep,
+    /// The state holds everything (the metadata and coordinator groups):
+    /// the log can go up to what is applied.
+    State,
+    /// A stream partition: data older than `ms` (by the records'
+    /// timestamps), and the oldest beyond `bytes` of log; each optional.
+    Stream {
+        /// Keep records this many ms.
+        ms: Option<u64>,
+        /// Keep this many bytes of log.
+        bytes: Option<u64>,
+    },
+    /// A queue: what every consumer has settled (below the ack floor).
+    Queue,
 }
 
 /// The partition's own state next to the state machine's (see the module
@@ -252,6 +278,10 @@ pub struct Replica<D: Disk, S> {
     sm: S,
     applied: u64,
     snapshot: Option<(SnapshotMeta, Bytes)>,
+    /// Snapshots taken where segments begin, newer than `snapshot`: where
+    /// retention may later cut (see [`Retention`]).
+    boundaries: std::collections::BTreeMap<u64, (SnapshotMeta, Bytes)>,
+    retention: Retention,
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
@@ -319,6 +349,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         // leaves the old log behind; it must continue the snapshot.
         if snapshot.is_some() && !continues(&log, snap_index, snap_term).await? {
             log.reset(snap_index).await?;
+        } else if snapshot.is_some() && log.start_offset() < snap_index {
+            // Retention cut here, and the segment it cut into starts
+            // earlier: the log starts at the snapshot again.
+            log.trim_before(snap_index).await?;
         }
         let mut runs =
             if snapshot.is_some() { TermRuns::with_snapshot(snap_index, snap_term) } else { TermRuns::new() };
@@ -356,6 +390,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             sm,
             applied: snap_index,
             snapshot,
+            boundaries: std::collections::BTreeMap::new(),
+            retention: options.retention,
             state,
             max_fill_bytes: 1 << 20,
         })
@@ -499,6 +535,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             self.log.reset(snap.meta.index).await?;
             self.applied = snap.meta.index;
             self.snapshot = Some((snap.meta, snap.data));
+            self.boundaries.clear();
         }
         if let Some(from) = ready.truncate_from {
             self.log.truncate_from(from - 1).await?;
@@ -547,6 +584,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                         batch.base_offset()
                     )));
                 }
+                self.note_boundary(batch.base_offset());
                 self.state.applied(batch.base_offset() + 1, batch.next_offset(), &batch)?;
                 // Control batches (Raft's own, transaction markers) are not data.
                 if !batch.attributes().control {
@@ -560,6 +598,104 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         }
         self.applied = last;
         Ok(())
+    }
+
+    /// Before applying the batch at `offset`, every batch before it applied:
+    /// if a segment begins there, the state as it is now (index `offset`)
+    /// is a place retention can cut.
+    fn note_boundary(&mut self, offset: u64) {
+        let cuts = matches!(self.retention, Retention::Stream { .. } | Retention::Queue);
+        if !cuts || offset <= self.raft.log().snapshot_index() {
+            return;
+        }
+        if self.boundaries.contains_key(&offset) || !self.log.segments().any(|s| s.base_offset == offset) {
+            return;
+        }
+        if let Some(meta) = self.raft.meta_at(offset) {
+            let data = self.state.snapshot(&self.sm.snapshot());
+            self.boundaries.insert(offset, (meta, data));
+        }
+    }
+
+    /// What may be deleted now.
+    pub fn retention(&self) -> Retention {
+        self.retention
+    }
+
+    /// Changes what may be deleted (a stream's settings changed).
+    pub fn set_retention(&mut self, r: Retention) {
+        self.retention = r;
+    }
+
+    /// The offset retention would like the log to start at, before it is
+    /// held back by snapshots: never past what is applied, nor into an open
+    /// transaction. `None` if nothing is to go.
+    fn retention_point(&self, now_ms: u64) -> Option<u64> {
+        let applied = self.applied;
+        let lso = self.state.txns.last_stable_offset(applied);
+        let point = match self.retention {
+            Retention::Keep => return None,
+            Retention::State => applied,
+            Retention::Queue => self.state.queue.as_ref()?.floor(),
+            Retention::Stream { ms, bytes } => {
+                let segs: Vec<lotse_log::SegmentInfo> = self.log.segments().collect();
+                let (old, _active) = segs.split_at(segs.len().saturating_sub(1));
+                let mut point = self.log.start_offset();
+                if let Some(ms) = ms {
+                    let horizon = i64::try_from(now_ms.saturating_sub(ms)).unwrap_or(i64::MAX);
+                    for s in old.iter().take_while(|s| s.max_timestamp < horizon) {
+                        point = point.max(s.next_offset);
+                    }
+                }
+                if let Some(limit) = bytes {
+                    let mut total: u64 = segs.iter().map(|s| s.bytes).sum();
+                    for s in old {
+                        if total <= limit {
+                            break;
+                        }
+                        total -= s.bytes;
+                        point = point.max(s.next_offset);
+                    }
+                }
+                point
+            }
+        };
+        Some(point.min(lso).min(applied))
+    }
+
+    /// Deletes what [`Retention`] lets go: up to the newest place at or
+    /// before the retention point where a snapshot was taken (for
+    /// [`Retention::State`], a snapshot taken now), and only whole segments.
+    /// Returns the log's new start, if it moved.
+    pub async fn retain(&mut self, now_ms: u64) -> Result<Option<u64>, Error> {
+        let Some(point) = self.retention_point(now_ms) else { return Ok(None) };
+        let current = self.raft.log().snapshot_index();
+        let (meta, data) = if self.retention == Retention::State {
+            // Worth a snapshot only once a whole segment can go.
+            let active = self.log.segments().last().map_or(0, |s| s.base_offset);
+            if !self.log.segments().any(|s| s.base_offset != active && s.next_offset <= point) {
+                return Ok(None);
+            }
+            let Some(meta) = self.raft.meta_at(point) else { return Ok(None) };
+            (meta, self.state.snapshot(&self.sm.snapshot()))
+        } else {
+            match self.boundaries.range(..=point).next_back() {
+                Some((_, (meta, data))) => (meta.clone(), data.clone()),
+                None => return Ok(None),
+            }
+        };
+        let cut = meta.index;
+        if cut <= current {
+            return Ok(None);
+        }
+        // The snapshot first: a crash after it finds the log continuing it
+        // and cuts it again on open.
+        write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
+        self.raft.compact(cut);
+        self.snapshot = Some((meta, data));
+        self.boundaries.retain(|&i, _| i > cut);
+        self.log.trim_before(cut).await?;
+        Ok(Some(cut))
     }
 
     async fn fill(&self, s: &mut Send) -> Result<(), Error> {

@@ -16,8 +16,13 @@
 //! After a snapshot is installed, [`Log::reset`] restarts the log at the
 //! snapshot's end; segments then no longer start at 0.
 //!
+//! Retention removes old data with [`Log::trim_before`]: whole segments
+//! below an offset are deleted, and the log starts at that offset. Which
+//! offset is the replica's to decide (ADR 0046); [`Log::segments`] tells it
+//! each segment's size and newest timestamp.
+//!
 //! Not yet here: persisted `.index`/`.timeindex`/`.txnindex` files (the
-//! sparse index is rebuilt by scanning on open) and retention.
+//! sparse index is rebuilt by scanning on open).
 
 #![warn(missing_docs)]
 
@@ -105,10 +110,27 @@ struct Segment<F> {
     /// Sparse `(base_offset of a batch, byte position)` entries, ascending.
     index: Vec<(u64, u64)>,
     bytes_since_index: u64,
+    /// The newest record timestamp in the segment, ms; `i64::MIN` if empty.
+    max_timestamp: i64,
+}
+
+/// What retention needs to know about one segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentInfo {
+    /// Its first offset.
+    pub base_offset: u64,
+    /// The offset after its last batch.
+    pub next_offset: u64,
+    /// Its size.
+    pub bytes: u64,
+    /// The newest record timestamp in it, ms since the epoch; `i64::MIN`
+    /// for an empty segment.
+    pub max_timestamp: i64,
 }
 
 impl<F: SegmentFile> Segment<F> {
-    fn note_batch(&mut self, base_offset: u64, position: u64, len: u64, interval: u64) {
+    fn note_batch(&mut self, base_offset: u64, position: u64, len: u64, interval: u64, max_timestamp: i64) {
+        self.max_timestamp = self.max_timestamp.max(max_timestamp);
         if self.index.is_empty() || self.bytes_since_index >= interval {
             self.index.push((base_offset, position));
             self.bytes_since_index = 0;
@@ -184,14 +206,28 @@ impl<D: Disk> Log<D> {
         let path = segment_path(&self.dir, base);
         let file = self.disk.open(&path, OpenMode::Existing).await?;
         let len = file.size().await?;
-        let mut seg = Segment { path, file, size: 0, next_offset: base, index: Vec::new(), bytes_since_index: 0 };
+        let mut seg = Segment {
+            path,
+            file,
+            size: 0,
+            next_offset: base,
+            index: Vec::new(),
+            bytes_since_index: 0,
+            max_timestamp: i64::MIN,
+        };
         let mut pos = 0u64;
         let mut problem = None;
         while pos < len {
             match read_batch_at(&seg.file, pos).await {
                 Ok(Some(batch)) if batch.base_offset() == seg.next_offset => {
                     let n = batch.len() as u64;
-                    seg.note_batch(batch.base_offset(), pos, n, self.config.index_interval_bytes);
+                    seg.note_batch(
+                        batch.base_offset(),
+                        pos,
+                        n,
+                        self.config.index_interval_bytes,
+                        batch.max_timestamp(),
+                    );
                     seg.next_offset = batch.next_offset();
                     pos += n;
                 }
@@ -233,8 +269,18 @@ impl<D: Disk> Log<D> {
         if self.segments.is_empty() {
             self.start_offset = base;
         }
-        self.segments
-            .insert(base, Segment { path, file, size: 0, next_offset: base, index: Vec::new(), bytes_since_index: 0 });
+        self.segments.insert(
+            base,
+            Segment {
+                path,
+                file,
+                size: 0,
+                next_offset: base,
+                index: Vec::new(),
+                bytes_since_index: 0,
+                max_timestamp: i64::MIN,
+            },
+        );
         Ok(())
     }
 
@@ -282,7 +328,7 @@ impl<D: Disk> Log<D> {
         let active = self.active_mut();
         let position = active.file.append(batch).await?;
         debug_assert_eq!(position, active.size);
-        active.note_batch(parsed.base_offset(), position, len, interval);
+        active.note_batch(parsed.base_offset(), position, len, interval, parsed.max_timestamp());
         active.size += len;
         active.next_offset = parsed.next_offset();
         self.next_offset = parsed.next_offset();
@@ -354,6 +400,7 @@ impl<D: Disk> Log<D> {
         let mut pos = 0u64;
         let mut index = Vec::new();
         let mut since = 0u64;
+        let mut newest = i64::MIN;
         {
             let seg = &self.segments[&base];
             while pos < seg.size {
@@ -373,9 +420,11 @@ impl<D: Disk> Log<D> {
                 }
                 since += batch.len() as u64;
                 pos += batch.len() as u64;
+                newest = newest.max(batch.max_timestamp());
             }
         }
         let seg = self.segments.get_mut(&base).expect("present");
+        seg.max_timestamp = newest;
         seg.file.truncate(pos).await?;
         seg.file.sync().await?;
         seg.size = pos;
@@ -384,6 +433,46 @@ impl<D: Disk> Log<D> {
         seg.next_offset = offset;
         self.next_offset = offset;
         Ok(())
+    }
+
+    /// Every segment, oldest first.
+    pub fn segments(&self) -> impl Iterator<Item = SegmentInfo> + '_ {
+        self.segments.iter().map(|(&base, s)| SegmentInfo {
+            base_offset: base,
+            next_offset: s.next_offset,
+            bytes: s.size,
+            max_timestamp: s.max_timestamp,
+        })
+    }
+
+    /// Starts the log at `offset`: reads below it are out of range, and
+    /// every segment that ends at or below it is deleted, except the
+    /// active one. The segment holding `offset` stays whole, so after a
+    /// restart the log may start earlier, at that segment's base; whoever
+    /// trims calls this again then. Durable on return.
+    pub async fn trim_before(&mut self, offset: u64) -> Result<(), Error> {
+        if offset < self.start_offset || offset > self.next_offset {
+            return Err(Error::OffsetOutOfRange { offset, start: self.start_offset, end: self.next_offset });
+        }
+        let active = self.active_base();
+        let doomed: Vec<u64> = self
+            .segments
+            .iter()
+            .filter(|&(&base, s)| base != active && s.next_offset <= offset)
+            .map(|(&base, _)| base)
+            .collect();
+        self.start_offset = offset;
+        // Oldest first: a crash in between leaves a log that still starts
+        // at a segment base and has no gap.
+        for base in doomed {
+            let seg = self.segments.remove(&base).expect("listed above");
+            self.disk.remove(&seg.path).await?;
+        }
+        Ok(())
+    }
+
+    fn active_base(&self) -> u64 {
+        *self.segments.keys().next_back().expect("a log always has a segment")
     }
 
     /// Drops every segment and starts the log afresh at `offset`, as after
@@ -397,7 +486,14 @@ impl<D: Disk> Log<D> {
                 seg.file.sync().await?;
                 self.segments.insert(
                     base,
-                    Segment { size: 0, next_offset: offset, index: Vec::new(), bytes_since_index: 0, ..seg },
+                    Segment {
+                        size: 0,
+                        next_offset: offset,
+                        index: Vec::new(),
+                        bytes_since_index: 0,
+                        max_timestamp: i64::MIN,
+                        ..seg
+                    },
                 );
             } else {
                 self.disk.remove(&seg.path).await?;
