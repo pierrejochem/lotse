@@ -225,6 +225,8 @@ fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
     let bytes = StreamChange { retention_bytes: Some(Some(1 << 20)), ..StreamChange::default() };
     let ms = StreamChange { retention_ms: Some(None), ..StreamChange::default() };
     s.apply(5, &payload(&Change::AlterStream { resource_id: id, change: bytes })).unwrap();
+    let want = StreamSettings { retention_ms: Some(60_000), retention_bytes: Some(1 << 20) };
+    assert_eq!(s.streams[&id].settings, want, "a change of the size leaves the age as it was");
     s.apply(6, &payload(&Change::AlterStream { resource_id: id, change: ms })).unwrap();
     let want = StreamSettings { retention_ms: None, retention_bytes: Some(1 << 20) };
     assert_eq!(s.streams[&id].settings, want);
