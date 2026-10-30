@@ -33,12 +33,25 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Creates a stream with `partitions` partitions, each replicated by
     /// `replication` nodes, in [`crate::ClientConfig::tenant`]; returns its id.
     pub async fn create_stream(&self, name: &str, partitions: u32, replication: u8) -> Result<u64, ClientError> {
+        self.create_stream_with(name, partitions, replication, &[]).await
+    }
+
+    /// [`Client::create_stream`] with settings of its own, such as
+    /// `retention.ms` and `retention.bytes` (`-1`: no limit); a setting it
+    /// does not name takes the node's default.
+    pub async fn create_stream_with(
+        &self,
+        name: &str,
+        partitions: u32,
+        replication: u8,
+        configs: &[(&str, &str)],
+    ) -> Result<u64, ClientError> {
         let req = Request::CreateStream(CreateStreamRequest {
             name: name.into(),
             tenant: self.cfg.tenant.clone(),
             partitions,
             replication,
-            configs: Vec::new(),
+            configs: configs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         });
         self.create(name, &req).await
     }

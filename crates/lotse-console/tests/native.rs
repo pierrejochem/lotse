@@ -158,7 +158,8 @@ async fn the_console_shows_a_real_cluster() {
     assert!(p["high_watermark"].as_u64().unwrap() >= 40, "{p}");
     assert_eq!(p["replicas"].as_array().unwrap().len(), 3, "{p}");
     assert_eq!(s["replication"], 3);
-    assert!(s["tenant"] == "default" && s["retention_ms"].is_null(), "{s}");
+    assert_eq!(s["tenant"], "default");
+    assert_eq!(s["retention"], serde_json::json!({ "ms": null, "bytes": null }), "the nodes keep everything");
     let (status, page) = get(&app, "/api/v1/clusters/local/streams/orders/records?partition=0&offset=3&count=5").await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let records = page["records"].as_array().unwrap();

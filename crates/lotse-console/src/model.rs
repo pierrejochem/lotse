@@ -384,6 +384,15 @@ pub struct AssignedMember {
     pub incoming: Vec<u32>,
 }
 
+/// How long and how much a stream keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub struct StreamRetention {
+    /// Records older than this many milliseconds go; `None`: no limit by age.
+    pub ms: Option<u64>,
+    /// Each partition keeps about this many bytes; `None`: no limit by size.
+    pub bytes: Option<u64>,
+}
+
 /// The stream detail screen.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct StreamDetail {
@@ -393,8 +402,8 @@ pub struct StreamDetail {
     pub tenant: Option<String>,
     /// Replication factor.
     pub replication: u32,
-    /// Retention in milliseconds, `None` = forever.
-    pub retention_ms: Option<u64>,
+    /// What the stream keeps; `None` when the cluster did not say.
+    pub retention: Option<StreamRetention>,
     /// Log compaction on.
     pub compaction: bool,
     /// Produce rate, bytes/s.

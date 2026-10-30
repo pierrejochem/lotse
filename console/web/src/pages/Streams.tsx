@@ -177,12 +177,19 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
   );
 }
 
+/** What a stream keeps, in words: by age, by size per partition, or both. */
+function retention(r: S['StreamDetail']['retention']): string {
+  if (!r) return 'Unknown';
+  const parts = [r.ms ? duration(r.ms) : null, r.bytes ? `${bytes(r.bytes)} per partition` : null].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'Forever';
+}
+
 function Config({ d }: { d: S['StreamDetail'] }) {
   const rows: [string, string][] = [
     ['Tenant', d.tenant ?? 'None (the cluster has no tenants)'],
     ['Partitions', String(d.partitions.length)],
     ['Replication', `${d.replication} replicas, quorum ${Math.floor(d.replication / 2) + 1}`],
-    ['Retention', d.retention_ms ? duration(d.retention_ms) : 'Forever'],
+    ['Retention', retention(d.retention)],
     ['Compaction', d.compaction ? 'On, latest value per key' : 'Off'],
   ];
   return (
@@ -217,7 +224,7 @@ export function StreamDetail() {
           <div className="row" style={{ gap: 8 }}>
             <span className="tag">{d.partitions.length} partitions</span>
             <span className="tag">Replication {d.replication}</span>
-            <span className="tag">Retention {d.retention_ms ? duration(d.retention_ms) : 'forever'}</span>
+            <span className="tag">Retention {retention(d.retention)}</span>
             <span className="tag">Compaction {d.compaction ? 'on' : 'off'}</span>
           </div>
         </div>
@@ -229,7 +236,7 @@ export function StreamDetail() {
           { label: 'In', value: rate(d.in_bytes_per_sec), note: `${count(d.records_per_sec)} records/s` },
           { label: 'Out', value: rate(d.out_bytes_per_sec), note: `${d.groups.length} groups` },
           { label: 'Stored', value: bytes(d.stored_bytes), note: `all ${d.replication} replicas` },
-          { label: 'Oldest record', value: duration(d.oldest_record_age_ms), note: d.retention_ms ? `retention ${duration(d.retention_ms)}` : 'kept forever' },
+          { label: 'Oldest record', value: duration(d.oldest_record_age_ms), note: d.retention?.ms ? `retention ${duration(d.retention.ms)}` : d.retention ? 'no limit by age' : 'retention unknown' },
           { label: 'Open transactions', value: count(d.open_transactions), note: 'touching this stream' },
         ]}
       />

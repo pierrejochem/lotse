@@ -44,7 +44,7 @@ use lotse_rt::{Instant, Runtime};
 
 use super::{Clients, ClusterView, Outbox, hint, outcome};
 use crate::auth::Principal;
-use crate::metadata::{self, Change, MAX_PARTITIONS};
+use crate::metadata::{self, Change, MAX_PARTITIONS, StreamChange, StreamSettings};
 use crate::replica::{Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
 
@@ -66,6 +66,8 @@ pub(crate) struct AdminView<'a> {
     pub(crate) voters: &'a BTreeMap<GroupId, Vec<NodeId>>,
     /// SCRAM users from the node configuration.
     pub(crate) configured_users: &'a BTreeMap<String, ScramCredential>,
+    /// The node's retention for streams that set none of their own.
+    pub(crate) retention: crate::RetentionConfig,
 }
 
 static NO_VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
@@ -73,7 +75,14 @@ static NO_USERS: BTreeMap<String, ScramCredential> = BTreeMap::new();
 
 impl Default for AdminView<'_> {
     fn default() -> Self {
-        AdminView { metadata: None, nodes: &[], configured_groups: 0, voters: &NO_VOTERS, configured_users: &NO_USERS }
+        AdminView {
+            metadata: None,
+            nodes: &[],
+            configured_groups: 0,
+            voters: &NO_VOTERS,
+            configured_users: &NO_USERS,
+            retention: crate::RetentionConfig::keep(),
+        }
     }
 }
 
@@ -88,7 +97,7 @@ pub(super) enum AdminThen {
     /// A delete.
     Deleted,
     /// A changed setting of a queue that may have been deleted since.
-    Altered { queue_id: u64 },
+    Altered { resource_id: u64 },
     /// A user's credential, a tenant or role bindings changed.
     Changed,
 }
@@ -145,6 +154,30 @@ const MAX_USER_NAME: usize = 255;
 
 /// The key of the one setting that can change so far.
 const ACK_TIMEOUT: &str = "ack.timeout.ms";
+const RETENTION_MS: &str = "retention.ms";
+const RETENTION_BYTES: &str = "retention.bytes";
+
+/// Sets (`Some`) or resets (`None`) one of a stream's settings: a positive
+/// number, or -1 for no limit.
+fn set_stream(s: &mut StreamChange, key: &str, value: Option<&String>) -> Result<(), String> {
+    let parsed = match value {
+        None => None,
+        Some(v) => match v.parse::<i64>() {
+            Ok(n) if n > 0 || n == -1 => Some(n),
+            _ => return Err(format!("{key} = {v}: a positive number, or -1 for no limit")),
+        },
+    };
+    let slot = match key {
+        RETENTION_MS => &mut s.retention_ms,
+        RETENTION_BYTES => &mut s.retention_bytes,
+        _ => return Err(format!("streams have no setting {key}; {RETENTION_MS} and {RETENTION_BYTES} can change")),
+    };
+    if slot.is_some() {
+        return Err(format!("{key} is given twice"));
+    }
+    *slot = Some(parsed);
+    Ok(())
+}
 
 /// The id of the resource called `name`, configured or created.
 fn existing(view: &ClusterView<'_>, name: &str) -> Option<u64> {
@@ -291,16 +324,23 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        if req.partitions == 0 || req.partitions > MAX_PARTITIONS || !req.configs.is_empty() {
-            let why = format!("1 to {MAX_PARTITIONS} partitions, and no settings are supported yet");
+        if req.partitions == 0 || req.partitions > MAX_PARTITIONS {
+            let why = format!("1 to {MAX_PARTITIONS} partitions");
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
         }
+        let mut given = StreamChange::default();
+        for (k, v) in &req.configs {
+            if let Err(why) = set_stream(&mut given, k, Some(v)) {
+                return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
+            }
+        }
+        let settings = given.applied_to(StreamSettings::default());
         let Some(replica) = Self::admit(&outbox, id, view, groups, &req.name, &req.tenant, Some(req.replication))
         else {
             return;
         };
         let partitions = Self::place(view, replica, req.replication, req.partitions as usize);
-        let change = Change::CreateStream { name: req.name.clone(), tenant: req.tenant.clone(), partitions };
+        let change = Change::CreateStream { name: req.name.clone(), tenant: req.tenant.clone(), partitions, settings };
         let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
@@ -420,25 +460,6 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        // `Some(0)` returns the ack timeout to its default.
-        let mut ack_timeout_ms = None;
-        let mut refused = None;
-        for (k, v) in &req.set {
-            match (k.as_str(), v.parse::<u64>()) {
-                (ACK_TIMEOUT, Ok(ms)) if ms > 0 && ack_timeout_ms.is_none() => ack_timeout_ms = Some(ms),
-                _ => refused = Some(format!("cannot set {k} = {v}; only {ACK_TIMEOUT} (> 0) can change, once")),
-            }
-        }
-        for k in &req.delete {
-            match k.as_str() {
-                ACK_TIMEOUT if ack_timeout_ms.is_none() => ack_timeout_ms = Some(0),
-                _ => refused = Some(format!("cannot reset {k}; only {ACK_TIMEOUT} can change, once")),
-            }
-        }
-        let Some(ack_timeout_ms) = ack_timeout_ms.filter(|_| refused.is_none()) else {
-            let why = refused.unwrap_or_else(|| "nothing to change".into());
-            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
-        };
         let replica = match Self::metadata_leader(view, groups) {
             Ok(r) => r,
             Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
@@ -446,12 +467,47 @@ impl Clients {
         if let Err((code, why)) = runtime_resource(view, replica, req.resource_id) {
             return outbox.push(id, &admin_response(code, why, None));
         }
-        if !replica.metadata().queues.contains_key(&req.resource_id) {
-            let why = "streams and exchanges have no settings that can change yet";
-            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(why), None));
+        let refuse = |why: String| admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None);
+        if req.set.is_empty() && req.delete.is_empty() {
+            return outbox.push(id, &refuse("nothing to change".into()));
         }
-        let change = Change::AlterQueue { resource_id: req.resource_id, ack_timeout_ms };
-        let then = AdminThen::Altered { queue_id: req.resource_id };
+        let (change, then) = if replica.metadata().streams.contains_key(&req.resource_id) {
+            // A stream: its retention, each key set or reset once.
+            let mut change = StreamChange::default();
+            let changes = req.set.iter().map(|(k, v)| (k, Some(v))).chain(req.delete.iter().map(|k| (k, None)));
+            for (k, v) in changes {
+                if let Err(why) = set_stream(&mut change, k, v) {
+                    return outbox.push(id, &refuse(why));
+                }
+            }
+            (
+                Change::AlterStream { resource_id: req.resource_id, change },
+                AdminThen::Altered { resource_id: req.resource_id },
+            )
+        } else if replica.metadata().queues.contains_key(&req.resource_id) {
+            // `Some(0)` returns the ack timeout to its default.
+            let mut ack_timeout_ms = None;
+            let mut refused = None;
+            for (k, v) in &req.set {
+                match (k.as_str(), v.parse::<u64>()) {
+                    (ACK_TIMEOUT, Ok(ms)) if ms > 0 && ack_timeout_ms.is_none() => ack_timeout_ms = Some(ms),
+                    _ => refused = Some(format!("cannot set {k} = {v}; only {ACK_TIMEOUT} (> 0) can change, once")),
+                }
+            }
+            for k in &req.delete {
+                match k.as_str() {
+                    ACK_TIMEOUT if ack_timeout_ms.is_none() => ack_timeout_ms = Some(0),
+                    _ => refused = Some(format!("cannot reset {k}; only {ACK_TIMEOUT} can change, once")),
+                }
+            }
+            let Some(ack_timeout_ms) = ack_timeout_ms.filter(|_| refused.is_none()) else {
+                return outbox.push(id, &refuse(refused.unwrap_or_else(|| "nothing to change".into())));
+            };
+            let change = Change::AlterQueue { resource_id: req.resource_id, ack_timeout_ms };
+            (change, AdminThen::Altered { resource_id: req.resource_id })
+        } else {
+            return outbox.push(id, &refuse("exchanges have no settings that can change".into()));
+        };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
 
@@ -720,8 +776,12 @@ impl Clients {
                         0 => entry(default_ms, config_source::DEFAULT),
                         ms => entry(ms, config_source::DYNAMIC),
                     }])
-                } else if state.streams.contains_key(&resource_id) || state.exchanges.contains_key(&resource_id) {
+                } else if let Some(st) = state.streams.get(&resource_id) {
+                    Some(stream_configs(st.settings, view.admin.retention))
+                } else if state.exchanges.contains_key(&resource_id) {
                     Some(Vec::new())
+                } else if configured(resource_id) && view.streams.iter().any(|st| st.resource_id == resource_id) {
+                    Some(stream_configs(StreamSettings::default(), view.admin.retention))
                 } else if let Some(q) =
                     view.queues.iter().find(|q| q.resource_id == resource_id && configured(q.resource_id))
                 {
@@ -770,7 +830,9 @@ impl Clients {
                         {
                             outcome_response(ErrorCode::UNKNOWN_RESOURCE, None)
                         }
-                        AdminThen::Altered { queue_id } if !state.queues.contains_key(queue_id) => {
+                        AdminThen::Altered { resource_id }
+                            if !state.queues.contains_key(resource_id) && !state.streams.contains_key(resource_id) =>
+                        {
                             admin_response(ErrorCode::UNKNOWN_RESOURCE, None, None)
                         }
                         then => then.answer(ErrorCode::NONE, 0, None),
@@ -788,4 +850,17 @@ impl Clients {
             }
         }
     }
+}
+
+/// A stream's retention as `DescribeConfigs` lists it: each value with
+/// where it comes from; -1 is no limit.
+fn stream_configs(s: StreamSettings, defaults: crate::RetentionConfig) -> Vec<ConfigEntry> {
+    let entry = |key: &str, own: Option<i64>, default: Option<u64>| {
+        let (value, source) = match own {
+            Some(v) => (v, config_source::DYNAMIC),
+            None => (default.map_or(-1, |d| d as i64), config_source::DEFAULT),
+        };
+        ConfigEntry { key: key.into(), value: value.to_string(), source }
+    };
+    vec![entry(RETENTION_MS, s.retention_ms, defaults.ms), entry(RETENTION_BYTES, s.retention_bytes, defaults.bytes)]
 }

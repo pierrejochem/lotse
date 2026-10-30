@@ -46,7 +46,7 @@ pub(crate) fn group_id(index: u64, p: u32) -> GroupId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Change {
     /// A stream; one voter set per partition.
-    CreateStream { name: String, tenant: String, partitions: Vec<Vec<NodeId>> },
+    CreateStream { name: String, tenant: String, partitions: Vec<Vec<NodeId>>, settings: StreamSettings },
     /// A queue and its voters; an ack timeout of 0 is the default.
     CreateQueue { name: String, tenant: String, voters: Vec<NodeId>, ack_timeout_ms: u64 },
     /// An exchange.
@@ -59,6 +59,9 @@ pub(crate) enum Change {
     Delete { resource_id: u64 },
     /// A queue's ack timeout changed; 0 returns it to the default.
     AlterQueue { resource_id: u64, ack_timeout_ms: u64 },
+    /// Some of a stream's settings set or reset; the others stay as they
+    /// are when this applies, so two changes of different keys both hold.
+    AlterStream { resource_id: u64, change: StreamChange },
     /// A user's SCRAM credential set, or removed with `None`.
     SetUser { user: String, credential: Option<ScramCredential> },
     /// A tenant created.
@@ -69,6 +72,58 @@ pub(crate) enum Change {
     SetBindings { add: Vec<RoleBinding>, remove: Vec<RoleBinding> },
 }
 
+/// A stream's own settings; `None` is the node configuration's default,
+/// `Some(-1)` no limit (ADR 0046).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StreamSettings {
+    /// `retention.ms`.
+    pub(crate) retention_ms: Option<i64>,
+    /// `retention.bytes`, per partition.
+    pub(crate) retention_bytes: Option<i64>,
+}
+
+/// What an `AlterStream` does to each setting: `None` leaves it,
+/// `Some(None)` returns it to the default, `Some(Some(v))` sets it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StreamChange {
+    /// `retention.ms`.
+    pub(crate) retention_ms: Option<Option<i64>>,
+    /// `retention.bytes`.
+    pub(crate) retention_bytes: Option<Option<i64>>,
+}
+
+impl StreamChange {
+    /// `s` with this change.
+    pub(crate) fn applied_to(&self, mut s: StreamSettings) -> StreamSettings {
+        self.apply(&mut s);
+        s
+    }
+
+    fn apply(&self, s: &mut StreamSettings) {
+        if let Some(v) = self.retention_ms {
+            s.retention_ms = v;
+        }
+        if let Some(v) = self.retention_bytes {
+            s.retention_bytes = v;
+        }
+    }
+}
+
+impl StreamSettings {
+    /// What a partition may delete, with `defaults` where unset.
+    pub(crate) fn retention(&self, defaults: crate::RetentionConfig) -> crate::Retention {
+        let pick = |own: Option<i64>, default: Option<u64>| match own {
+            None => default,
+            Some(v) if v < 0 => None,
+            Some(v) => Some(v as u64),
+        };
+        crate::Retention::Stream {
+            ms: pick(self.retention_ms, defaults.ms),
+            bytes: pick(self.retention_bytes, defaults.bytes),
+        }
+    }
+}
+
 /// A stream created at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynStream {
@@ -77,6 +132,7 @@ pub(crate) struct DynStream {
     pub(crate) resource_id: u64,
     /// Per partition: its group and voters.
     pub(crate) partitions: Vec<(GroupId, Vec<NodeId>)>,
+    pub(crate) settings: StreamSettings,
 }
 
 /// A queue created at runtime.
@@ -121,7 +177,7 @@ pub(crate) struct MetadataState {
     pub(crate) deleted_tenants: BTreeSet<String>,
 }
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 impl MetadataState {
     /// The id of the runtime resource called `name`, if any.
@@ -172,14 +228,14 @@ impl MetadataState {
         let change = decode_change(payload)?;
         let id = resource_id(index);
         match change {
-            Change::CreateStream { name, tenant, partitions } => {
+            Change::CreateStream { name, tenant, partitions, settings } => {
                 if self.id_of(&name).is_none() && self.tenant_open(&tenant) {
                     let partitions = partitions
                         .into_iter()
                         .enumerate()
                         .map(|(p, voters)| (group_id(index, p as u32), voters))
                         .collect();
-                    self.streams.insert(id, DynStream { name, tenant, resource_id: id, partitions });
+                    self.streams.insert(id, DynStream { name, tenant, resource_id: id, partitions, settings });
                 }
             }
             Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
@@ -232,6 +288,11 @@ impl MetadataState {
                     q.ack_timeout_ms = ack_timeout_ms;
                 }
             }
+            Change::AlterStream { resource_id, change } => {
+                if let Some(s) = self.streams.get_mut(&resource_id) {
+                    change.apply(&mut s.settings);
+                }
+            }
             Change::SetUser { user, credential: Some(c) } => {
                 self.users.insert(user, c);
             }
@@ -273,6 +334,7 @@ impl MetadataState {
                 b.put_u64_le(*g);
                 put_nodes(&mut b, voters);
             }
+            put_settings(&mut b, &s.settings);
         }
         b.put_u32_le(self.queues.len() as u32);
         for q in self.queues.values() {
@@ -332,7 +394,8 @@ impl MetadataState {
                 let g = b.get_u64_le();
                 partitions.push((g, get_nodes(b)?));
             }
-            s.streams.insert(resource_id, DynStream { name, tenant, resource_id, partitions });
+            let settings = get_settings(b)?;
+            s.streams.insert(resource_id, DynStream { name, tenant, resource_id, partitions, settings });
         }
         for _ in 0..count(b)? {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
@@ -387,7 +450,7 @@ pub(crate) fn record(change: &Change) -> Bytes {
     let mut b = BytesMut::new();
     b.put_u8(VERSION);
     match change {
-        Change::CreateStream { name, tenant, partitions } => {
+        Change::CreateStream { name, tenant, partitions, settings } => {
             b.put_u8(0);
             put_str(&mut b, name);
             put_str(&mut b, tenant);
@@ -395,6 +458,7 @@ pub(crate) fn record(change: &Change) -> Bytes {
             for voters in partitions {
                 put_nodes(&mut b, voters);
             }
+            put_settings(&mut b, settings);
         }
         Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
             b.put_u8(1);
@@ -422,6 +486,20 @@ pub(crate) fn record(change: &Change) -> Bytes {
             b.put_u8(6);
             b.put_u64_le(*resource_id);
             b.put_u64_le(*ack_timeout_ms);
+        }
+        Change::AlterStream { resource_id, change } => {
+            b.put_u8(11);
+            b.put_u64_le(*resource_id);
+            for v in [change.retention_ms, change.retention_bytes] {
+                match v {
+                    None => b.put_u8(0),
+                    Some(None) => b.put_u8(1),
+                    Some(Some(v)) => {
+                        b.put_u8(2);
+                        b.put_i64_le(v);
+                    }
+                }
+            }
         }
         Change::SetUser { user, credential } => {
             b.put_u8(7);
@@ -454,7 +532,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         0 => {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
-            Change::CreateStream { name, tenant, partitions }
+            Change::CreateStream { name, tenant, partitions, settings: get_settings(b)? }
         }
         1 => {
             let (name, tenant, voters) = (get_str(b)?, get_str(b)?, get_nodes(b)?);
@@ -494,6 +572,24 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         8 => Change::CreateTenant { name: get_str(b)? },
         9 => Change::DeleteTenant { name: get_str(b)? },
         10 => Change::SetBindings { add: get_role_bindings(b)?, remove: get_role_bindings(b)? },
+        11 => {
+            need(b, 8)?;
+            let resource_id = b.get_u64_le();
+            let mut get = || -> Result<Option<Option<i64>>, String> {
+                need(b, 1)?;
+                match b.get_u8() {
+                    0 => Ok(None),
+                    1 => Ok(Some(None)),
+                    2 => {
+                        need(b, 8)?;
+                        Ok(Some(Some(b.get_i64_le())))
+                    }
+                    _ => Err("unknown stream setting change".into()),
+                }
+            };
+            let change = StreamChange { retention_ms: get()?, retention_bytes: get()? };
+            Change::AlterStream { resource_id, change }
+        }
         _ => return Err("unknown metadata change".into()),
     };
     if b.has_remaining() {
@@ -584,6 +680,19 @@ fn get_credential(b: &mut &[u8]) -> Result<ScramCredential, String> {
     let salt = get_bytes(b)?.to_vec();
     let stored_key = get_bytes(b)?.to_vec();
     Ok(ScramCredential { iterations, salt, stored_key, server_key: get_bytes(b)?.to_vec() })
+}
+
+/// A setting: unset (the default) is `i64::MIN`.
+fn put_settings(b: &mut BytesMut, s: &StreamSettings) {
+    for v in [s.retention_ms, s.retention_bytes] {
+        b.put_i64_le(v.unwrap_or(i64::MIN));
+    }
+}
+
+fn get_settings(b: &mut &[u8]) -> Result<StreamSettings, String> {
+    need(b, 16)?;
+    let mut get = || Some(b.get_i64_le()).filter(|v| *v != i64::MIN);
+    Ok(StreamSettings { retention_ms: get(), retention_bytes: get() })
 }
 
 fn put_nodes(b: &mut BytesMut, nodes: &[NodeId]) {

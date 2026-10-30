@@ -882,11 +882,7 @@ export interface components {
              * @description Replication factor.
              */
             replication: number;
-            /**
-             * Format: int64
-             * @description Retention in milliseconds, `None` = forever.
-             */
-            retention_ms?: number | null;
+            retention?: null | components["schemas"]["StreamRetention"];
             /**
              * Format: int64
              * @description Bytes stored, all replicas.
@@ -894,6 +890,19 @@ export interface components {
             stored_bytes: number;
             /** @description Tenant. */
             tenant?: string | null;
+        };
+        /** @description How long and how much a stream keeps. */
+        StreamRetention: {
+            /**
+             * Format: int64
+             * @description Each partition keeps about this many bytes; `None`: no limit by size.
+             */
+            bytes?: number | null;
+            /**
+             * Format: int64
+             * @description Records older than this many milliseconds go; `None`: no limit by age.
+             */
+            ms?: number | null;
         };
         /** @description A row in "busiest streams". */
         StreamRow: {

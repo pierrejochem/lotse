@@ -54,7 +54,7 @@ use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 9;
+const FORMAT: u8 = 10;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -648,9 +648,11 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                     }
                 }
                 if let Some(limit) = bytes {
+                    // A segment goes only if what stays still holds `limit`
+                    // bytes: the limit is what a partition keeps at least.
                     let mut total: u64 = segs.iter().map(|s| s.bytes).sum();
                     for s in old {
-                        if total <= limit {
+                        if total - s.bytes < limit {
                             break;
                         }
                         total -= s.bytes;

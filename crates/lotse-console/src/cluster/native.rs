@@ -321,6 +321,18 @@ impl NativeCluster {
         Arc::clone(seat)
     }
 
+    /// The stream's retention as its settings say, the node's defaults
+    /// filled in; `None` if the cluster does not answer (no metadata group,
+    /// or not now).
+    async fn retention(&self, who: &Identity, stream: &str) -> Option<StreamRetention> {
+        let configs = self.seat(who).client.describe_configs(stream).await.ok()?;
+        let limit = |key: &str| {
+            let v: i64 = configs.iter().find(|c| c.key == key)?.value.parse().ok()?;
+            u64::try_from(v).ok()
+        };
+        Some(StreamRetention { ms: limit("retention.ms"), bytes: limit("retention.bytes") })
+    }
+
     /// How many seats are open (for tests).
     pub fn seats(&self) -> usize {
         lock(&self.seats).len()
@@ -662,7 +674,7 @@ impl Cluster for NativeCluster {
             name: r.name.clone(),
             tenant: tenant_of(r),
             replication: r.partitions.first().map_or(0, |p| p.voters.len() as u32),
-            retention_ms: None,
+            retention: self.retention(who, name).await,
             compaction: false,
             in_bytes_per_sec: per(|p| p.produce_bytes),
             out_bytes_per_sec: per(|p| p.fetch_bytes),
@@ -800,9 +812,9 @@ impl Cluster for NativeCluster {
                 Err(ClientError::UnknownStream(..)) => {
                     return Err(ApiError::NotFound(format!("There is no stream {stream} with partition {partition}.")));
                 }
-                Err(ClientError::Broker { code: ErrorCode::OFFSET_OUT_OF_RANGE, .. }) => {
+                Err(ClientError::OffsetOutOfRange { log_start, .. }) => {
                     return Err(ApiError::BadRequest(format!(
-                        "Offset {at} is outside {stream} P{partition}. Start at its log start or later."
+                        "Offset {at} is outside {stream} P{partition}, which starts at {log_start}."
                     )));
                 }
                 Err(e) => return Err(failed(e)),

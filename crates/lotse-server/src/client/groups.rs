@@ -177,9 +177,12 @@ impl Clients {
                 }
                 self.group_timers.next += 1;
                 let mid = format!("{term}-{}", self.group_timers.next);
+                // Epoch 1 even with nothing to read yet: 0 means joining, so
+                // a member left at 0 would join again with every heartbeat.
                 let m = MemberMeta {
                     subscribed: subscribed.clone().unwrap_or_default(),
                     rebalance_timeout_ms: req.rebalance_timeout_ms,
+                    epoch: 1,
                     ..MemberMeta::default()
                 };
                 g.members.insert(mid.clone(), m);

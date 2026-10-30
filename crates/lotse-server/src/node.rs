@@ -496,6 +496,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 configured_groups: cfg.groups.len(),
                 voters: &known.voters,
                 configured_users: &cfg.auth.users,
+                retention: cfg.retention,
             },
             client_addrs: &cfg.client_addrs,
             coordinator: cfg.coordinator,
@@ -541,16 +542,39 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 outbound.entry(s.to).or_default().push((g, s.msg));
             }
         }
-        if rt.now() >= next_retain {
-            next_retain = rt.now() + RETAIN_EVERY;
-            let now_ms = rt.unix_time().as_millis() as u64;
-            for group in groups.values_mut() {
-                group.retain(now_ms).await?;
-            }
-        }
         for job in clients.after_round(&view, groups).await? {
             let task = write_markers(rt.clone(), marker_client.clone(), job, shared.clone(), cfg.tick * 5);
             jobs.spawn(rt, task);
+        }
+        // After the round's answers: a request waiting on an entry learns
+        // its fate before retention may compact it, which would leave the
+        // outcome unknown.
+        if rt.now() >= next_retain {
+            next_retain = rt.now() + RETAIN_EVERY;
+            let now_ms = rt.unix_time().as_millis() as u64;
+            // A runtime stream's own settings, as the metadata group has
+            // applied them here; configured streams keep the node's.
+            let own: BTreeMap<GroupId, Retention> = cfg
+                .metadata
+                .and_then(|m| groups.get(&m))
+                .map(|meta| {
+                    let state = meta.metadata();
+                    state
+                        .streams
+                        .values()
+                        .flat_map(|s| {
+                            let r = s.settings.retention(cfg.retention);
+                            s.partitions.iter().map(move |(g, _)| (*g, r))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (g, group) in groups.iter_mut() {
+                if let Some(r) = own.get(g) {
+                    group.set_retention(*r);
+                }
+                group.retain(now_ms).await?;
+            }
         }
         for (to, messages) in outbound {
             let Some(peer) = peers.get(&to) else { continue };

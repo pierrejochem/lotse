@@ -193,6 +193,15 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         let f = match self.client.fetch(&stream, partition, offset, wait).await {
             Ok(f) => f,
             Err(ClientError::GaveUp(..)) => return Ok(Vec::new()),
+            // Retention deleted what the group had not read: go on from
+            // the oldest record left, as Kafka's `earliest` reset does.
+            Err(ClientError::OffsetOutOfRange { log_start, .. }) if log_start > offset => {
+                let key = (stream, partition);
+                if let Some(at) = self.owned.get_mut(&key).filter(|at| **at == Some(offset)) {
+                    *at = Some(log_start);
+                }
+                return Ok(Vec::new());
+            }
             Err(e) => return Err(e),
         };
         if self.last_ok.is_none_or(|t| self.client.rt.now() - t >= self.cfg.session_timeout) {

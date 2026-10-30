@@ -18,6 +18,7 @@ fn changes_apply_once_per_name_and_round_trip() {
         name: "orders".into(),
         tenant: "t".into(),
         partitions: vec![vec![1, 2, 3], vec![2, 3, 4]],
+        settings: StreamSettings::default(),
     };
     s.apply(10, &payload(&stream)).unwrap();
     assert_eq!(s.id_of("orders"), Some(resource_id(10)));
@@ -96,6 +97,7 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
             name: "s".into(),
             tenant: "t".into(),
             partitions: vec![vec![1], vec![2], vec![3]],
+            settings: StreamSettings::default(),
         }),
     )
     .unwrap();
@@ -161,8 +163,16 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
     };
     let set = Change::SetBindings { add: vec![b(Role::Producer, "shop"), b(Role::ClusterAdmin, "")], remove: vec![] };
     s.apply(2, &payload(&set)).unwrap();
-    s.apply(3, &payload(&Change::CreateStream { name: "o".into(), tenant: "shop".into(), partitions: vec![vec![1]] }))
-        .unwrap();
+    s.apply(
+        3,
+        &payload(&Change::CreateStream {
+            name: "o".into(),
+            tenant: "shop".into(),
+            partitions: vec![vec![1]],
+            settings: StreamSettings::default(),
+        }),
+    )
+    .unwrap();
     // Not empty: the delete does nothing.
     s.apply(4, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
     assert!(s.tenants.contains("shop") && s.bindings_of_roles.len() == 2);
@@ -199,5 +209,34 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
     s.apply(10, &payload(&unset)).unwrap();
     assert!(s.bindings_of_roles.is_empty());
     s.apply(11, &payload(&set)).unwrap();
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
+fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
+    let mut s = MetadataState::default();
+    let settings = StreamSettings { retention_ms: Some(60_000), retention_bytes: None };
+    let create = Change::CreateStream { name: "o".into(), tenant: "t".into(), partitions: vec![vec![1]], settings };
+    s.apply(4, &payload(&create)).unwrap();
+    let id = resource_id(4);
+    assert_eq!(s.streams[&id].settings, settings);
+    // Two changes of different keys, proposed from the same state: both
+    // hold, whichever applies last.
+    let bytes = StreamChange { retention_bytes: Some(Some(1 << 20)), ..StreamChange::default() };
+    let ms = StreamChange { retention_ms: Some(None), ..StreamChange::default() };
+    s.apply(5, &payload(&Change::AlterStream { resource_id: id, change: bytes })).unwrap();
+    s.apply(6, &payload(&Change::AlterStream { resource_id: id, change: ms })).unwrap();
+    let want = StreamSettings { retention_ms: None, retention_bytes: Some(1 << 20) };
+    assert_eq!(s.streams[&id].settings, want);
+    let unlimited = StreamChange { retention_ms: Some(Some(-1)), ..StreamChange::default() };
+    s.apply(7, &payload(&Change::AlterStream { resource_id: id, change: unlimited })).unwrap();
+    let want = StreamSettings { retention_ms: Some(-1), retention_bytes: Some(1 << 20) };
+    assert_eq!(s.streams[&id].settings, want);
+    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: None };
+    assert_eq!(want.retention(defaults), crate::Retention::Stream { ms: None, bytes: Some(1 << 20) });
+    assert_eq!(
+        StreamSettings::default().retention(defaults),
+        crate::Retention::Stream { ms: Some(1_000), bytes: None }
+    );
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }

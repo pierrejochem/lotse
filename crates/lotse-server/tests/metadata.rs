@@ -101,6 +101,9 @@ struct Outcomes {
     deleted: BTreeMap<String, BTreeSet<u64>>,
     /// Ack timeouts tried per queue, in ms; 0 is a reset to the default.
     timeouts: BTreeMap<String, BTreeSet<u64>>,
+    /// `retention.bytes` tried per stream, at creation or changed; 0 is a
+    /// reset to the default. Large enough that nothing goes.
+    retention: BTreeMap<String, BTreeSet<i64>>,
     /// Queues ever bound to the exchange (or tried).
     bound: BTreeSet<String>,
     /// Acknowledged produces: (stream, partition, offset) → value.
@@ -234,6 +237,13 @@ async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
         let name = NAMES[rt.below(NAMES.len() as u64) as usize];
         let (k, partitions, replication) = spec(name);
         let res = match k {
+            kind::STREAM if rt.chance(1, 2) => {
+                let bytes = retention_bytes(&rt);
+                out.lock().unwrap().retention.entry(name.into()).or_default().insert(bytes);
+                client
+                    .create_stream_with(name, partitions, replication, &[("retention.bytes", &bytes.to_string())])
+                    .await
+            }
             kind::STREAM => client.create_stream(name, partitions, replication).await,
             kind::QUEUE => client.create_queue(name, replication, None).await,
             _ => client.declare_exchange(name, ExchangeKind::Fanout).await,
@@ -269,6 +279,21 @@ async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
                 Err(e) => panic!("unexpected error changing {q}: {e}"),
             }
         }
+        if rt.chance(1, 4) {
+            let st = ["s1", "s2", "s3"][rt.below(3) as usize];
+            let bytes = if rt.chance(1, 4) { 0 } else { retention_bytes(&rt) };
+            out.lock().unwrap().retention.entry(st.into()).or_default().insert(bytes);
+            let res = if bytes == 0 {
+                client.alter_configs(st, &[], &["retention.bytes"]).await
+            } else {
+                client.alter_configs(st, &[("retention.bytes", &bytes.to_string())], &[]).await
+            };
+            match res {
+                Ok(()) => {}
+                Err(e) if coming_and_going(&e) => {}
+                Err(e) => panic!("unexpected error changing {st}: {e}"),
+            }
+        }
         if rt.chance(1, 5) {
             let name = DELETED[rt.below(DELETED.len() as u64) as usize];
             out.lock().unwrap().delete_tried.insert(name.into());
@@ -282,6 +307,12 @@ async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
         }
         rt.sleep(TICK * (5 + rt.below(20) as u32)).await;
     }
+}
+
+/// A `retention.bytes` no partition here reaches: 1 GiB and more, or no
+/// limit.
+fn retention_bytes(rt: &SimRuntime) -> i64 {
+    if rt.chance(1, 3) { -1 } else { (1 << 30) + rt.below(1_000) as i64 }
 }
 
 /// Produces and publishes until stopped; returns its client, routes and
@@ -551,11 +582,31 @@ async fn run(rt: SimRuntime) {
         }
     }
 
-    // Ack timeouts are the default or what an admin set.
+    // Ack timeouts and stream retention are the default or what an admin
+    // set.
     let admin =
         Client::new(rt.node("checker"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(n) });
     for (name, (_, k, ..)) in view.iter().filter(|(_, (id, ..))| *id >= lotse_server::DYNAMIC_BASE) {
         let configs = admin.describe_configs(name).await.expect("the healed cluster describes resources");
+        if *k == kind::STREAM {
+            let [ms, bytes] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+            assert_eq!(
+                (ms.key.as_str(), ms.value.as_str(), ms.source),
+                ("retention.ms", "-1", lotse_proto::config_source::DEFAULT),
+                "{name}: the node keeps everything by age"
+            );
+            assert_eq!(bytes.key, "retention.bytes");
+            let tried = out.retention.get(name).cloned().unwrap_or_default();
+            let value: i64 = bytes.value.parse().expect("a number");
+            match bytes.source {
+                lotse_proto::config_source::DEFAULT => assert_eq!(value, -1, "{name}: the default"),
+                lotse_proto::config_source::DYNAMIC => {
+                    assert!(tried.contains(&value), "{name}: {value} bytes, tried {tried:?}")
+                }
+                other => panic!("{name}: source {other}"),
+            }
+            continue;
+        }
         if *k != kind::QUEUE {
             assert!(configs.is_empty(), "{name} has settings: {configs:?}");
             continue;

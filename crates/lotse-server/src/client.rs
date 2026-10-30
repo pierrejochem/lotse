@@ -770,6 +770,7 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                     // Offsets below the commit index are committed (index = offset + 1).
                     let hw = raft.commit();
                     let start = replica.log().start_offset();
+                    out.log_start_offset = start;
                     if raft.role() != Role::Leader {
                         out.error = ErrorCode::NOT_LEADER;
                         out.leader_hint = hint(raft);

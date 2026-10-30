@@ -2078,14 +2078,16 @@
             "description": "Replication factor.",
             "minimum": 0
           },
-          "retention_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Retention in milliseconds, `None` = forever.",
-            "minimum": 0
+          "retention": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StreamRetention",
+                "description": "What the stream keeps; `None` when the cluster did not say."
+              }
+            ]
           },
           "stored_bytes": {
             "type": "integer",
@@ -2099,6 +2101,30 @@
               "null"
             ],
             "description": "Tenant."
+          }
+        }
+      },
+      "StreamRetention": {
+        "type": "object",
+        "description": "How long and how much a stream keeps.",
+        "properties": {
+          "bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Each partition keeps about this many bytes; `None`: no limit by size.",
+            "minimum": 0
+          },
+          "ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Records older than this many milliseconds go; `None`: no limit by age.",
+            "minimum": 0
           }
         }
       },

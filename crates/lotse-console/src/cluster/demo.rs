@@ -515,7 +515,7 @@ impl Cluster for DemoCluster {
             name: row.name,
             tenant: row.tenant,
             replication: 3,
-            retention_ms: Some(7 * 86_400_000),
+            retention: Some(StreamRetention { ms: Some(7 * 86_400_000), bytes: None }),
             compaction: false,
             in_bytes_per_sec: row.in_bytes_per_sec,
             out_bytes_per_sec: row.in_bytes_per_sec.map(|r| r * 2.94),

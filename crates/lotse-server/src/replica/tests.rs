@@ -306,7 +306,9 @@ fn a_stream_keeps_its_newest_bytes_and_starts_at_a_snapshot() {
         assert_eq!(r.log().start_offset(), start);
         assert_eq!(r.raft_ref().log().snapshot_index(), start, "the log starts where the snapshot ends");
         let size: u64 = r.log().segments().map(|s| s.bytes).sum();
-        assert!(size <= 800 + 400, "about the limit, give or take a segment: {size}");
+        assert!(size >= 800, "at least the limit stays: {size}");
+        let oldest = r.log().segments().next().unwrap().bytes;
+        assert!(size - oldest < 800, "but no segment more than it takes: {size}, the oldest {oldest}");
         let left = kept(&r).await;
         assert_eq!(left[..], values[values.len() - left.len()..], "the newest are kept, in order");
         assert!(left.len() < values.len());

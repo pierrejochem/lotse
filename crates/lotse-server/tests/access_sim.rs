@@ -226,11 +226,11 @@ fn expected(e: &ClientError) -> bool {
             | ClientError::UnknownStream(..)
             | ClientError::Authentication(_)
             | ClientError::ResourceExists { .. }
+            | ClientError::OffsetOutOfRange { .. }
             | ClientError::Broker {
                 code: ErrorCode::UNAUTHORIZED
                     | ErrorCode::UNKNOWN_RESOURCE
                     | ErrorCode::INVALID_REQUEST
-                    | ErrorCode::OFFSET_OUT_OF_RANGE
                     | ErrorCode::NOT_LEADER
                     | ErrorCode::REQUEST_TIMED_OUT
                     | ErrorCode::NOT_ENOUGH_REPLICAS,

@@ -998,5 +998,82 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
         assert_eq!(alter.error, ErrorCode::UNKNOWN_RESOURCE, "an alter of a deleted queue was acknowledged");
         let state = groups[&G].metadata();
         assert!(state.bindings.values().all(Vec::is_empty) && state.queues.is_empty());
+
+        // A stream's retention: given at creation, changed key by key,
+        // refused where it makes no sense, described with the defaults.
+        let stream = |configs: Vec<(&str, &str)>| {
+            Request::CreateStream(lotse_proto::CreateStreamRequest {
+                tenant: crate::DEFAULT_TENANT.into(),
+                name: "s".into(),
+                partitions: 1,
+                replication: 1,
+                configs: configs.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+            })
+        };
+        let created = ask(&mut clients, &mut groups, &[], &[], vec![stream(vec![("retention.ms", "0")])]).await;
+        let [Response::Create(c)] = &created[..] else { panic!("{created:?}") };
+        assert_eq!(c.error, ErrorCode::INVALID_REQUEST, "no retention of 0 ms");
+        let created = ask(&mut clients, &mut groups, &[], &[], vec![stream(vec![("retention.ms", "60000")])]).await;
+        let [Response::Create(c)] = &created[..] else { panic!("{created:?}") };
+        assert_eq!(c.error, ErrorCode::NONE);
+        let alter = |set: Vec<(&str, &str)>, delete: Vec<&str>| {
+            Request::AlterConfigs(lotse_proto::AlterConfigsRequest {
+                resource_id: c.resource_id,
+                set: set.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                delete: delete.into_iter().map(String::from).collect(),
+            })
+        };
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![
+                alter(vec![("ack.timeout.ms", "5")], vec![]),
+                alter(vec![("retention.bytes", "-2")], vec![]),
+                alter(vec![("retention.bytes", "100")], vec!["retention.bytes"]),
+                alter(vec![("retention.bytes", "4096")], vec![]),
+                alter(vec![], vec!["retention.ms"]),
+                Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: vec![c.resource_id] }),
+            ],
+        )
+        .await;
+        let [
+            Response::Admin(other_key),
+            Response::Admin(negative),
+            Response::Admin(twice),
+            Response::Admin(bytes),
+            Response::Admin(reset),
+            Response::DescribeConfigs(described),
+        ] = &answers[..]
+        else {
+            panic!("{answers:?}")
+        };
+        assert_eq!(
+            (other_key.error, negative.error, twice.error),
+            (ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST)
+        );
+        assert_eq!((bytes.error, reset.error), (ErrorCode::NONE, ErrorCode::NONE));
+        let settings = groups[&G].metadata().streams[&c.resource_id].settings;
+        assert_eq!(settings, crate::metadata::StreamSettings { retention_ms: None, retention_bytes: Some(4096) });
+        // The describe was answered before the changes applied; ask again.
+        let _ = described;
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: vec![c.resource_id] })],
+        )
+        .await;
+        let [Response::DescribeConfigs(d)] = &answers[..] else { panic!("{answers:?}") };
+        let got: Vec<_> = d.resources[0].configs.iter().map(|e| (e.key.as_str(), e.value.as_str(), e.source)).collect();
+        assert_eq!(
+            got,
+            [
+                ("retention.ms", "-1", lotse_proto::config_source::DEFAULT),
+                ("retention.bytes", "4096", lotse_proto::config_source::DYNAMIC)
+            ]
+        );
     });
 }

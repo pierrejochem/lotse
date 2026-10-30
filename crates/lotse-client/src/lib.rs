@@ -75,6 +75,19 @@ pub enum ClientError {
         /// The broker's explanation, if any.
         message: Option<String>,
     },
+    /// The offset is not in the partition: retention deleted it (it is
+    /// below `log_start`), or it is past the end.
+    #[error("offset {offset} is not in {stream} partition {partition}, which starts at {log_start}")]
+    OffsetOutOfRange {
+        /// The stream.
+        stream: String,
+        /// The partition.
+        partition: u32,
+        /// The offset asked for.
+        offset: u64,
+        /// The first offset the partition still holds.
+        log_start: u64,
+    },
     /// A produce may or may not have been written. Read the partition to
     /// find out, or produce again and accept a possible duplicate.
     #[error("outcome unknown: {0}")]
@@ -878,6 +891,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 self.redirect(stream, partition, p.leader_hint);
                 Err(Attempt::Retry(code.to_string()))
             }
+            ErrorCode::OFFSET_OUT_OF_RANGE => Err(Attempt::Fail(ClientError::OffsetOutOfRange {
+                stream: stream.into(),
+                partition,
+                offset,
+                log_start: p.log_start_offset,
+            })),
             code => {
                 if code == ErrorCode::UNKNOWN_RESOURCE {
                     self.forget(stream, partition);
