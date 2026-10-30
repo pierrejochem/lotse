@@ -85,6 +85,12 @@ fn client_config(n: u64) -> ClientConfig {
     }
 }
 
+/// A value and the timestamp it was written with.
+type Written = (String, i64);
+
+/// One replica of a partition: log start, log end, bytes, whether it leads.
+type ReplicaView = (u64, u64, u64, bool);
+
 #[derive(Default)]
 struct Outcomes {
     /// Per partition: offset → (value, timestamp), as acknowledged.
@@ -93,7 +99,7 @@ struct Outcomes {
     read: BTreeMap<u32, Vec<(u64, String)>>,
     /// Transactions: `(value, timestamp)` each, and whether committed
     /// (`Some(true)`), aborted (`Some(false)`) or unknown.
-    txns: Vec<(Vec<(String, i64)>, Option<bool>)>,
+    txns: Vec<(Vec<Written>, Option<bool>)>,
     /// Times a reader found its offset deleted and went on.
     skipped: u64,
 }
@@ -493,7 +499,7 @@ async fn run(rt: SimRuntime) {
     loop {
         let mut behind = Vec::new();
         let answers = reader.node_metrics().await.expect("the healed cluster describes itself");
-        let mut ends: BTreeMap<u64, BTreeMap<u32, (u64, u64, u64, bool)>> = BTreeMap::new();
+        let mut ends: BTreeMap<u64, BTreeMap<u32, ReplicaView>> = BTreeMap::new();
         for (node, m) in answers {
             let Ok(m) = m else {
                 behind.push(format!("node {node} did not answer"));
