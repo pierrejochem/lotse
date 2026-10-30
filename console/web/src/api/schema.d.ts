@@ -30,7 +30,7 @@ export interface paths {
         };
         /** Chart history from the console's in-memory buffer (at most 180 points):
          *     the sum over the streams and queues the caller may see; the commit
-         *     latency only for cluster admins. */
+         *     latency only for cluster admins and cluster viewers. */
         get: operations["metrics"];
         put?: never;
         post?: never;
