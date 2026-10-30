@@ -13,6 +13,7 @@ mod auth;
 mod client;
 mod coordinator;
 mod groups;
+mod membership;
 mod metadata;
 mod node;
 mod producers;

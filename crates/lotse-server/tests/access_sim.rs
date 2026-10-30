@@ -199,6 +199,7 @@ fn config(id: NodeId, n: u64) -> NodeConfig {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         retention: lotse_server::RetentionConfig::keep(),
+        join: false,
         auth: AuthConfig { required: true, scram: true, users, admins: vec!["root".into()], ..AuthConfig::none() },
     }
 }

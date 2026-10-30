@@ -211,6 +211,16 @@ pub(crate) struct MetadataState {
     /// is never placed on such a node again, so a node never comes back to
     /// a group with an empty log under an id the group once counted.
     pub(crate) left: BTreeMap<GroupId, BTreeSet<NodeId>>,
+    /// A group's voters before its first change at runtime: what a new
+    /// replica of it starts from, as every replica of the group did. A
+    /// replica placed later starts outside the group and learns who the
+    /// members are from the group's log.
+    pub(crate) initial: BTreeMap<GroupId, Vec<NodeId>>,
+    /// The metadata index of each group's last `SetVoters`: the tag its
+    /// leader puts on the Raft membership that carries it out, so that a
+    /// leader whose view of the metadata group lags never undoes a newer
+    /// change (ADR 0048).
+    pub(crate) target_at: BTreeMap<GroupId, u64>,
 }
 
 const VERSION: u8 = 3;
@@ -260,6 +270,12 @@ impl MetadataState {
             return Some(v);
         }
         self.groups().find(|(group, ..)| *group == g).map(|(_, v, _)| v)
+    }
+
+    /// The voters a new replica of runtime group `g` starts from: the
+    /// group's voters when it was created.
+    pub(crate) fn initial_voters(&self, g: GroupId) -> Option<&[NodeId]> {
+        self.initial.get(&g).map(Vec::as_slice).or_else(|| self.voters_of(g))
     }
 
     /// Whether `g` has the voters it is to have, as its leader reported.
@@ -389,11 +405,13 @@ impl MetadataState {
             Change::SetVoters { group, mut voters } => {
                 voters.sort_unstable();
                 voters.dedup();
+                self.target_at.insert(group, index);
                 let Some(old) = self.voters_of(group).map(<[NodeId]>::to_vec) else {
                     // A configured group (not runtime, no target yet).
                     self.targets.insert(group, voters);
                     return Ok(());
                 };
+                self.initial.entry(group).or_insert_with(|| old.clone());
                 let left = self.left.entry(group).or_default();
                 left.extend(old.iter().copied().filter(|n| !voters.contains(n)));
                 if let Some(slot) = self.runtime_voters_mut(group) {
@@ -496,6 +514,16 @@ impl MetadataState {
             b.put_u64_le(*g);
             put_nodes(&mut b, &v.iter().copied().collect::<Vec<_>>());
         }
+        b.put_u32_le(self.initial.len() as u32);
+        for (g, v) in &self.initial {
+            b.put_u64_le(*g);
+            put_nodes(&mut b, v);
+        }
+        b.put_u32_le(self.target_at.len() as u32);
+        for (g, at) in &self.target_at {
+            b.put_u64_le(*g);
+            b.put_u64_le(*at);
+        }
         b.freeze()
     }
 
@@ -577,6 +605,16 @@ impl MetadataState {
             let g = b.get_u64_le();
             s.left.insert(g, get_nodes(b)?.into_iter().collect());
         }
+        for _ in 0..count(b)? {
+            need(b, 8)?;
+            let g = b.get_u64_le();
+            s.initial.insert(g, get_nodes(b)?);
+        }
+        for _ in 0..count(b)? {
+            need(b, 16)?;
+            let g = b.get_u64_le();
+            s.target_at.insert(g, b.get_u64_le());
+        }
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
@@ -586,6 +624,17 @@ impl MetadataState {
 
 /// The record for `change`, as an internal control batch.
 pub(crate) fn record(change: &Change) -> Bytes {
+    lotse_record::internal_control_batch(lotse_record::InternalControl::Metadata, &change_bytes(change))
+        .expect("one record")
+}
+
+/// The record's payload, as [`MetadataState::apply`] takes it.
+#[cfg(test)]
+pub(crate) fn record_payload(change: &Change) -> Bytes {
+    change_bytes(change)
+}
+
+fn change_bytes(change: &Change) -> Bytes {
     let mut b = BytesMut::new();
     b.put_u8(VERSION);
     match change {
@@ -682,7 +731,7 @@ pub(crate) fn record(change: &Change) -> Bytes {
             put_role_bindings(&mut b, remove.iter());
         }
     }
-    lotse_record::internal_control_batch(lotse_record::InternalControl::Metadata, &b).expect("one record")
+    b.freeze()
 }
 
 fn decode_change(mut b: &[u8]) -> Result<Change, String> {

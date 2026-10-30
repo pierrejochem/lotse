@@ -64,6 +64,8 @@ use crate::wire::GroupId;
 mod admin;
 mod coord;
 mod groups;
+mod nodes;
+pub(crate) use nodes::{managed_groups, moving};
 mod queues;
 mod session;
 mod stats;
@@ -295,9 +297,11 @@ impl ClusterView<'_> {
     }
 }
 
-/// What a request waiting on `group` hears when the group has gone: it was
-/// deleted, the only way a group stops being hosted while the node runs.
+/// What a request waiting on `group` hears when the group was deleted.
 const GONE: &str = "the resource was deleted";
+
+/// What it hears when the group moved off this node (ADR 0048).
+const MOVED: &str = "outcome unknown: the partition moved to other nodes";
 
 fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
     raft.leader().map(|l| LeaderHint { leader: l as u32, term: raft.term() })
@@ -395,6 +399,10 @@ impl Clients {
             Request::AlterRoleBindings(req) => self.alter_role_bindings(outbox, id, req, view, groups),
             Request::DescribeRoleBindings(_) => self.describe_role_bindings(&outbox, id, view),
             Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
+            Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
+            Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
+            Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),
+            Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::Fetch(f) => {
@@ -484,7 +492,7 @@ impl Clients {
         }
         let deadline = view.now + Duration::from_millis(u64::from(req.timeout_ms));
         let pending = PendingProduce { outbox, correlation_id, arrived: view.now, deadline, response, waiting };
-        if let Some(p) = settle(pending, view.now, groups, &mut self.stats) {
+        if let Some(p) = settle(pending, view, groups, &mut self.stats) {
             self.produces.push(p);
         }
     }
@@ -573,7 +581,7 @@ impl Clients {
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<Vec<MarkerJob>, Error> {
         let produces = std::mem::take(&mut self.produces);
-        self.produces = produces.into_iter().filter_map(|p| settle(p, view.now, groups, &mut self.stats)).collect();
+        self.produces = produces.into_iter().filter_map(|p| settle(p, view, groups, &mut self.stats)).collect();
         let inits = std::mem::take(&mut self.inits);
         self.inits = inits.into_iter().filter_map(|p| settle_init(p, view.now, groups)).collect();
         let markers = std::mem::take(&mut self.markers);
@@ -665,16 +673,25 @@ fn transactional(batch: &Bytes) -> bool {
 /// left to wait for.
 fn settle<R: Runtime, S: StateMachine>(
     mut p: PendingProduce,
-    now: Instant,
+    view: &ClusterView<'_>,
     groups: &BTreeMap<GroupId, Replica<R, S>>,
     stats: &mut stats::Stats,
 ) -> Option<PendingProduce> {
+    let now = view.now;
     let timed_out = now >= p.deadline;
     p.waiting.retain(|w| {
+        let resource_id = p.response.resources[w.resource].resource_id;
         let out = &mut p.response.resources[w.resource].partitions[w.partition];
         let Some(replica) = groups.get(&w.group) else {
-            out.error = ErrorCode::UNKNOWN_RESOURCE;
-            out.error_msg = Some(GONE.into());
+            if view.deleted.contains(&resource_id) {
+                out.error = ErrorCode::UNKNOWN_RESOURCE;
+                out.error_msg = Some(GONE.into());
+            } else {
+                // Moved to other nodes while the batch waited (ADR 0048):
+                // it may have committed there.
+                out.error = ErrorCode::REQUEST_TIMED_OUT;
+                out.error_msg = Some(MOVED.into());
+            }
             return false;
         };
         let raft = replica.raft_ref();

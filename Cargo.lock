@@ -838,6 +838,7 @@ dependencies = [
  "bytes",
  "lotse-client",
  "lotse-log",
+ "lotse-proto",
  "lotse-record",
  "lotse-rt",
  "lotse-rt-tokio",

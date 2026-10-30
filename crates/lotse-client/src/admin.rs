@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry, CreateQueueRequest,
-    CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest, DeleteTenantRequest,
-    DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeRoleBindingsRequest,
-    DescribeTenantsRequest, DescribeUsersRequest, ErrorCode, LeaderHint, Request, Response, RoleBindingData,
-    ScramCredentialData, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
+    AddNodeRequest, AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry,
+    CreateQueueRequest, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest,
+    DeleteTenantRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeNodesRequest,
+    DescribeRoleBindingsRequest, DescribeTenantsRequest, DescribeUsersRequest, ErrorCode, LeaderHint, NodeEntry,
+    RemoveNodeRequest, Request, Response, RoleBindingData, ScramCredentialData, SettleVotersRequest, TenantEntry,
+    UserEntry, WhoAmIRequest, WhoAmIResponse,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
@@ -254,6 +255,40 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         .await
     }
 
+    /// Adds node `node_id` to the cluster, reached by nodes at `peer` and
+    /// by clients at `client`; start it with `join` afterwards. Ids are
+    /// never used twice.
+    pub async fn add_node(&self, node_id: u64, peer: &str, client: &str) -> Result<(), ClientError> {
+        let req = AddNodeRequest { node_id, peer: peer.into(), client: client.into() };
+        self.admin_change(Request::AddNode(req)).await
+    }
+
+    /// Starts draining node `node_id`: its replicas move to other nodes,
+    /// then it leaves the cluster. [`Client::describe_nodes`] shows how far.
+    pub async fn remove_node(&self, node_id: u64) -> Result<(), ClientError> {
+        self.admin_change(Request::RemoveNode(RemoveNodeRequest { node_id })).await
+    }
+
+    /// The cluster's nodes, as the metadata group knows them.
+    pub async fn describe_nodes(&self) -> Result<Vec<NodeEntry>, ClientError> {
+        let req = Request::DescribeNodes(DescribeNodesRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeNodes(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d.nodes)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Internal, for nodes: reports that `group` has exactly `voters`.
+    pub async fn settle_voters(&self, group: u64, voters: Vec<u64>) -> Result<(), ClientError> {
+        self.admin_change(Request::SettleVoters(SettleVotersRequest { group, voters })).await
+    }
+
     /// Adds and removes role bindings; removals first.
     pub async fn alter_role_bindings(
         &self,
@@ -419,6 +454,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// is not known.
     async fn call_admin(&self, req: &Request) -> Result<Response, Attempt> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
+        // A leader whose address this client has not seen (a node added
+        // since it last asked): learn the cluster's nodes first, or it
+        // keeps asking the others.
+        if leader.is_some_and(|l| !self.brokers.lock().expect("brokers lock").contains_key(&l)) {
+            let _ = self.metadata(&[]).await;
+        }
         let addr = match leader.and_then(|l| self.brokers.lock().expect("brokers lock").get(&l).cloned()) {
             Some(a) => a,
             None => {

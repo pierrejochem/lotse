@@ -2802,3 +2802,155 @@ impl WhoAmIResponse {
         })
     }
 }
+
+/// Adds a node to the cluster (cluster admin). Answered with
+/// [`AdminResponse`] once the metadata group has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddNodeRequest {
+    /// Its id: never used in this cluster before.
+    pub node_id: u64,
+    /// Where the other nodes reach it (`host:port`).
+    pub peer: String,
+    /// Where clients reach it (`host:port`).
+    pub client: String,
+}
+
+impl AddNodeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.node_id);
+        w.string(&self.peer);
+        w.string(&self.client);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AddNodeRequest { node_id: r.u64()?, peer: r.string()?, client: r.string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Starts draining a node: its replicas move to other nodes, then it
+/// leaves the cluster (cluster admin). Answered with [`AdminResponse`]
+/// once the drain has started, not when it is done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveNodeRequest {
+    /// The node.
+    pub node_id: u64,
+}
+
+impl RemoveNodeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.node_id);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RemoveNodeRequest { node_id: r.u64()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Lists the cluster's nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeNodesRequest;
+
+impl DescribeNodesRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeNodesRequest)
+    }
+}
+
+/// States of a node in [`NodeEntry`].
+pub mod node_state {
+    /// Holds replicas; new ones may be placed on it.
+    pub const ACTIVE: u8 = 0;
+    /// Its replicas are moving to other nodes; then it leaves.
+    pub const DRAINING: u8 = 1;
+}
+
+/// One node of the cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeEntry {
+    /// Its id.
+    pub node_id: u64,
+    /// Where the other nodes reach it.
+    pub peer: String,
+    /// Where clients reach it.
+    pub client: String,
+    /// [`node_state`].
+    pub state: u8,
+    /// Groups it is to be a voter of.
+    pub replicas: u32,
+    /// Of those, groups whose voters are not yet in place.
+    pub moving: u32,
+}
+
+/// The cluster's nodes, from the metadata group's leader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeNodesResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The nodes, by id.
+    pub nodes: Vec<NodeEntry>,
+}
+
+impl DescribeNodesResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.array(&self.nodes, |w, n| {
+            w.u64(n.node_id);
+            w.string(&n.peer);
+            w.string(&n.client);
+            w.u8(n.state);
+            w.u32(n.replicas);
+            w.u32(n.moving);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeNodesResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            nodes: r.array(30, |r| {
+                Ok(NodeEntry {
+                    node_id: r.u64()?,
+                    peer: r.string()?,
+                    client: r.string()?,
+                    state: r.u8()?,
+                    replicas: r.u32()?,
+                    moving: r.u32()?,
+                })
+            })?,
+        })
+    }
+}
+
+/// A group's leader reports that the group's Raft membership has exactly
+/// these voters and nothing in flight (internal, from a node). Answered
+/// with [`AdminResponse`] once the metadata group has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettleVotersRequest {
+    /// The group.
+    pub group: u64,
+    /// Its voters.
+    pub voters: Vec<u64>,
+}
+
+impl SettleVotersRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.group);
+        w.array(&self.voters, |w, v| w.u64(*v));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = SettleVotersRequest { group: r.u64()?, voters: r.array(8, |r| r.u64())? };
+        r.tags()?;
+        Ok(req)
+    }
+}

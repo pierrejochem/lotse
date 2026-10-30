@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly: the client, queue, group, metadata, access and retention
-  # simulations at full depth (ADRs 0027, 0031, 0033, 0034, 0039, 0046).
+  # Nightly: the client, queue, group, metadata, access, retention and
+  # membership simulations at full depth (ADRs 0027, 0031, 0033, 0034, 0039,
+  # 0046, 0048).
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
@@ -58,7 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may --skip nodes_come_and_go_without_losing_anything
         env:
           LOTSE_SIM_SEEDS: "5000"
 
@@ -135,5 +136,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p lotse-server --release --test retention
+        env:
+          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
+
+  # The membership simulation, in a job of its own (ADR 0048): nodes added
+  # and drained under load and faults; 1,000 seeds on pushes and pull
+  # requests, 5,000 nightly.
+  membership-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p lotse-server --release --test membership
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}

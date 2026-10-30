@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 lotse-server.workspace = true
+lotse-client.workspace = true
+lotse-proto.workspace = true
 lotse-rt-tokio.workspace = true
 lotse-log.workspace = true
 lotse-record.workspace = true
@@ -26,9 +28,6 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
-
-[dev-dependencies]
-lotse-client.workspace = true
 
 [lints]
 workspace = true

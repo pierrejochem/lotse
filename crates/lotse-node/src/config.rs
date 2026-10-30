@@ -362,6 +362,7 @@ impl ClusterFile {
                 ms: pick(self.retention.ms, defaults.ms),
                 bytes: pick(self.retention.bytes, defaults.bytes),
             },
+            join: false,
         })
     }
 

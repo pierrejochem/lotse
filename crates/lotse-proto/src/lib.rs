@@ -111,6 +111,14 @@ impl ApiKey {
     pub const DESCRIBE_ROLE_BINDINGS: ApiKey = ApiKey(38);
     /// Who the connection acts as.
     pub const WHO_AM_I: ApiKey = ApiKey(39);
+    /// Adds a node to the cluster (cluster admin).
+    pub const ADD_NODE: ApiKey = ApiKey(40);
+    /// Drains a node and then removes it (cluster admin).
+    pub const REMOVE_NODE: ApiKey = ApiKey(41);
+    /// Lists the cluster's nodes (cluster viewers).
+    pub const DESCRIBE_NODES: ApiKey = ApiKey(42);
+    /// A group's leader reports the voters in place (internal, node to node).
+    pub const SETTLE_VOTERS: ApiKey = ApiKey(43);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -133,7 +141,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 37] = [
+    pub const SUPPORTED: [ApiVersionRange; 41] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -171,6 +179,10 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::ALTER_ROLE_BINDINGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_ROLE_BINDINGS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::WHO_AM_I, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ADD_NODE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::REMOVE_NODE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_NODES, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::SETTLE_VOTERS, min: 0, max: 0 },
     ];
 }
 
@@ -416,6 +428,14 @@ pub enum Request {
     DescribeRoleBindings(DescribeRoleBindingsRequest),
     /// [`ApiKey::WHO_AM_I`].
     WhoAmI(WhoAmIRequest),
+    /// [`ApiKey::ADD_NODE`].
+    AddNode(AddNodeRequest),
+    /// [`ApiKey::REMOVE_NODE`].
+    RemoveNode(RemoveNodeRequest),
+    /// [`ApiKey::DESCRIBE_NODES`].
+    DescribeNodes(DescribeNodesRequest),
+    /// [`ApiKey::SETTLE_VOTERS`].
+    SettleVoters(SettleVotersRequest),
 }
 
 impl Request {
@@ -459,6 +479,10 @@ impl Request {
             Request::AlterRoleBindings(_) => ApiKey::ALTER_ROLE_BINDINGS,
             Request::DescribeRoleBindings(_) => ApiKey::DESCRIBE_ROLE_BINDINGS,
             Request::WhoAmI(_) => ApiKey::WHO_AM_I,
+            Request::AddNode(_) => ApiKey::ADD_NODE,
+            Request::RemoveNode(_) => ApiKey::REMOVE_NODE,
+            Request::DescribeNodes(_) => ApiKey::DESCRIBE_NODES,
+            Request::SettleVoters(_) => ApiKey::SETTLE_VOTERS,
         }
     }
 }
@@ -512,6 +536,8 @@ pub enum Response {
     DescribeRoleBindings(DescribeRoleBindingsResponse),
     /// To [`Request::WhoAmI`].
     WhoAmI(WhoAmIResponse),
+    /// To [`Request::DescribeNodes`].
+    DescribeNodes(DescribeNodesResponse),
     /// To [`Request::Produce`].
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
@@ -576,6 +602,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::AlterRoleBindings(r) => r.put(&mut w),
         Request::DescribeRoleBindings(r) => r.put(&mut w),
         Request::WhoAmI(r) => r.put(&mut w),
+        Request::AddNode(r) => r.put(&mut w),
+        Request::RemoveNode(r) => r.put(&mut w),
+        Request::DescribeNodes(r) => r.put(&mut w),
+        Request::SettleVoters(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -633,6 +663,10 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::ALTER_ROLE_BINDINGS => Request::AlterRoleBindings(AlterRoleBindingsRequest::get(&mut r)?),
         ApiKey::DESCRIBE_ROLE_BINDINGS => Request::DescribeRoleBindings(DescribeRoleBindingsRequest::get(&mut r)?),
         ApiKey::WHO_AM_I => Request::WhoAmI(WhoAmIRequest::get(&mut r)?),
+        ApiKey::ADD_NODE => Request::AddNode(AddNodeRequest::get(&mut r)?),
+        ApiKey::REMOVE_NODE => Request::RemoveNode(RemoveNodeRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_NODES => Request::DescribeNodes(DescribeNodesRequest::get(&mut r)?),
+        ApiKey::SETTLE_VOTERS => Request::SettleVoters(SettleVotersRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -668,6 +702,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::DescribeTenants(r) => r.put(&mut w),
         Response::DescribeRoleBindings(r) => r.put(&mut w),
         Response::WhoAmI(r) => r.put(&mut w),
+        Response::DescribeNodes(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::Error(code) => {
@@ -761,7 +796,11 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::ALTER_USER
         | ApiKey::CREATE_TENANT
         | ApiKey::DELETE_TENANT
-        | ApiKey::ALTER_ROLE_BINDINGS => Response::Admin(AdminResponse::get(&mut r)?),
+        | ApiKey::ALTER_ROLE_BINDINGS
+        | ApiKey::ADD_NODE
+        | ApiKey::REMOVE_NODE
+        | ApiKey::SETTLE_VOTERS => Response::Admin(AdminResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_NODES => Response::DescribeNodes(DescribeNodesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_METRICS => Response::DescribeMetrics(Box::new(DescribeMetricsResponse::get(&mut r)?)),
         ApiKey::SASL_HANDSHAKE => Response::SaslHandshake(SaslHandshakeResponse::get(&mut r)?),

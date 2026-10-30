@@ -21,6 +21,11 @@ pub struct Membership {
     pub outgoing: BTreeSet<NodeId>,
     /// Receive the log, do not vote.
     pub learners: BTreeSet<NodeId>,
+    /// Opaque to Raft: which decision of the driver this membership
+    /// carries out. It travels with every config entry and snapshot and is
+    /// kept when the leader finishes a joint change, so that a driver can
+    /// tell a newer decision from an older one it may still hear about.
+    pub tag: u64,
 }
 
 impl Membership {
@@ -79,7 +84,8 @@ impl Membership {
         one(&self.voters).min(one(&self.outgoing))
     }
 
-    /// Encoded for a config entry: three counted lists of little-endian ids.
+    /// Encoded for a config entry: three counted lists of little-endian ids,
+    /// then the tag if there is one.
     pub fn encode(&self) -> Bytes {
         let mut b = BytesMut::new();
         for set in [&self.voters, &self.outgoing, &self.learners] {
@@ -87,6 +93,9 @@ impl Membership {
             for id in set {
                 b.put_u64_le(*id);
             }
+        }
+        if self.tag != 0 {
+            b.put_u64_le(self.tag);
         }
         b.freeze()
     }
@@ -103,7 +112,12 @@ impl Membership {
             }
         }
         let [voters, outgoing, learners] = sets;
-        data.is_empty().then_some(Membership { voters, outgoing, learners })
+        let tag = match data.len() {
+            0 => 0,
+            8 => u64::from_le_bytes(data.try_into().ok()?),
+            _ => return None,
+        };
+        Some(Membership { voters, outgoing, learners, tag })
     }
 }
 
@@ -117,7 +131,7 @@ mod tests {
 
     #[test]
     fn joint_majorities_need_both_sides() {
-        let m = Membership { voters: set(&[1, 2, 4]), outgoing: set(&[1, 2, 3]), learners: set(&[5]) };
+        let m = Membership { voters: set(&[1, 2, 4]), outgoing: set(&[1, 2, 3]), learners: set(&[5]), tag: 0 };
         assert!(m.has_quorum(&set(&[1, 2])));
         assert!(!m.has_quorum(&set(&[1, 4])), "majority of the new voters only");
         assert!(!m.has_quorum(&set(&[1, 3])), "majority of the old voters only");
@@ -130,8 +144,17 @@ mod tests {
 
     #[test]
     fn encoding_round_trips() {
-        let m = Membership { voters: set(&[1, 2, 4]), outgoing: set(&[1, 2, 3]), learners: set(&[5]) };
+        let m = Membership { voters: set(&[1, 2, 4]), outgoing: set(&[1, 2, 3]), learners: set(&[5]), tag: 0 };
         assert_eq!(Membership::decode(&m.encode()), Some(m.clone()));
         assert_eq!(Membership::decode(&m.encode()[..10]), None);
+    }
+
+    #[test]
+    fn the_tag_travels_with_the_membership() {
+        let m = Membership { voters: set(&[1, 2]), outgoing: BTreeSet::new(), learners: set(&[3]), tag: 42 };
+        assert_eq!(Membership::decode(&m.encode()), Some(m.clone()));
+        let untagged = Membership { tag: 0, ..m };
+        assert_eq!(untagged.encode().len(), 4 + 16 + 4 + 4 + 8, "no tag, no bytes for it");
+        assert_eq!(Membership::decode(&untagged.encode()), Some(untagged));
     }
 }

@@ -128,9 +128,14 @@ impl Access {
             (_, Request::ApiVersions | Request::WhoAmI(_) | Request::Metadata(_) | Request::FindCoordinator(_)) => {
                 return Ok(());
             }
-            (Principal::Node(_) | Principal::Anonymous, Request::WriteTxnMarkers(_)) => return Ok(()),
+            (Principal::Node(_) | Principal::Anonymous, Request::WriteTxnMarkers(_) | Request::SettleVoters(_)) => {
+                return Ok(());
+            }
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
-            (Principal::Node(id), _) => return Err(format!("node {id} may only look up metadata and write markers")),
+            (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
+            (Principal::Node(id), _) => {
+                return Err(format!("node {id} may only look up metadata, write markers and report voters"));
+            }
             (Principal::Anonymous, _) => return Ok(()),
             _ => {}
         }
@@ -177,12 +182,22 @@ impl Access {
             | Request::CreateTenant(_)
             | Request::DeleteTenant(_)
             | Request::AlterRoleBindings(_)
-            | Request::DescribeRoleBindings(_) => admin(),
+            | Request::DescribeRoleBindings(_)
+            | Request::AddNode(_)
+            | Request::RemoveNode(_) => admin(),
+            Request::DescribeNodes(_) => {
+                if self.sees_cluster(p) {
+                    Ok(())
+                } else {
+                    Err(format!("{p} may not see the cluster's nodes"))
+                }
+            }
             Request::ApiVersions
             | Request::WhoAmI(_)
             | Request::Metadata(_)
             | Request::FindCoordinator(_)
             | Request::WriteTxnMarkers(_)
+            | Request::SettleVoters(_)
             | Request::SaslHandshake(_)
             | Request::SaslAuthenticate(_) => Ok(()),
         }

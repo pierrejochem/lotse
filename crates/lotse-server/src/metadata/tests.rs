@@ -267,6 +267,7 @@ fn nodes_come_and_go_and_groups_get_new_voters() {
     assert_eq!(s.streams[&resource_id(2)].partitions[0].1, vec![1, 3, 4]);
     assert_eq!(s.voters_of(1), Some(&[1, 3, 4][..]));
     assert_eq!(s.left[&g], BTreeSet::from([2]), "node 2 never comes back to this group");
+    assert_eq!(s.initial_voters(g), Some(&[1, 2, 3][..]), "new replicas start where the group started");
     assert!(!s.is_settled(g, &[1, 3, 4]));
     s.apply(6, &payload(&Change::Settled { group: g, voters: vec![4, 1, 3] })).unwrap();
     assert!(s.is_settled(g, &[3, 1, 4]));

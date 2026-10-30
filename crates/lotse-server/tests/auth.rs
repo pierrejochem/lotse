@@ -88,6 +88,7 @@ fn config(id: NodeId, auth: AuthConfig) -> NodeConfig {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         retention: lotse_server::RetentionConfig::keep(),
+        join: false,
         auth,
     }
 }

@@ -850,6 +850,18 @@ impl RaftGroup {
         voters: BTreeSet<NodeId>,
         learners: BTreeSet<NodeId>,
     ) -> Result<(u64, u64), ChangeError> {
+        let tag = self.membership().tag;
+        self.propose_membership_tagged(voters, learners, tag)
+    }
+
+    /// [`RaftGroup::propose_membership`] with the driver's `tag`
+    /// ([`Membership::tag`]).
+    pub fn propose_membership_tagged(
+        &mut self,
+        voters: BTreeSet<NodeId>,
+        learners: BTreeSet<NodeId>,
+        tag: u64,
+    ) -> Result<(u64, u64), ChangeError> {
         self.check_leading().map_err(ChangeError::NotLeader)?;
         let State::Leader { progress } = &self.state else { unreachable!() };
         if voters.is_empty() || !voters.is_disjoint(&learners) {
@@ -866,11 +878,11 @@ impl RaftGroup {
             }
         }
         let next = if voters == current.voters {
-            Membership { voters, outgoing: BTreeSet::new(), learners }
+            Membership { voters, outgoing: BTreeSet::new(), learners, tag }
         } else {
             let outgoing = current.voters.clone();
             let learners = learners.difference(&outgoing).copied().collect();
-            Membership { voters, outgoing, learners }
+            Membership { voters, outgoing, learners, tag }
         };
         let range = self.append_config(next);
         for f in self.followers() {
@@ -1190,7 +1202,12 @@ impl RaftGroup {
         }
         let m = self.membership().clone();
         if m.is_joint() {
-            self.append_config(Membership { voters: m.voters, outgoing: BTreeSet::new(), learners: m.learners });
+            self.append_config(Membership {
+                voters: m.voters,
+                outgoing: BTreeSet::new(),
+                learners: m.learners,
+                tag: m.tag,
+            });
             for f in self.followers() {
                 self.replicate(f);
             }

@@ -54,7 +54,7 @@ use crate::txns::{MarkerCheck, TxnState};
 
 const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
-const FORMAT: u8 = 10;
+pub(crate) const FORMAT: u8 = 10;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -801,7 +801,7 @@ pub(crate) fn to_batch(e: &Entry) -> Result<Bytes, Error> {
     Ok(bytes)
 }
 
-async fn read_file<D: Disk>(disk: &D, path: &Path) -> Result<Option<Bytes>, Error> {
+pub(crate) async fn read_file<D: Disk>(disk: &D, path: &Path) -> Result<Option<Bytes>, Error> {
     let file = match disk.open(path, OpenMode::Existing).await {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -812,7 +812,7 @@ async fn read_file<D: Disk>(disk: &D, path: &Path) -> Result<Option<Bytes>, Erro
 }
 
 /// Writes `name` so that a crash leaves either the old or the new contents.
-async fn write_atomic<D: Disk>(disk: &D, dir: &Path, name: &str, bytes: Bytes) -> Result<(), Error> {
+pub(crate) async fn write_atomic<D: Disk>(disk: &D, dir: &Path, name: &str, bytes: Bytes) -> Result<(), Error> {
     let tmp = dir.join(format!("{name}.tmp"));
     let file = disk.open(&tmp, OpenMode::CreateOrOpen).await?;
     file.truncate(0).await?;
@@ -822,13 +822,13 @@ async fn write_atomic<D: Disk>(disk: &D, dir: &Path, name: &str, bytes: Bytes) -
     Ok(())
 }
 
-fn seal(mut b: BytesMut) -> Bytes {
+pub(crate) fn seal(mut b: BytesMut) -> Bytes {
     let crc = crc32c::crc32c(&b);
     b.put_u32_le(crc);
     b.freeze()
 }
 
-fn unseal(bytes: Bytes, what: &str) -> Result<Bytes, Error> {
+pub(crate) fn unseal(bytes: Bytes, what: &str) -> Result<Bytes, Error> {
     if bytes.len() < 5 {
         return Err(Error::Corrupt(format!("{what} is truncated")));
     }

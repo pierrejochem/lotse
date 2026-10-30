@@ -148,6 +148,7 @@ impl World {
                         coordinator: Some(3),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                         retention: lotse_server::RetentionConfig::keep(),
+                        join: false,
                         auth: lotse_server::AuthConfig::none(),
                     },
                 )

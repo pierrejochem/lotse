@@ -66,9 +66,12 @@ pub fn runtime(file: &ClusterFile, id: u64) -> Result<TokioRuntime, RunError> {
 }
 
 /// Runs node `id` of the cluster in `file` until `shutdown` completes,
-/// then stops it and waits for it to finish.
-pub async fn run(file: &ClusterFile, id: u64, shutdown: impl Future<Output = ()>) -> Result<(), RunError> {
-    let cfg = file.node_config(id)?;
+/// then stops it and waits for it to finish. With `join`, a node starting
+/// for the first time joins a running cluster (after `lotse node add`)
+/// instead of being one of its first voters (ADR 0048).
+pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<Output = ()>) -> Result<(), RunError> {
+    let mut cfg = file.node_config(id)?;
+    cfg.join = join;
     let rt = runtime(file, id)?;
     tracing::info!(
         node = id,
@@ -90,4 +93,27 @@ pub async fn run(file: &ClusterFile, id: u64, shutdown: impl Future<Output = ()>
     stopped.await?;
     tracing::info!(node = id, "stopped");
     Ok(())
+}
+
+/// A client acting for an admin, reaching the nodes the file names: with a
+/// client certificate (`identity`: certificate and key paths) or, without
+/// one, a SCRAM user and password.
+pub fn admin_client(
+    file: &ClusterFile,
+    identity: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    scram: Option<(String, String)>,
+) -> Result<lotse_client::Client<TokioRuntime>, RunError> {
+    let rt = TokioRuntime::new(std::env::temp_dir());
+    let rt = match &file.tls.ca {
+        Some(ca) => rt.with_tls(TlsConfig::from_files(ca, identity)?),
+        None => rt.plaintext_on_loopback(),
+    };
+    let bootstrap = file.nodes.iter().map(|n| n.client.clone()).collect();
+    let credentials = scram.map(|(user, password)| lotse_client::Credentials::Scram { user, password });
+    let cfg = lotse_client::ClientConfig {
+        retry_for: std::time::Duration::from_secs(15),
+        credentials,
+        ..lotse_client::ClientConfig::new(bootstrap)
+    };
+    Ok(lotse_client::Client::new(rt, cfg))
 }

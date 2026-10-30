@@ -266,6 +266,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         retention: lotse_server::RetentionConfig::keep(),
+        join: false,
         auth,
     };
     let rt = TokioRuntime::new(root.join("node-1")).with_tls(ca.node_tls(1, &["127.0.0.1"]).unwrap());

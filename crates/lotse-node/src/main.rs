@@ -1,5 +1,6 @@
 //! `lotse`: runs one node of a cluster from a cluster file, makes its
-//! certificates, or checks the file (ADR 0047).
+//! certificates, checks the file (ADR 0047), and adds and removes nodes
+//! (ADR 0048).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,18 +12,26 @@ const USAGE: &str = "\
 lotse: one node of a Lotse cluster
 
 usage:
-  lotse run   --config <cluster.toml> --node <id>
+  lotse run   --config <cluster.toml> --node <id> [--join]
   lotse certs --config <cluster.toml>
   lotse certs --config <cluster.toml> --client <principal> --out <dir>
   lotse check --config <cluster.toml>
+  lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port>] <admin>
+  lotse node remove --config <cluster.toml> --node <id> <admin>
+  lotse node list   --config <cluster.toml> <admin>
   lotse --version
 
 run    runs the node; stops on Ctrl-C or SIGTERM. LOTSE_LOG sets the log
-       filter (default info).
+       filter (default info). --join: a new node joining a running cluster,
+       after `lotse node add`.
 certs  makes the cluster's CA and every node's certificate where [tls] says,
        keeping those that exist; with --client, a certificate for a
        principal, such as an admin named in auth.admins.
-check  reads the file and says what it describes.";
+check  reads the file and says what it describes.
+node   adds a node (addresses from its [[node]] entry unless given), drains
+       and removes one, or lists them.
+       <admin> is --cert <file> --key <file> (a client certificate) or
+       --user <name> with the password in LOTSE_PASSWORD.";
 
 #[derive(Debug, Default)]
 struct Args {
@@ -30,6 +39,12 @@ struct Args {
     node: Option<u64>,
     client: Option<String>,
     out: Option<PathBuf>,
+    join: bool,
+    peer: Option<String>,
+    client_addr: Option<String>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+    user: Option<String>,
 }
 
 fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -44,6 +59,12 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--client" => a.client = Some(value()?),
             "--out" => a.out = Some(PathBuf::from(value()?)),
+            "--join" => a.join = true,
+            "--peer" => a.peer = Some(value()?),
+            "--client-addr" => a.client_addr = Some(value()?),
+            "--cert" => a.cert = Some(PathBuf::from(value()?)),
+            "--key" => a.key = Some(PathBuf::from(value()?)),
+            "--user" => a.user = Some(value()?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -73,6 +94,13 @@ fn main() -> ExitCode {
         "run" => parse(args).and_then(|a| run(&a)),
         "certs" => parse(args).and_then(|a| certs(&a)),
         "check" => parse(args).and_then(|a| check(&a)),
+        "node" => match args.next().as_deref() {
+            Some(what @ ("add" | "remove" | "list")) => {
+                let what = what.to_string();
+                parse(args).and_then(|a| node(&what, &a))
+            }
+            _ => Err(format!("lotse node needs add, remove or list\n\n{USAGE}")),
+        },
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     };
     match result {
@@ -91,7 +119,7 @@ fn run(a: &Args) -> Result<(), String> {
     let filter = std::env::var("LOTSE_LOG").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new(filter)).init();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
-    rt.block_on(lotse_node::run(&file, id, shutdown())).map_err(|e| e.to_string())
+    rt.block_on(lotse_node::run(&file, id, a.join, shutdown())).map_err(|e| e.to_string())
 }
 
 /// Ctrl-C, or SIGTERM from a service manager.
@@ -169,4 +197,58 @@ fn check(a: &Args) -> Result<(), String> {
         println!("clients: no authentication, everyone may do everything");
     }
     Ok(())
+}
+
+/// `lotse node add | remove | list`, as the admin the flags name.
+fn node(what: &str, a: &Args) -> Result<(), String> {
+    let file = load(a)?;
+    let identity = match (&a.cert, &a.key) {
+        (Some(c), Some(k)) => Some((c.clone(), k.clone())),
+        (None, None) => None,
+        _ => return Err("--cert and --key go together".into()),
+    };
+    let scram = match &a.user {
+        Some(u) => {
+            let password = std::env::var("LOTSE_PASSWORD").map_err(|_| "--user needs LOTSE_PASSWORD")?;
+            Some((u.clone(), password))
+        }
+        None => None,
+    };
+    let client = lotse_node::admin_client(&file, identity, scram).map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        match what {
+            "add" => {
+                let id = a.node.ok_or("--node is missing")?;
+                let entry = file.nodes.iter().find(|n| n.id == id);
+                let peer = a.peer.clone().or_else(|| entry.map(|n| n.peer.clone()));
+                let addr = a.client_addr.clone().or_else(|| entry.map(|n| n.client.clone()));
+                let (Some(peer), Some(addr)) = (peer, addr) else {
+                    return Err(format!("node {id} is not in the file: give --peer and --client-addr"));
+                };
+                client.add_node(id, &peer, &addr).await.map_err(|e| e.to_string())?;
+                println!("node {id} added; start it with: lotse run --config <file> --node {id} --join");
+            }
+            "remove" => {
+                let id = a.node.ok_or("--node is missing")?;
+                client.remove_node(id).await.map_err(|e| e.to_string())?;
+                println!("node {id}: draining; `lotse node list` shows how far, and it leaves once empty");
+            }
+            _ => {
+                let nodes = client.describe_nodes().await.map_err(|e| e.to_string())?;
+                println!(
+                    "{:<6} {:<24} {:<24} {:<9} {:>8} {:>7}",
+                    "node", "peer", "client", "state", "replicas", "moving"
+                );
+                for n in nodes {
+                    let state = if n.state == lotse_proto::node_state::DRAINING { "draining" } else { "active" };
+                    println!(
+                        "{:<6} {:<24} {:<24} {:<9} {:>8} {:>7}",
+                        n.node_id, n.peer, n.client, state, n.replicas, n.moving
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
 }

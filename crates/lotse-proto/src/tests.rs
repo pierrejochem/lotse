@@ -132,6 +132,10 @@ fn requests() -> Vec<Request> {
                 ],
             }],
         }),
+        Request::AddNode(AddNodeRequest { node_id: 4, peer: "10.0.0.4:7000".into(), client: "10.0.0.4:9000".into() }),
+        Request::RemoveNode(RemoveNodeRequest { node_id: 2 }),
+        Request::DescribeNodes(DescribeNodesRequest),
+        Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,
@@ -365,6 +369,25 @@ fn responses() -> Vec<(ApiKey, Response)> {
                     ],
                 }],
             }),
+        ),
+        (
+            ApiKey::DESCRIBE_NODES,
+            Response::DescribeNodes(DescribeNodesResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                nodes: vec![NodeEntry {
+                    node_id: 2,
+                    peer: "10.0.0.2:7000".into(),
+                    client: "10.0.0.2:9000".into(),
+                    state: node_state::DRAINING,
+                    replicas: 3,
+                    moving: 1,
+                }],
+            }),
+        ),
+        (
+            ApiKey::REMOVE_NODE,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
         ),
         (
             ApiKey::END_TXN,

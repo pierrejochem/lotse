@@ -66,12 +66,18 @@ pub(crate) struct AdminView<'a> {
     pub(crate) voters: &'a BTreeMap<GroupId, Vec<NodeId>>,
     /// SCRAM users from the node configuration.
     pub(crate) configured_users: &'a BTreeMap<String, ScramCredential>,
+    /// The cluster's nodes, `(peer, client)`, those draining included.
+    pub(crate) members: &'a BTreeMap<NodeId, (String, String)>,
+    /// The first voters of the configured groups (the metadata and
+    /// coordinator groups): the nodes of the configuration.
+    pub(crate) configured_voters: &'a [NodeId],
     /// The node's retention for streams that set none of their own.
     pub(crate) retention: crate::RetentionConfig,
 }
 
 static NO_VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
 static NO_USERS: BTreeMap<String, ScramCredential> = BTreeMap::new();
+static NO_MEMBERS: BTreeMap<NodeId, (String, String)> = BTreeMap::new();
 
 impl Default for AdminView<'_> {
     fn default() -> Self {
@@ -82,12 +88,14 @@ impl Default for AdminView<'_> {
             voters: &NO_VOTERS,
             configured_users: &NO_USERS,
             retention: crate::RetentionConfig::keep(),
+            members: &NO_MEMBERS,
+            configured_voters: &[],
         }
     }
 }
 
 /// What to answer once an admin record is applied.
-pub(super) enum AdminThen {
+pub(crate) enum AdminThen {
     /// A create: the name, its tenant and the id this record gives it.
     Created { name: String, tenant: String, id: u64 },
     /// A bind, which holds only if neither side was deleted before it.
@@ -130,7 +138,7 @@ fn outcome_response(error: ErrorCode, leader_hint: Option<LeaderHint>) -> Respon
     Response::Outcome(OutcomeResponse { error, leader_hint })
 }
 
-fn admin_response(error: ErrorCode, why: Option<&str>, leader_hint: Option<LeaderHint>) -> Response {
+pub(super) fn admin_response(error: ErrorCode, why: Option<&str>, leader_hint: Option<LeaderHint>) -> Response {
     Response::Admin(AdminResponse { error, error_msg: why.map(str::to_string), leader_hint })
 }
 
@@ -219,7 +227,7 @@ fn runtime_resource<R: Runtime, S: StateMachine>(
 impl Clients {
     /// The metadata group's replica, if this node leads it and has applied
     /// an entry of its own term; otherwise the error and leader hint.
-    fn metadata_leader<'a, R: Runtime, S: StateMachine>(
+    pub(super) fn metadata_leader<'a, R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
     ) -> Result<&'a mut Replica<R, S>, (ErrorCode, Option<LeaderHint>)> {
@@ -236,7 +244,7 @@ impl Clients {
     }
 
     /// Proposes `change`; answered by `then` once applied.
-    fn propose_admin<R: Runtime, S: StateMachine>(
+    pub(super) fn propose_admin<R: Runtime, S: StateMachine>(
         &mut self,
         replica: &mut Replica<R, S>,
         now: Instant,

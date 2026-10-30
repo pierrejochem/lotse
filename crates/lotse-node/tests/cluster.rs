@@ -37,7 +37,7 @@ fn start_in_process(file: &ClusterFile) -> Vec<(oneshot::Sender<()>, tokio::task
             let (tx, rx) = oneshot::channel::<()>();
             let f = file.clone();
             let task = tokio::spawn(async move {
-                lotse_node::run(&f, id, async {
+                lotse_node::run(&f, id, false, async {
                     let _ = rx.await;
                 })
                 .await
@@ -179,8 +179,60 @@ async fn a_cluster_from_one_file() {
         assert_eq!(first.base_offset(), *offset);
         assert_eq!(first.records().unwrap()[0].value.as_deref(), Some(value.as_bytes()));
     }
+
+    // A fourth node joins and the first leaves (ADR 0048), through the
+    // executable, as the admin.
+    std::fs::write(
+        &config,
+        format!(
+            "{text}\n[[node]]\nid = 4\npeer = \"127.0.0.1:{}\"\nclient = \"127.0.0.1:{}\"\n",
+            free_port(),
+            free_port()
+        ),
+    )
+    .unwrap();
+    let out = lotse(&["certs", "--config", c]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("wrote") && out.status.success(), "a certificate for node 4");
+    let admin = [
+        "--cert",
+        clients.join("alice.pem").to_str().unwrap().to_string().leak() as &str,
+        "--key",
+        clients.join("alice.key").to_str().unwrap().to_string().leak(),
+    ];
+    let out = lotse(&[&["node", "add", "--config", c, "--node", "4"][..], &admin[..]].concat());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let file4 = ClusterFile::load(&config).unwrap();
+    let (tx4, rx4) = oneshot::channel::<()>();
+    let joining = tokio::spawn(async move {
+        lotse_node::run(&file4, 4, true, async {
+            let _ = rx4.await;
+        })
+        .await
+        .unwrap_or_else(|e| panic!("node 4: {e}"));
+    });
+    let out = lotse(&[&["node", "remove", "--config", c, "--node", "1"][..], &admin[..]].concat());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let out = lotse(&[&["node", "list", "--config", c][..], &admin[..]].concat());
+        let listed = String::from_utf8_lossy(&out.stdout).to_string();
+        let ids: Vec<&str> = listed.lines().skip(1).filter_map(|l| l.split_whitespace().next()).collect();
+        if out.status.success() && ids == ["2", "3", "4"] && !listed.contains("draining") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "node 1 never left: {listed}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    for (p, offset, value) in &written {
+        let f = alice.fetch("orders", *p, *offset, Duration::from_millis(100)).await.expect("a read after the move");
+        let first = f.committed_batches().unwrap().into_iter().next().expect("the batch is there");
+        assert_eq!(first.records().unwrap()[0].value.as_deref(), Some(value.as_bytes()));
+    }
+    alice.produce("orders", 0, batch("after the move")).await.expect("the moved partition takes writes");
     drop(alice);
     drop(stranger);
+    let _ = tx4.send(());
+    joining.await.unwrap();
     stop_all(nodes, third).await;
     let _ = std::fs::remove_dir_all(&root);
 }
