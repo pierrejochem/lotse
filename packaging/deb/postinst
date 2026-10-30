@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    systemd-sysusers lotse.conf >/dev/null 2>&1 || systemd-sysusers >/dev/null 2>&1 || true
+    if ! getent passwd lotse >/dev/null; then
+        adduser --system --group --home /var/lib/lotse --no-create-home lotse >/dev/null
+    fi
+    install -d -o lotse -g lotse -m 0750 /var/lib/lotse
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+fi
+#DEBHELPER#

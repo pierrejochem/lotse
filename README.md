@@ -4,7 +4,7 @@
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
-Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues). The `lotse` binary runs a node from a cluster file, and nodes can be added to and drained from a running cluster.
+Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues). The `lotse` binary runs a node from a cluster file, as a systemd unit, a Debian package or a container image, and nodes can be added to and drained from a running cluster.
 
 ## Documentation
 
@@ -91,6 +91,25 @@ lotse node remove --config cluster.toml --node 2 --cert alice/alice.pem --key al
 lotse node list --config cluster.toml --cert alice/alice.pem --key alice/alice.key
 ``` Larger setups put certificates from their own CA at the same paths. Clients authenticate with a certificate, SCRAM-SHA-512 (users set at runtime) or OAUTHBEARER (`[auth.oidc]`); `auth.required = false` with `[tls] plaintext_on_loopback = true` runs a cluster on one machine without either. `LOTSE_LOG` sets the log filter; the node stops cleanly on Ctrl-C or SIGTERM.
 
+### Packages, images and systemd
+
+Each release (ADR 0049) has static binaries for x86_64 and aarch64, Debian packages and the image `ghcr.io/pierrejochem/lotse`. A node takes its id from `--node` or `LOTSE_NODE`, its cluster file from `--config` or `LOTSE_CONFIG`, and joins with `--join` or `LOTSE_JOIN=1`.
+
+```sh
+# Debian or Ubuntu: the binary, lotse@.service, the lotse user
+sudo apt install ./lotse_<version>_amd64.deb
+sudo install -d /etc/lotse
+sudo cp /usr/share/doc/lotse/cluster.toml.example /etc/lotse/cluster.toml   # then edit it
+sudo lotse certs --config /etc/lotse/cluster.toml && sudo chown -R lotse: /etc/lotse
+sudo systemctl enable --now lotse@1
+
+# A container: the cluster file and certificates read-only, the data in a volume
+docker run -e LOTSE_NODE=1 -v /etc/lotse:/etc/lotse:ro -v lotse-1:/var/lib/lotse \
+  -p 7000:7000 -p 9000:9000 ghcr.io/pierrejochem/lotse
+```
+
+`packaging/` holds the Dockerfile, the unit and the package scripts; `docker build -f packaging/Dockerfile .` and `cargo deb -p lotse-node` build them from the repository. In the image and under the unit the data directory is `/var/lib/lotse`, so the cluster file's `data_dir` should be that path or one below it.
+
 ## Management console
 
 `lotse-console` is one binary. It embeds the React app from `console/web` and talks to the clusters on behalf of the signed-in user. A cluster with `kind = "native"` is a real one, reached through `lotse-client` at its `bootstrap` addresses; the console asks every node for its metrics and turns counters into rates (ADR 0036). A cluster with `kind = "demo"` serves sample data that moves over time.
@@ -154,7 +173,7 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 - Queues: exchanges are routed by the client (no `Publish` wire key), with bindings it may have cached for up to `metadata_max_age`, one message per publish; no dead-letter queues, TTL, delay, priorities, single active consumer or transactional acks. Delivery counts are written only on requeue and ack timeout, so after a failover they may start over. Settled offsets stay in the ack index as ranges even below the log start, which retention moves up to the ack floor.
 - Consumer groups: one coordinator group serves all groups and transactional ids; no `ListOffsets` (a partition without a committed offset is read from its log start), no static membership or regex subscriptions; every heartbeat that changes a group writes the whole group.
 - Retention: whole segments only, so a partition keeps up to a segment more than its limits; age goes by the timestamps producers write; streams from the node configuration take the node's defaults and cannot be changed at runtime; no compaction.
-- The binary: certificates from `lotse certs` do not expire and are read once at start.
+- The binary: certificates from `lotse certs` do not expire and are read once at start. Releases and the image are built only by GitHub Actions; the package targets systemd systems.
 - Nodes: a new node takes new groups and the replicas of drained nodes, but nothing moves existing groups onto it; four groups move at a time, each as a full copy through Raft; a removed node keeps its copies of the metadata and coordinator groups until it is switched off.
 - Metadata: only a queue's ack timeout and a stream's retention can change; no conditional delete (`if_empty`), no authorisation; tombstones of deleted resources are kept for ever; right after a change some brokers do not know it yet.
 - Console: chart history (about 10 KiB per stream or queue for 24 h) covers only what the sampler may see. The oldest record's age, open transactions per stream, bytes in flight per consumer, zones and disk limits are not reported. Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+# Data and configuration stay, even on purge: a broker's log is not
+# something a package manager should delete.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+#DEBHELPER#

@@ -63,7 +63,11 @@ impl Drop for Third {
 
 fn start_executable(config: &Path) -> Third {
     let child = Command::new(env!("CARGO_BIN_EXE_lotse"))
-        .args(["run", "--config", config.to_str().unwrap(), "--node", "3"])
+        // As a container or a systemd instance runs it: from the
+        // environment, not flags.
+        .args(["run"])
+        .env("LOTSE_CONFIG", config)
+        .env("LOTSE_NODE", "3")
         .env("LOTSE_LOG", "warn")
         .stdout(std::process::Stdio::null())
         .spawn()

@@ -1,0 +1,62 @@
+# One Lotse node (ADR 0049); the instance is the node's id in the cluster
+# file:
+#
+#   systemctl enable --now lotse@2
+#
+# The cluster file is /etc/lotse/cluster.toml; its data_dir should be
+# /var/lib/lotse (or /var/lib/lotse/node-{id}). Certificates and keys go
+# under /etc/lotse, readable by the lotse user. A node joining a running
+# cluster starts once with LOTSE_JOIN=1, for instance from a drop-in made
+# with `systemctl edit lotse@4`.
+
+[Unit]
+Description=Lotse node %i
+Documentation=https://github.com/pierrejochem/lotse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=lotse
+Group=lotse
+Environment=LOTSE_NODE=%i
+Environment=LOTSE_CONFIG=/etc/lotse/cluster.toml
+ExecStart=/usr/bin/lotse run
+# The node stops cleanly on SIGTERM; give it time to close its groups.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+StateDirectory=lotse
+StateDirectoryMode=0750
+ConfigurationDirectory=lotse
+
+# Nothing but its data directory is writable, and it gets no privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lotse
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

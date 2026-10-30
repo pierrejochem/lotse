@@ -151,3 +151,19 @@ jobs:
       - run: cargo test -p lotse-server --release --test membership
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
+
+  # The packaging (ADR 0049): the image builds from source and the binary in
+  # it starts; the Debian package builds and holds the unit.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-deb
+      - run: cargo deb -p lotse-node
+      - run: sudo dpkg -i target/debian/*.deb
+      - run: lotse --version && getent passwd lotse
+      - run: systemd-analyze verify /lib/systemd/system/lotse@.service
+      - run: docker build -f packaging/Dockerfile -t lotse:ci .
+      - run: docker run --rm lotse:ci --version

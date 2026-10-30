@@ -1,0 +1,2 @@
+# The user Lotse nodes run as (systemd-sysusers).
+u lotse - "Lotse message broker" /var/lib/lotse

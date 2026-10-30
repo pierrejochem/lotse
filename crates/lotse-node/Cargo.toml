@@ -31,3 +31,22 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 
 [lints]
 workspace = true
+
+# `cargo deb -p lotse-node` (ADR 0049): the binary, a systemd instance unit
+# per node, the lotse user and an example cluster file.
+[package.metadata.deb]
+name = "lotse"
+maintainer = "Pierre Jochem <pierrejochem@msn.com>"
+copyright = "2026, Pierre Jochem"
+extended-description = "Lotse is a message broker: reliable queues and persistent streams on one replicated log, with exactly-once delivery. This package runs one node of a cluster as lotse@<id>.service."
+section = "net"
+priority = "optional"
+depends = "$auto, adduser"
+maintainer-scripts = "../../packaging/deb"
+assets = [
+    ["target/release/lotse", "usr/bin/lotse", "755"],
+    ["../../packaging/systemd/lotse@.service", "lib/systemd/system/lotse@.service", "644"],
+    ["../../packaging/systemd/lotse.sysusers", "usr/lib/sysusers.d/lotse.conf", "644"],
+    ["../../packaging/deb/cluster.toml.example", "usr/share/doc/lotse/cluster.toml.example", "644"],
+]
+

@@ -53,5 +53,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0046 | [Retention: trimming the log at snapshot points](0046-retention.md) | Accepted |
 | 0047 | [The `lotse` binary: one cluster file, resources at runtime](0047-the-lotse-binary.md) | Accepted |
 | 0048 | [Adding and removing nodes](0048-adding-and-removing-nodes.md) | Accepted |
+| 0049 | [Packaging: an image, a systemd unit, a Debian package and releases](0049-packaging.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

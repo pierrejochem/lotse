@@ -23,7 +23,8 @@ usage:
 
 run    runs the node; stops on Ctrl-C or SIGTERM. LOTSE_LOG sets the log
        filter (default info). --join: a new node joining a running cluster,
-       after `lotse node add`.
+       after `lotse node add`. In a container or a systemd instance,
+       LOTSE_NODE, LOTSE_JOIN=1 and LOTSE_CONFIG stand in for the flags.
 certs  makes the cluster's CA and every node's certificate where [tls] says,
        keeping those that exist; with --client, a certificate for a
        principal, such as an admin named in auth.admins.
@@ -72,8 +73,23 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 fn load(a: &Args) -> Result<ClusterFile, String> {
-    let path = a.config.as_ref().ok_or("--config is missing")?;
-    ClusterFile::load(path).map_err(|e| e.to_string())
+    let path = match &a.config {
+        Some(p) => p.clone(),
+        None => std::env::var_os("LOTSE_CONFIG").map(PathBuf::from).ok_or("--config (or LOTSE_CONFIG) is missing")?,
+    };
+    ClusterFile::load(&path).map_err(|e| e.to_string())
+}
+
+/// The node `run` starts: `--node`, else `LOTSE_NODE` (ADR 0049), and
+/// whether it joins: `--join`, else `LOTSE_JOIN` (`1` or `true`).
+fn node_and_join(a: &Args) -> Result<(u64, bool), String> {
+    let id = match (a.node, std::env::var("LOTSE_NODE")) {
+        (Some(id), _) => id,
+        (None, Ok(v)) => v.trim().parse().map_err(|_| format!("LOTSE_NODE={v}: a node id is a number"))?,
+        (None, Err(_)) => return Err("--node (or LOTSE_NODE) is missing".into()),
+    };
+    let join = a.join || std::env::var("LOTSE_JOIN").is_ok_and(|v| matches!(v.trim(), "1" | "true"));
+    Ok((id, join))
 }
 
 fn main() -> ExitCode {
@@ -114,12 +130,12 @@ fn main() -> ExitCode {
 
 fn run(a: &Args) -> Result<(), String> {
     let file = load(a)?;
-    let id = a.node.ok_or("--node is missing")?;
+    let (id, join) = node_and_join(a)?;
     file.node(id).map_err(|e| e.to_string())?;
     let filter = std::env::var("LOTSE_LOG").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new(filter)).init();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
-    rt.block_on(lotse_node::run(&file, id, a.join, shutdown())).map_err(|e| e.to_string())
+    rt.block_on(lotse_node::run(&file, id, join, shutdown())).map_err(|e| e.to_string())
 }
 
 /// Ctrl-C, or SIGTERM from a service manager.

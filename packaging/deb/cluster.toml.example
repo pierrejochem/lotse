@@ -1,0 +1,35 @@
+# A Lotse cluster file (ADR 0047): the same on every node. Copy it to
+# /etc/lotse/cluster.toml, name your nodes, make the certificates with
+#
+#   lotse certs --config /etc/lotse/cluster.toml
+#
+# and start each node with `systemctl enable --now lotse@<id>`.
+
+[cluster]
+data_dir = "/var/lib/lotse"
+
+[[node]]
+id = 1
+peer = "10.0.0.1:7000"
+client = "10.0.0.1:9000"
+
+[[node]]
+id = 2
+peer = "10.0.0.2:7000"
+client = "10.0.0.2:9000"
+
+[[node]]
+id = 3
+peer = "10.0.0.3:7000"
+client = "10.0.0.3:9000"
+
+[tls]
+ca = "/etc/lotse/ca.pem"
+cert = "/etc/lotse/node-{id}.pem"
+key = "/etc/lotse/node-{id}.key"
+
+[retention]
+ms = 604800000      # 7 days; -1 keeps everything
+
+[auth]
+admins = ["admin"]  # signs in with `lotse certs --client admin`
