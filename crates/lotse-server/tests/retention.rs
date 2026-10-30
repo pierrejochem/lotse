@@ -576,3 +576,49 @@ async fn run(rt: SimRuntime) {
 fn retention_deletes_only_what_it_may_and_readers_go_on() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
 }
+
+/// Without faults, the coordinator group's log is cut again and again
+/// while several transactional producers keep writing to it: every
+/// transaction begins, writes and commits, none is lost to a cut.
+async fn quiet(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), RetentionConfig::keep()).await;
+    let n = w.cfgs.len() as u64;
+    let end = rt.now() + Duration::from_secs(5);
+    let mut tasks = Vec::new();
+    for t in 0..6 {
+        let host = rt.node(&format!("t{t}"));
+        tasks.push(rt.spawn(async move {
+            let client = Client::new(
+                host.clone(),
+                ClientConfig {
+                    transactional_id: Some(format!("tx{t}")),
+                    retry_for: Duration::from_secs(5),
+                    ..client_config(n)
+                },
+            );
+            let mut committed = 0;
+            while host.now() < end {
+                let mut txn = client.begin_transaction().await.unwrap_or_else(|e| panic!("tx{t} did not begin: {e}"));
+                let p = host.below(u64::from(PARTITIONS)) as u32;
+                txn.produce(STREAM, p, batch(&format!("tx{t}-{committed}"), now_ms(&host)))
+                    .await
+                    .unwrap_or_else(|e| panic!("tx{t}: a quiet cluster lost a transactional write: {e}"));
+                txn.commit().await.unwrap_or_else(|e| panic!("tx{t}: a quiet cluster left a commit open: {e}"));
+                committed += 1;
+            }
+            assert!(committed > 20, "tx{t}: only {committed} transactions in 5 s");
+        }));
+    }
+    for t in tasks {
+        t.await;
+    }
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn requests_learn_their_outcome_while_retention_cuts_the_coordinator_log() {
+    lotse_sim::check_few_seeds(5, |seed| Sim::new(seed).run(quiet));
+}
