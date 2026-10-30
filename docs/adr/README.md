@@ -49,5 +49,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0042 | [The console keeps its session key](0042-the-console-keeps-its-session-key.md) | Accepted |
 | 0043 | [A cluster-wide viewer role](0043-cluster-viewer-role.md) | Accepted |
 | 0044 | [Sign-ins in progress in a sealed cookie](0044-sign-ins-in-progress-in-a-sealed-cookie.md) | Accepted |
+| 0045 | [Chart history coarser with age](0045-chart-history-coarser-with-age.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

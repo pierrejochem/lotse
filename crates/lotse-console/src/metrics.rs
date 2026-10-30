@@ -1,4 +1,5 @@
-//! Chart history: in-memory series per cluster, per resource.
+//! Chart history: in-memory series per cluster, per resource, coarser with
+//! age (ADR 0045).
 //!
 //! The sampler records, every `sample_secs`, each stream's and queue's
 //! rates as the console's metrics identity sees them, and the cluster's
@@ -81,9 +82,9 @@ struct Columns {
     present: usize,
 }
 
-/// One cluster's history.
+/// One resolution of a cluster's history: samples at one step.
 #[derive(Debug, Default)]
-struct History {
+struct Series {
     times: VecDeque<u64>,
     commit_p99: VecDeque<f32>,
     resources: BTreeMap<u64, Columns>,
@@ -93,7 +94,7 @@ fn held(v: f32) -> bool {
     !v.is_nan()
 }
 
-impl History {
+impl Series {
     fn push(&mut self, cap: usize, t: u64, s: &ChartSample) {
         let len = self.times.len();
         self.times.push_back(t);
@@ -157,28 +158,143 @@ impl History {
     }
 }
 
+/// Averages of the samples in one bucket of a coarser resolution, until
+/// the bucket is full.
+#[derive(Debug, Default)]
+struct Bucket {
+    /// Which bucket: sample time divided by the step.
+    index: u64,
+    /// The newest sample's time: the bucket's point is drawn there.
+    last: u64,
+    commit_p99: (f64, u32),
+    resources: BTreeMap<u64, [(f64, u32); PER_RESOURCE]>,
+}
+
+impl Bucket {
+    fn add(&mut self, t: u64, s: &ChartSample) {
+        self.last = t;
+        if let Some(v) = s.commit_p99_ms {
+            self.commit_p99.0 += v;
+            self.commit_p99.1 += 1;
+        }
+        for (id, row) in &s.resources {
+            let acc = self.resources.entry(*id).or_default();
+            for (k, v) in row.iter().enumerate() {
+                if let Some(v) = v {
+                    acc[k].0 += v;
+                    acc[k].1 += 1;
+                }
+            }
+        }
+    }
+
+    /// The bucket as one sample: each value the mean of those it saw.
+    fn sample(&self) -> ChartSample {
+        let mean = |(sum, n): (f64, u32)| (n > 0).then(|| sum / f64::from(n));
+        ChartSample {
+            resources: self.resources.iter().map(|(id, acc)| (*id, acc.map(mean))).collect(),
+            commit_p99_ms: mean(self.commit_p99),
+        }
+    }
+}
+
+/// One resolution: its step, how much it covers, its samples, and the
+/// bucket it is filling (for all but the finest).
+#[derive(Debug)]
+struct Tier {
+    step_ms: u64,
+    span_ms: u64,
+    cap: usize,
+    series: Series,
+    filling: Option<Bucket>,
+}
+
+impl Tier {
+    fn new(step: Duration, span: Duration) -> Tier {
+        let (step_ms, span_ms) = (step.as_millis() as u64, span.as_millis() as u64);
+        Tier {
+            step_ms,
+            span_ms,
+            cap: (span_ms / step_ms.max(1)).max(1) as usize,
+            series: Series::default(),
+            filling: None,
+        }
+    }
+
+    fn add(&mut self, finest: bool, t: u64, s: &ChartSample) {
+        if finest {
+            return self.series.push(self.cap, t, s);
+        }
+        let index = t / self.step_ms;
+        if self.filling.as_ref().is_some_and(|b| b.index != index) {
+            let full = self.filling.take().expect("checked");
+            self.series.push(self.cap, full.last, &full.sample());
+        }
+        self.filling.get_or_insert_with(|| Bucket { index, ..Bucket::default() }).add(t, s);
+    }
+
+    fn query(&self, series: usize, since: u64, vis: &Visibility) -> Vec<Point> {
+        let mut points = self.series.query(series, since, vis);
+        // The bucket being filled is the newest stretch: shown as it is.
+        if let Some(b) = self.filling.as_ref().filter(|b| b.last >= since) {
+            let mut now = Series::default();
+            now.push(1, b.last, &b.sample());
+            points.extend(now.query(series, since, vis));
+        }
+        points
+    }
+}
+
+/// One cluster's history at every resolution.
+#[derive(Debug)]
+struct History {
+    tiers: Vec<Tier>,
+}
+
+/// The resolutions kept: 10 s (the sample step) for an hour, 1 min up to
+/// 6 h, 8 min up to the retention, each no finer than the sample step and
+/// none longer than the retention. A chart shows at most 180 points, so
+/// this is all any range can draw (ADR 0045).
+pub fn tiers(retention: Duration, step: Duration) -> Vec<(Duration, Duration)> {
+    let step = step.max(Duration::from_secs(1));
+    let mut out: Vec<(Duration, Duration)> = Vec::new();
+    for (s, span) in [(step, 3_600), (Duration::from_secs(60), 21_600), (Duration::from_secs(480), u64::MAX)] {
+        let span = Duration::from_secs(span).min(retention);
+        let s = s.max(step);
+        if out.last().is_none_or(|(_, last)| span > *last) {
+            out.push((s, span));
+        }
+    }
+    out
+}
+
 /// Every cluster's history.
 #[derive(Debug)]
 pub struct MetricsStore {
-    cap: usize,
+    tiers: Vec<(Duration, Duration)>,
     clusters: Mutex<BTreeMap<String, History>>,
 }
 
 impl MetricsStore {
-    /// Keeps `retention / step` samples per cluster.
+    /// Keeps `retention` of history sampled every `step`, coarser with age.
     pub fn new(retention: Duration, step: Duration) -> Self {
-        let cap = (retention.as_secs() / step.as_secs().max(1)) as usize;
-        MetricsStore { cap: cap.max(1), clusters: Mutex::new(BTreeMap::new()) }
+        MetricsStore { tiers: tiers(retention, step), clusters: Mutex::new(BTreeMap::new()) }
     }
 
     /// Records a sample taken at `t` (ms since the epoch).
     pub fn record(&self, cluster: &str, t: u64, sample: &ChartSample) {
         let mut all = self.clusters.lock().unwrap_or_else(|e| e.into_inner());
-        all.entry(cluster.to_owned()).or_default().push(self.cap, t, sample);
+        let h = all
+            .entry(cluster.to_owned())
+            .or_insert_with(|| History { tiers: self.tiers.iter().map(|(s, span)| Tier::new(*s, *span)).collect() });
+        for (i, tier) in h.tiers.iter_mut().enumerate() {
+            tier.add(i == 0, t, sample);
+        }
     }
 
     /// Points of `series` over the last `range` as `vis` may see them, at
-    /// most `max`. Empty if nothing is known.
+    /// most `max`, from the finest resolution that covers the range. Empty
+    /// if nothing is known.
     pub fn query(
         &self,
         cluster: &str,
@@ -191,16 +307,27 @@ impl MetricsStore {
         if k == PER_RESOURCE && !vis.cluster_wide {
             return Err(QueryError::ClusterWide("Commit latency".into()));
         }
-        let since = now_ms().saturating_sub(range.as_millis() as u64);
+        let range_ms = range.as_millis() as u64;
+        let since = now_ms().saturating_sub(range_ms);
         let all = self.clusters.lock().unwrap_or_else(|e| e.into_inner());
-        let points = all.get(cluster).map(|h| h.query(k, since, vis)).unwrap_or_default();
+        let points = all
+            .get(cluster)
+            .and_then(|h| h.tiers.iter().find(|t| t.span_ms >= range_ms).or(h.tiers.last()))
+            .map(|t| t.query(k, since, vis))
+            .unwrap_or_default();
         Ok(downsample(&points, max))
     }
 
     /// How many resources of `cluster` have history (for tests).
     pub fn resources(&self, cluster: &str) -> usize {
         let all = self.clusters.lock().unwrap_or_else(|e| e.into_inner());
-        all.get(cluster).map_or(0, |h| h.resources.len())
+        all.get(cluster).map_or(0, |h| h.tiers.iter().map(|t| t.series.resources.len()).max().unwrap_or(0))
+    }
+
+    /// How many samples `cluster` keeps, over all resolutions (for tests).
+    pub fn samples(&self, cluster: &str) -> usize {
+        let all = self.clusters.lock().unwrap_or_else(|e| e.into_inner());
+        all.get(cluster).map_or(0, |h| h.tiers.iter().map(|t| t.series.times.len()).sum())
     }
 }
 
@@ -250,9 +377,38 @@ mod tests {
     }
 
     #[test]
-    fn a_day_at_ten_seconds_is_8640_points() {
-        let s = MetricsStore::new(Duration::from_secs(86_400), Duration::from_secs(10));
-        assert_eq!(s.cap, 8_640);
+    fn history_gets_coarser_with_age() {
+        let (s, h, day) = (Duration::from_secs, |h: u64| Duration::from_secs(h * 3600), Duration::from_secs(86_400));
+        assert_eq!(tiers(day, s(10)), [(s(10), h(1)), (s(60), h(6)), (s(480), day)]);
+        assert_eq!(tiers(h(2), s(10)), [(s(10), h(1)), (s(60), h(2))], "none longer than the retention");
+        assert_eq!(tiers(day, s(120)), [(s(120), h(1)), (s(120), h(6)), (s(480), day)], "none finer than a sample");
+
+        // A day of samples every 10 s: 900 kept instead of 8,640.
+        let store = MetricsStore::new(day, s(10));
+        let now = now_ms();
+        let start = now - 86_400_000;
+        for i in 0..8_640u64 {
+            store.record("c", start + i * 10_000, &sample(&[(1, (i % 6) as f64)], Some(1.0)));
+        }
+        assert!((900..=903).contains(&store.samples("c")), "{}", store.samples("c"));
+        let all = sees(&[1], true);
+        let q = |range: u64| store.query("c", "in_bytes_per_sec", Duration::from_secs(range), 10_000, &all).unwrap();
+        let fifteen = q(900);
+        assert!((89..=91).contains(&fifteen.len()), "15 min at 10 s: {}", fifteen.len());
+        assert!(fifteen.iter().any(|p| p.v == 0.0) && fifteen.iter().any(|p| p.v == 5.0), "raw samples");
+        let six = q(21_600);
+        assert!((359..=362).contains(&six.len()), "6 h at 1 min: {}", six.len());
+        // Full minutes: the oldest may have lost samples to the window, the
+        // newest is still filling.
+        let full = &six[1..six.len() - 1];
+        assert!(full.iter().all(|p| (p.v - 2.5).abs() < 1e-6), "a minute averages its six samples");
+        let whole = q(86_400);
+        assert!((179..=182).contains(&whole.len()), "24 h at 8 min: {}", whole.len());
+        assert!(whole.last().unwrap().t >= now - 20_000, "up to the newest sample, from the bucket being filled");
+        assert_eq!(
+            store.query("c", "commit_p99_ms", Duration::from_secs(86_400), 10_000, &all).unwrap().len(),
+            whole.len()
+        );
     }
 
     fn sample(rows: &[(u64, f64)], p99: Option<f64>) -> ChartSample {
