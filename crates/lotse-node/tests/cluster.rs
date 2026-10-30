@@ -212,15 +212,15 @@ async fn a_cluster_from_one_file() {
     });
     let out = lotse(&[&["node", "remove", "--config", c, "--node", "1"][..], &admin[..]].concat());
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let deadline = std::time::Instant::now() + Duration::from_secs(90);
-    loop {
+    // Up to 90 s, in half seconds.
+    for attempt in 0.. {
         let out = lotse(&[&["node", "list", "--config", c][..], &admin[..]].concat());
         let listed = String::from_utf8_lossy(&out.stdout).to_string();
         let ids: Vec<&str> = listed.lines().skip(1).filter_map(|l| l.split_whitespace().next()).collect();
         if out.status.success() && ids == ["2", "3", "4"] && !listed.contains("draining") {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "node 1 never left: {listed}");
+        assert!(attempt < 180, "node 1 never left: {listed}");
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     for (p, offset, value) in &written {
