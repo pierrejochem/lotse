@@ -242,3 +242,40 @@ fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
     );
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
+
+#[test]
+fn nodes_come_and_go_and_groups_get_new_voters() {
+    let mut s = MetadataState::default();
+    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into() };
+    s.apply(1, &payload(&add)).unwrap();
+    assert_eq!(s.nodes[&4], NodeMeta { peer: "n4:7000".into(), client: "n4:9000".into() });
+    // A runtime stream's partition and a configured group get new voters.
+    let create = Change::CreateStream {
+        name: "o".into(),
+        tenant: "t".into(),
+        partitions: vec![vec![1, 2, 3]],
+        settings: StreamSettings::default(),
+    };
+    s.apply(2, &payload(&create)).unwrap();
+    let g = group_id(2, 0);
+    assert_eq!(s.voters_of(g), Some(&[1, 2, 3][..]));
+    assert_eq!(s.voters_of(1), None, "a configured group has no voters set at runtime yet");
+    s.apply(3, &payload(&Change::DrainNode { id: 2 })).unwrap();
+    s.apply(4, &payload(&Change::SetVoters { group: g, voters: vec![4, 3, 1] })).unwrap();
+    s.apply(5, &payload(&Change::SetVoters { group: 1, voters: vec![1, 3, 4] })).unwrap();
+    assert_eq!(s.voters_of(g), Some(&[1, 3, 4][..]), "kept sorted, and with the resource");
+    assert_eq!(s.streams[&resource_id(2)].partitions[0].1, vec![1, 3, 4]);
+    assert_eq!(s.voters_of(1), Some(&[1, 3, 4][..]));
+    assert_eq!(s.left[&g], BTreeSet::from([2]), "node 2 never comes back to this group");
+    assert!(!s.is_settled(g, &[1, 3, 4]));
+    s.apply(6, &payload(&Change::Settled { group: g, voters: vec![4, 1, 3] })).unwrap();
+    assert!(s.is_settled(g, &[3, 1, 4]));
+    s.apply(7, &payload(&Change::ForgetNode { id: 2 })).unwrap();
+    assert!(s.gone.contains(&2) && !s.draining.contains(&2));
+    // A gone id is never added again, nor drained.
+    let again = Change::AddNode { id: 2, peer: "x:1".into(), client: "x:2".into() };
+    s.apply(8, &payload(&again)).unwrap();
+    s.apply(9, &payload(&Change::DrainNode { id: 2 })).unwrap();
+    assert!(!s.nodes.contains_key(&2) && !s.draining.contains(&2));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}

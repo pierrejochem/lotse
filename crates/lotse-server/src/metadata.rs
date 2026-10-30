@@ -70,6 +70,26 @@ pub(crate) enum Change {
     DeleteTenant { name: String },
     /// Role bindings removed, then added.
     SetBindings { add: Vec<RoleBinding>, remove: Vec<RoleBinding> },
+    /// A node joins the cluster (ADR 0048). Ids are never used twice.
+    AddNode { id: NodeId, peer: String, client: String },
+    /// A node is to leave: nothing new is placed on it, and its replicas
+    /// move to other nodes.
+    DrainNode { id: NodeId },
+    /// A drained node is gone: nodes drop it, its id stays taken.
+    ForgetNode { id: NodeId },
+    /// The voters a group is to have; its leader changes the group's Raft
+    /// membership until it has them.
+    SetVoters { group: GroupId, voters: Vec<NodeId> },
+    /// A group's leader reports that the group has these voters (and no
+    /// one else) in its Raft membership.
+    Settled { group: GroupId, voters: Vec<NodeId> },
+}
+
+/// A node added at runtime: where nodes and clients reach it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeMeta {
+    pub(crate) peer: String,
+    pub(crate) client: String,
 }
 
 /// A stream's own settings; `None` is the node configuration's default,
@@ -175,9 +195,25 @@ pub(crate) struct MetadataState {
     /// Tenants deleted at runtime and not created again: nothing may be
     /// created in them, even by a create proposed before the delete.
     pub(crate) deleted_tenants: BTreeSet<String>,
+    /// Nodes added at runtime; those from the configuration are not here.
+    pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
+    /// Nodes being drained.
+    pub(crate) draining: BTreeSet<NodeId>,
+    /// Nodes that left; their ids are never used again.
+    pub(crate) gone: BTreeSet<NodeId>,
+    /// Voters set at runtime for groups from the configuration (the
+    /// metadata and coordinator groups); a runtime group's voters live
+    /// with its resource.
+    pub(crate) targets: BTreeMap<GroupId, Vec<NodeId>>,
+    /// The voters each group's leader last reported in place.
+    pub(crate) settled: BTreeMap<GroupId, Vec<NodeId>>,
+    /// Nodes that were voters of a group and were moved off it: a replica
+    /// is never placed on such a node again, so a node never comes back to
+    /// a group with an empty log under an id the group once counted.
+    pub(crate) left: BTreeMap<GroupId, BTreeSet<NodeId>>,
 }
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 impl MetadataState {
     /// The id of the runtime resource called `name`, if any.
@@ -215,6 +251,22 @@ impl MetadataState {
     pub(crate) fn deleted_groups(&self) -> BTreeSet<GroupId> {
         let groups = |(&id, &n): (&u64, &u32)| (0..n).map(move |p| group_id(id - DYNAMIC_BASE, p));
         self.deleted.iter().flat_map(groups).collect()
+    }
+
+    /// The voters `g` is to have, if set at runtime (a runtime group's
+    /// always are).
+    pub(crate) fn voters_of(&self, g: GroupId) -> Option<&[NodeId]> {
+        if let Some(v) = self.targets.get(&g) {
+            return Some(v);
+        }
+        self.groups().find(|(group, ..)| *group == g).map(|(_, v, _)| v)
+    }
+
+    /// Whether `g` has the voters it is to have, as its leader reported.
+    pub(crate) fn is_settled(&self, g: GroupId, voters: &[NodeId]) -> bool {
+        let mut want = voters.to_vec();
+        want.sort_unstable();
+        self.settled.get(&g).is_some_and(|v| *v == want)
     }
 
     /// Every runtime group and its voters.
@@ -317,8 +369,54 @@ impl MetadataState {
                 }
                 self.bindings_of_roles.extend(add);
             }
+            Change::AddNode { id, peer, client } => {
+                // Checked against the configuration when proposed; here
+                // only against what applied since.
+                if !self.gone.contains(&id) && !self.nodes.contains_key(&id) {
+                    self.nodes.insert(id, NodeMeta { peer, client });
+                }
+            }
+            Change::DrainNode { id } => {
+                if !self.gone.contains(&id) {
+                    self.draining.insert(id);
+                }
+            }
+            Change::ForgetNode { id } => {
+                self.nodes.remove(&id);
+                self.draining.remove(&id);
+                self.gone.insert(id);
+            }
+            Change::SetVoters { group, mut voters } => {
+                voters.sort_unstable();
+                voters.dedup();
+                let Some(old) = self.voters_of(group).map(<[NodeId]>::to_vec) else {
+                    // A configured group (not runtime, no target yet).
+                    self.targets.insert(group, voters);
+                    return Ok(());
+                };
+                let left = self.left.entry(group).or_default();
+                left.extend(old.iter().copied().filter(|n| !voters.contains(n)));
+                if let Some(slot) = self.runtime_voters_mut(group) {
+                    *slot = voters;
+                } else {
+                    self.targets.insert(group, voters);
+                }
+            }
+            Change::Settled { group, mut voters } => {
+                voters.sort_unstable();
+                self.settled.insert(group, voters);
+            }
         }
         Ok(())
+    }
+
+    fn runtime_voters_mut(&mut self, g: GroupId) -> Option<&mut Vec<NodeId>> {
+        for s in self.streams.values_mut() {
+            if let Some((_, v)) = s.partitions.iter_mut().find(|(group, _)| *group == g) {
+                return Some(v);
+            }
+        }
+        self.queues.values_mut().find(|q| q.group == g).map(|q| &mut q.voters)
     }
 
     /// The applied state, for a snapshot.
@@ -377,6 +475,27 @@ impl MetadataState {
             }
         }
         put_role_bindings(&mut b, self.bindings_of_roles.iter());
+        b.put_u32_le(self.nodes.len() as u32);
+        for (id, n) in &self.nodes {
+            b.put_u64_le(*id);
+            put_str(&mut b, &n.peer);
+            put_str(&mut b, &n.client);
+        }
+        for set in [&self.draining, &self.gone] {
+            put_nodes(&mut b, &set.iter().copied().collect::<Vec<_>>());
+        }
+        for map in [&self.targets, &self.settled] {
+            b.put_u32_le(map.len() as u32);
+            for (g, v) in map {
+                b.put_u64_le(*g);
+                put_nodes(&mut b, v);
+            }
+        }
+        b.put_u32_le(self.left.len() as u32);
+        for (g, v) in &self.left {
+            b.put_u64_le(*g);
+            put_nodes(&mut b, &v.iter().copied().collect::<Vec<_>>());
+        }
         b.freeze()
     }
 
@@ -438,6 +557,26 @@ impl MetadataState {
             s.deleted_tenants.insert(get_str(b)?);
         }
         s.bindings_of_roles = get_role_bindings(b)?.into_iter().collect();
+        for _ in 0..count(b)? {
+            need(b, 8)?;
+            let id = b.get_u64_le();
+            let (peer, client) = (get_str(b)?, get_str(b)?);
+            s.nodes.insert(id, NodeMeta { peer, client });
+        }
+        s.draining = get_nodes(b)?.into_iter().collect();
+        s.gone = get_nodes(b)?.into_iter().collect();
+        for map in [&mut s.targets, &mut s.settled] {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let g = b.get_u64_le();
+                map.insert(g, get_nodes(b)?);
+            }
+        }
+        for _ in 0..count(b)? {
+            need(b, 8)?;
+            let g = b.get_u64_le();
+            s.left.insert(g, get_nodes(b)?.into_iter().collect());
+        }
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
@@ -501,6 +640,30 @@ pub(crate) fn record(change: &Change) -> Bytes {
                 }
             }
         }
+        Change::AddNode { id, peer, client } => {
+            b.put_u8(12);
+            b.put_u64_le(*id);
+            put_str(&mut b, peer);
+            put_str(&mut b, client);
+        }
+        Change::DrainNode { id } => {
+            b.put_u8(13);
+            b.put_u64_le(*id);
+        }
+        Change::ForgetNode { id } => {
+            b.put_u8(14);
+            b.put_u64_le(*id);
+        }
+        Change::SetVoters { group, voters } => {
+            b.put_u8(15);
+            b.put_u64_le(*group);
+            put_nodes(&mut b, voters);
+        }
+        Change::Settled { group, voters } => {
+            b.put_u8(16);
+            b.put_u64_le(*group);
+            put_nodes(&mut b, voters);
+        }
         Change::SetUser { user, credential } => {
             b.put_u8(7);
             put_str(&mut b, user);
@@ -528,7 +691,8 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
     if b.get_u8() != VERSION {
         return Err("metadata record has an unknown version".into());
     }
-    let change = match b.get_u8() {
+    let tag = b.get_u8();
+    let change = match tag {
         0 => {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
@@ -589,6 +753,22 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             };
             let change = StreamChange { retention_ms: get()?, retention_bytes: get()? };
             Change::AlterStream { resource_id, change }
+        }
+        12 => {
+            need(b, 8)?;
+            let id = b.get_u64_le();
+            Change::AddNode { id, peer: get_str(b)?, client: get_str(b)? }
+        }
+        13 | 14 => {
+            need(b, 8)?;
+            let id = b.get_u64_le();
+            if tag == 13 { Change::DrainNode { id } } else { Change::ForgetNode { id } }
+        }
+        15 | 16 => {
+            need(b, 8)?;
+            let group = b.get_u64_le();
+            let voters = get_nodes(b)?;
+            if tag == 15 { Change::SetVoters { group, voters } } else { Change::Settled { group, voters } }
         }
         _ => return Err("unknown metadata change".into()),
     };
