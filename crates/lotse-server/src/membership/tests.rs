@@ -74,7 +74,7 @@ fn a_drained_node_is_emptied_a_few_groups_at_a_time_then_forgotten() {
     let mut at = 100;
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
     let active = [1, 3, 4];
-    let first = plan(&s, &core, &[1, 2, 3], &active);
+    let first = plan(&s, &core, &[1, 2, 3], &active, &BTreeMap::new());
     // The core groups drop 2 and take 4; MAX_MOVING bounds the rest.
     let moves: Vec<&Change> = first.iter().filter(|c| matches!(c, Change::SetVoters { .. })).collect();
     assert_eq!(moves.len(), MAX_MOVING, "{first:?}");
@@ -83,7 +83,10 @@ fn a_drained_node_is_emptied_a_few_groups_at_a_time_then_forgotten() {
         assert!(!voters.contains(&2) && voters.contains(&4), "{c:?}");
     }
     apply_all(&mut s, &mut at, &first);
-    assert!(plan(&s, &core, &[1, 2, 3], &active).is_empty(), "nothing more while those are in flight");
+    assert!(
+        plan(&s, &core, &[1, 2, 3], &active, &BTreeMap::new()).is_empty(),
+        "nothing more while those are in flight"
+    );
     // Each group's leader reports its voters in place; the planner goes on.
     let mut rounds = 0;
     loop {
@@ -93,7 +96,7 @@ fn a_drained_node_is_emptied_a_few_groups_at_a_time_then_forgotten() {
             .map(|(group, voters)| Change::Settled { group, voters })
             .collect();
         apply_all(&mut s, &mut at, &settled);
-        let next = plan(&s, &core, &[1, 2, 3], &active);
+        let next = plan(&s, &core, &[1, 2, 3], &active, &BTreeMap::new());
         if next.iter().any(|c| matches!(c, Change::ForgetNode { id: 2 })) {
             apply_all(&mut s, &mut at, &next);
             break;
@@ -115,7 +118,7 @@ fn a_new_node_joins_the_core_groups_while_they_are_short() {
     let s = with_stream(&[&[1, 2, 3]]);
     let core = [1, 2];
     // Five nodes: the core groups grow from three voters to five.
-    let changes = plan(&s, &core, &[1, 2, 3], &[1, 2, 3, 4, 5]);
+    let changes = plan(&s, &core, &[1, 2, 3], &[1, 2, 3, 4, 5], &BTreeMap::new());
     let core_changes: Vec<&Change> =
         changes.iter().filter(|c| matches!(c, Change::SetVoters { group: 1 | 2, .. })).collect();
     assert_eq!(
@@ -192,7 +195,7 @@ fn a_node_that_left_a_group_may_hold_it_again() {
     apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 2, 3] }]);
     apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 2, 3] }]);
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 3 }]);
-    let next = plan(&s, &[], &[], &[1, 2, 5, 6, 7, 8]);
+    let next = plan(&s, &[], &[], &[1, 2, 5, 6, 7, 8], &BTreeMap::new());
     let to = next.iter().find_map(|c| match c {
         Change::SetVoters { group, voters } if *group == g => Some(voters.clone()),
         _ => None,
@@ -210,7 +213,7 @@ fn a_new_node_gets_replicas_until_nodes_are_within_one() {
     let mut at = 100;
     let mut rounds = 0;
     loop {
-        let next = plan(&s, &[], &[], &active);
+        let next = plan(&s, &[], &[], &active, &BTreeMap::new());
         assert!(next.iter().filter(|c| matches!(c, Change::SetVoters { .. })).count() <= MAX_MOVING, "{next:?}");
         if next.is_empty() {
             break;
@@ -242,9 +245,9 @@ fn nothing_rebalances_while_a_node_drains_or_when_nearly_even() {
     let mut s = with_stream(&[&[1, 2, 3], &[1, 2, 3]]);
     let mut at = 100;
     // Nodes 1-3 hold two each, node 4 none: 2 - 0 is more than one.
-    assert!(!plan(&s, &[], &[], &[1, 2, 3, 4]).is_empty());
+    assert!(!plan(&s, &[], &[], &[1, 2, 3, 4], &BTreeMap::new()).is_empty());
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 3 }]);
-    let next = plan(&s, &[], &[], &[1, 2, 4]);
+    let next = plan(&s, &[], &[], &[1, 2, 4], &BTreeMap::new());
     assert!(
         next.iter().all(|c| match c {
             Change::SetVoters { voters, .. } => !voters.contains(&3),
@@ -325,4 +328,31 @@ fn a_draining_node_the_cluster_forgot_stops() {
     let managed = crate::client::managed_groups(&s, &[], &[]);
     assert!(!stops(&s, &managed, &[], 2, false), "its view still has it holding a group");
     assert!(stops(&s, &managed, &[], 2, true), "but the metadata leader no longer lists it");
+}
+
+#[test]
+fn a_move_evens_out_bytes_as_far_as_counts_allow() {
+    // Twelve groups of three on nodes 1-3, one of them far larger; node 4
+    // joins empty. The counts call for a move off a full node; of the
+    // groups it may take, the large one evens out the bytes most.
+    let partitions: Vec<Vec<NodeId>> = (0..12).map(|_| vec![1, 2, 3]).collect();
+    let refs: Vec<&[NodeId]> = partitions.iter().map(Vec::as_slice).collect();
+    let s = with_stream(&refs);
+    let big = crate::metadata::group_id(10, 7);
+    let sizes: BTreeMap<GroupId, u64> =
+        (0..12).map(|p| (crate::metadata::group_id(10, p), if p == 7 { 1_000 } else { 10 })).collect();
+    let next = plan(&s, &[], &[], &[1, 2, 3, 4], &sizes);
+    let first = next.iter().find_map(|c| match c {
+        Change::SetVoters { group, .. } => Some(*group),
+        _ => None,
+    });
+    assert_eq!(first, Some(big), "{next:?}");
+    // Without sizes, the same moves as by count alone.
+    let by_count = plan(&s, &[], &[], &[1, 2, 3, 4], &BTreeMap::new());
+    let first = by_count.iter().find_map(|c| match c {
+        Change::SetVoters { group, .. } => Some(*group),
+        _ => None,
+    });
+    assert_eq!(first, Some(crate::metadata::group_id(10, 0)));
+    assert_eq!(by_count.len(), next.len(), "sizes choose between moves, they add none");
 }

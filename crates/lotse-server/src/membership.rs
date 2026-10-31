@@ -178,6 +178,7 @@ pub(crate) fn plan(
     core: &[GroupId],
     configured_voters: &[NodeId],
     active: &[NodeId],
+    sizes: &BTreeMap<GroupId, u64>,
 ) -> Vec<Change> {
     let managed = managed_groups(state, core, configured_voters);
     let mut in_flight = managed.iter().filter(|(g, v)| moving(state, *g, v)).count();
@@ -256,13 +257,21 @@ pub(crate) fn plan(
             if !uneven(hi, lo) {
                 break;
             }
-            let pick = managed.iter().find(|(g, v)| {
-                !core.contains(g)
-                    && v.contains(&full)
-                    && !v.contains(&empty)
-                    && !changed.contains(g)
-                    && !moving(state, *g, v)
-            });
+            // Of the groups that may move, the one that evens out the two
+            // nodes' bytes most (ADR 0052); without sizes, the first.
+            let gap = bytes_on(&managed, sizes, full) as i128 - bytes_on(&managed, sizes, empty) as i128;
+            let pick = managed
+                .iter()
+                .enumerate()
+                .filter(|(_, (g, v))| {
+                    !core.contains(g)
+                        && v.contains(&full)
+                        && !v.contains(&empty)
+                        && !changed.contains(g)
+                        && !moving(state, *g, v)
+                })
+                .min_by_key(|(i, (g, _))| ((gap - 2 * sizes.get(g).copied().unwrap_or(0) as i128).abs(), *i))
+                .map(|(_, gv)| gv);
             let Some((g, voters)) = pick else { break };
             let mut next: Vec<NodeId> = voters.iter().copied().filter(|n| *n != full).collect();
             next.push(empty);
@@ -299,6 +308,11 @@ pub(crate) fn stops(
     unlisted: bool,
 ) -> bool {
     state.draining.contains(&me) && (unlisted || drained(state, managed, core, me))
+}
+
+/// Bytes of the groups `node` is a voter of, as far as `sizes` knows them.
+fn bytes_on(managed: &[(GroupId, Vec<NodeId>)], sizes: &BTreeMap<GroupId, u64>, node: NodeId) -> u64 {
+    managed.iter().filter(|(_, v)| v.contains(&node)).map(|(g, _)| sizes.get(g).copied().unwrap_or(0)).sum()
 }
 
 /// Whether node `d` is drained: it is draining, no group counts it among

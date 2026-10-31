@@ -274,7 +274,8 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     if !caught_up || meta.applied() != known.applied {
         return;
     }
-    for change in crate::membership::plan(state, &core, configured_voters, &known.active) {
+    let sizes = shared.sizes.lock().expect("sizes lock").clone();
+    for change in crate::membership::plan(state, &core, configured_voters, &known.active, &sizes) {
         let _ = meta.propose_internal(crate::metadata::record(&change));
     }
 }
@@ -351,6 +352,10 @@ struct Shared {
     removed: std::sync::atomic::AtomicBool,
     /// Set when the metadata leader listed the nodes without this one.
     unlisted: std::sync::atomic::AtomicBool,
+    /// Bytes of each group's log, the largest any replica reported, as the
+    /// metadata leader last asked the nodes: what rebalancing weighs moves
+    /// by (ADR 0052).
+    sizes: Mutex<BTreeMap<GroupId, u64>>,
     work: Signal,
     stop: Signal,
 }
@@ -674,6 +679,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let mut links_at = 0;
     let mut links_learned: BTreeMap<NodeId, String> = BTreeMap::new();
     let (mut next_ask, asking) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let (mut next_sizes, sizing) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let mut next_membership = started;
     let mut moves = Moves::default();
     while !shared.stop.is_set() {
@@ -716,6 +722,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         if rt.now() >= next_ask {
             next_ask = rt.now() + cfg.tick * ASK_NODES_EVERY_TICKS;
             ask_for_nodes(rt, cfg, groups, &known, &marker_client, shared, jobs, &asking);
+        }
+        if rt.now() >= next_sizes {
+            next_sizes = rt.now() + cfg.tick * SIZES_EVERY_TICKS;
+            ask_for_sizes(rt, cfg, groups, &marker_client, shared, jobs, &sizing);
         }
         if shared.deleted.lock().expect("deleted lock").len() != known.deleted.len() {
             // Marker jobs look before each attempt.
@@ -909,6 +919,44 @@ fn ask_for_nodes<R: Runtime, S: StateMachine>(
             shared.work.set();
         }
         asking.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// How often the metadata group's leader asks the nodes for their groups'
+/// sizes.
+const SIZES_EVERY_TICKS: u32 = 1_000;
+
+/// On the metadata group's leader: asks every node for its metrics and
+/// keeps each group's size, the largest any replica reported, for the
+/// planner to weigh moves by (ADR 0052). Sizes may be minutes old; they
+/// only choose between moves the replica counts already call for.
+fn ask_for_sizes<R: Runtime, S: StateMachine>(
+    rt: &R,
+    cfg: &NodeConfig,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+    sizing: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let leads = cfg.metadata.and_then(|g| groups.get(&g)).is_some_and(|r| r.raft_ref().role() == Role::Leader);
+    if !leads || sizing.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let (client, shared, sizing) = (client.clone(), shared.clone(), sizing.clone());
+    let stop = shared.stop.clone();
+    jobs.spawn(rt, async move {
+        if let Some(Ok(nodes)) = race(client.node_metrics(), &[&stop]).await {
+            let mut sizes = BTreeMap::new();
+            for m in nodes.into_iter().filter_map(|(_, m)| m.ok()) {
+                for p in m.partitions {
+                    let s = sizes.entry(p.group).or_insert(0u64);
+                    *s = (*s).max(p.size_bytes);
+                }
+            }
+            *shared.sizes.lock().expect("sizes lock") = sizes;
+        }
+        sizing.store(false, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
