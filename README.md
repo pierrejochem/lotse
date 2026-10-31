@@ -81,7 +81,7 @@ lotse run --config cluster.toml --node 1                          # on each mach
 
 `lotse certs` keeps what exists, so it can run again after a node is added to the file; keep `ca.key` off the nodes.
 
-To add a node, give it a `[[node]]` entry, make its certificate, announce it and start it with `--join`; to remove one, drain it. Its replicas move to other nodes, then it leaves the list and can be switched off (ADR 0048). A new node fills up by itself: replicas and leadership move onto it until the nodes are even (ADR 0050).
+To add a node, give it a `[[node]]` entry, make its certificate, announce it and start it with `--join`; to remove one, drain it. Its replicas move to other nodes, then it leaves the list and stops by itself (ADR 0048, ADR 0051). A new node fills up by itself: replicas and leadership move onto it until the nodes are even (ADR 0050).
 
 ```sh
 lotse certs --config cluster.toml
@@ -174,6 +174,6 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 - Consumer groups: one coordinator group serves all groups and transactional ids; no `ListOffsets` (a partition without a committed offset is read from its log start), no static membership or regex subscriptions; every heartbeat that changes a group writes the whole group.
 - Retention: whole segments only, so a partition keeps up to a segment more than its limits; age goes by the timestamps producers write; streams from the node configuration take the node's defaults and cannot be changed at runtime; no compaction.
 - The binary: certificates from `lotse certs` do not expire and are read once at start. Releases and the image are built only by GitHub Actions; the package targets systemd systems.
-- Nodes: four groups move at a time, each as a full copy through Raft; rebalancing counts replicas, not bytes or traffic; a removed node keeps its copies of the metadata and coordinator groups until it is switched off, and while it runs it answers clients with the metadata it last knew.
+- Nodes: four groups move at a time, each as a full copy through Raft; rebalancing counts replicas, not bytes or traffic; a drained node exits by itself (ADR 0051) and must join under a new id to come back; one that cannot reach any node it lists keeps running until it can.
 - Metadata: only a queue's ack timeout and a stream's retention can change; no conditional delete (`if_empty`), no authorisation; tombstones of deleted resources are kept for ever; right after a change some brokers do not know it yet.
 - Console: chart history (about 10 KiB per stream or queue for 24 h) covers only what the sampler may see. The oldest record's age, open transactions per stream, bytes in flight per consumer, zones and disk limits are not reported. Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

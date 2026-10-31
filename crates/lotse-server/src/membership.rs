@@ -277,17 +277,40 @@ pub(crate) fn plan(
 
     // A drained node is forgotten once no group counts it and no change
     // that moved it off is still under way.
+    let proposed = changes.iter().any(|c| matches!(c, Change::SetVoters { .. }));
     for &d in &state.draining {
-        let held = managed.iter().any(|(_, v)| v.contains(&d));
-        let settling = managed.iter().any(|(g, v)| {
-            moving(state, *g, v) && (core.contains(g) || state.left.get(g).is_some_and(|l| l.contains(&d)))
-        });
-        let proposed = changes.iter().any(|c| matches!(c, Change::SetVoters { .. }));
-        if !held && !settling && !proposed {
+        if drained(state, &managed, core, d) && !proposed {
             changes.push(Change::ForgetNode { id: d });
         }
     }
     changes
+}
+
+/// Whether this node (`me`) stops for good (ADR 0051): it is draining and
+/// either drained by its own metadata state or no longer listed by the
+/// metadata leader (`unlisted`), which forgot it while it was cut off. A
+/// node not draining never stops for being unlisted: a joining node is not
+/// listed until it has been added.
+pub(crate) fn stops(
+    state: &MetadataState,
+    managed: &[(GroupId, Vec<NodeId>)],
+    core: &[GroupId],
+    me: NodeId,
+    unlisted: bool,
+) -> bool {
+    state.draining.contains(&me) && (unlisted || drained(state, managed, core, me))
+}
+
+/// Whether node `d` is drained: it is draining, no group counts it among
+/// its voters, and no change that moved it off is still under way. The
+/// planner then forgets it, and the node itself, seeing the same in its own
+/// metadata state, stops (ADR 0051).
+pub(crate) fn drained(state: &MetadataState, managed: &[(GroupId, Vec<NodeId>)], core: &[GroupId], d: NodeId) -> bool {
+    let held = managed.iter().any(|(_, v)| v.contains(&d));
+    let settling = managed
+        .iter()
+        .any(|(g, v)| moving(state, *g, v) && (core.contains(g) || state.left.get(g).is_some_and(|l| l.contains(&d))));
+    state.draining.contains(&d) && !held && !settling
 }
 
 #[cfg(test)]

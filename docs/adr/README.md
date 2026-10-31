@@ -55,5 +55,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0048 | [Adding and removing nodes](0048-adding-and-removing-nodes.md) | Accepted, in part superseded by 0050 |
 | 0049 | [Packaging: an image, a systemd unit, a Debian package and releases](0049-packaging.md) | Accepted |
 | 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted |
+| 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

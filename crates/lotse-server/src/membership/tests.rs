@@ -296,3 +296,33 @@ fn a_node_moved_off_a_group_runs_it_until_the_move_settled() {
     apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
     assert!(!hosts(&s, g, &voters, 2), "settled without it");
 }
+
+#[test]
+fn a_node_is_drained_once_no_group_needs_it() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    let managed = |s: &MetadataState| crate::client::managed_groups(s, &[], &[]);
+    assert!(!drained(&s, &managed(&s), &[], 4), "never draining");
+    apply_all(&mut s, &mut at, &[Change::AddNode { id: 4, peer: "n4:1".into(), client: "n4:2".into() }]);
+    apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
+    assert!(!drained(&s, &managed(&s), &[], 2), "still a voter");
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    assert!(!drained(&s, &managed(&s), &[], 2), "the move off it has not settled");
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
+    assert!(drained(&s, &managed(&s), &[], 2));
+    assert!(!drained(&s, &managed(&s), &[], 1), "a node that does not drain");
+    assert!(stops(&s, &managed(&s), &[], 2, false));
+    assert!(!stops(&s, &managed(&s), &[], 5, true), "a joining node is not listed until added: it stays");
+    assert!(!stops(&s, &managed(&s), &[], 1, true), "nor does a node that does not drain");
+}
+
+#[test]
+fn a_draining_node_the_cluster_forgot_stops() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
+    let managed = crate::client::managed_groups(&s, &[], &[]);
+    assert!(!stops(&s, &managed, &[], 2, false), "its view still has it holding a group");
+    assert!(stops(&s, &managed, &[], 2, true), "but the metadata leader no longer lists it");
+}

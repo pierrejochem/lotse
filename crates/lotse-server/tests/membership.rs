@@ -333,6 +333,21 @@ async fn run(rt: SimRuntime) {
         rt.sleep(TICK * 50).await;
     }
 
+    // The removed node stops by itself (ADR 0051), even if it was down or
+    // cut off when its drain finished; the cluster is healed now.
+    let deadline = rt.now() + Duration::from_secs(30);
+    loop {
+        let stopped = w.running[&removed].as_ref().is_none_or(|(_, h)| h.removed());
+        if stopped {
+            break;
+        }
+        assert!(rt.now() < deadline, "node {removed} was drained but did not stop");
+        rt.sleep(TICK * 50).await;
+    }
+    if let Some((node, _)) = w.running.insert(removed, None).flatten() {
+        node.join().await.expect("a drained node stops cleanly");
+    }
+
     // What the metadata group wants is what every group has, three voters
     // each, none of them the removed node. A node that hosts a partition
     // reports its Raft voters and its leader; the others report the voters

@@ -3,7 +3,8 @@
 //! run in this process and the third as the `lotse` executable; the admin
 //! creates a stream and writes to it, a client without a certificate may
 //! not; the executable stops cleanly on SIGTERM; after a restart of all
-//! three, what was written is still there.
+//! three, what was written is still there; a fourth node joins, the first
+//! is drained and stops by itself.
 
 use std::path::Path;
 use std::process::{Child, Command};
@@ -225,6 +226,14 @@ async fn a_cluster_from_one_file() {
             break;
         }
         assert!(attempt < 180, "node 1 never left: {listed}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Drained, node 1 stops by itself (ADR 0051).
+    for attempt in 0.. {
+        if nodes[0].1.is_finished() {
+            break;
+        }
+        assert!(attempt < 120, "node 1 was drained but did not stop");
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     for (p, offset, value) in &written {

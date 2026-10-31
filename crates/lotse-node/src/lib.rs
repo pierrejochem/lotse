@@ -86,7 +86,14 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     let stopped = node.join();
     tokio::pin!(stopped);
     tokio::select! {
-        res = &mut stopped => return res.map_err(RunError::from),
+        res = &mut stopped => {
+            res?;
+            if handle.removed() {
+                // Exit 0: a supervisor does not start a drained node again.
+                tracing::info!(node = id, "drained: no group needs this node any more, stopped");
+            }
+            return Ok(());
+        }
         () = shutdown => tracing::info!(node = id, "stopping"),
     }
     handle.stop();
