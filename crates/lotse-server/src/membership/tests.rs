@@ -132,18 +132,23 @@ fn a_leader_with_an_older_view_never_undoes_a_newer_change() {
     let tagged = |voters: &[NodeId], tag| Membership { tag, ..m(voters, &[]) };
     // The group carries out decision 9; this leader's view knows only 5,
     // which wanted node 2 back.
-    assert_eq!(leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 2, 3]), &BTreeSet::new(), 5), Step::Wait);
+    assert_eq!(leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 2, 3]), &BTreeSet::new(), 5, true), Step::Wait);
     // The same view, as new as the group: it goes ahead, tagging the change.
     assert_eq!(
-        leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 3, 5]), &BTreeSet::new(), 9),
+        leader_step(&tagged(&[1, 3, 4], 9), &set(&[1, 3, 5]), &BTreeSet::new(), 9, true),
         Step::Propose { voters: set(&[1, 3, 4]), learners: set(&[5]) }
     );
     // Already the wanted voters, under an older decision: record the newer.
     assert_eq!(
-        leader_step(&tagged(&[1, 3, 4], 2), &set(&[1, 3, 4]), &BTreeSet::new(), 7),
+        leader_step(&tagged(&[1, 3, 4], 2), &set(&[1, 3, 4]), &BTreeSet::new(), 7, true),
         Step::Propose { voters: set(&[1, 3, 4]), learners: set(&[]) }
     );
-    assert_eq!(leader_step(&tagged(&[1, 3, 4], 7), &set(&[1, 3, 4]), &BTreeSet::new(), 7), Step::Settled);
+    assert_eq!(leader_step(&tagged(&[1, 3, 4], 7), &set(&[1, 3, 4]), &BTreeSet::new(), 7, true), Step::Settled);
+    assert_eq!(
+        leader_step(&tagged(&[1, 3, 4], 7), &set(&[1, 3, 4]), &BTreeSet::new(), 7, false),
+        Step::Wait,
+        "not before the membership is committed: a new leader may never have had it"
+    );
 }
 
 #[test]
@@ -276,4 +281,18 @@ fn leadership_goes_only_to_a_preferred_voter_that_has_everything() {
     assert_eq!(hand_over_to(&current, 1, Some(1), &matched, 50), None, "already the leader");
     let joint = Membership { voters: set(&[1, 2, 4]), outgoing: set(&[1, 2, 3]), learners: set(&[]), tag: 0 };
     assert_eq!(hand_over_to(&joint, 1, Some(2), &matched, 50), None, "not during a change of voters");
+}
+
+#[test]
+fn a_node_moved_off_a_group_runs_it_until_the_move_settled() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    let voters = s.voters_of(g).unwrap().to_vec();
+    assert!(hosts(&s, g, &voters, 4), "a new voter");
+    assert!(hosts(&s, g, &voters, 2), "the group may need it for a quorum until it settles");
+    assert!(!hosts(&s, g, &voters, 5), "never a member");
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
+    assert!(!hosts(&s, g, &voters, 2), "settled without it");
 }

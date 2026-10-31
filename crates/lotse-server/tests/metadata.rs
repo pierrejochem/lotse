@@ -217,6 +217,31 @@ impl World {
 /// bound to it).
 type View = BTreeMap<String, (u64, u8, Vec<Vec<u32>>, BTreeSet<u64>)>;
 
+/// What every node reports: its resources, their kinds, each partition's
+/// voters (a hosting node's Raft voters, the metadata group's choice
+/// otherwise) and an exchange's bound queues.
+async fn views_of(rt: &SimRuntime, n: u64) -> BTreeMap<NodeId, View> {
+    let mut views = BTreeMap::new();
+    for id in 1..=n {
+        let c = Client::new(
+            rt.node("checker"),
+            ClientConfig { bootstrap: vec![format!("n{id}:9000")], ..client_config(n) },
+        );
+        let m = c.metadata(&[]).await.expect("the healed cluster answers metadata");
+        let view = m
+            .resources
+            .iter()
+            .map(|r| {
+                let voters = r.partitions.iter().map(|p| p.voters.clone()).collect();
+                let bound = r.exchange.iter().flat_map(|x| x.bindings.iter().map(|b| b.queue_id)).collect();
+                (r.name.clone(), (r.resource_id, r.kind, voters, bound))
+            })
+            .collect();
+        views.insert(id, view);
+    }
+    views
+}
+
 const NAMES: [&str; 7] = ["s1", "s2", "s3", "q1", "q2", "q3", "x1"];
 
 async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
@@ -503,24 +528,7 @@ async fn run(rt: SimRuntime) {
     let deadline = rt.now() + Duration::from_secs(30);
     let mut views: BTreeMap<NodeId, View>;
     loop {
-        views = BTreeMap::new();
-        for id in 1..=n {
-            let c = Client::new(
-                rt.node("checker"),
-                ClientConfig { bootstrap: vec![format!("n{id}:9000")], ..client_config(n) },
-            );
-            let m = c.metadata(&[]).await.expect("the healed cluster answers metadata");
-            let view = m
-                .resources
-                .iter()
-                .map(|r| {
-                    let voters = r.partitions.iter().map(|p| p.voters.clone()).collect();
-                    let bound = r.exchange.iter().flat_map(|x| x.bindings.iter().map(|b| b.queue_id)).collect();
-                    (r.name.clone(), (r.resource_id, r.kind, voters, bound))
-                })
-                .collect();
-            views.insert(id, view);
-        }
+        views = views_of(&rt, n).await;
         let first = views[&1].clone();
         let created = out.ids.keys().filter(|n| !out.delete_tried.contains(*n)).all(|name| first.contains_key(name));
         if views.values().all(|v| *v == first) && created {
@@ -629,10 +637,17 @@ async fn run(rt: SimRuntime) {
     }
     drop(admin);
 
-    // Each node runs exactly the groups it is a voter of.
-    let deadline = rt.now() + Duration::from_secs(10);
+    // Each node runs exactly the groups it is a voter of, once nothing
+    // moves: groups may still be moving to even out the nodes (ADR 0050),
+    // so the voters are read again each time and all nodes must agree.
+    let deadline = rt.now() + Duration::from_secs(30);
     loop {
         let mut wrong = Vec::new();
+        let views = views_of(&rt, n).await;
+        let view = &views[&1];
+        if views.values().any(|v| v != view) {
+            wrong.push((&0, "the nodes disagree".to_string(), 0, false));
+        }
         for (id, entry) in &w.running {
             let (_, handle) = entry.as_ref().expect("all nodes are up");
             for (name, (rid, _, voters, _)) in view.iter().filter(|(_, (rid, ..))| *rid >= lotse_server::DYNAMIC_BASE) {

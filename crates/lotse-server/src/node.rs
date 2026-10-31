@@ -226,7 +226,7 @@ fn membership_pass<R: Runtime, S: StateMachine>(
         };
         let learners = if Some(g) == cfg.metadata { everyone.clone() } else { BTreeSet::new() };
         let tag = state.target_at.get(&g).copied().unwrap_or(0);
-        let step = crate::membership::leader_step(&current, &target, &learners, tag);
+        let step = crate::membership::leader_step(&current, &target, &learners, tag, raft.membership_committed());
         match step {
             crate::membership::Step::Propose { voters, learners } => {
                 // Refused while a learner catches up or a change commits:
@@ -1195,7 +1195,10 @@ impl Known {
             // from them. A replica starts from the group's first voters, as
             // every replica of it did: one placed later is outside them and
             // learns who the members are from the group's log.
-            if voters.contains(&cfg.id) && !groups.contains_key(&g) {
+            if crate::membership::hosts(&state, g, voters, cfg.id)
+                && !known.forgotten.contains(&g)
+                && !groups.contains_key(&g)
+            {
                 let first = state.initial_voters(g).unwrap_or(voters).to_vec();
                 let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, first) };
                 let options =

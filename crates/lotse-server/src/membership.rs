@@ -71,12 +71,16 @@ pub(crate) fn next_step(current: &Membership, target: &BTreeSet<NodeId>, learner
 /// that already carries out a newer decision than this view knows waits
 /// for the view to catch up rather than undo it; one that already has what
 /// is wanted under an older decision records the newer one, so that no
-/// stale view undoes it either.
+/// stale view undoes it either. A membership is settled only once it is
+/// committed (`committed`): one merely appended may still be replaced by a
+/// new leader that never had it, and a replica removed on the strength of
+/// it would leave the group short of voters.
 pub(crate) fn leader_step(
     current: &Membership,
     target: &BTreeSet<NodeId>,
     learners: &BTreeSet<NodeId>,
     tag: u64,
+    committed: bool,
 ) -> Step {
     if current.tag > tag {
         return Step::Wait;
@@ -85,8 +89,19 @@ pub(crate) fn leader_step(
         Step::Settled if current.tag < tag => {
             Step::Propose { voters: current.voters.clone(), learners: current.learners.clone() }
         }
+        Step::Settled if !committed => Step::Wait,
         step => step,
     }
+}
+
+/// Whether this node (`me`) runs a replica of `g`: as one of the voters the
+/// metadata group wants, or as one it moved off while that move has not
+/// settled. The group may still need that replica for a quorum: a node that
+/// was down when the move began, and then started only the groups it is
+/// to vote in, would leave a group that cannot elect a leader and so never
+/// finishes the move.
+pub(crate) fn hosts(state: &MetadataState, g: GroupId, voters: &[NodeId], me: NodeId) -> bool {
+    voters.contains(&me) || (state.left.get(&g).is_some_and(|l| l.contains(&me)) && !state.is_settled(g, voters))
 }
 
 /// Whether this node (`me`) may close and delete its replica of `g`: only

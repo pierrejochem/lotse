@@ -602,6 +602,11 @@ impl RaftGroup {
     pub fn membership(&self) -> &Membership {
         self.configs.last().map_or(&self.base_membership, |c| &c.1)
     }
+    /// Whether the membership in force is committed: no new leader can
+    /// replace it with an older one.
+    pub fn membership_committed(&self) -> bool {
+        self.membership_index() <= self.commit
+    }
     /// Last index of the latest config entry, or the snapshot index if
     /// the membership comes from there.
     fn membership_index(&self) -> u64 {
@@ -1159,13 +1164,7 @@ impl RaftGroup {
                 // `next` never goes below what it acknowledged and it never
                 // catches up. A voter never loses an acknowledged entry.
                 if last_index < p.matched && !self.membership().is_voter(from) {
-                    p.matched = last_index;
-                    p.next = last_index + 1;
-                    p.inflight = false;
-                    self.put_progress(from, p);
-                    self.check_reads();
-                    self.replicate(from);
-                    return;
+                    p.matched = 0;
                 }
                 // Only the answer to the append in flight moves `next`.
                 if prev_index + 1 != p.next || prev_index < p.matched {
