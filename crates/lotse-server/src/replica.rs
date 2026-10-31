@@ -41,7 +41,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_log::{Log, LogConfig};
 use lotse_queue::QueueLog;
 use lotse_raft::{
-    Config, Entry, EntryKind, HardState, Membership, Message, NotLeader, RaftGroup, ReadState, Restored, Send,
+    Config, Entry, EntryKind, HardState, Membership, Message, NodeId, NotLeader, RaftGroup, ReadState, Restored, Send,
     SnapshotMeta, TermRuns,
 };
 use lotse_record::{Batch, RaftControl};
@@ -52,8 +52,11 @@ use crate::metadata::MetadataState;
 use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, ProducerState};
 use crate::txns::{MarkerCheck, TxnState};
 
-const HARD_STATE: &str = "raft.state";
+pub(crate) const HARD_STATE: &str = "raft.state";
 const SNAPSHOT: &str = "snapshot";
+/// Written when a replica's log was removed after the group moved off this
+/// node (ADR 0050): the tag of the decision that moved it.
+pub(crate) const MOVED: &str = "moved";
 pub(crate) const FORMAT: u8 = 10;
 
 /// What a replica applies committed batches to: a partition's producer state,
@@ -285,6 +288,8 @@ pub struct Replica<D: Disk, S> {
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
+    /// The tag of the move that removed this replica's log, if one did.
+    moved_at: Option<u64>,
 }
 
 impl<D: Disk, S> fmt::Debug for Replica<D, S> {
@@ -343,6 +348,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             Some(bytes) => decode_hard_state(bytes)?,
             None => HardState::default(),
         };
+        let moved_at = match read_file(&disk, &dir.join(MOVED)).await? {
+            Some(bytes) => Some(decode_moved(bytes)?),
+            None => None,
+        };
         let mut log = Log::open(disk.clone(), dir.join("log"), log_config).await?;
         let (snap_index, snap_term) = snapshot.as_ref().map_or((0, 0), |(m, _)| (m.index, m.term));
         // A crash between writing an installed snapshot and restarting the log
@@ -394,7 +403,23 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             retention: options.retention,
             state,
             max_fill_bytes: 1 << 20,
+            moved_at,
         })
+    }
+
+    /// Hands a message from `from` to the Raft group. A replica whose log
+    /// was removed when its group moved off this node (ADR 0050) grants no
+    /// vote until it holds a membership newer than that move: before the
+    /// move it may have acknowledged entries it no longer has, and a
+    /// candidate with an older view of the group could otherwise win with
+    /// its vote and overwrite them. Once it holds the membership that placed
+    /// it here again, its log holds everything committed before, and it
+    /// votes like any other replica.
+    pub fn step(&mut self, from: NodeId, msg: Message) {
+        if matches!(msg, Message::Vote { .. }) && !may_vote(self.moved_at, self.raft.membership().tag) {
+            return;
+        }
+        self.raft.step(from, msg);
     }
 
     /// The Raft group, to tick, step and ask about.
@@ -842,7 +867,28 @@ pub(crate) fn unseal(bytes: Bytes, what: &str) -> Result<Bytes, Error> {
     Ok(bytes.slice(1..bytes.len() - 4))
 }
 
-fn encode_hard_state(hs: &HardState) -> Bytes {
+/// Whether a replica moved off this node at decision `moved_at` (if ever)
+/// may vote while it holds a membership tagged `tag`.
+pub(crate) fn may_vote(moved_at: Option<u64>, tag: u64) -> bool {
+    moved_at.is_none_or(|at| tag > at)
+}
+
+pub(crate) fn encode_moved(tag: u64) -> Bytes {
+    let mut b = BytesMut::new();
+    b.put_u8(FORMAT);
+    b.put_u64_le(tag);
+    seal(b)
+}
+
+fn decode_moved(bytes: Bytes) -> Result<u64, Error> {
+    let mut b = unseal(bytes, MOVED)?;
+    if b.len() != 8 {
+        return Err(Error::Corrupt(format!("{MOVED} has the wrong size")));
+    }
+    Ok(b.get_u64_le())
+}
+
+pub(crate) fn encode_hard_state(hs: &HardState) -> Bytes {
     let mut b = BytesMut::new();
     b.put_u8(FORMAT);
     b.put_u64_le(hs.term);
@@ -852,7 +898,7 @@ fn encode_hard_state(hs: &HardState) -> Bytes {
     seal(b)
 }
 
-fn decode_hard_state(bytes: Bytes) -> Result<HardState, Error> {
+pub(crate) fn decode_hard_state(bytes: Bytes) -> Result<HardState, Error> {
     let mut b = unseal(bytes, HARD_STATE)?;
     if b.len() != 25 {
         return Err(Error::Corrupt(format!("{HARD_STATE} has the wrong size")));

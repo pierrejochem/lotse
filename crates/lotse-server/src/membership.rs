@@ -92,9 +92,60 @@ pub(crate) fn leader_step(
 /// Whether this node (`me`) may close and delete its replica of `g`: only
 /// once it is no voter of what the metadata group wants and the group's
 /// leader reported those voters in place. Before that the replica may still
-/// be one of the copies the group's commits rest on.
-pub(crate) fn replica_may_go(state: &MetadataState, g: GroupId, voters: &[NodeId], me: NodeId) -> bool {
-    !voters.contains(&me) && state.is_settled(g, voters)
+/// be one of the copies the group's commits rest on. `replica_tag` is the
+/// tag of the membership this node's replica holds: one newer than the
+/// settled decision means this node's view of the metadata group lags (it
+/// restarted, say) and the group has since placed it here again, so the
+/// replica may be a voter whose copy commits rest on, and it stays (ADR 0050).
+pub(crate) fn replica_may_go(
+    state: &MetadataState,
+    g: GroupId,
+    voters: &[NodeId],
+    me: NodeId,
+    replica_tag: u64,
+) -> bool {
+    !voters.contains(&me) && state.is_settled(g, voters) && replica_tag <= state.target_at.get(&g).copied().unwrap_or(0)
+}
+
+/// Whether nodes holding `hi` and `lo` replicas are uneven enough to move
+/// one: by more than one replica and more than a tenth of `hi`.
+pub(crate) fn uneven(hi: usize, lo: usize) -> bool {
+    hi.saturating_sub(lo) > 1.max(hi / 10)
+}
+
+/// Each group's preferred leader (ADR 0050): one of its voters, chosen so
+/// that every node is preferred for as few groups as can be, the lowest id
+/// among equals. Every node computes the same from the same metadata state,
+/// so no node needs to know who leads what elsewhere.
+pub(crate) fn preferred_leaders(managed: &[(GroupId, Vec<NodeId>)]) -> BTreeMap<GroupId, NodeId> {
+    let mut sorted: Vec<&(GroupId, Vec<NodeId>)> = managed.iter().collect();
+    sorted.sort_by_key(|(g, _)| *g);
+    let mut count: BTreeMap<NodeId, usize> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for (g, voters) in sorted {
+        let Some(&n) = voters.iter().min_by_key(|n| (count.get(n).copied().unwrap_or(0), **n)) else { continue };
+        *count.entry(n).or_default() += 1;
+        out.insert(*g, n);
+    }
+    out
+}
+
+/// Whom the leader `me` of a group with `current` membership hands
+/// leadership to: its `preferred` leader, if that is another voter that
+/// holds everything the leader has (`matched` against `last`), and no
+/// change of voters is under way.
+pub(crate) fn hand_over_to(
+    current: &Membership,
+    me: NodeId,
+    preferred: Option<NodeId>,
+    matched: &BTreeMap<NodeId, u64>,
+    last: u64,
+) -> Option<NodeId> {
+    let p = preferred?;
+    if p == me || current.is_joint() || !current.voters.contains(&p) || !current.voters.contains(&me) {
+        return None;
+    }
+    (matched.get(&p).copied().unwrap_or(0) >= last).then_some(p)
 }
 
 /// How many voters the metadata and coordinator groups should have with
@@ -163,13 +214,47 @@ pub(crate) fn plan(
             if moving(state, *g, voters) {
                 continue;
             }
-            let left = state.left.get(g);
-            let skip = |n: NodeId| voters.contains(&n) || left.is_some_and(|l| l.contains(&n));
-            let Some(to) = least_loaded(&load, &skip) else { continue };
+            let Some(to) = least_loaded(&load, &|n| voters.contains(&n)) else { continue };
             let mut next: Vec<NodeId> = voters.iter().copied().filter(|n| *n != d).collect();
             next.push(to);
             next.sort_unstable();
             *load.entry(to).or_default() += 1;
+            changes.push(Change::SetVoters { group: *g, voters: next });
+            in_flight += 1;
+        }
+    }
+
+    // Rebalancing (ADR 0050): while nothing drains, one replica at a time
+    // goes from the fullest node to the emptiest, until they are within
+    // one replica (or a tenth of the fullest).
+    let mut changed: BTreeSet<GroupId> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::SetVoters { group, .. } => Some(*group),
+            _ => None,
+        })
+        .collect();
+    if state.draining.is_empty() {
+        while in_flight < MAX_MOVING {
+            let Some((&full, &hi)) = load.iter().max_by_key(|(n, l)| (**l, **n)) else { break };
+            let Some((&empty, &lo)) = load.iter().min_by_key(|(n, l)| (**l, **n)) else { break };
+            if !uneven(hi, lo) {
+                break;
+            }
+            let pick = managed.iter().find(|(g, v)| {
+                !core.contains(g)
+                    && v.contains(&full)
+                    && !v.contains(&empty)
+                    && !changed.contains(g)
+                    && !moving(state, *g, v)
+            });
+            let Some((g, voters)) = pick else { break };
+            let mut next: Vec<NodeId> = voters.iter().copied().filter(|n| *n != full).collect();
+            next.push(empty);
+            next.sort_unstable();
+            *load.get_mut(&full).expect("active") -= 1;
+            *load.get_mut(&empty).expect("active") += 1;
+            changed.insert(*g);
             changes.push(Change::SetVoters { group: *g, voters: next });
             in_flight += 1;
         }

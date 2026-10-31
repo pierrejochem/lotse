@@ -9,9 +9,11 @@
 //! nodes lose power. After healing the drain must finish.
 //!
 //! Checked:
+//! - replicas end up even across nodes (within one) and no node leads
+//!   more than two of the four partitions (ADR 0050);
 //! - the removed node leaves: it is no longer listed, no group counts it,
-//!   it holds the files of no runtime group, and every group still has
-//!   three voters;
+//!   and every group still has three voters;
+//! - no node that stays keeps the log of a group it no longer votes in;
 //! - what the metadata group wants is what the groups have: every
 //!   partition's Raft voters, as its leader reports them, are the voters
 //!   the metadata group lists for it;
@@ -275,7 +277,9 @@ async fn run(rt: SimRuntime) {
     }
     // Changes not made during the faults are made now.
     rt.net().heal();
+    let deadline = rt.now() + Duration::from_secs(60);
     while step < 3 {
+        assert!(rt.now() < deadline, "membership change {step} never went through on the healed cluster");
         let res = match step {
             0 | 1 => {
                 let id = 4 + step as NodeId;
@@ -315,12 +319,17 @@ async fn run(rt: SimRuntime) {
         let nodes = checker.describe_nodes().await.expect("the healed cluster lists its nodes");
         let ids: BTreeSet<u64> = nodes.iter().map(|n| n.node_id).collect();
         let quiet = nodes.iter().all(|n| n.moving == 0 && n.state == node_state::ACTIVE);
-        if !ids.contains(&removed) && quiet {
+        // Rebalanced too (ADR 0050): replicas within one, or a tenth of
+        // the fullest node.
+        let hi = nodes.iter().map(|n| n.replicas).max().unwrap_or(0) as i64;
+        let lo = nodes.iter().map(|n| n.replicas).min().unwrap_or(0) as i64;
+        let even = hi - lo <= 1.max(hi / 10);
+        if !ids.contains(&removed) && quiet && even {
             let expected: BTreeSet<u64> = (1..=5).filter(|n| *n != removed).collect();
             assert_eq!(ids, expected, "the cluster's nodes");
             break;
         }
-        assert!(rt.now() < deadline, "the drain of node {removed} never finished: {nodes:?}");
+        assert!(rt.now() < deadline, "the drain of node {removed} or the rebalancing never finished: {nodes:?}");
         rt.sleep(TICK * 50).await;
     }
 
@@ -331,7 +340,7 @@ async fn run(rt: SimRuntime) {
     let deadline = rt.now() + Duration::from_secs(30);
     loop {
         let mut wrong = Vec::new();
-        let mut led: BTreeSet<(String, u32)> = BTreeSet::new();
+        let mut led: BTreeMap<(String, u32), u32> = BTreeMap::new();
         for id in (1..=5).filter(|n| *n != removed) {
             let c =
                 Client::new(rt.node("checker"), ClientConfig { bootstrap: vec![addr(id, 9000)], ..client_config() });
@@ -346,28 +355,75 @@ async fn run(rt: SimRuntime) {
                         wrong.push(format!("node {id}: {}/{} has voters {voters:?}", r.name, p.partition));
                     }
                     if p.leader != 0 {
-                        led.insert((r.name.clone(), p.partition));
+                        led.insert((r.name.clone(), p.partition), p.leader);
                     }
                 }
             }
         }
-        if wrong.is_empty() && led.len() == STREAMS.len() * 2 {
+        // Leaders spread (ADR 0050): four partitions on four nodes, no node
+        // leads more than two of them.
+        let mut per_node: BTreeMap<u32, usize> = BTreeMap::new();
+        for l in led.values() {
+            *per_node.entry(*l).or_default() += 1;
+        }
+        let spread = per_node.values().all(|n| *n <= 2);
+        if wrong.is_empty() && led.len() == STREAMS.len() * 2 && spread {
             break;
         }
-        assert!(rt.now() < deadline, "groups do not have their voters or a leader: {wrong:?}, led {led:?}");
+        if rt.now() >= deadline {
+            let nodes = checker.describe_nodes().await;
+            let status: Vec<_> =
+                w.running.iter().filter_map(|(id, r)| r.as_ref().map(|(_, h)| (*id, h.status(1)))).collect();
+            panic!(
+                "groups do not have their voters or a leader: {wrong:?}, led {led:?}, nodes {nodes:?}, metadata group {status:?}"
+            );
+        }
         rt.sleep(TICK * 50).await;
     }
-    // The removed node holds no runtime group's files any more.
-    let mut left_on_disk = Vec::new();
-    if let Ok(dirs) = w.hosts[&removed].list(std::path::Path::new("groups")).await {
-        for d in dirs {
-            let name = d.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-            if name != "1" && name != "2" {
-                left_on_disk.push(name);
+    // No node that stays keeps the log or snapshot of a group it is not a
+    // voter of: at most its term and vote (ADR 0050), even if it was down
+    // when the group moved off it.
+    let deadline = rt.now() + Duration::from_secs(30);
+    loop {
+        // Asked afresh of the nodes that stay: the checker knows the removed
+        // node too, which still runs and answers with what it last knew.
+        let fresh = Client::new(
+            rt.node("checker"),
+            ClientConfig {
+                bootstrap: (1..=5).filter(|n| *n != removed).map(|n| addr(n, 9000)).collect(),
+                ..client_config()
+            },
+        );
+        let m = fresh.metadata(&STREAMS).await.expect("the healed cluster answers metadata");
+        let mut left_on_disk = Vec::new();
+        for r in &m.resources {
+            let index = r.resource_id - lotse_server::DYNAMIC_BASE;
+            for p in &r.partitions {
+                let group = lotse_server::DYNAMIC_BASE
+                    + index * u64::from(lotse_server::MAX_PARTITIONS)
+                    + u64::from(p.partition);
+                let dir = std::path::Path::new("groups").join(group.to_string());
+                for id in (1..=5).filter(|n| *n != removed && !p.voters.contains(&(*n as u32))) {
+                    let host = &w.hosts[&id];
+                    let files: Vec<_> = host.list(&dir).await.unwrap_or_default();
+                    let logs: Vec<_> = host.list(&dir.join("log")).await.unwrap_or_default();
+                    let extra: Vec<_> = files
+                        .iter()
+                        .filter(|f| !f.ends_with("raft.state") && !f.ends_with("moved"))
+                        .chain(logs.iter())
+                        .collect();
+                    if !extra.is_empty() {
+                        left_on_disk.push(format!("node {id}, {}/{}: {extra:?}", r.name, p.partition));
+                    }
+                }
             }
         }
+        if left_on_disk.is_empty() {
+            break;
+        }
+        assert!(rt.now() < deadline, "nodes keep groups they left: {left_on_disk:?}");
+        rt.sleep(TICK * 50).await;
     }
-    assert!(left_on_disk.is_empty(), "node {removed} still holds groups {left_on_disk:?}");
 
     // Nothing acknowledged is lost, and every partition takes writes.
     let out = std::mem::take(&mut *out.lock().unwrap());

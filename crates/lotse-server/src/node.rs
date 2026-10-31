@@ -172,6 +172,23 @@ fn core_groups(cfg: &NodeConfig) -> Vec<GroupId> {
     cfg.metadata.into_iter().chain(cfg.coordinator).collect()
 }
 
+/// What the membership passes remember between rounds.
+#[derive(Default)]
+struct Moves {
+    /// Voters reported in place, per group, and when.
+    reported: BTreeMap<GroupId, (Vec<NodeId>, lotse_rt::Instant)>,
+    /// When this node last handed a group's leadership over.
+    last_handover: Option<lotse_rt::Instant>,
+    /// When it last tried for each group, so that a preferred leader that
+    /// does not take over is not asked again at once.
+    tried: BTreeMap<GroupId, lotse_rt::Instant>,
+}
+
+/// A node hands over at most one group's leadership in this time.
+const HANDOVER_EVERY_TICKS: u32 = 100;
+/// And asks the same group's preferred leader again only after this.
+const HANDOVER_RETRY_TICKS: u32 = 1_000;
+
 /// One pass of moving groups between nodes: each group this node leads
 /// takes a step towards the voters the metadata group wants for it, or
 /// reports them in place; the metadata group's leader plans.
@@ -182,7 +199,7 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     known: &Known,
     configured_voters: &[NodeId],
-    reported: &mut BTreeMap<GroupId, (Vec<NodeId>, lotse_rt::Instant)>,
+    moves: &mut Moves,
     client: &Arc<lotse_client::Client<R>>,
     shared: &Arc<Shared>,
     jobs: &Live,
@@ -190,6 +207,8 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     let state = &known.state;
     let core = core_groups(cfg);
     let everyone: BTreeSet<NodeId> = known.nodes.keys().copied().collect();
+    let preferred =
+        crate::membership::preferred_leaders(&crate::client::managed_groups(state, &core, configured_voters));
     for (&g, replica) in groups.iter_mut() {
         let raft = replica.raft();
         if raft.role() != Role::Leader {
@@ -217,14 +236,26 @@ fn membership_pass<R: Runtime, S: StateMachine>(
             crate::membership::Step::Wait => {}
             crate::membership::Step::Settled => {
                 let voters: Vec<NodeId> = target.iter().copied().collect();
-                if !crate::client::moving(state, g, &voters) {
-                    continue;
-                }
                 let now = rt.now();
-                if reported.get(&g).is_some_and(|(v, at)| *v == voters && now - *at < cfg.tick * 100) {
+                if !crate::client::moving(state, g, &voters) {
+                    // In place: spread the leaders (ADR 0050).
+                    let last = raft.last_index();
+                    let matched = raft.matched().unwrap_or_default();
+                    let due = moves.last_handover.is_none_or(|t| now - t >= cfg.tick * HANDOVER_EVERY_TICKS)
+                        && moves.tried.get(&g).is_none_or(|t| now - *t >= cfg.tick * HANDOVER_RETRY_TICKS);
+                    let to =
+                        crate::membership::hand_over_to(&current, cfg.id, preferred.get(&g).copied(), &matched, last);
+                    if let (true, Some(to)) = (due, to) {
+                        moves.last_handover = Some(now);
+                        moves.tried.insert(g, now);
+                        let _ = raft.transfer_leadership(to);
+                    }
                     continue;
                 }
-                reported.insert(g, (voters.clone(), now));
+                if moves.reported.get(&g).is_some_and(|(v, at)| *v == voters && now - *at < cfg.tick * 100) {
+                    continue;
+                }
+                moves.reported.insert(g, (voters.clone(), now));
                 let client = client.clone();
                 let stop = shared.stop.clone();
                 jobs.spawn(rt, async move {
@@ -309,6 +340,13 @@ struct Shared {
     net: Arc<NetStats>,
     /// The other nodes of the cluster: only they may open a node link.
     members: Mutex<BTreeSet<NodeId>>,
+    /// Nodes this node's metadata state does not list yet but a listed node
+    /// does (it lags, after a restart, say): they may open a node link, but
+    /// only their metadata group frames are taken, so that this node can
+    /// catch up and learn of them (ADR 0050).
+    metadata_only: Mutex<BTreeSet<NodeId>>,
+    /// Peer addresses of such nodes, as the metadata leader listed them.
+    learned: Mutex<BTreeMap<NodeId, String>>,
     work: Signal,
     stop: Signal,
 }
@@ -491,7 +529,7 @@ async fn run<R: Runtime, S: StateMachine>(
     let jobs = Live::default();
     let mut links = Links { peers: BTreeMap::new() };
     links.follow(&rt, cfg.id, &cfg.peers, &shared, &jobs, cfg.tick);
-    tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone())));
+    tasks.push(rt.spawn(accept(rt.clone(), listener, shared.clone(), cfg.metadata)));
     if let Some(l) = client_listener {
         tasks.push(rt.spawn(accept_clients(rt.clone(), l, shared.clone(), auth.clone())));
     }
@@ -624,17 +662,36 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
     let mut next_retain = started + RETAIN_EVERY;
     let mut links_at = 0;
+    let mut links_learned: BTreeMap<NodeId, String> = BTreeMap::new();
+    let (mut next_ask, asking) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let mut next_membership = started;
-    let mut reported: BTreeMap<GroupId, (Vec<NodeId>, lotse_rt::Instant)> = BTreeMap::new();
+    let mut moves = Moves::default();
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
         }
-        if known.applied != links_at {
+        let learned: BTreeMap<NodeId, String> = shared
+            .learned
+            .lock()
+            .expect("learned lock")
+            .iter()
+            .filter(|(id, _)| **id != cfg.id && !known.nodes.contains_key(id) && !known.state.gone.contains(id))
+            .map(|(id, peer)| (*id, peer.clone()))
+            .collect();
+        if known.applied != links_at || learned != links_learned {
             links_at = known.applied;
-            let want: BTreeMap<NodeId, String> =
+            let mut want: BTreeMap<NodeId, String> =
                 known.nodes.iter().map(|(id, (peer, _))| (*id, peer.clone())).collect();
+            want.extend(learned.iter().map(|(id, peer)| (*id, peer.clone())));
             links.follow(rt, cfg.id, &want, shared, jobs, cfg.tick);
+            *shared.members.lock().expect("members lock") =
+                known.nodes.keys().copied().filter(|id| *id != cfg.id).collect();
+            *shared.metadata_only.lock().expect("metadata-only lock") = learned.keys().copied().collect();
+            links_learned = learned;
+        }
+        if rt.now() >= next_ask {
+            next_ask = rt.now() + cfg.tick * ASK_NODES_EVERY_TICKS;
+            ask_for_nodes(rt, cfg, groups, &known, &marker_client, shared, jobs, &asking);
         }
         if shared.deleted.lock().expect("deleted lock").len() != known.deleted.len() {
             // Marker jobs look before each attempt.
@@ -703,7 +760,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         for (from, messages) in inbox {
             for (g, msg) in messages {
                 if let Some(group) = groups.get_mut(&g) {
-                    group.raft().step(from, msg);
+                    group.step(from, msg);
                 }
             }
         }
@@ -750,7 +807,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         if rt.now() >= next_membership {
             next_membership = rt.now() + cfg.tick * MEMBERSHIP_EVERY_TICKS;
-            membership_pass(rt, cfg, groups, &known, &configured_voters, &mut reported, &marker_client, shared, jobs);
+            membership_pass(rt, cfg, groups, &known, &configured_voters, &mut moves, &marker_client, shared, jobs);
         }
         for (to, messages) in outbound {
             let Some((_, peer)) = links.peers.get(&to) else { continue };
@@ -781,21 +838,67 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     Ok(())
 }
 
+/// How often a node whose metadata group has no leader it lists asks for
+/// the node list.
+const ASK_NODES_EVERY_TICKS: u32 = 100;
+
+/// A node whose metadata group has no leader, or one its metadata state does
+/// not list, may lag behind nodes added since: their links are refused and
+/// it has no address to answer them at, so it would never catch up. It asks
+/// the metadata leader, through a node it lists, for the node list, and
+/// links to those it is missing for the metadata group alone (ADR 0050).
+#[allow(clippy::too_many_arguments)]
+fn ask_for_nodes<R: Runtime, S: StateMachine>(
+    rt: &R,
+    cfg: &NodeConfig,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+    known: &Known,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+    asking: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return };
+    let leader = meta.raft_ref().leader();
+    if leader.is_some_and(|l| l == cfg.id || known.nodes.contains_key(&l)) {
+        return;
+    }
+    if asking.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let (client, shared, asking) = (client.clone(), shared.clone(), asking.clone());
+    let stop = shared.stop.clone();
+    jobs.spawn(rt, async move {
+        if let Some(Ok(nodes)) = race(client.describe_nodes(), &[&stop]).await {
+            let mut learned = shared.learned.lock().expect("learned lock");
+            for n in nodes {
+                learned.insert(n.node_id, n.peer);
+            }
+            drop(learned);
+            shared.work.set();
+        }
+        asking.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Takes connections from the other nodes. When the network verifies peers,
 /// a connection is only taken from a node of this cluster, and carries only
 /// that node's frames: a certificate from the cluster's CA for some other
 /// node id, or for no node at all, gets nowhere.
-async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>) {
+async fn accept<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Shared>, metadata: Option<GroupId>) {
     let mut readers = Vec::new();
     let verify = rt.verifies_peers();
     while let Some(Ok((conn, _peer))) = race(listener.accept(), &[&shared.stop]).await {
-        let member = |id| shared.members.lock().expect("members lock").contains(&id);
+        let member = |id| {
+            shared.members.lock().expect("members lock").contains(&id)
+                || shared.metadata_only.lock().expect("metadata-only lock").contains(&id)
+        };
         let sender = match (verify, conn.peer_identity()) {
             (false, _) => None,
             (true, Some(PeerIdentity::Node(id))) if member(id) => Some(id),
             (true, _) => continue,
         };
-        readers.push(rt.spawn(read_from(conn, shared.clone(), sender)));
+        readers.push(rt.spawn(read_from(conn, shared.clone(), sender, metadata)));
     }
     drop(listener);
     for r in readers {
@@ -842,19 +945,46 @@ async fn accept_clients<R: Runtime>(rt: R, listener: R::Listener, shared: Arc<Sh
 
 /// Reads one peer's frames into the inbox. `sender` is the node the
 /// connection proved to be, if the network verifies peers.
-async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>, sender: Option<NodeId>) {
+async fn read_from<C: Conn>(conn: C, shared: Arc<Shared>, sender: Option<NodeId>, metadata: Option<GroupId>) {
     while let Some(Ok(Some(frame))) = race(conn.recv(), &[&shared.stop]).await {
         NetStats::add(&shared.net.peer_in, frame.len());
         // A frame that does not decode means a broken or foreign peer: drop
         // the connection, the peer reconnects.
         let Ok(decoded) = wire::decode(frame) else { return };
-        // A node speaks only for itself, and only while it is a member.
-        if sender.is_some_and(|id| decoded.0 != id || !shared.members.lock().expect("members lock").contains(&id)) {
-            return;
-        }
+        let decoded = match sender {
+            None => decoded,
+            Some(id) => {
+                let listed = shared.members.lock().expect("members lock").contains(&id);
+                let metadata_only = shared.metadata_only.lock().expect("metadata-only lock").contains(&id);
+                match heard(id, listed, metadata_only, metadata, decoded) {
+                    Some(d) => d,
+                    None => return,
+                }
+            }
+        };
         shared.inbox.lock().expect("inbox lock").push_back(decoded);
         shared.work.set();
     }
+}
+
+/// What of a frame from the node a connection proved to be (`sender`) is
+/// taken: nothing if it speaks for another node or is not a member; from a
+/// node this node does not list yet but learned of (`metadata_only`), only
+/// the metadata group's messages (ADR 0050).
+fn heard(
+    sender: NodeId,
+    listed: bool,
+    metadata_only: bool,
+    metadata: Option<GroupId>,
+    (from, mut messages): Incoming,
+) -> Option<Incoming> {
+    if from != sender || !(listed || metadata_only) {
+        return None;
+    }
+    if !listed {
+        messages.retain(|(g, _)| Some(*g) == metadata);
+    }
+    Some((from, messages))
 }
 
 /// Keeps a connection to node `to` and sends its frames. When the network
@@ -922,6 +1052,8 @@ struct Known {
     deleted: BTreeSet<u64>,
     /// Groups of deleted resources whose files this process has removed.
     removed: BTreeSet<GroupId>,
+    /// Groups moved off this node whose logs this process has removed.
+    forgotten: BTreeSet<GroupId>,
     /// The metadata group's applied index these were built from.
     applied: u64,
     /// Who may do what.
@@ -946,6 +1078,7 @@ impl Known {
             voters: BTreeMap::new(),
             deleted: BTreeSet::new(),
             removed: BTreeSet::new(),
+            forgotten: BTreeSet::new(),
             applied: 0,
             access: Access::build(&cfg.auth, &configured_ids(cfg), &MetadataState::default()),
             nodes: cfg
@@ -981,6 +1114,7 @@ impl Known {
         known.access = Access::build(&cfg.auth, &configured_ids(cfg), &state);
         known.applied = self.applied;
         known.removed = std::mem::take(&mut self.removed);
+        known.forgotten = std::mem::take(&mut self.forgotten);
         known.deleted = state.deleted.keys().copied().collect();
         for (id, n) in &state.nodes {
             known.nodes.insert(*id, (n.peer.clone(), n.client.clone()));
@@ -1039,9 +1173,23 @@ impl Known {
             // Moved off this node: once the group's leader reported the new
             // voters in place, this replica is no member any more and goes.
             // Nothing places it here again (`left`).
-            if groups.contains_key(&g) && crate::membership::replica_may_go(&state, g, voters, cfg.id) {
-                closed |= groups.remove(&g).is_some();
-                remove_group_files(rt, &group_dir(g)).await?;
+            // So is a replica left behind by a node that was down when the
+            // move settled: it never opens the group again, but its files
+            // are still there, once per start.
+            if voters.contains(&cfg.id) {
+                // Back on this node: should it move off again, clean again.
+                known.forgotten.remove(&g);
+            }
+            if !known.forgotten.contains(&g) && !voters.contains(&cfg.id) && state.is_settled(g, voters) {
+                let tag = match groups.get(&g) {
+                    Some(r) => r.raft_ref().membership().tag,
+                    None => tag_on_disk(rt, cfg, g, factory, &state).await?,
+                };
+                if crate::membership::replica_may_go(&state, g, voters, cfg.id, tag) {
+                    known.forgotten.insert(g);
+                    closed |= groups.remove(&g).is_some();
+                    forget_group_log(rt, &group_dir(g), state.target_at.get(&g).copied().unwrap_or(0)).await?;
+                }
             }
             // Only voters replicate a group; the others learn its leader
             // from them. A replica starts from the group's first voters, as
@@ -1065,6 +1213,82 @@ impl Known {
 /// Where a group lives on the disk.
 fn group_dir(g: GroupId) -> PathBuf {
     PathBuf::from("groups").join(g.to_string())
+}
+
+/// The tag of the membership a group's replica on this node's disk holds,
+/// for a replica that is not open: 0 when nothing but its term and vote is
+/// there (and the record of an earlier move). Opening it reads the snapshot and the log once; a node only does
+/// so while deciding whether a moved replica may go.
+async fn tag_on_disk<R: Runtime, S: StateMachine>(
+    rt: &R,
+    cfg: &NodeConfig,
+    g: GroupId,
+    factory: &Factory<S>,
+    state: &MetadataState,
+) -> Result<u64, Error> {
+    let dir = group_dir(g);
+    let files = match rt.list(&dir).await {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    let kept = |f: &PathBuf| f.ends_with(crate::replica::HARD_STATE) || f.ends_with(crate::replica::MOVED);
+    if files.iter().all(kept) && rt.list(&dir.join("log")).await.is_err() {
+        return Ok(0);
+    }
+    let first = state.initial_voters(g).or_else(|| state.voters_of(g)).unwrap_or(&[]).to_vec();
+    let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, first) };
+    let replica = Replica::open_with(rt.clone(), dir, raft, factory(g), cfg.log, ReplicaOptions::default()).await?;
+    Ok(replica.raft_ref().membership().tag)
+}
+
+/// Removes a group's log and snapshot from this node after its replica
+/// moved to another node (ADR 0050), but keeps its term and vote, with the
+/// commit index back at 0. Should the group come back to this node, the new
+/// replica starts from them and never votes twice in a term: what an empty
+/// log rejoining under the same id would otherwise risk. It also records the
+/// decision that moved it (`moved_at`): until the replica holds a newer
+/// membership it grants no vote (see [`Replica::step`]). Both are written
+/// before anything is removed, so a crash halfway leaves a replica that is
+/// merely behind.
+async fn forget_group_log<D: Disk>(disk: &D, dir: &Path, moved_at: u64) -> Result<(), Error> {
+    match disk.list(dir).await {
+        Ok(_) => {}
+        // Never held here: nothing to forget.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    let path = dir.join(crate::replica::HARD_STATE);
+    let kept = match crate::replica::read_file(disk, &path).await? {
+        Some(bytes) => Some(crate::replica::decode_hard_state(bytes)?),
+        None => None,
+    };
+    if let Some(mut hs) = kept {
+        hs.commit = 0;
+        crate::replica::write_atomic(disk, dir, crate::replica::HARD_STATE, crate::replica::encode_hard_state(&hs))
+            .await?;
+    }
+    // Before anything goes: a replica that finds its log gone but no such
+    // record would vote as if it had never acknowledged anything.
+    crate::replica::write_atomic(disk, dir, crate::replica::MOVED, crate::replica::encode_moved(moved_at)).await?;
+    let keep = [path.clone(), dir.join(crate::replica::MOVED)];
+    for d in [dir.join("log"), dir.to_path_buf()] {
+        let files = match disk.list(&d).await {
+            Ok(files) => files,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for f in files.into_iter().filter(|f| !keep.contains(f)) {
+            if f == dir.join("log") {
+                continue;
+            }
+            disk.remove(&f).await?;
+        }
+        if d != *dir {
+            disk.remove_dir(&d).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes a closed group's files and directories, as much as is there:

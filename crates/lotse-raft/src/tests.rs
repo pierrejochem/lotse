@@ -559,3 +559,65 @@ fn a_restart_never_keeps_a_term_below_the_log() {
     let out = n.process();
     assert!(out.iter().any(|s| matches!(s.msg, Message::VoteReply { granted: true, term: 3, .. })), "{out:?}");
 }
+
+#[test]
+fn an_answer_from_before_a_node_rejoined_does_not_count() {
+    // Node 2 is a learner, catches up and answers; it is removed and its
+    // replica wiped; one of its old answers arrives after it was added
+    // again. The leader must not take the new, empty replica for caught up.
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.add_node(2);
+    c.change(&[1], &[2]).unwrap();
+    for i in 0..5 {
+        c.nodes.get_mut(&l).unwrap().propose(1, format!("v{i}")).unwrap();
+        c.pump();
+    }
+    let caught_up = c.nodes[&l].raft.matched().unwrap()[&2];
+    assert!(caught_up >= 6, "node 2 caught up to {caught_up}");
+    // An answer node 2 sent then, held back by the network.
+    let term = c.nodes[&l].raft.term();
+    let stale = Message::AppendReply { term, result: AppendResult::Accepted { last: caught_up }, seq: 1 };
+    c.change(&[1], &[]).unwrap();
+    c.nodes.remove(&2);
+    c.add_node(2);
+    c.cut.insert(2);
+    c.change(&[1], &[2]).unwrap();
+    c.nodes.get_mut(&l).unwrap().raft.step(2, stale);
+    assert_eq!(c.nodes[&l].raft.matched().unwrap()[&2], 0, "an answer from before it rejoined");
+    assert_eq!(
+        c.nodes.get_mut(&l).unwrap().raft.propose_membership([1, 2].into(), BTreeSet::new()),
+        Err(ChangeError::NotCaughtUp(2)),
+        "so it is no voter yet"
+    );
+    // Once it really answers, it catches up and may become one.
+    c.cut.clear();
+    c.ticks(30);
+    let now = c.nodes[&l].raft.matched().unwrap()[&2];
+    assert!(now >= caught_up, "caught up to {now} of {caught_up}");
+    c.change(&[1, 2], &[]).unwrap();
+}
+
+#[test]
+fn a_learner_that_lost_its_log_catches_up_again() {
+    // Node 2 is a learner and has acknowledged entries; its node then
+    // removes the replica and makes it anew, empty. The leader must not
+    // keep sending from what it acknowledged.
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.add_node(2);
+    c.change(&[1], &[2]).unwrap();
+    for i in 0..5 {
+        c.nodes.get_mut(&l).unwrap().propose(1, format!("v{i}")).unwrap();
+        c.pump();
+    }
+    let acked = c.nodes[&l].raft.matched().unwrap()[&2];
+    assert!(acked >= 6);
+    c.nodes.remove(&2);
+    c.add_node(2);
+    c.nodes.get_mut(&l).unwrap().propose(1, "after").unwrap();
+    c.ticks(30);
+    let last = c.nodes[&l].raft.last_index();
+    assert_eq!(c.nodes[&2].raft.last_index(), last, "the new replica has everything again");
+    assert_eq!(c.nodes[&l].raft.matched().unwrap()[&2], last);
+}

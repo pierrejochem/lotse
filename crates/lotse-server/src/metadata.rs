@@ -207,9 +207,8 @@ pub(crate) struct MetadataState {
     pub(crate) targets: BTreeMap<GroupId, Vec<NodeId>>,
     /// The voters each group's leader last reported in place.
     pub(crate) settled: BTreeMap<GroupId, Vec<NodeId>>,
-    /// Nodes that were voters of a group and were moved off it: a replica
-    /// is never placed on such a node again, so a node never comes back to
-    /// a group with an empty log under an id the group once counted.
+    /// Nodes that were voters of a group and were moved off it: while such
+    /// a move is under way, a drained node is not forgotten.
     pub(crate) left: BTreeMap<GroupId, BTreeSet<NodeId>>,
     /// A group's voters before its first change at runtime: what a new
     /// replica of it starts from, as every replica of the group did. A

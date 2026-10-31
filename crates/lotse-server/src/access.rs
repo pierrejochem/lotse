@@ -131,10 +131,12 @@ impl Access {
             (Principal::Node(_) | Principal::Anonymous, Request::WriteTxnMarkers(_) | Request::SettleVoters(_)) => {
                 return Ok(());
             }
+            // A lagging node asks for the node list (ADR 0050).
+            (Principal::Node(_), Request::DescribeNodes(_)) => return Ok(()),
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
             (Principal::Node(id), _) => {
-                return Err(format!("node {id} may only look up metadata, write markers and report voters"));
+                return Err(format!("node {id} may only look up metadata and nodes, write markers and report voters"));
             }
             (Principal::Anonymous, _) => return Ok(()),
             _ => {}

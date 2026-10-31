@@ -424,6 +424,10 @@ struct Progress {
     active: bool,
     /// Highest round it answered.
     acked: u64,
+    /// The first round sent to it as a member: an answer to an earlier one
+    /// came from before it (re)joined, from a replica it may no longer have,
+    /// and is ignored.
+    since: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -821,6 +825,7 @@ impl RaftGroup {
                     inflight_ticks: 0,
                     active: true,
                     acked: 0,
+                    since: self.seq + 1,
                 });
             }
         }
@@ -1003,8 +1008,10 @@ impl RaftGroup {
         let range = self.append_own(1, EntryKind::Config, m.encode());
         self.configs.push((range.1, m));
         // A node that just joined usually has nothing: start from the
-        // beginning (the snapshot, or index 1).
+        // beginning (the snapshot, or index 1). A new round, so that its
+        // answers can be told from those to a membership it left.
         self.sync_progress(1);
+        self.start_round();
         range
     }
 
@@ -1127,6 +1134,9 @@ impl RaftGroup {
     fn on_append_reply(&mut self, from: NodeId, result: AppendResult, seq: u64) {
         let State::Leader { progress } = &self.state else { return };
         let Some(p) = progress.get(&from).cloned() else { return };
+        if seq < p.since {
+            return;
+        }
         let mut p = p;
         p.active = true;
         p.acked = p.acked.max(seq);
@@ -1143,6 +1153,20 @@ impl RaftGroup {
                 p.next = p.next.max(p.matched + 1);
             }
             AppendResult::Rejected { prev_index, last_index, conflict } => {
+                // A learner with less than it acknowledged lost its log: its
+                // node removed the replica and made it anew. Learners count
+                // toward no commit, so it simply starts over; without this
+                // `next` never goes below what it acknowledged and it never
+                // catches up. A voter never loses an acknowledged entry.
+                if last_index < p.matched && !self.membership().is_voter(from) {
+                    p.matched = last_index;
+                    p.next = last_index + 1;
+                    p.inflight = false;
+                    self.put_progress(from, p);
+                    self.check_reads();
+                    self.replicate(from);
+                    return;
+                }
                 // Only the answer to the append in flight moves `next`.
                 if prev_index + 1 != p.next || prev_index < p.matched {
                     self.put_progress(from, p);

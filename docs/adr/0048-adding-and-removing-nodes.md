@@ -1,6 +1,6 @@
 # 48. Adding and removing nodes
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0050](0050-rebalancing-groups-onto-new-nodes.md) (a node may hold a group again; groups rebalance onto new nodes; a lagging node takes metadata frames from nodes it does not list yet)
 - Date: 2026-10-30
 
 ## Context
