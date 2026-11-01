@@ -58,5 +58,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted |
 | 0052 | [Rebalancing weighs moves by size](0052-rebalancing-weighs-moves-by-size.md) | Accepted |
 | 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted |
+| 0054 | [A moved replica does not elect itself](0054-a-moved-replica-does-not-elect-itself.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

@@ -429,7 +429,21 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.raft.step(from, msg);
     }
 
-    /// The Raft group, to tick, step and ask about.
+    /// One tick of the Raft group. A replica that may not vote yet (see
+    /// [`Replica::step`]) does not tick: left alone it would time out and
+    /// vote for itself, and when the first voters of its group are just this
+    /// node it wins alone, with an empty log and a term the group may have
+    /// passed, and commits entries that contradict the ones the group
+    /// committed while the replica was elsewhere. It stays a follower, takes
+    /// what the group's leader sends and starts ticking once it holds the
+    /// membership that placed it here again.
+    pub fn tick(&mut self) {
+        if may_vote(self.moved_at, self.raft.membership().tag) {
+            self.raft.tick();
+        }
+    }
+
+    /// The Raft group, to step and ask about.
     pub fn raft(&mut self) -> &mut RaftGroup {
         &mut self.raft
     }

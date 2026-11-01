@@ -738,7 +738,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         if rt.now() >= next_tick {
             next_tick = rt.now() + cfg.tick;
-            groups.values_mut().for_each(|g| g.raft().tick());
+            groups.values_mut().for_each(|g| g.tick());
         }
         if rt.now() >= next_host {
             host = rt.host_stats().await;

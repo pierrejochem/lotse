@@ -70,7 +70,7 @@ fn a_moved_replica_leaves_only_its_term_and_vote() {
         assert_eq!(left, vec![dir.join(crate::replica::MOVED), dir.join(crate::replica::HARD_STATE)]);
         assert!(rt.list(&dir.join("log")).await.is_err(), "the log is gone");
         // A replica of the group opens from that state again, empty.
-        let raft = Config::new(1, vec![1, 2, 3]);
+        let raft = Config::new(1, vec![1]);
         let r = Replica::open_with(rt.clone(), dir, raft, NoState, LogConfig::default(), ReplicaOptions::default())
             .await
             .unwrap();
@@ -82,6 +82,14 @@ fn a_moved_replica_leaves_only_its_term_and_vote() {
         let ask = |term| lotse_raft::Message::Vote { term, last_index: 3, last_term: 7, pre: false, transfer: false };
         r.step(1, ask(8));
         assert_eq!(r.raft_ref().term(), 7, "the request did not even reach Raft");
+        // Nor does it elect itself, though the group started with this node
+        // alone: an empty replica must not win a term of its own and commit
+        // what contradicts the group's log.
+        for _ in 0..200 {
+            r.tick();
+        }
+        assert_ne!(r.raft_ref().role(), lotse_raft::Role::Leader, "a replica that may not vote never campaigns");
+        assert_eq!(r.raft_ref().term(), 7);
         // A group never held here leaves nothing behind.
         forget_group_log(&rt, &group_dir(43), 31).await.unwrap();
         assert!(rt.list(&group_dir(43)).await.is_err());
