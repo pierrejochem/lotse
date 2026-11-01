@@ -66,7 +66,7 @@ struct BatchHeader {
 }
 ```
 
-`kind` unterscheidet `DATA`, `ACK`, `QUEUE_STATE` und `TIMER`. Dadurch liegen Queue-Zustände im selben Log und in derselben Raft-Gruppe wie die Nachrichten.
+`kind` unterscheidet `DATA` (0), `ACK` (1), `QUEUE_STATE` (2), `TIMER` (3), `DEAD_LETTER` (4) und `RETIRE` (5). `DEAD_LETTER` trägt Nachrichten, die eine andere Queue weitergereicht hat, zustellbar wie Daten; `RETIRE` trägt den Claim, mit dem der Leader Nachrichten wegen der Grenzen einer Queue erledigt, und den Vermerk, dass sie weitergeleitet sind (ADR 0055). Dadurch liegen Queue-Zustände im selben Log und in derselben Raft-Gruppe wie die Nachrichten.
 
 ### Record-Kodierung (varint-Deltas)
 
@@ -231,13 +231,15 @@ TCP mit TLS, eigenes längenpräfixiertes Binärformat, Version pro API-Key. Rec
 Request:  length u32 | api_key u16 | api_version u16 | correlation_id u32
           | flags u16 | tagged_fields | body
 Response: length u32 | correlation_id u32 | flags u16 | tagged_fields | body
-Push:     length u32 | api_key u16 | api_version u16 | correlation_id 0
-          | flags PUSH | subscription_id u32 | body
+Push:     length u32 | correlation_id u32 (0) | flags u16 (PUSH)
+          | tagged_fields | api_key u16 | api_version u16 | body
 ```
 
-Requests auf einer Verbindung werden gepipelined; Antworten kommen pro Partition geordnet, aber nicht global. Push-Frames (Zustellung an Queue-Consumer) nutzen `correlation_id = 0` und tragen die Subscription-ID.
+Requests auf einer Verbindung werden gepipelined; Antworten kommen pro Partition geordnet, aber nicht global. Push-Frames (Zustellung an Queue-Consumer) nutzen die Form einer Antwort mit `correlation_id = 0` und dem Flag `PUSH` (1), danach folgen API-Key (`Deliver`, 11) und Version; die Subscription-ID ist das erste Feld des Bodys.
 
-Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frames, auf TCP mit `u32`-Präfix, und der Codec beginnt danach. Eine Antwort, deren Body nur aus einem Fehlercode besteht (der Request ließ sich gar nicht bedienen, etwa `UNSUPPORTED_VERSION`), setzt das Flag `ERROR` (2).
+Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frames, auf TCP mit `u32`-Präfix in Big-Endian-Byte-Order (alle anderen Felder sind Little-Endian), und der Codec beginnt danach. Eine Antwort, deren Body nur aus einem Fehlercode besteht (der Request ließ sich gar nicht bedienen, etwa `UNSUPPORTED_VERSION`), setzt das Flag `ERROR` (2).
+
+Client-SDKs für andere Sprachen (zuerst die JVM, ADR 0056) liegen in `sdk/`. Maßgeblich bleibt der Rust-Code; `sdk/PROTOCOL.md` beschreibt das Protokoll für Implementierer, und `sdk/conformance` enthält Golden Vectors, die `lotse-proto` schreibt und jedes SDK lesen und unverändert wieder schreiben muss.
 
 ### Verbindungsaufbau
 
@@ -497,6 +499,9 @@ Antworten mit `NOT_LEADER` tragen als Tag 0 den Leader der Metadaten-Gruppe. Umg
 | 12 | `CORRUPT_BATCH` | nein | CRC oder Format ungültig |
 | 13 | `UNAUTHORIZED` | nein | RBAC verweigert |
 | 14 | `UNSUPPORTED_VERSION` | nein | API-Version außerhalb min/max |
+| 15 | `FENCED_MEMBER_EPOCH` | nein | Die Epoch des Mitglieds ist veraltet; der Client tritt der Gruppe neu bei |
+| 16 | `UNKNOWN_MEMBER_ID` | nein | Das Mitglied ist unbekannt; der Client tritt der Gruppe neu bei |
+| 17 | `FRAME_TOO_LARGE` | nein | Der Frame überschreitet das Limit; die Verbindung wird geschlossen |
 | 18 | `COORDINATOR_NOT_AVAILABLE` | ja | Keine Koordinator-Gruppe konfiguriert oder gerade ohne Leader |
 | 19 | `CONCURRENT_TRANSACTIONS` | ja | Eine andere Änderung derselben Transaktion läuft |
 | 20 | `COORDINATOR_FENCED` | nein | Ein neuerer Koordinator hat die Marker dieses Producers übernommen |
@@ -506,6 +511,8 @@ Antworten mit `NOT_LEADER` tragen als Tag 0 den Leader der Metadaten-Gruppe. Umg
 | 24 | `UNSTABLE_OFFSET_COMMIT` | ja | Eine offene Transaktion hält einen noch nicht committeten Offset der Partition |
 | 25 | `CONCURRENT_GROUP_CHANGE` | ja | Eine andere Änderung derselben Consumer-Gruppe läuft |
 | 26 | `RESOURCE_EXISTS` | nein | Eine Ressource dieses Namens existiert schon; die Antwort nennt ihre ID |
+| 27 | `AUTHENTICATION_FAILED` | nein | Zugangsdaten oder Token wurden nicht akzeptiert; der Node sagt nicht mehr, damit Namen sich nicht erraten lassen |
+| 28 | `UNSUPPORTED_SASL_MECHANISM` | nein | Der SASL-Mechanismus ist auf diesem Node nicht aktiviert; die Antwort listet die aktivierten |
 
 ## Weitere Entscheidungen
 
