@@ -41,8 +41,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_log::{Log, LogConfig};
 use lotse_queue::QueueLog;
 use lotse_raft::{
-    Config, Entry, EntryKind, HardState, Membership, Message, NodeId, NotLeader, RaftGroup, ReadState, Restored, Send,
-    SnapshotMeta, TermRuns,
+    Config, Entry, EntryKind, HardState, Membership, Message, NodeId, NotLeader, OlderSnapshots, RaftGroup, ReadState,
+    Restored, Send, SnapshotMeta, TermRuns,
 };
 use lotse_record::{Batch, RaftControl};
 use lotse_rt::{Disk, OpenMode, SegmentFile};
@@ -281,6 +281,8 @@ pub struct Replica<D: Disk, S> {
     sm: S,
     applied: u64,
     snapshot: Option<(SnapshotMeta, Bytes)>,
+    /// Snapshots replaced while being sent to a follower in chunks.
+    older: OlderSnapshots,
     /// Snapshots taken where segments begin, newer than `snapshot`: where
     /// retention may later cut (see [`Retention`]).
     boundaries: std::collections::BTreeMap<u64, (SnapshotMeta, Bytes)>,
@@ -288,6 +290,9 @@ pub struct Replica<D: Disk, S> {
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
+    /// Largest chunk of a snapshot sent in one message. A snapshot is cut into
+    /// chunks of at most this size so that it never has to fit one frame.
+    pub max_snapshot_chunk: usize,
     /// The tag of the move that removed this replica's log, if one did.
     moved_at: Option<u64>,
 }
@@ -399,10 +404,12 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             sm,
             applied: snap_index,
             snapshot,
+            older: OlderSnapshots::default(),
             boundaries: std::collections::BTreeMap::new(),
             retention: options.retention,
             state,
             max_fill_bytes: 1 << 20,
+            max_snapshot_chunk: 1 << 20,
             moved_at,
         })
     }
@@ -559,7 +566,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             self.sm.restore(&d).map_err(Error::Corrupt)?;
             self.log.reset(snap.meta.index).await?;
             self.applied = snap.meta.index;
-            self.snapshot = Some((snap.meta, snap.data));
+            let old = self.snapshot.replace((snap.meta, snap.data));
+            self.older.supersede(old, &self.raft);
             self.boundaries.clear();
         }
         if let Some(from) = ready.truncate_from {
@@ -719,7 +727,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         // and cuts it again on open.
         write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
         self.raft.compact(cut);
-        self.snapshot = Some((meta, data));
+        let old = self.snapshot.replace((meta, data));
+        self.older.supersede(old, &self.raft);
         self.boundaries.retain(|&i, _| i > cut);
         self.log.trim_before(cut).await?;
         Ok(Some(cut))
@@ -727,9 +736,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
 
     async fn fill(&self, s: &mut Send) -> Result<(), Error> {
         if s.attach_snapshot {
-            if let (Message::Snapshot { meta, data, .. }, Some((m, d))) = (&mut s.msg, &self.snapshot) {
-                *meta = m.clone();
-                *data = d.clone();
+            if let Some((m, d)) = &self.snapshot {
+                s.msg.attach_snapshot_chunk(m, d, &self.older, self.max_snapshot_chunk);
             }
             s.attach_snapshot = false;
             return Ok(());
@@ -760,7 +768,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let meta = self.raft.snapshot_meta();
         let data = self.state.snapshot(&self.sm.snapshot());
         write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
-        self.snapshot = Some((meta, data));
+        let old = self.snapshot.replace((meta, data));
+        self.older.supersede(old, &self.raft);
         Ok(index)
     }
 }

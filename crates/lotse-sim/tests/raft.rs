@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use lotse_raft::testing::MemNode;
-use lotse_raft::{Config, Entry, EntryKind, Membership, Message, NodeId, Role};
+use lotse_raft::{AppendResult, Config, Entry, EntryKind, Membership, Message, NodeId, Role};
 use lotse_rt::Rng;
 use lotse_sim::{SimRng, check_seeds};
 
@@ -80,6 +80,23 @@ struct World {
     /// Per node: how many of its served reads were checked.
     read_seen: BTreeMap<NodeId, usize>,
     next_read: u64,
+    stats: Stats,
+}
+
+/// What a run actually did, so that a green run can be told from one that never
+/// reached the code under test.
+#[derive(Debug, Default, Clone, Copy)]
+struct Stats {
+    /// Chunks of a snapshot delivered after the first.
+    later_chunks: u64,
+    /// Snapshots whose last chunk was delivered although it was not also the first.
+    chunked_installs: u64,
+    /// Answers delivered that ask the leader to go on from the middle.
+    resumes: u64,
+    /// Answers delivered that ask the leader to start over.
+    restarts: u64,
+    /// Nodes that went down in the middle of receiving a snapshot.
+    crashes_mid_transfer: u64,
 }
 
 impl World {
@@ -120,6 +137,7 @@ impl World {
             committed_by: Vec::new(),
             kept: BTreeMap::new(),
             proposals: 0,
+            stats: Stats::default(),
         }
     }
 
@@ -219,6 +237,17 @@ impl World {
             if self.down.contains_key(&m.to) || self.down.contains_key(&m.from) || !self.linked(m.from, m.to) {
                 continue;
             }
+            match &m.msg {
+                Message::Snapshot { offset, done, .. } => {
+                    self.stats.later_chunks += u64::from(*offset > 0);
+                    self.stats.chunked_installs += u64::from(*offset > 0 && *done);
+                }
+                Message::AppendReply { result: AppendResult::SnapshotChunk { next, .. }, .. } => {
+                    self.stats.resumes += u64::from(*next > 0);
+                    self.stats.restarts += u64::from(*next == 0);
+                }
+                _ => {}
+            }
             self.nodes.get_mut(&m.to).unwrap().raft.step(m.from, m.msg);
         }
 
@@ -227,6 +256,7 @@ impl World {
         // sending (its messages are gone).
         for id in self.up() {
             if self.faults && self.up().len() > 1 && r.chance(1, self.f.crash) {
+                self.stats.crashes_mid_transfer += u64::from(self.nodes[&id].raft.receiving_snapshot());
                 let before_persist = r.chance(1, 2);
                 if !before_persist {
                     self.nodes.get_mut(&id).unwrap().process();
@@ -405,10 +435,11 @@ fn fresh(rng: &SimRng, id: NodeId, voters: Vec<NodeId>, pre_vote: bool, lease_ti
     let cfg = Config { seed: rng.next_u64(), pre_vote, lease_ticks, ..Config::new(id, voters) };
     let mut node = MemNode::new(cfg);
     node.max_fill_bytes = 1 + rng.below(250) as usize; // often one entry per append
+    node.max_snapshot_chunk = 32 + rng.below(1_500) as usize; // snapshots in several chunks
     node
 }
 
-fn run(seed: u64, steps: u64) {
+fn run(seed: u64, steps: u64) -> Stats {
     let mut w = World::new(seed);
     for _ in 0..steps {
         w.step();
@@ -434,7 +465,7 @@ fn run(seed: u64, steps: u64) {
         {
             let any_normal = w.committed.iter().filter(|e| e.kind == EntryKind::Normal).count();
             assert!(any_normal > 0);
-            return;
+            return w.stats;
         }
     }
     panic!(
@@ -450,5 +481,32 @@ fn run(seed: u64, steps: u64) {
 
 #[test]
 fn raft_is_safe_and_live_under_faults() {
-    check_seeds(150, |seed| run(seed, 2_500));
+    check_seeds(150, |seed| {
+        run(seed, 2_500);
+    });
+}
+
+/// Snapshots cut into chunks of a few dozen bytes cross a network that drops,
+/// duplicates and reorders them, to nodes that crash with a transfer half done
+/// and leaders that change. The checks of `run` hold: every node applies what
+/// was committed, whatever it installed, and it converges after healing. The
+/// counters keep the test honest: transfers really span several chunks, are
+/// resumed in the middle, are restarted, and nodes really crash during one.
+#[test]
+fn chunked_snapshots_converge_under_faults() {
+    let total = std::sync::Mutex::new(Stats::default());
+    check_seeds(150, |seed| {
+        let s = run(seed, 2_500);
+        let mut t = total.lock().unwrap();
+        t.later_chunks += s.later_chunks;
+        t.chunked_installs += s.chunked_installs;
+        t.resumes += s.resumes;
+        t.restarts += s.restarts;
+        t.crashes_mid_transfer += s.crashes_mid_transfer;
+    });
+    let t = *total.lock().unwrap();
+    eprintln!("chunked snapshots: {t:?}");
+    assert!(t.later_chunks > 0 && t.chunked_installs > 0, "no snapshot ever spanned chunks: {t:?}");
+    assert!(t.resumes > 0 && t.restarts > 0, "no transfer was resumed and restarted: {t:?}");
+    assert!(t.crashes_mid_transfer > 0, "no node crashed mid-transfer: {t:?}");
 }

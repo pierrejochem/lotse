@@ -21,6 +21,6 @@ Per peer, a `Node` queues at most 256 frames while the peer is unreachable and d
 ## Consequences
 
 - The same `Node` runs unchanged on Tokio and in the simulation; the node simulation exercises the real main loop, senders, readers and codec.
-- A snapshot must fit in one frame until chunked transfer exists.
+- A snapshot must fit in one frame until chunked transfer exists (it does since [ADR 0053](0053-snapshots-travel-in-chunks.md)).
 - The format carries a version byte, so a later change can be rolled out node by node.
 - No TLS or authentication between nodes yet.

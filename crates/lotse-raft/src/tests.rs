@@ -10,6 +10,12 @@ struct Cluster {
     nodes: BTreeMap<NodeId, MemNode>,
     net: VecDeque<(NodeId, Send)>,
     cut: BTreeSet<NodeId>,
+    /// Offsets of snapshot chunks to lose, each once.
+    lose_chunks: BTreeSet<u64>,
+    /// Every snapshot chunk sent: the snapshot's index and the chunk's offset.
+    chunks_sent: Vec<(u64, u64)>,
+    /// Cuts the receiver off once this many chunks have been sent.
+    cut_after_chunks: Option<usize>,
 }
 
 impl Cluster {
@@ -23,7 +29,14 @@ impl Cluster {
             .iter()
             .map(|&id| (id, MemNode::new(Config { seed: id * 7919, lease_ticks, ..Config::new(id, ids.clone()) })))
             .collect();
-        Cluster { nodes, net: VecDeque::new(), cut: BTreeSet::new() }
+        Cluster {
+            nodes,
+            net: VecDeque::new(),
+            cut: BTreeSet::new(),
+            lose_chunks: BTreeSet::new(),
+            chunks_sent: Vec::new(),
+            cut_after_chunks: None,
+        }
     }
 
     /// A node that joins an existing group: no voters of its own.
@@ -64,6 +77,15 @@ impl Cluster {
             };
             if self.cut.contains(&from) || self.cut.contains(&s.to) {
                 continue;
+            }
+            if let Message::Snapshot { meta, offset, .. } = &s.msg {
+                self.chunks_sent.push((meta.index, *offset));
+                if self.cut_after_chunks == Some(self.chunks_sent.len()) {
+                    self.cut.insert(s.to);
+                }
+                if self.lose_chunks.remove(offset) {
+                    continue;
+                }
             }
             self.nodes.get_mut(&s.to).unwrap().raft.step(from, s.msg);
         }
@@ -251,7 +273,11 @@ fn a_follower_with_the_snapshot_entry_keeps_its_log() {
     let meta = c.nodes[&l].raft.snapshot_meta();
     assert_eq!(meta.index, at);
     let term = c.nodes[&l].raft.term();
-    c.nodes.get_mut(&f).unwrap().raft.step(l, Message::Snapshot { term, meta, data: Bytes::new(), seq: 0 });
+    c.nodes
+        .get_mut(&f)
+        .unwrap()
+        .raft
+        .step(l, Message::Snapshot { term, meta, offset: 0, data: Bytes::new(), done: true, seq: 0 });
     c.nodes.get_mut(&f).unwrap().process();
     assert_eq!(c.nodes[&f].log, before, "nothing dropped, nothing installed");
     assert_eq!(c.nodes[&f].snapshot_index(), 0);
@@ -620,4 +646,214 @@ fn a_learner_that_lost_its_log_catches_up_again() {
     let last = c.nodes[&l].raft.last_index();
     assert_eq!(c.nodes[&2].raft.last_index(), last, "the new replica has everything again");
     assert_eq!(c.nodes[&l].raft.matched().unwrap()[&2], last);
+}
+
+/// A snapshot a leader holds and a cut-off follower lacks.
+struct Snap {
+    leader: NodeId,
+    follower: NodeId,
+    term: u64,
+    meta: SnapshotMeta,
+    data: Bytes,
+}
+
+impl Snap {
+    /// Hands the follower the bytes `from..to` as one chunk and returns its answer.
+    fn give(&self, c: &mut Cluster, from: usize, to: usize) -> AppendResult {
+        self.give_of(c, &self.meta, from, to)
+    }
+
+    /// The same for the chunk of another snapshot, described by `meta`.
+    fn give_of(&self, c: &mut Cluster, meta: &SnapshotMeta, from: usize, to: usize) -> AppendResult {
+        let msg = Message::Snapshot {
+            term: self.term,
+            meta: meta.clone(),
+            offset: from as u64,
+            data: self.data.slice(from..to),
+            done: to == self.data.len(),
+            seq: 1,
+        };
+        let f = self.follower;
+        c.nodes.get_mut(&f).unwrap().raft.step(self.leader, msg);
+        let out = c.nodes.get_mut(&f).unwrap().process();
+        let mut replies = out.into_iter().filter_map(|s| match s.msg {
+            Message::AppendReply { result, .. } => Some(result),
+            _ => None,
+        });
+        let r = replies.next().expect("an answer");
+        assert!(replies.next().is_none(), "exactly one answer");
+        r
+    }
+}
+
+/// A leader with a snapshot a follower lacks, and the follower, cut off.
+fn snapshot_to_send() -> (Cluster, Snap) {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.cut.insert(f);
+    for i in 0..12 {
+        c.nodes.get_mut(&l).unwrap().propose(1 + i % 3, format!("value-{i}")).unwrap();
+        c.ticks(1);
+    }
+    c.nodes.get_mut(&l).unwrap().compact();
+    let (meta, data) = c.nodes[&l].snapshot.clone().unwrap();
+    assert!(data.len() > 100, "enough data for several chunks");
+    let term = c.nodes[&l].raft.term();
+    (c, Snap { leader: l, follower: f, term, meta, data })
+}
+
+#[test]
+fn a_snapshot_installs_only_when_its_last_chunk_arrives() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    let n = data.len();
+    let (a, b) = (n / 3, 2 * n / 3);
+    let r = sn.give(&mut c, 0, a);
+    assert_eq!(r, AppendResult::SnapshotChunk { index: meta.index, next: a as u64 });
+    let r = sn.give(&mut c, a, b);
+    assert_eq!(r, AppendResult::SnapshotChunk { index: meta.index, next: b as u64 });
+    assert_eq!(c.nodes[&f].snapshot_index(), 0, "nothing installed before the end");
+    assert!(c.nodes[&f].raft.receiving_snapshot());
+    let r = sn.give(&mut c, b, n);
+    assert_eq!(r, AppendResult::Accepted { last: meta.index });
+    assert_eq!(c.nodes[&f].snapshot_index(), meta.index);
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    assert!(!c.nodes[&f].raft.receiving_snapshot());
+}
+
+#[test]
+fn repeated_and_skipped_chunks_only_say_where_the_follower_stands() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    let n = data.len();
+    let (a, b) = (n / 3, 2 * n / 3);
+    let at = |next: usize| AppendResult::SnapshotChunk { index: meta.index, next: next as u64 };
+    assert_eq!(sn.give(&mut c, 0, a), at(a));
+    // A copy of the first chunk: not taken twice.
+    assert_eq!(sn.give(&mut c, 0, a), at(a));
+    // The last chunk with the middle one missing: not taken, no install.
+    assert_eq!(sn.give(&mut c, b, n), at(a));
+    assert_eq!(c.nodes[&f].snapshot_index(), 0);
+    // A copy of the first chunk after the second: also not taken.
+    assert_eq!(sn.give(&mut c, a, b), at(b));
+    assert_eq!(sn.give(&mut c, 0, a), at(b));
+    assert_eq!(sn.give(&mut c, b, n), AppendResult::Accepted { last: meta.index });
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data(), "reassembled exactly");
+}
+
+#[test]
+fn a_newer_snapshot_replaces_a_partial_one_and_an_unknown_one_must_start_over() {
+    let (mut c, sn) = snapshot_to_send();
+    let (f, meta, data) = (sn.follower, sn.meta.clone(), sn.data.clone());
+    let n = data.len();
+    let a = n / 2;
+    sn.give(&mut c, 0, a);
+    // Another snapshot starts at 0: the partial one is dropped.
+    let other = SnapshotMeta { term: meta.term + 1, ..meta.clone() };
+    let r = sn.give_of(&mut c, &other, 0, 10);
+    assert_eq!(r, AppendResult::SnapshotChunk { index: other.index, next: 10 });
+    // The first one's second half now finds nothing to continue: start over.
+    let r = sn.give(&mut c, a, n);
+    assert_eq!(r, AppendResult::SnapshotChunk { index: meta.index, next: 0 });
+    assert_eq!(c.nodes[&f].snapshot_index(), 0, "an unknown continuation installs nothing");
+    // A node that restarted lost its chunks and says so.
+    sn.give(&mut c, 0, a);
+    c.nodes.get_mut(&f).unwrap().restart();
+    let r = sn.give(&mut c, a, n);
+    assert_eq!(r, AppendResult::SnapshotChunk { index: meta.index, next: 0 });
+    assert_eq!(c.nodes[&f].snapshot_index(), 0);
+    assert_eq!(sn.give(&mut c, 0, n), AppendResult::Accepted { last: meta.index });
+}
+
+#[test]
+fn a_leader_sends_a_snapshot_in_chunks_and_resumes_where_the_follower_stands() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    let chunks = data.len().div_ceil(40);
+    assert!(chunks >= 4);
+    // Lose the second and the fourth chunk once each.
+    c.lose_chunks.extend([40, 120]);
+    c.cut.clear();
+    c.ticks(3 * chunks as u32 + 60);
+    assert_eq!(c.nodes[&f].snapshot_index(), meta.index, "caught up from chunks");
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    assert!(c.lose_chunks.is_empty(), "the chunks were lost as planned");
+}
+
+#[test]
+fn a_replaced_snapshot_is_sent_from_its_start_and_the_last_chunk_is_marked() {
+    let (_c, sn) = snapshot_to_send();
+    let (latest, data) = (sn.meta.clone(), sn.data.clone());
+    let older = SnapshotMeta { index: latest.index - 1, ..latest.clone() };
+    let msg = |meta: &SnapshotMeta, offset| Message::Snapshot {
+        term: 1,
+        meta: meta.clone(),
+        offset,
+        data: Bytes::new(),
+        done: false,
+        seq: 1,
+    };
+    // The core meant an older snapshot at offset 50: the driver starts over.
+    let mut m = msg(&older, 50);
+    m.attach_snapshot_chunk(&latest, &data, &OlderSnapshots::default(), 30);
+    let Message::Snapshot { meta, offset, data: chunk, done, .. } = &m else { unreachable!() };
+    assert_eq!((meta, *offset, done), (&latest, 0, &false));
+    assert_eq!(chunk[..], data[..30]);
+    // The same snapshot goes on at the offset; the chunk reaching the end is the last.
+    let mut m = msg(&latest, data.len() as u64 - 10);
+    m.attach_snapshot_chunk(&latest, &data, &OlderSnapshots::default(), 30);
+    let Message::Snapshot { offset, data: chunk, done, .. } = &m else { unreachable!() };
+    assert_eq!((*offset, chunk.len(), *done), (data.len() as u64 - 10, 10, true));
+    // A snapshot the driver kept for a transfer under way is sent as it was,
+    // not replaced by the latest.
+    let kept = Bytes::from_static(b"an older snapshot's bytes");
+    let kept_at = OlderSnapshots(vec![(older.clone(), kept.clone())]);
+    let mut m = msg(&older, 9);
+    m.attach_snapshot_chunk(&latest, &data, &kept_at, 8);
+    let Message::Snapshot { meta, offset, data: chunk, done, .. } = &m else { unreachable!() };
+    assert_eq!((meta, *offset, &chunk[..], *done), (&older, 9, &kept[9..17], false));
+}
+
+#[test]
+fn a_transfer_finishes_with_its_snapshot_although_the_leader_snapshots_again() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, first) = (sn.leader, sn.follower, sn.meta.index);
+    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    // Let a few chunks through, then the follower is cut off and the leader
+    // snapshots again.
+    c.cut_after_chunks = Some(2);
+    c.cut.clear();
+    for _ in 0..100 {
+        if c.cut.contains(&f) {
+            break;
+        }
+        c.ticks(1);
+    }
+    c.cut_after_chunks = None;
+    assert!(c.cut.contains(&f));
+    assert!(c.nodes[&l].raft.snapshots_in_transfer().contains(&first), "a transfer is under way");
+    c.nodes.get_mut(&l).unwrap().propose(1, "newer").unwrap();
+    c.ticks(1);
+    let second = c.nodes.get_mut(&l).unwrap().compact();
+    assert!(second > first);
+    assert!(c.nodes[&f].snapshot_index() < first, "not done yet");
+    c.cut.clear();
+    c.ticks(400);
+    let starts: Vec<u64> = c.chunks_sent.iter().filter(|c| c.1 == 0).map(|c| c.0).collect();
+    assert_eq!(
+        starts.iter().filter(|&&i| i == first).count(),
+        1,
+        "the first snapshot was not started over: {starts:?}"
+    );
+    let order: Vec<u64> = c.chunks_sent.iter().map(|c| c.0).collect();
+    let last_first = order.iter().rposition(|&i| i == first).unwrap();
+    let first_second = order.iter().position(|&i| i == second).expect("the newer one follows");
+    let reached = c.chunks_sent.iter().filter(|c| c.0 == first).map(|c| c.1).max().unwrap();
+    assert!(reached + 40 >= sn.data.len() as u64, "the first snapshot was sent to its end, not abandoned");
+    assert!(last_first < first_second, "the first snapshot is finished before the newer starts: {order:?}");
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    assert!(c.nodes[&f].snapshot_index() >= first);
+    assert!(c.nodes[&l].raft.snapshots_in_transfer().is_empty(), "nothing is kept once it arrived");
 }

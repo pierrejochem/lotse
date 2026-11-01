@@ -11,8 +11,8 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
-    Config, Entry, EntryKind, HardState, Membership, Message, RaftGroup, ReadState, Restored, Send, SnapshotMeta,
-    TermRuns,
+    Config, Entry, EntryKind, HardState, Membership, Message, OlderSnapshots, RaftGroup, ReadState, Restored, Send,
+    SnapshotMeta, TermRuns,
 };
 
 /// Size of a batch header in `lotse-record`; counts towards the fill limit.
@@ -31,9 +31,13 @@ pub struct MemNode {
     pub applied: Vec<Entry>,
     /// The latest snapshot: where it stands and its encoded entries.
     pub snapshot: Option<(SnapshotMeta, Bytes)>,
+    /// Snapshots replaced while a transfer of them was under way.
+    pub older: OlderSnapshots,
     /// Largest number of bytes (headers included) per append; at least one
     /// entry is always sent.
     pub max_fill_bytes: usize,
+    /// Largest chunk of a snapshot in one message.
+    pub max_snapshot_chunk: usize,
     /// Reads confirmed so far, with the index applied when each was served.
     pub reads: Vec<(ReadState, u64)>,
     /// Reads aborted so far.
@@ -50,7 +54,9 @@ impl MemNode {
             hard_state: HardState::default(),
             applied: Vec::new(),
             snapshot: None,
+            older: OlderSnapshots::default(),
             max_fill_bytes: 64 * 1024,
+            max_snapshot_chunk: 64 * 1024,
             reads: Vec::new(),
             reads_aborted: Vec::new(),
             cfg,
@@ -103,7 +109,8 @@ impl MemNode {
         self.raft.compact(last);
         let meta = self.raft.snapshot_meta();
         assert_eq!(meta.index, last);
-        self.snapshot = Some((meta, encode(&self.applied)));
+        let old = self.snapshot.replace((meta, encode(&self.applied)));
+        self.older.supersede(old, &self.raft);
         self.log.drain(..pos);
         last
     }
@@ -122,7 +129,8 @@ impl MemNode {
             assert_eq!(entries.last().map_or(0, |e| e.last), snap.meta.index, "snapshot data matches its meta");
             self.applied = entries;
             self.log.clear();
-            self.snapshot = Some((snap.meta, snap.data));
+            let old = self.snapshot.replace((snap.meta, snap.data));
+            self.older.supersede(old, &self.raft);
         }
         if let Some(from) = ready.truncate_from {
             let applied = self.applied.last().map_or(0, |e| e.last);
@@ -169,9 +177,8 @@ impl MemNode {
     /// attaches the snapshot.
     pub fn fill(&self, s: &mut Send) {
         if s.attach_snapshot {
-            if let (Message::Snapshot { meta, data, .. }, Some((m, d))) = (&mut s.msg, &self.snapshot) {
-                *meta = m.clone();
-                *data = d.clone();
+            if let Some((m, d)) = &self.snapshot {
+                s.msg.attach_snapshot_chunk(m, d, &self.older, self.max_snapshot_chunk);
             }
             s.attach_snapshot = false;
             return;

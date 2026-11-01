@@ -136,6 +136,7 @@ impl World {
                 .await
                 .unwrap_or_else(|e| panic!("node {id} cannot recover from its disk: {e}"));
         node.max_fill_bytes = 1 + self.rng.below(400) as usize;
+        node.max_snapshot_chunk = 16 + self.rng.below(600) as usize; // snapshots in chunks, also across power loss
         node
     }
 

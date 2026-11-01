@@ -20,8 +20,14 @@
 //! The driver snapshots its applied state when it likes and calls
 //! [`RaftGroup::compact`]; the core forgets the log up to there. A follower
 //! too far behind gets a [`Message::Snapshot`], whose data the driver fills
-//! in ([`Send::attach_snapshot`]) and installs from [`Ready::snapshot`]. The
-//! core only knows a snapshot's [`SnapshotMeta`].
+//! in ([`Send::attach_snapshot`], [`Message::attach_snapshot_chunk`]) and
+//! installs from [`Ready::snapshot`]. The core only knows a snapshot's
+//! [`SnapshotMeta`]. The data travels in chunks, one in flight at a time: each
+//! [`Message::Snapshot`] carries the `offset` its bytes start at, the follower
+//! buffers them in order and answers with [`AppendResult::SnapshotChunk`]
+//! naming the next offset it wants, and the leader goes on from there. The
+//! follower hands the snapshot over in [`Ready::snapshot`] only when the last
+//! chunk (`done`) has arrived, so a transfer that breaks off installs nothing.
 //!
 //! # Membership
 //!
@@ -133,6 +139,32 @@ pub struct SnapshotMeta {
     pub membership: Membership,
 }
 
+/// Snapshots a driver has replaced but still sends, because a transfer of
+/// them is under way ([`RaftGroup::snapshots_in_transfer`]).
+#[derive(Debug, Clone, Default)]
+pub struct OlderSnapshots(Vec<(SnapshotMeta, Bytes)>);
+
+impl OlderSnapshots {
+    /// Call when `old` is replaced as the driver's latest snapshot: keeps it
+    /// if a transfer of it is under way, and drops what no transfer needs any
+    /// more.
+    pub fn supersede(&mut self, old: Option<(SnapshotMeta, Bytes)>, raft: &RaftGroup) {
+        let wanted = raft.snapshots_in_transfer();
+        self.0.retain(|(m, _)| wanted.contains(&m.index));
+        if let Some((m, d)) = old
+            && wanted.contains(&m.index)
+            && self.get(m.index).is_none()
+        {
+            self.0.push((m, d));
+        }
+    }
+
+    /// The kept snapshot ending at `index`.
+    pub fn get(&self, index: u64) -> Option<(&SnapshotMeta, &Bytes)> {
+        self.0.iter().find(|(m, _)| m.index == index).map(|(m, d)| (m, d))
+    }
+}
+
 /// A snapshot to install: replace the state machine with `data` and drop the
 /// whole log; it continues after `meta.index`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +182,15 @@ pub enum AppendResult {
     Accepted {
         /// Last index known to match.
         last: u64,
+    },
+    /// A chunk of a snapshot arrived (or was refused as out of order) and the
+    /// snapshot is not complete: the follower wants the data from `next` on.
+    SnapshotChunk {
+        /// Last index of the snapshot the answer is about.
+        index: u64,
+        /// Offset of the first byte the follower is missing; 0 asks for a
+        /// restart.
+        next: u64,
     },
     /// The follower does not have `prev_index` with `prev_term`.
     Rejected {
@@ -223,8 +264,15 @@ pub enum Message {
         /// Where the snapshot stands. The driver may replace it with a newer
         /// snapshot's, together with `data`.
         meta: SnapshotMeta,
-        /// The core leaves this empty and sets [`Send::attach_snapshot`].
+        /// Where in the snapshot's data `data` starts. The core sets the
+        /// offset it believes the follower wants; the driver resets it to 0 if
+        /// it had to replace the snapshot.
+        offset: u64,
+        /// The core leaves this empty and sets [`Send::attach_snapshot`]; the
+        /// driver puts one chunk of the snapshot's data in.
         data: Bytes,
+        /// `data` ends the snapshot. Set by the driver.
+        done: bool,
         /// Leader's round, echoed in the reply.
         seq: u64,
     },
@@ -236,6 +284,35 @@ pub enum Message {
 }
 
 impl Message {
+    /// For a [`Message::Snapshot`] with [`Send::attach_snapshot`]: puts the
+    /// snapshot the message is about in, at most `max_chunk` bytes of it from
+    /// the message's offset: the driver's latest (`latest`, its encoded
+    /// `snapshot` data) or one of the `older` ones it kept for a transfer. If
+    /// the driver has dropped the one meant, the latest goes from offset 0.
+    pub fn attach_snapshot_chunk(
+        &mut self,
+        latest: &SnapshotMeta,
+        snapshot: &Bytes,
+        older: &OlderSnapshots,
+        max_chunk: usize,
+    ) {
+        let Message::Snapshot { meta, offset, data, done, .. } = self else { return };
+        let (source, snapshot) = if meta.index == latest.index {
+            (latest, snapshot)
+        } else if let Some((m, d)) = older.get(meta.index) {
+            (m, d)
+        } else {
+            *offset = 0;
+            (latest, snapshot)
+        };
+        *meta = source.clone();
+        let start = (*offset as usize).min(snapshot.len());
+        let end = start.saturating_add(max_chunk.max(1)).min(snapshot.len());
+        *offset = start as u64;
+        *data = snapshot.slice(start..end);
+        *done = end == snapshot.len();
+    }
+
     /// Term carried by the message.
     pub fn term(&self) -> u64 {
         match self {
@@ -428,6 +505,11 @@ struct Progress {
     /// came from before it (re)joined, from a replica it may no longer have,
     /// and is ignored.
     since: u64,
+    /// Snapshot in transfer and the offset the follower asked for next. The
+    /// transfer finishes with this snapshot even if the leader snapshots
+    /// again meanwhile; otherwise a snapshot taken more often than a
+    /// transfer takes would never arrive.
+    snap: Option<(SnapshotMeta, u64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -467,6 +549,8 @@ pub struct RaftGroup {
     rng: u64,
     hs_dirty: bool,
     pending_snapshot: Option<Snapshot>,
+    /// The snapshot being received in chunks: what has arrived in order.
+    incoming: Option<(SnapshotMeta, Vec<u8>)>,
     pending_truncate: Option<u64>,
     pending_entries: Vec<Entry>,
     outbox: Vec<Send>,
@@ -537,6 +621,7 @@ impl RaftGroup {
             timeout: 0,
             hs_dirty: false,
             pending_snapshot: None,
+            incoming: None,
             pending_truncate: None,
             pending_entries: Vec::new(),
             outbox: Vec::new(),
@@ -781,6 +866,7 @@ impl RaftGroup {
     }
 
     fn campaign_with(&mut self, transfer: bool) {
+        self.incoming = None;
         self.term += 1;
         self.vote = Some(self.cfg.id);
         self.hs_dirty = true;
@@ -801,6 +887,7 @@ impl RaftGroup {
     }
 
     fn become_leader(&mut self) {
+        self.incoming = None;
         self.state = State::Leader { progress: BTreeMap::new() };
         // Followers are probably close behind: start at the end and back off.
         self.sync_progress(self.log.last_index() + 1);
@@ -831,6 +918,7 @@ impl RaftGroup {
                     active: true,
                     acked: 0,
                     since: self.seq + 1,
+                    snap: None,
                 });
             }
         }
@@ -1083,10 +1171,12 @@ impl RaftGroup {
         p.inflight_ticks = 0;
         let prev_index = p.next - 1;
         if prev_index < snapshot.index {
-            // The entries it needs are compacted: send the snapshot.
+            // The entries it needs are compacted: send the snapshot, going on
+            // with the one in transfer from where the follower said it stands.
+            let (meta, offset) = p.snap.clone().unwrap_or((snapshot, 0));
             self.outbox.push(Send {
                 to: f,
-                msg: Message::Snapshot { term, meta: snapshot, data: Bytes::new(), seq },
+                msg: Message::Snapshot { term, meta, offset, data: Bytes::new(), done: false, seq },
                 fill_from: None,
                 attach_snapshot: true,
             });
@@ -1156,6 +1246,21 @@ impl RaftGroup {
                     p.matched = last;
                 }
                 p.next = p.next.max(p.matched + 1);
+                if p.snap.as_ref().is_some_and(|s| last >= s.0.index) {
+                    p.snap = None;
+                }
+            }
+            AppendResult::SnapshotChunk { index, next } => {
+                // Only an answer about the snapshot we are sending counts. The
+                // driver sends the latest one instead if it no longer holds
+                // the one in transfer, and the follower starts over.
+                if p.snap.as_ref().is_some_and(|s| s.0.index == index) {
+                    p.snap = p.snap.take().map(|s| (s.0, next));
+                    p.inflight = false;
+                } else if index == self.log.snapshot_index() {
+                    p.snap = Some((self.snapshot_meta(), next));
+                    p.inflight = false;
+                }
             }
             AppendResult::Rejected { prev_index, last_index, conflict } => {
                 // A learner with less than it acknowledged lost its log: its
@@ -1308,9 +1413,9 @@ impl RaftGroup {
                 self.follow(term, from);
                 self.on_append(from, prev_index, prev_term, entries, commit, seq);
             }
-            Message::Snapshot { term, meta, data, seq } => {
+            Message::Snapshot { term, meta, offset, data, done, seq } => {
                 self.follow(term, from);
-                self.on_snapshot(from, meta, data, seq);
+                self.on_snapshot(from, meta, offset, data, done, seq);
             }
             Message::AppendReply { result, seq, .. } => self.on_append_reply(from, result, seq),
             Message::TimeoutNow { .. } => {
@@ -1459,18 +1564,45 @@ impl RaftGroup {
         self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: last_new }, seq });
     }
 
-    fn on_snapshot(&mut self, from: NodeId, meta: SnapshotMeta, data: Bytes, seq: u64) {
+    fn on_snapshot(&mut self, from: NodeId, meta: SnapshotMeta, offset: u64, data: Bytes, done: bool, seq: u64) {
         let term = self.term;
         let index = meta.index;
         if index <= self.commit {
             // Nothing new: we already have all of it.
+            self.incoming = None;
         } else if self.log.term_at(index) == Some(meta.term) {
             // Our log holds the snapshot's last entry, so it matches the
             // leader's up to there. Keep it (entries after it may be acked
             // copies of committed entries) and just commit.
             self.commit = index;
             self.hs_dirty = true;
+            self.incoming = None;
         } else {
+            // Chunks are taken strictly in order. A snapshot's bytes are the
+            // same whoever sends them (same index, term and membership), so
+            // a chunk from another leader or an earlier attempt continues
+            // the transfer; a gap or a repeat only makes us say where we are.
+            let same = matches!(&self.incoming, Some((m, _)) if *m == meta);
+            let have = match &self.incoming {
+                Some((_, buf)) if same => buf.len() as u64,
+                _ => 0,
+            };
+            if offset == 0 && !same {
+                // A transfer of another snapshot (or none) starts over.
+                self.incoming = Some((meta.clone(), Vec::new()));
+            } else if offset != have {
+                let result = AppendResult::SnapshotChunk { index, next: have };
+                self.send(from, Message::AppendReply { term, result, seq });
+                return;
+            }
+            let (_, buf) = self.incoming.as_mut().expect("a transfer is under way");
+            buf.extend_from_slice(&data);
+            if !done {
+                let result = AppendResult::SnapshotChunk { index, next: buf.len() as u64 };
+                self.send(from, Message::AppendReply { term, result, seq });
+                return;
+            }
+            let (meta, buf) = self.incoming.take().expect("a transfer is under way");
             self.log = TermRuns::with_snapshot(index, meta.term);
             self.base_membership = meta.membership.clone();
             self.configs.clear();
@@ -1481,7 +1613,7 @@ impl RaftGroup {
             self.persisted = index;
             self.ready_last = index;
             self.hs_dirty = true;
-            self.pending_snapshot = Some(Snapshot { meta, data });
+            self.pending_snapshot = Some(Snapshot { meta, data: Bytes::from(buf) });
         }
         // Either way the log now matches the leader's up to `index`.
         self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: index }, seq });
@@ -1508,6 +1640,24 @@ impl RaftGroup {
     }
 
     // ----- ready / advance ---------------------------------------------
+
+    /// Last indexes of the snapshots being sent to followers in chunks. A
+    /// driver keeps the data of a snapshot it replaces while its index is in
+    /// here ([`OlderSnapshots`]).
+    pub fn snapshots_in_transfer(&self) -> BTreeSet<u64> {
+        match &self.state {
+            State::Leader { progress } => {
+                progress.values().filter_map(|p| p.snap.as_ref().map(|s| s.0.index)).collect()
+            }
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// `true` while the chunks of a snapshot are being collected: a crash now
+    /// drops them (the leader then starts over).
+    pub fn receiving_snapshot(&self) -> bool {
+        self.incoming.is_some()
+    }
 
     /// `true` if [`RaftGroup::ready`] has something.
     pub fn has_ready(&self) -> bool {

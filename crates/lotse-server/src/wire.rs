@@ -10,15 +10,17 @@
 //! VoteReply   term:u64  flags:u8 (1 = granted, 2 = pre)
 //! Append      term prev_index prev_term commit seq:u64  n:u32  (len:u32 batch)*
 //! AppendReply term seq:u64  tag:u8 (0 = accepted: last:u64,
-//!             1 = rejected: prev_index last_index:u64 has_conflict:u8 term first:u64)
-//! Snapshot    term seq index snapshot_term:u64  len:u32 membership  len:u32 data
+//!             1 = rejected: prev_index last_index:u64 has_conflict:u8 term first:u64,
+//!             2 = snapshot chunk taken: index next:u64)
+//! Snapshot    term seq index snapshot_term:u64  len:u32 membership
+//!             offset:u64  done:u8  len:u32 data (one chunk)
 //! TimeoutNow  term:u64
 //! ```
 //!
 //! Integers are little-endian. Entries travel as their stored record batches
 //! (stamped with offset and term): the sender passes them on as read from
 //! its log, the receiver parses them in place, so record bytes are never
-//! re-encoded. A snapshot must fit in one frame for now.
+//! re-encoded. A snapshot travels in chunks, each of which fits a frame.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_raft::{AppendResult, Membership, Message, NodeId, SnapshotMeta};
@@ -87,6 +89,11 @@ pub fn encode(from: NodeId, messages: &[(GroupId, Message)]) -> Bytes {
                         b.put_u8(0);
                         b.put_u64_le(*last);
                     }
+                    AppendResult::SnapshotChunk { index, next } => {
+                        b.put_u8(2);
+                        b.put_u64_le(*index);
+                        b.put_u64_le(*next);
+                    }
                     AppendResult::Rejected { prev_index, last_index, conflict } => {
                         b.put_u8(1);
                         b.put_u64_le(*prev_index);
@@ -98,7 +105,7 @@ pub fn encode(from: NodeId, messages: &[(GroupId, Message)]) -> Bytes {
                     }
                 }
             }
-            Message::Snapshot { term, meta, data, seq } => {
+            Message::Snapshot { term, meta, offset, data, done, seq } => {
                 b.put_u8(5);
                 for v in [*term, *seq, meta.index, meta.term] {
                     b.put_u64_le(v);
@@ -106,6 +113,8 @@ pub fn encode(from: NodeId, messages: &[(GroupId, Message)]) -> Bytes {
                 let m = meta.membership.encode();
                 b.put_u32_le(m.len() as u32);
                 b.put_slice(&m);
+                b.put_u64_le(*offset);
+                b.put_u8(u8::from(*done));
                 b.put_u32_le(data.len() as u32);
                 b.put_slice(data);
             }
@@ -193,6 +202,7 @@ pub fn decode(frame: Bytes) -> Result<(NodeId, Vec<(GroupId, Message)>), DecodeE
                         let (t, f) = (r.u64()?, r.u64()?);
                         AppendResult::Rejected { prev_index, last_index, conflict: has.then_some((t, f)) }
                     }
+                    2 => AppendResult::SnapshotChunk { index: r.u64()?, next: r.u64()? },
                     _ => return Err(DecodeError::Malformed("unknown append result")),
                 };
                 Message::AppendReply { term, result, seq }
@@ -200,8 +210,17 @@ pub fn decode(frame: Bytes) -> Result<(NodeId, Vec<(GroupId, Message)>), DecodeE
             5 => {
                 let (term, seq, index, snapshot_term) = (r.u64()?, r.u64()?, r.u64()?, r.u64()?);
                 let membership = Membership::decode(&r.bytes()?).ok_or(DecodeError::Malformed("bad membership"))?;
+                let offset = r.u64()?;
+                let done = r.u8()? != 0;
                 let data = r.bytes()?;
-                Message::Snapshot { term, meta: SnapshotMeta { index, term: snapshot_term, membership }, data, seq }
+                Message::Snapshot {
+                    term,
+                    meta: SnapshotMeta { index, term: snapshot_term, membership },
+                    offset,
+                    data,
+                    done,
+                    seq,
+                }
             }
             6 => Message::TimeoutNow { term: r.u64()? },
             _ => return Err(DecodeError::Malformed("unknown message kind")),
@@ -266,7 +285,9 @@ mod tests {
                 Message::Snapshot {
                     term: 5,
                     meta: SnapshotMeta { index: 40, term: 4, membership },
+                    offset: 1 << 33,
                     data: Bytes::from_static(b"state"),
+                    done: true,
                     seq: 3,
                 },
             ),
