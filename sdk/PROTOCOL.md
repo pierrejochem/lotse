@@ -215,6 +215,49 @@ The first record of a fresh partition is not at offset 0: the log begins with en
 
 `OFFSET_OUT_OF_RANGE` is not retried. The partition response's `log_start_offset` says where the log starts now; a reader that was overtaken by retention continues from there.
 
+## Client behaviour: queues
+
+These rules come from `crates/lotse-client/src/consumer.rs` and the push handling in `lib.rs`. A queue is a resource of kind 1 with one partition, 0, so routes, leader hints and `Produce` work as for a stream; messages are produced with a normal `Produce` to partition 0.
+
+### Subscribing
+
+1. Look up the route of `(queue, 0)` and open (or reuse) the connection to its leader.
+2. Send `Subscribe(queue_id, consumer_tag = "", credit_msgs, credit_bytes = 0xFFFFFFFF, exclusive = false)`. `exclusive` and `single_active` queues are refused with `INVALID_REQUEST`; do not offer them.
+3. On `NONE`, register the `subscription_id` **on that connection**. Subscription ids are per node, and `Credit`, `Unsubscribe` and a requeueing `Nack` are honoured only on the connection that owns the subscription (`UNKNOWN_SUBSCRIPTION` otherwise). Pushes can arrive before the answer to `Subscribe` has been handled: the connection keeps them (see Connections) and hands them over on registration.
+4. A retriable error (`NOT_LEADER`) follows the leader hint and retries. `UNKNOWN_RESOURCE` drops the route and fails the call. A lost answer drops the connection (a subscription the broker may have made ends with it), drops the route and retries.
+
+### Receiving
+
+A push holds one batch exactly as stored and `deliveries`, the offsets in it that are meant for this subscription, each with its delivery count. **Only records whose offset is in `deliveries` are the consumer's**; the rest of the batch belongs to others. Read the first batch of the push only.
+
+The consumer hands out what it holds first and reads the next push (or the end of the subscription) only when its buffer is empty. A push with a non-zero `error` ends the subscription:
+
+| Error | Then |
+| --- | --- |
+| `NOT_LEADER` | follow the leader hint (as for a request), subscribe again |
+| `UNKNOWN_RESOURCE` | drop the route, subscribe again |
+| `ACK_TIMED_OUT`, any other | subscribe again; the broker took the unacknowledged messages back |
+
+A connection that breaks ends the subscription in the same way. The next read subscribes again, on the next call and not before. Messages received before the end but not yet handed out are still handed out; the broker meanwhile gives them to others, so they can arrive twice, and a delivery count that rose by one for each time says so. Counts are a lower bound (ADR 0031): after a failover they can start over.
+
+### Credit
+
+The consumer keeps two counters: messages handed out and bytes received (the length of each pushed batch, added when it arrives, saturating at `u32::MAX`). After handing out a message, if messages used is at least `ceil(credit / 2)`, it sends `Credit(subscription_id, add_msgs = used, add_bytes = bytes)` on the subscription's connection and sets both counters to 0. `Credit` is never answered; a lost one shows as a broken connection on the next read.
+
+### Settling
+
+- **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null. An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
+- **Nack without requeue** discards the message (or dead-letters it, if the queue's limits say so) and is sent like an ack.
+- **Nack with requeue** is sent **on the subscription's own connection**: the broker takes back only what that connection holds. `delay_ms` is 0 (anything else is refused). If the subscription has ended or the connection fails, the message has gone back already, and the call does nothing. The Java client also does nothing for a message of an earlier subscription, rather than ask the new connection for something it does not hold.
+
+### Closing
+
+Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out, one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
+
+### Dead letters
+
+A queue with limits (`max.deliveries`, `message.ttl.ms`) and a `dead.letter.queue` moves a message there as a one-record batch with the original key, value, headers and timestamp, and these headers (UTF-8 text, decimal numbers; they describe the latest move and replace those a message arrived with): `x-lotse-dead-letter-reason` (`max-deliveries` or `expired`), `-queue` (source queue name), `-queue-id`, `-offset`, `-deliveries` and `-floor` (the source's ack floor when it was sent). A client reads them like any header; the Java client offers them typed as `Delivery.deadLetter()`.
+
 ## Conformance vectors
 
 `sdk/conformance/*` is written by `cargo run -p lotse-proto --features samples --example vectors` (`make sdk-vectors`). One vector per line, `#` for comments.

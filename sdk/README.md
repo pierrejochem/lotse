@@ -10,7 +10,7 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 
 ## Status
 
-Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams: metadata and leader routing, idempotent produce, read_committed fetch. Queues, transactions, consumer groups, exchanges, the rest of admin and the Kotlin layer follow.
+Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch) and queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers). Transactions, consumer groups, exchanges, the rest of admin and the Kotlin layer follow.
 
 ### Producing and reading a stream
 
@@ -41,7 +41,44 @@ try (var client = new LotseClient(config)) {
 - A message without a timestamp is stamped with the time of the call. Retention judges a stream's data by producers' timestamps, so a message stamped 0 would be deleted at the next pass.
 - `ClientException.Unknown` is the one error that needs a decision: after retrying until `retryFor` the client cannot tell whether the batch was written. It has dropped its producer id, so later produces are not blocked. Read the partition, or produce again and accept a possible duplicate. Without `idempotent(true)` an unknown outcome is never retried.
 - `ClientException.OffsetOutOfRange` carries `logStart()`: retention deleted the offset; read on from there.
-- `createStream` is the one admin call so far; the rest follow with the admin phase.
+- `createStream` and `createQueue` are the only admin calls so far; the rest follow with the admin phase.
+
+### Consuming a queue
+
+```java
+try (var client = new LotseClient(config)) {
+    client.createQueue("jobs", QueueOptions.builder()
+            .replication(3)
+            .ackTimeout(Duration.ofSeconds(30))
+            .maxDeliveries(5)
+            .deadLetterQueue("jobs-dead")      // must exist; without one, retired messages are dropped
+            .build());
+    client.produce("jobs", 0, OutMessage.value("resize image 42"));   // queues are written like partition 0
+
+    try (QueueConsumer consumer = client.subscribe("jobs", SubscribeOptions.withCredit(16))) {
+        while (true) {
+            Delivery job = consumer.poll(Duration.ofSeconds(1));      // null if nothing came
+            if (job == null) {
+                continue;
+            }
+            try {
+                work(job.value().toUtf8());
+                consumer.ack(job);
+            } catch (RuntimeException e) {
+                consumer.nack(job, true);      // true: deliver again, to any consumer
+            }
+        }
+    }
+}
+```
+
+- Credit is how many messages the leader may have pushed to this consumer and not yet counted as used. It is also the most that wait unprocessed in the client. The consumer adds credit by itself once half of it is used up.
+- A message can arrive more than once: after a `nack` with requeue, after the ack timeout, or after a failover. `deliveryCount()` says how often it has been delivered, and after a failover it can start over. Process messages so that a second run does no harm.
+- `ack` and `nack` name an offset, not a delivery, so they are safe to repeat and are retried when an answer is lost. `ack(Collection)` sends neighbouring offsets as one range.
+- `nack(job, true)` only works for a message of the current subscription, on its connection. After the subscription ended the broker has already taken the message back, and the call does nothing.
+- `poll` and `next` are for one thread; `ack`, `nack` and `close` may be called from any thread. `close` hands back the messages the consumer received but did not hand out. Messages it handed out stay with it until acknowledged or until the client's connection closes.
+- A dead-lettered message carries where it came from: `delivery.deadLetter()` has the reason (`max-deliveries` or `expired`), the source queue, its id, the offset there, the delivery count and the ack floor.
+- Exclusive and single-active subscriptions, delayed requeue and acknowledging within a transaction are refused by the broker so far and are not offered.
 
 
 ### Connecting
