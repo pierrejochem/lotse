@@ -40,6 +40,7 @@ LOTSE_SIM_SEED=1234 cargo test -p lotse-sim                # reproduce one faili
 
 cd console/web && npm ci && npm run build && cd ../..       # build the web app (needed before the console binary)
 cargo run -p lotse-console -- --config console/lotse-console.example.toml
+make dev                                                  # local dev environment: web app, three nodes, console on 127.0.0.1:8080 (`make` lists all targets)
 cargo run -p lotse-node -- check --config cluster.toml       # the node binary: check, certs, run --node <id>
 cargo deb -p lotse-node                                    # the Debian package (cargo install cargo-deb)
 docker build -f packaging/Dockerfile -t lotse .             # the image
