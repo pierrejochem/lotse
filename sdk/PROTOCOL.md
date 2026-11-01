@@ -113,6 +113,51 @@ length varint | attributes i8 (0) | ts_delta varint | offset_delta varint
 
 **Control batches.** One record. Key: `version u16 (0) | type u16`. Types 0 abort and 1 commit are transaction markers whose value is the coordinator epoch as a `u32`. Types 2 and 3 are Raft's own entries, 4 to 8 the coordinator and metadata groups' records. Consumers skip all of them. A `read_committed` consumer uses the fetch response's aborted-transaction list and the markers to hide aborted data.
 
+## Connections
+
+One TCP connection per broker address, kept open. Every connection is TLS 1.3 with the cluster's CA (ADR 0037), or plain TCP on loopback when a node was set up for development; a client never falls back from one to the other. The client checks the node's certificate against the host it dialled, including IP entries: `lotse certs` writes the node's addresses from the cluster file as IP entries, so dial the same address the file lists. A client certificate, if the node asks for one, names the principal by its common name. There is no hello, no ALPN and no version byte: the first bytes after the handshake are the first frame.
+
+- Set `TCP_NODELAY`. Frames are written whole; writes from several threads must not interleave.
+- One reader per connection decodes frames and completes requests by correlation id. A response nobody waits for (its request timed out) is dropped without ending the connection.
+- A frame whose length exceeds 16 MiB, one that does not decode, or end of stream ends the connection: fail every pending request and every subscription. A refused request (`ERROR` flag) does not end it.
+- A request that timed out has an unknown outcome. Retry only what is idempotent.
+- `ApiVersions` is answered before authentication. The Rust client never sends it; the broker does not require it.
+- A request on a connection that is not authenticated, or whose session ended, gets an `ERROR` response with `UNAUTHORIZED` and no reason. The connection stays open.
+- Pushes of a subscription can arrive before the response to `Subscribe` has been handled, so the client keeps pushes for subscriptions nobody has registered yet. The Rust client keeps up to 64 such subscriptions and drops the lowest id for another.
+
+## Authentication
+
+Two SASL mechanisms, chosen by name in `SaslHandshake`. A node offers the ones its configuration enables; asking for another gives `UNSUPPORTED_SASL_MECHANISM` (28) with the node's list in the same response.
+
+```text
+SaslHandshake(mechanism)  ->  error u16 | mechanisms array<string>        (no tagged fields)
+SaslAuthenticate(bytes)   ->  error u16 | error_msg optional string | auth_bytes bytes | session_lifetime_ms u64
+```
+
+An unsuccessful `SaslAuthenticate` carries `AUTHENTICATION_FAILED` (27) and a message, and the node **closes the connection** after sending it. It does not say whether the user or the password was wrong.
+
+**OAUTHBEARER** is one round: `n,,\x01auth=Bearer <token>\x01\x01`. Ask for the token on every authentication, including renewals.
+
+**SCRAM-SHA-512** (RFC 5802, RFC 7677) is two rounds, with these particulars that differ from what a library might assume:
+
+| Step | Detail |
+| --- | --- |
+| client first | `n,,n=<user>,r=<nonce>`; in the user name `=` becomes `=3D` and `,` becomes `=2C`. The nonce is 24 random bytes in hex |
+| server first | `r=<nonce>,s=<base64 salt>,i=<iterations>`. The nonce must **strictly** extend the client's. Refuse iterations below 4096 or above 1,048,576 |
+| password | the raw UTF-8 bytes, **no SASLprep**, as PBKDF2-HMAC-SHA512 input with a 64-byte output |
+| client final | `c=biws,r=<nonce>,p=<base64 proof>`; `biws` is base64 of `n,,` (no channel binding) |
+| AuthMessage | `<client first without n,,>,<server first>,<client final without ,p=...>` |
+| proof | `ClientKey xor HMAC(StoredKey, AuthMessage)`, where `ClientKey = HMAC(SaltedPassword, "Client Key")` and `StoredKey = SHA-512(ClientKey)` |
+| server final | `v=<base64 HMAC(ServerKey, AuthMessage)>`; the client **must** verify it, it is the server's proof that it knows the credential |
+
+An empty password is valid. HMAC pads a short key with zeros, so an implementation whose library refuses an empty key can use 128 zero bytes.
+
+`conformance/scram.txt` holds whole exchanges with fixed nonces, written by the broker's own code, and the credential computed for each.
+
+**Setting a password** (`AlterUser`, admin) sends a credential, never the password: a 16-byte random salt, 4096 iterations, `StoredKey` and `ServerKey = HMAC(SaltedPassword, "Server Key")` (each 64 bytes). A removal sends no credential.
+
+**Sessions.** `session_lifetime_ms` of the **last** response is how long the session lasts, counted by the node from when it completes the login (its last answer); `0` means as long as the connection (a certificate login has no SASL session at all). The node caps it at its `max_session_s` and, for OAUTHBEARER, at the token's expiry. Authenticate again on the same connection (`SaslHandshake`, then `SaslAuthenticate`) before it ends: the Rust client does so at four fifths of the lifetime, counted from before its first request (so it never believes in a session longer than the node does), and the node insists on the same principal. Requests in flight meanwhile are served. After the end the node answers `UNAUTHORIZED` to everything but SASL and `ApiVersions`; the Rust client does not try to renew then but opens a new connection and logs in again, and so does the Java one.
+
 ## Conformance vectors
 
 `sdk/conformance/*` is written by `cargo run -p lotse-proto --features samples --example vectors` (`make sdk-vectors`). One vector per line, `#` for comments.
@@ -127,5 +172,6 @@ length varint | attributes i8 (0) | ts_delta varint | offset_delta varint
 | `batch-ops.txt` | `op arguments input output`: an in-place edit and its result |
 | `fetch-records.hex` | several batches in a row |
 | `varints.txt`, `crc32c.txt`, `error-codes.txt` | fixed cases, including CRC32C of `123456789` = `E3069283` |
+| `scram.txt` | `label user_hex password salt_hex iterations client_nonce server_nonce` and the five messages, `stored_key server_key`; the password is `=` and its hex |
 
 A decoder passes when it reads every vector and writes it again to the same bytes, refuses each vector cut at every length and with one byte added, and agrees with the field files.
