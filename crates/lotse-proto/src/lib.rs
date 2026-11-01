@@ -26,6 +26,8 @@
 
 pub mod codec;
 mod messages;
+#[cfg(any(test, feature = "samples"))]
+pub mod samples;
 
 pub use messages::*;
 

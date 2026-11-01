@@ -12,5 +12,16 @@ lotse-record.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+crc32c.workspace = true
+
+[features]
+# Sample messages for the conformance vectors (sdk/conformance); tests have them anyway.
+samples = []
+
+[[example]]
+name = "vectors"
+required-features = ["samples"]
+
 [lints]
 workspace = true

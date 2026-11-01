@@ -858,6 +858,7 @@ name = "lotse-proto"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "crc32c",
  "lotse-record",
  "thiserror 2.0.21",
 ]
