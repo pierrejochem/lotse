@@ -38,6 +38,7 @@ use bytes::Bytes;
 use lotse_client::OutMessage;
 use lotse_client::{Client, ClientConfig, ClientError};
 use lotse_log::LogConfig;
+use lotse_queue::Limits;
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_route::{Binding, Exchange, ExchangeKind};
@@ -118,17 +119,20 @@ struct World {
     down_until: BTreeMap<NodeId, lotse_rt::Instant>,
 }
 
-impl World {
-    async fn new(rt: SimRuntime) -> World {
-        let n = if rt.chance(1, 2) { 3 } else { 5 };
-        let ids: Vec<NodeId> = (1..=n).collect();
-        let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
-        let client_addrs: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:9000"))).collect();
-        let pre_vote = rt.chance(1, 2);
-        let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
+/// What a run hosts: queues, exchanges and the groups behind them.
+struct Scenario {
+    queues: Vec<QueueConfig>,
+    exchanges: Vec<Exchange>,
+    /// Group 2 coordinates producers.
+    groups: Vec<u64>,
+}
+
+impl Scenario {
+    /// Two queues without limits and two exchanges routing to them.
+    fn classic() -> Scenario {
         let queues = vec![
-            QueueConfig { name: "jobs".into(), resource_id: 9, group: 1, ack_timeout: ACK_TIMEOUT },
-            QueueConfig { name: "audit".into(), resource_id: 10, group: 3, ack_timeout: ACK_TIMEOUT },
+            QueueConfig { ack_timeout: ACK_TIMEOUT, ..QueueConfig::new("jobs", 9, 1) },
+            QueueConfig { ack_timeout: ACK_TIMEOUT, ..QueueConfig::new("audit", 10, 3) },
         ];
         let exchanges = vec![
             Exchange {
@@ -144,6 +148,42 @@ impl World {
                 bindings: vec![Binding::key(9, "jobs")],
             },
         ];
+        // Groups 1 and 3 are queues, group 2 coordinates producers.
+        Scenario { queues, exchanges, groups: vec![1, 2, 3] }
+    }
+
+    /// Queues with limits (ADR 0055): `poison` lets a message be delivered
+    /// three times and then dead-letters it into `graveyard`; `drop` lets it
+    /// be delivered twice and then drops it; `short` dead-letters what waits
+    /// longer than `TTL` into `graveyard` too.
+    fn limits() -> Scenario {
+        let queue = |name: &str, id, group, limits: Limits, dead_letter| QueueConfig {
+            ack_timeout: ACK_TIMEOUT,
+            limits,
+            dead_letter,
+            ..QueueConfig::new(name, id, group)
+        };
+        let max = |n| Limits { max_deliveries: n, ..Limits::default() };
+        let ttl = Limits { message_ttl_ms: TTL.as_millis() as u64, ..Limits::default() };
+        let queues = vec![
+            queue("poison", POISON, 11, max(MAX_DELIVERIES), Some(GRAVEYARD)),
+            queue("drop", DROP, 12, max(DROP_DELIVERIES), None),
+            queue("short", SHORT, 13, ttl, Some(GRAVEYARD)),
+            queue("graveyard", GRAVEYARD, 14, Limits::default(), None),
+        ];
+        Scenario { queues, exchanges: Vec::new(), groups: vec![2, 11, 12, 13, 14] }
+    }
+}
+
+impl World {
+    async fn new(rt: SimRuntime, scenario: Scenario) -> World {
+        let n = if rt.chance(1, 2) { 3 } else { 5 };
+        let ids: Vec<NodeId> = (1..=n).collect();
+        let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
+        let client_addrs: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:9000"))).collect();
+        let pre_vote = rt.chance(1, 2);
+        let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
+        let Scenario { queues, exchanges, groups } = scenario;
         let cfgs = ids
             .iter()
             .map(|&id| {
@@ -153,8 +193,7 @@ impl World {
                         id,
                         listen: peers[&id].clone(),
                         peers: peers.clone(),
-                        // Groups 1 and 3 are queues, group 2 coordinates producers.
-                        groups: vec![1, 2, 3],
+                        groups: groups.clone(),
                         tick: TICK,
                         pre_vote,
                         log,
@@ -409,21 +448,13 @@ async fn consumer(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBoo
     }
 }
 
-async fn run(rt: SimRuntime) {
-    let mut w = World::new(rt.clone()).await;
-    let out = Arc::new(Mutex::new(Outcomes::default()));
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut tasks = vec![
-        rt.spawn(producer(rt.node("p1"), out.clone(), stop.clone())),
-        rt.spawn(transactional(rt.node("t1"), out.clone(), stop.clone())),
-    ];
-    for c in 1..=2 {
-        tasks.push(rt.spawn(consumer(rt.node(&format!("k{c}")), out.clone(), stop.clone())));
-    }
+/// Partitions pairs of hosts and crashes nodes for `lasts`, restarting the
+/// ones that were down.
+async fn faults(rt: &SimRuntime, w: &mut World, clients: &[&str], lasts: Duration) {
     let n = w.cfgs.len() as u64;
     let mut hosts: Vec<String> = (1..=n).map(|i| format!("n{i}")).collect();
-    hosts.extend(["p1", "t1", "k1", "k2"].map(String::from));
-    let end = rt.now() + Duration::from_secs(6);
+    hosts.extend(clients.iter().map(|c| c.to_string()));
+    let end = rt.now() + lasts;
     let mut partition_until = None;
     while rt.now() < end {
         rt.sleep(TICK * 2).await;
@@ -449,6 +480,20 @@ async fn run(rt: SimRuntime) {
             w.crash(1 + rt.below(n), mid_write).await;
         }
     }
+}
+
+async fn run(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::classic()).await;
+    let out = Arc::new(Mutex::new(Outcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut tasks = vec![
+        rt.spawn(producer(rt.node("p1"), out.clone(), stop.clone())),
+        rt.spawn(transactional(rt.node("t1"), out.clone(), stop.clone())),
+    ];
+    for c in 1..=2 {
+        tasks.push(rt.spawn(consumer(rt.node(&format!("k{c}")), out.clone(), stop.clone())));
+    }
+    faults(&rt, &mut w, &["p1", "t1", "k1", "k2"], Duration::from_secs(6)).await;
 
     stop.store(true, Ordering::Relaxed);
     for t in tasks {
@@ -536,6 +581,381 @@ async fn run(rt: SimRuntime) {
         handle.stop();
         let _ = node.join().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Limits: max deliveries, message TTL and dead-letter queues (ADR 0055).
+//
+// Producers write "good" and "bad" messages to `poison`, `drop` and `short`.
+// A consumer acknowledges the good ones at once and never acknowledges a bad
+// one: it requeues it or sits on it. One consumer of `short` comes and goes,
+// so that messages wait and expire. A consumer of `graveyard` reads what the
+// other queues dead-lettered. Nodes crash and hosts are partitioned
+// meanwhile; at the end the network heals and every queue is drained.
+//
+// Checked:
+// - a dead letter exists once: one message in `graveyard` per source queue
+//   and offset, however often the move was retried across failovers;
+// - it carries what was produced there (value), says where it came from, and
+//   why: `max-deliveries` only from `poison` with a delivery count of at
+//   least the limit, `expired` only from `short` and only after the TTL had
+//   passed since the produce began;
+// - nothing is lost where a dead-letter queue exists: every message that was
+//   produced is acknowledged, in the queue at the end, or in `graveyard`;
+// - a message acknowledged at its first delivery is never dead-lettered for
+//   its deliveries (for its age it may be, if a failover came between its
+//   delivery and the ack: the new leader does not know it is out), and a
+//   dead-lettered message is not in its queue at the end;
+// - `short` hands out nothing much older than its TTL: at most
+//   `TTL_SLACK_MS` over, which covers the leader's scan interval and the
+//   network.
+//
+// - no message goes out more often than its queue allows (the delivery count
+//   a consumer sees, which is never above the real number of deliveries).
+//
+// `drop` has no dead-letter queue: what exhausts its deliveries is dropped,
+// so it may lose messages (also good ones, whose deliveries end when a
+// connection does); nothing else loses any.
+
+const POISON: u64 = 30;
+const DROP: u64 = 31;
+const SHORT: u64 = 32;
+const GRAVEYARD: u64 = 33;
+const MAX_DELIVERIES: u32 = 3;
+const DROP_DELIVERIES: u32 = 2;
+const TTL: Duration = Duration::from_millis(300);
+const TTL_SLACK_MS: i64 = 250;
+const LIMITED: [&str; 3] = ["poison", "drop", "short"];
+
+/// A message in the graveyard.
+#[derive(Debug, Clone)]
+struct Dead {
+    /// Its offset in the graveyard.
+    at: u64,
+    reason: String,
+    queue: String,
+    deliveries: u16,
+    value: String,
+    /// The graveyard leader's clock when it appended the copy, in ms.
+    appended_ms: i64,
+}
+
+#[derive(Default)]
+struct LimitOutcomes {
+    /// Where each acknowledged produce put its message: value, and the clock
+    /// in ms when the produce began.
+    produced: BTreeMap<At, (String, i64)>,
+    settled: BTreeSet<At>,
+    maybe_settled: BTreeSet<At>,
+    /// Acknowledged when it was delivered for the first time.
+    acked_first: BTreeSet<At>,
+    /// Graveyard messages by origin `(queue, offset)`.
+    dead: BTreeMap<At, Vec<Dead>>,
+    /// The greatest age in ms at which `short` handed a message out.
+    oldest_short_ms: i64,
+}
+
+fn header(m: &lotse_client::Message, name: &[u8]) -> Option<String> {
+    let h = m.record.headers.iter().find(|h| h.key[..] == *name)?;
+    Some(String::from_utf8(h.value.clone()?.to_vec()).unwrap())
+}
+
+fn now_ms(rt: &SimRuntime) -> i64 {
+    rt.unix_time().as_millis() as i64
+}
+
+async fn limits_producer(rt: SimRuntime, out: Arc<Mutex<LimitOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    let mut n = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        n += 1;
+        let queue = LIMITED[rt.below(3) as usize];
+        let value = format!("{}-{n}", if rt.chance(1, 3) { "bad" } else { "good" });
+        let began = now_ms(&rt);
+        match client.produce(queue, 0, message(&value)).await {
+            Ok(offset) => {
+                let before = out.lock().unwrap().produced.insert((queue.into(), offset), (value, began));
+                assert!(before.is_none(), "{queue} offset {offset} acknowledged twice");
+            }
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
+            Err(e) => panic!("unexpected produce error: {e}"),
+        }
+        rt.sleep(TICK * (1 + rt.below(4) as u32)).await;
+    }
+}
+
+/// Handles one message of a limited queue the way the scenario says: good
+/// ones are acknowledged, bad ones never.
+async fn handle(
+    rt: &SimRuntime,
+    out: &Mutex<LimitOutcomes>,
+    consumer: &mut lotse_client::Consumer<'_, SimRuntime>,
+    queue: &str,
+    m: &lotse_client::Message,
+) {
+    let at = (queue.to_string(), m.offset());
+    let value = value_of(m);
+    // Counts only ever fall short of the real number of deliveries, so one
+    // above the limit means a message went out once too often.
+    let limit = match queue {
+        "poison" => MAX_DELIVERIES as u16,
+        "drop" => DROP_DELIVERIES as u16,
+        _ => u16::MAX,
+    };
+    assert!(
+        m.delivery_count <= limit,
+        "{value} at {at:?} was delivered a {}. time; the limit is {limit}",
+        m.delivery_count
+    );
+    if queue == "short" {
+        let age = now_ms(rt) - m.record.timestamp;
+        let mut o = out.lock().unwrap();
+        o.oldest_short_ms = o.oldest_short_ms.max(age);
+        assert!(
+            age <= TTL.as_millis() as i64 + TTL_SLACK_MS,
+            "short handed out {value} at {at:?} {age} ms after it was appended; the TTL is {} ms",
+            TTL.as_millis()
+        );
+    }
+    if value.starts_with("good") {
+        let res = consumer.ack(m).await;
+        let mut o = out.lock().unwrap();
+        match res {
+            Ok(()) => {
+                if m.delivery_count == 1 {
+                    o.acked_first.insert(at.clone());
+                }
+                o.settled.insert(at);
+            }
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {
+                o.maybe_settled.insert(at);
+            }
+            Err(e) => panic!("unexpected settle error: {e}"),
+        }
+    } else if rt.below(3) != 0 {
+        let _ = consumer.nack(m, true).await;
+    }
+    // Otherwise it is sat on until the subscription ends.
+}
+
+async fn limits_consumer(
+    rt: SimRuntime,
+    out: Arc<Mutex<LimitOutcomes>>,
+    stop: Arc<AtomicBool>,
+    queues: &'static [&'static str],
+) {
+    let client = Client::new(rt.clone(), client_config());
+    while !stop.load(Ordering::Relaxed) {
+        let queue = queues[rt.below(queues.len() as u64) as usize];
+        if queue == "short" {
+            // Away for a while: what is produced meanwhile waits, and expires.
+            rt.sleep(TICK * (10 + rt.below(80) as u32)).await;
+        }
+        // `short` is read one message per subscription, taken as soon as it
+        // arrives: a message waiting in the client's buffer would age there
+        // and make its age at the consumer say nothing about the leader.
+        let (credit, most) = if queue == "short" { (1, 1) } else { (1 + rt.below(4) as u32, 1 + rt.below(20)) };
+        let mut consumer = match client.subscribe(queue, credit).await {
+            Ok(c) => c,
+            Err(ClientError::GaveUp(..)) => continue,
+            Err(e) => panic!("unexpected subscribe error: {e}"),
+        };
+        for _ in 0..most {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let m = match consumer.next(TICK * 15).await {
+                Ok(Some(m)) => m,
+                Ok(None) => continue,
+                Err(ClientError::GaveUp(..)) => continue,
+                Err(e) => panic!("unexpected error receiving: {e}"),
+            };
+            handle(&rt, &out, &mut consumer, queue, &m).await;
+        }
+        if queue == "short" || rt.chance(1, 2) {
+            consumer.close().await;
+        }
+    }
+}
+
+/// Notes a graveyard message once, however often it is delivered.
+fn note_dead(out: &Mutex<LimitOutcomes>, m: &lotse_client::Message) {
+    let queue = header(m, lotse_record::dead_letter::QUEUE).expect("a dead letter names its queue");
+    let offset: u64 = header(m, lotse_record::dead_letter::OFFSET).expect("and its offset").parse().unwrap();
+    let dead = Dead {
+        at: m.offset(),
+        reason: header(m, lotse_record::dead_letter::REASON).expect("and a reason"),
+        queue: queue.clone(),
+        deliveries: header(m, lotse_record::dead_letter::DELIVERIES).expect("and its deliveries").parse().unwrap(),
+        value: value_of(m),
+        appended_ms: m.record.timestamp,
+    };
+    let mut o = out.lock().unwrap();
+    let copies = o.dead.entry((queue, offset)).or_default();
+    if !copies.iter().any(|d| d.at == dead.at) {
+        copies.push(dead);
+    }
+}
+
+async fn graveyard_consumer(rt: SimRuntime, out: Arc<Mutex<LimitOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    while !stop.load(Ordering::Relaxed) {
+        let mut consumer = match client.subscribe("graveyard", 3).await {
+            Ok(c) => c,
+            Err(ClientError::GaveUp(..)) => continue,
+            Err(e) => panic!("unexpected subscribe error: {e}"),
+        };
+        for _ in 0..1 + rt.below(30) {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match consumer.next(TICK * 15).await {
+                Ok(Some(m)) => {
+                    note_dead(&out, &m);
+                    let _ = consumer.ack(&m).await;
+                }
+                Ok(None) | Err(ClientError::GaveUp(..)) => {}
+                Err(e) => panic!("unexpected error receiving: {e}"),
+            }
+        }
+        consumer.close().await;
+    }
+}
+
+/// Counted over the seeds of a run, to see that the scenario does what it is
+/// for.
+static DEAD_LETTERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static EXPIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+async fn run_limits(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::limits()).await;
+    let out = Arc::new(Mutex::new(LimitOutcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tasks = vec![
+        rt.spawn(limits_producer(rt.node("p1"), out.clone(), stop.clone())),
+        rt.spawn(limits_consumer(rt.node("k1"), out.clone(), stop.clone(), &["poison", "drop", "poison"])),
+        rt.spawn(limits_consumer(rt.node("k2"), out.clone(), stop.clone(), &["short"])),
+        rt.spawn(graveyard_consumer(rt.node("g1"), out.clone(), stop.clone())),
+    ];
+    faults(&rt, &mut w, &["p1", "k1", "k2", "g1"], Duration::from_secs(6)).await;
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        t.await;
+    }
+    rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
+
+    // Drain the limited queues, then the graveyard: moves that were under
+    // way finish once the cluster is whole.
+    let drainer =
+        Client::new(rt.node("drainer"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
+    let mut drained: BTreeMap<At, String> = BTreeMap::new();
+    for queue in LIMITED {
+        let mut consumer = drainer.subscribe(queue, 50).await.expect("the healed cluster takes a subscription");
+        let mut quiet_since = rt.now();
+        while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
+            let Some(m) = consumer.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+            quiet_since = rt.now();
+            drained.insert((queue.to_string(), m.offset()), value_of(&m));
+            consumer.ack(&m).await.expect("the healed cluster takes acks");
+        }
+    }
+    let mut consumer = drainer.subscribe("graveyard", 50).await.expect("the healed cluster takes a subscription");
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < ACK_TIMEOUT * 6 {
+        let Some(m) = consumer.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+        quiet_since = rt.now();
+        note_dead(&out, &m);
+        consumer.ack(&m).await.expect("the healed cluster takes acks");
+    }
+    drop(consumer);
+
+    let out = std::mem::take(&mut *out.lock().unwrap());
+    let accounted = |o: &At| {
+        out.settled.contains(o) || out.maybe_settled.contains(o) || drained.contains_key(o) || out.dead.contains_key(o)
+    };
+    let mut expired = 0;
+    for (origin, copies) in &out.dead {
+        assert_eq!(copies.len(), 1, "{origin:?} was dead-lettered {} times: {copies:?}", copies.len());
+        let d = &copies[0];
+        assert_eq!(d.queue, origin.0);
+        if let Some((value, began)) = out.produced.get(origin) {
+            assert_eq!(&d.value, value, "{origin:?} was dead-lettered as {}, but {value} was produced there", d.value);
+            if d.reason == "expired" {
+                assert!(
+                    d.appended_ms >= began + TTL.as_millis() as i64,
+                    "{origin:?} was dead-lettered as expired {} ms after its produce began; the TTL is {} ms",
+                    d.appended_ms - began,
+                    TTL.as_millis()
+                );
+            }
+        }
+        match (d.reason.as_str(), origin.0.as_str()) {
+            ("max-deliveries", "poison") => {
+                assert!(
+                    d.deliveries >= MAX_DELIVERIES as u16,
+                    "{origin:?} was dead-lettered after {} deliveries; the limit is {MAX_DELIVERIES}",
+                    d.deliveries
+                );
+            }
+            ("expired", "short") => expired += 1,
+            other => panic!("{origin:?} was dead-lettered for {other:?}"),
+        }
+        // A new leader does not know what its predecessor had delivered, so
+        // it may expire a message a consumer holds and acknowledges late;
+        // an exhausted count is persisted, so it cannot lead to this.
+        assert!(
+            d.reason != "max-deliveries" || !out.acked_first.contains(origin),
+            "{origin:?} was acknowledged at its first delivery, then dead-lettered"
+        );
+        assert!(!drained.contains_key(origin), "{origin:?} was dead-lettered and is still in its queue");
+    }
+    let mut dropped = 0;
+    for (o, (v, _)) in &out.produced {
+        if accounted(o) {
+            continue;
+        }
+        // Only `drop` has nowhere to put what it retires. Good messages go
+        // that way too when their deliveries end without an ack, as they do
+        // when connections break.
+        assert!(o.0 == "drop", "message {o:?} ({v}) was produced and lost");
+        dropped += 1;
+    }
+    for (o, v) in &drained {
+        if let Some((p, _)) = out.produced.get(o) {
+            assert_eq!(v, p, "message {o:?} holds {v}, but {p} was produced there");
+        }
+    }
+    DEAD_LETTERED.fetch_add(out.dead.len(), Ordering::Relaxed);
+    EXPIRED.fetch_add(expired, Ordering::Relaxed);
+    DROPPED.fetch_add(dropped, Ordering::Relaxed);
+    if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        eprintln!(
+            "stats: produced {} settled {} drained {} dead {} (expired {expired}) dropped {dropped} oldest short {} ms",
+            out.produced.len(),
+            out.settled.len(),
+            drained.len(),
+            out.dead.len(),
+            out.oldest_short_ms
+        );
+    }
+    drop(drainer);
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn queues_lose_nothing_with_dead_letters_and_message_ttl() {
+    check_seeds(10, |seed| Sim::new(seed).run(run_limits));
+    // Over all seeds the scenario must have done what it is for.
+    assert!(DEAD_LETTERED.load(Ordering::Relaxed) > 0, "no message was dead-lettered: the run checked nothing");
+    assert!(EXPIRED.load(Ordering::Relaxed) > 0, "no message expired: the TTL was not checked");
+    assert!(DROPPED.load(Ordering::Relaxed) > 0, "no message was dropped: the drop rule was not checked");
 }
 
 #[test]
