@@ -158,6 +158,63 @@ An empty password is valid. HMAC pads a short key with zeros, so an implementati
 
 **Sessions.** `session_lifetime_ms` of the **last** response is how long the session lasts, counted by the node from when it completes the login (its last answer); `0` means as long as the connection (a certificate login has no SASL session at all). The node caps it at its `max_session_s` and, for OAUTHBEARER, at the token's expiry. Authenticate again on the same connection (`SaslHandshake`, then `SaslAuthenticate`) before it ends: the Rust client does so at four fifths of the lifetime, counted from before its first request (so it never believes in a session longer than the node does), and the node insists on the same principal. Requests in flight meanwhile are served. After the end the node answers `UNAUTHORIZED` to everything but SASL and `ApiVersions`; the Rust client does not try to renew then but opens a new connection and logs in again, and so does the Java one.
 
+## Client behaviour: streams
+
+The bytes above are enough to talk to a node. These rules are what makes a client behave like `lotse-client` when nodes fail; they come from `crates/lotse-client/src/lib.rs` and the Java client follows them rule for rule.
+
+### Errors of a call
+
+Every request ends in one of four ways, and the retry rules depend on which:
+
+| Outcome | Meaning | Retried by |
+| --- | --- | --- |
+| not sent | the connection was not there, or the node refused the whole frame without a reason | everything |
+| lost | the request may have reached the node (timeout, broken connection after sending, an answer that does not decode) | idempotent produce, and requests that can be repeated |
+| denied | the node requires authentication, or login failed | nothing: `Authentication` at once |
+| refused | the node answered with `ERROR` and a reason (a role is missing) | nothing |
+
+A connection that failed in any of these ways is closed and not trusted again. A failed login is remembered until a new connection logs in, so that a retry loop whose last attempt only saw a metadata lookup fail still reports the login. If an earlier attempt of a produce was lost and a later one is denied, the answer is `Unknown`, not `Authentication`: the first attempt may have been written.
+
+The retry loop tries again until `retry_for` (default 30 s) has passed, pausing `backoff` (50 ms) between attempts. When time runs out it reports `GaveUp` if every attempt was certainly not carried out, and `Unknown` if one may have been.
+
+### Routes
+
+The client keeps `(stream, partition) -> {resource_id, leader, term}`, learnt from `Metadata`, and uses a route until a request fails. Routes do not expire by age; `metadata_max_age` applies to exchange bindings only.
+
+- `Metadata` for a name a node does not know returns a resource with `UNKNOWN_RESOURCE`. The client then asks **every** broker it knows (sorted by address, the bootstrap list included) and keeps, per name, the resource with the **highest `resource_id`** (compared as `u64`): a name deleted and created again has a higher id, and a node that lags may still report the old one. A resource with an error names nothing and is never merged.
+- `leader == 0` means unknown here, not that there is none. A partition created at runtime lives on some nodes only; the client asks the partition's voters, one after the other, for `Metadata` of that name and takes the first non-zero leader. If none knows, the attempt is retried.
+- `NOT_LEADER` and `FENCED_LEADER_TERM` carry a leader hint (`leader`, `term`) when the node knows one. The client switches the route to the hint **only if** `hint.term >= route.term` (unsigned) and `hint.leader != route.leader`. Otherwise (no hint, an older term, the same leader) it drops the route, and the next attempt asks for metadata again. An older term comes from a node that lags; following it would send the client back to a leader that has been replaced.
+- A leader whose node id has no known address drops the route and retries.
+- `UNKNOWN_RESOURCE` in a `Produce` or `Fetch` drops the route too: the name may come back as a new resource.
+
+### Idempotent produce
+
+1. On the first produce the client asks any broker `FindCoordinator(key_type = PRODUCER, key = "")` and then the coordinator `InitProducer(txn_id = null)`. The answer is `producer_id` and `epoch`; both are kept for the client's session.
+2. Per `(stream, partition)` the client counts the next sequence, starting at 0. It stamps the batch (`set_producer(id, epoch, sequence)`, which recomputes the CRC) and sends it.
+3. **Produces to one partition go out one at a time.** A second batch is not sent until the first has an answer, so the leader sees sequences in order. Different partitions run in parallel.
+4. Retrying a batch whose outcome is unknown (lost connection, `REQUEST_TIMED_OUT`) sends **the same bytes**: same id, epoch and sequence. The leader recognises a batch it has and answers with its offset.
+5. On success the sequence advances by the batch's record count (a wrapping `i32`).
+6. When the call ends with `Unknown`, `OUT_OF_ORDER_SEQUENCE` or `PRODUCER_FENCED`, the whole session is dropped; the next produce gets a new producer id and starts every partition at 0. A gap in the sequence would otherwise block everything behind it. Any other failure means the batch was not written, and its sequence is free.
+7. `REQUEST_TIMED_OUT` means the quorum did not confirm in time: the batch may or may not be written.
+8. Without idempotence nothing is stamped and an unknown outcome fails at once, because a retry could write the batch twice. Errors that prove the batch was not written (`NOT_LEADER`, a connection that was never opened) are still retried.
+
+The timestamp of a record is the producer's. A stream's retention judges a batch's age by it, so a record stamped 0 is old at once and may be deleted at the next retention pass. The Rust helper `OutMessage` defaults to 0; the Java client uses the time of the call.
+
+### Fetch
+
+`Fetch` asks for `min_bytes = 1`, `max_bytes` 4 MiB, 1 MiB per partition, `isolation = 1` (committed) and `leader_term` = the route's term; the broker holds the request up to `max_wait_ms` when there is nothing to return. Keep `max_wait` well below the request timeout. The records are whole batches; a response may contain only a control batch, so a reader moves on by the offset after the last batch, not by the number of messages it got.
+
+A read_committed reader drops what it must not show:
+
+1. Sort the `aborted_txns` by first offset (as `u64`).
+2. For each batch in order, every aborted entry whose first offset is at or below the batch's base offset puts its producer into the *skipping* set.
+3. Control batches are never shown. A control batch that is an **abort** marker (type 0) takes its producer out of the skipping set; commit markers and the broker's own control entries do nothing.
+4. A **transactional** data batch of a producer in the skipping set is dropped. A non-transactional batch of the same producer is kept.
+
+The first record of a fresh partition is not at offset 0: the log begins with entries of the broker's own. Do not assume the offset of the first message.
+
+`OFFSET_OUT_OF_RANGE` is not retried. The partition response's `log_start_offset` says where the log starts now; a reader that was overtaken by retention continues from there.
+
 ## Conformance vectors
 
 `sdk/conformance/*` is written by `cargo run -p lotse-proto --features samples --example vectors` (`make sdk-vectors`). One vector per line, `#` for comments.
