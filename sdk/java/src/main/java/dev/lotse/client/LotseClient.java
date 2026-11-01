@@ -46,7 +46,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /**
- * A client for Lotse streams, written to behave like the Rust client ({@code lotse-client}).
+ * A client for Lotse streams and queues, written to behave like the Rust client ({@code lotse-client}).
  *
  * <p>It looks up streams with {@code Metadata}, sends {@code Produce} and {@code Fetch} straight to each partition's
  * leader, and follows {@code NOT_LEADER} hints and metadata changes on its own. It connects on first use, keeps one
@@ -350,7 +350,7 @@ public final class LotseClient implements AutoCloseable {
         return null;
     }
 
-    private void forget(String stream, int partition) {
+    void forget(String stream, int partition) {
         synchronized (state) {
             routes.remove(new PartitionKey(stream, partition));
         }
@@ -374,7 +374,7 @@ public final class LotseClient implements AutoCloseable {
 
     // ---- the retry loop ----
 
-    private <T> T retrying(Supplier<T> attempt) {
+    <T> T retrying(Supplier<T> attempt) {
         long start = System.nanoTime();
         boolean maybeDone = false;
         while (true) {
@@ -779,7 +779,11 @@ public final class LotseClient implements AutoCloseable {
         checkOpen();
         List<Config> list = new ArrayList<>();
         configs.forEach((k, v) -> list.add(new Config(k, v)));
-        Request req = new Request.CreateStream(name, cfg.tenant(), partitions, replication, list);
+        return create(name, new Request.CreateStream(name, cfg.tenant(), partitions, replication, list));
+    }
+
+    /** Sends a create request to the metadata leader and returns the id of what was created. */
+    long create(String name, Request req) {
         return retrying(() -> {
             Response r = callAdmin(req);
             if (!(r instanceof Response.Create c)) {
@@ -798,6 +802,45 @@ public final class LotseClient implements AutoCloseable {
             }
             throw Attempt.fail(new ClientException.Broker(code, c.errorMsg()));
         });
+    }
+
+    /**
+     * Creates a queue in the configured tenant and returns its id. Phase 6 of the SDK adds the rest of the admin
+     * calls. A create whose outcome is unknown is retried and may then fail with
+     * {@link ClientException.ResourceExists}, as for {@link #createStream}.
+     */
+    public long createQueue(String name, QueueOptions options) {
+        checkOpen();
+        return create(
+                name,
+                new Request.CreateQueue(
+                        name, cfg.tenant(), 1, false, options.deadLetterQueue(), options.replication(), options.configs()));
+    }
+
+    /** Creates a queue on 3 nodes with the default settings. */
+    public long createQueue(String name) {
+        return createQueue(name, QueueOptions.defaults());
+    }
+
+    // ---- queues ----
+
+    /**
+     * Subscribes to a queue. The consumer is connected to the queue's leader when this returns; messages are
+     * produced to a queue with {@link #produce} to partition 0.
+     *
+     * @throws ClientException.UnknownStream if the queue does not exist
+     * @throws ClientException.GaveUp if no leader can be reached within {@code retryFor}
+     */
+    public QueueConsumer subscribe(String queue, SubscribeOptions options) {
+        checkOpen();
+        QueueConsumer consumer = new QueueConsumer(this, queue, options.credit());
+        consumer.start();
+        return consumer;
+    }
+
+    /** {@link #subscribe(String, SubscribeOptions)} with the default options. */
+    public QueueConsumer subscribe(String queue) {
+        return subscribe(queue, SubscribeOptions.defaults());
     }
 
     /** Creates a stream with the node's default settings; see {@link #createStream(String, int, int, Map)}. */
@@ -858,6 +901,15 @@ public final class LotseClient implements AutoCloseable {
      * @throws CallFailure when there is no response
      */
     Response call(Address addr, Request req) {
+        return callOn(connect(addr), req);
+    }
+
+    /**
+     * The pooled connection to {@code addr}, logged in.
+     *
+     * @throws CallFailure when there is none
+     */
+    Connection connect(Address addr) {
         checkOpen();
         Connection c;
         try {
@@ -875,6 +927,16 @@ public final class LotseClient implements AutoCloseable {
             // A new connection logged in (if it has credentials): an earlier failed login no longer holds.
             fatal.set(null);
         }
+        return c;
+    }
+
+    /**
+     * Sends one request on a given connection and waits for its response; failures are handled as in
+     * {@link #call}.
+     *
+     * @throws CallFailure when there is no response
+     */
+    Response callOn(Connection c, Request req) {
         try {
             return c.call(req);
         } catch (BrokerException e) {

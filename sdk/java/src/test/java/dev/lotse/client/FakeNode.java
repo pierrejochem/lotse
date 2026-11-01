@@ -27,6 +27,53 @@ final class FakeNode implements AutoCloseable {
         Response handle(FakeNode node, Request request) throws Exception;
     }
 
+    /** Like {@link Handler}, told which connection the request came on. */
+    interface ConnHandler {
+        Response handle(FakeNode node, Conn conn, Request request) throws Exception;
+    }
+
+    /** One accepted connection: what came in on it, and a way to push to it. */
+    static final class Conn {
+        private static final java.util.concurrent.atomic.AtomicInteger NEXT = new java.util.concurrent.atomic.AtomicInteger();
+        final int number = NEXT.incrementAndGet();
+        private final Socket socket;
+        private final List<Request> requests = new CopyOnWriteArrayList<>();
+
+        Conn(Socket socket) {
+            this.socket = socket;
+        }
+
+        /** Sends a push on this connection. */
+        void push(Frames.DeliverPush push) throws IOException {
+            byte[] wire = Frames.withLengthPrefix(Frames.encodePush(push));
+            synchronized (socket) {
+                OutputStream out = socket.getOutputStream();
+                out.write(wire);
+                out.flush();
+            }
+        }
+
+        /** Closes the connection from the broker's side. */
+        void drop() {
+            closeQuietly(socket);
+        }
+
+        /** The requests that came in on this connection. */
+        List<Request> requests() {
+            return new ArrayList<>(requests);
+        }
+
+        <T extends Request> List<T> requests(Class<T> type) {
+            List<T> out = new ArrayList<>();
+            for (Request r : requests) {
+                if (type.isInstance(r)) {
+                    out.add(type.cast(r));
+                }
+            }
+            return out;
+        }
+    }
+
     /** Close the connection without answering. */
     static final class Drop extends RuntimeException {
         private static final long serialVersionUID = 1L;
@@ -45,7 +92,8 @@ final class FakeNode implements AutoCloseable {
     });
     private final List<Socket> sockets = new CopyOnWriteArrayList<>();
     private final List<Request> received = new CopyOnWriteArrayList<>();
-    private volatile Handler handler = (node, request) -> {
+    private final List<Conn> conns = new CopyOnWriteArrayList<>();
+    private volatile ConnHandler handler = (node, conn, request) -> {
         throw new AssertionError("node " + node.id + " was not expected to get " + request);
     };
 
@@ -58,8 +106,18 @@ final class FakeNode implements AutoCloseable {
     }
 
     FakeNode on(Handler handler) {
+        this.handler = (node, conn, request) -> handler.handle(node, request);
+        return this;
+    }
+
+    FakeNode onConn(ConnHandler handler) {
         this.handler = handler;
         return this;
+    }
+
+    /** Every connection accepted so far, in order. */
+    List<Conn> conns() {
+        return new ArrayList<>(conns);
     }
 
     Address address() {
@@ -105,6 +163,8 @@ final class FakeNode implements AutoCloseable {
     }
 
     private void serve(Socket socket) {
+        Conn conn = new Conn(socket);
+        conns.add(conn);
         try (DataInputStream in = new DataInputStream(socket.getInputStream())) {
             while (true) {
                 int length;
@@ -117,16 +177,17 @@ final class FakeNode implements AutoCloseable {
                 in.readFully(frame);
                 Frames.DecodedRequest decoded = Frames.decodeRequest(frame);
                 received.add(decoded.request());
-                workers.execute(() -> answer(socket, decoded));
+                conn.requests.add(decoded.request());
+                workers.execute(() -> answer(socket, conn, decoded));
             }
         } catch (Exception e) {
             // the peer or the test closed the socket
         }
     }
 
-    private void answer(Socket socket, Frames.DecodedRequest decoded) {
+    private void answer(Socket socket, Conn conn, Frames.DecodedRequest decoded) {
         try {
-            Response response = handler.handle(this, decoded.request());
+            Response response = handler.handle(this, conn, decoded.request());
             if (response == null) {
                 return;
             }
