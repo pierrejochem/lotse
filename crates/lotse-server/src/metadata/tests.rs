@@ -31,6 +31,7 @@ fn changes_apply_once_per_name_and_round_trip() {
             tenant: "t".into(),
             voters: vec![1],
             ack_timeout_ms: 5,
+            limits: QueueLimits::default(),
         }),
     )
     .unwrap();
@@ -42,6 +43,7 @@ fn changes_apply_once_per_name_and_round_trip() {
             tenant: "t".into(),
             voters: vec![1, 4, 5],
             ack_timeout_ms: 5,
+            limits: QueueLimits::default(),
         }),
     )
     .unwrap();
@@ -103,7 +105,13 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     .unwrap();
     s.apply(
         2,
-        &payload(&Change::CreateQueue { name: "q".into(), tenant: "t".into(), voters: vec![1], ack_timeout_ms: 0 }),
+        &payload(&Change::CreateQueue {
+            name: "q".into(),
+            tenant: "t".into(),
+            voters: vec![1],
+            ack_timeout_ms: 0,
+            limits: QueueLimits::default(),
+        }),
     )
     .unwrap();
     s.apply(3, &payload(&Change::DeclareExchange { name: "x".into(), tenant: "t".into(), kind: ExchangeKind::Fanout }))
@@ -113,7 +121,14 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     for x in [resource_id(3), 9] {
         s.apply(4, &payload(&Change::Bind { exchange_id: x, binding: to_q.clone() })).unwrap();
     }
-    s.apply(5, &payload(&Change::AlterQueue { resource_id: resource_id(2), ack_timeout_ms: 750 })).unwrap();
+    s.apply(
+        5,
+        &payload(&Change::AlterQueue {
+            resource_id: resource_id(2),
+            change: QueueChange { ack_timeout_ms: Some(750), ..Default::default() },
+        }),
+    )
+    .unwrap();
     assert_eq!(s.queues[&resource_id(2)].ack_timeout_ms, 750);
 
     s.apply(6, &payload(&Change::Delete { resource_id: resource_id(2) })).unwrap();
@@ -121,7 +136,14 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     assert!(s.bindings.values().all(Vec::is_empty), "bindings to the queue are gone, on every exchange");
     // A bind and an alter that were admitted before the delete arrive after it.
     s.apply(7, &payload(&Change::Bind { exchange_id: resource_id(3), binding: to_q.clone() })).unwrap();
-    s.apply(8, &payload(&Change::AlterQueue { resource_id: resource_id(2), ack_timeout_ms: 1 })).unwrap();
+    s.apply(
+        8,
+        &payload(&Change::AlterQueue {
+            resource_id: resource_id(2),
+            change: QueueChange { ack_timeout_ms: Some(1), ..Default::default() },
+        }),
+    )
+    .unwrap();
     assert!(s.bindings.values().all(Vec::is_empty) && s.queues.is_empty());
 
     s.apply(9, &payload(&Change::Delete { resource_id: resource_id(1) })).unwrap();
@@ -138,7 +160,13 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     // The name is free again, under a new id.
     s.apply(
         13,
-        &payload(&Change::CreateQueue { name: "q".into(), tenant: "t".into(), voters: vec![1], ack_timeout_ms: 0 }),
+        &payload(&Change::CreateQueue {
+            name: "q".into(),
+            tenant: "t".into(),
+            voters: vec![1],
+            ack_timeout_ms: 0,
+            limits: QueueLimits::default(),
+        }),
     )
     .unwrap();
     assert_eq!(s.id_of("q"), Some(resource_id(13)));
@@ -192,6 +220,7 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
             tenant: "shop".into(),
             voters: vec![1],
             ack_timeout_ms: 0,
+            limits: QueueLimits::default(),
         }),
     )
     .unwrap();
@@ -278,5 +307,50 @@ fn nodes_come_and_go_and_groups_get_new_voters() {
     s.apply(8, &payload(&again)).unwrap();
     s.apply(9, &payload(&Change::DrainNode { id: 2 })).unwrap();
     assert!(!s.nodes.contains_key(&2) && !s.draining.contains(&2));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+fn queue(name: &str, tenant: &str, limits: QueueLimits) -> Change {
+    Change::CreateQueue { name: name.into(), tenant: tenant.into(), voters: vec![1], ack_timeout_ms: 0, limits }
+}
+
+#[test]
+fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_used() {
+    let mut s = MetadataState::default();
+    let limits = |dead_letter| QueueLimits { max_deliveries: 3, message_ttl_ms: 0, dead_letter };
+    s.apply(1, &payload(&queue("dead", "t", QueueLimits::default()))).unwrap();
+    let dead = resource_id(1);
+    s.apply(2, &payload(&queue("work", "t", limits(dead)))).unwrap();
+    let work = resource_id(2);
+    assert_eq!(s.queues[&work].limits.dead_letter, dead);
+    // Another tenant's queue, or one that does not exist, is no target.
+    s.apply(3, &payload(&queue("other", "u", QueueLimits::default()))).unwrap();
+    s.apply(4, &payload(&queue("stray", "t", limits(resource_id(3))))).unwrap();
+    s.apply(5, &payload(&queue("ghost", "t", limits(resource_id(99))))).unwrap();
+    assert_eq!((s.id_of("stray"), s.id_of("ghost")), (None, None));
+    // Itself, or a loop through others.
+    let alter = |id, dead_letter| Change::AlterQueue {
+        resource_id: id,
+        change: QueueChange { dead_letter: Some(dead_letter), ..Default::default() },
+    };
+    s.apply(6, &payload(&alter(work, work))).unwrap();
+    assert_eq!(s.queues[&work].limits.dead_letter, dead, "not its own dead-letter queue");
+    s.apply(7, &payload(&alter(dead, work))).unwrap();
+    assert_eq!(s.queues[&dead].limits.dead_letter, 0, "dead -> work -> dead is a loop");
+    // Settings change alone, and 0 resets.
+    let ttl = Change::AlterQueue {
+        resource_id: work,
+        change: QueueChange { message_ttl_ms: Some(500), ..Default::default() },
+    };
+    s.apply(8, &payload(&ttl)).unwrap();
+    assert_eq!(s.queues[&work].limits, QueueLimits { max_deliveries: 3, message_ttl_ms: 500, dead_letter: dead });
+    // A queue that others dead-letter into stays.
+    s.apply(9, &payload(&Change::Delete { resource_id: dead })).unwrap();
+    assert!(s.queues.contains_key(&dead) && !s.is_deleted(dead));
+    s.apply(10, &payload(&alter(work, 0))).unwrap();
+    s.apply(11, &payload(&Change::Delete { resource_id: dead })).unwrap();
+    assert!(s.is_deleted(dead));
+    // The state survives a snapshot.
+    s.apply(12, &payload(&alter(work, 0))).unwrap();
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }

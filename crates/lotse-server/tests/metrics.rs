@@ -67,6 +67,8 @@ fn config(id: NodeId) -> NodeConfig {
             resource_id: QUEUE,
             group: 4,
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+            limits: Default::default(),
+            dead_letter: None,
         }],
         exchanges: Vec::new(),
         group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,

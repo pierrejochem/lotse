@@ -77,6 +77,8 @@ async fn main() {
                 resource_id: 8,
                 group: 6,
                 ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+                limits: Default::default(),
+                dead_letter: None,
             }],
             exchanges: Vec::new(),
             group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,

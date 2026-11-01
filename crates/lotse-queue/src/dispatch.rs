@@ -182,11 +182,16 @@ impl Dispatcher {
 
     /// Offsets to deliver next, at most `max`, all below `limit` (the last
     /// stable offset): released ones first, then new ones.
-    pub fn candidates(&mut self, queue: &QueueLog, limit: u64, max: usize) -> Vec<u64> {
-        let mut out: Vec<u64> = self.redeliver.iter().copied().filter(|o| *o < limit).take(max).collect();
+    ///
+    /// `skip` holds messages that must not go out: the leader has decided
+    /// to retire them (dead-letter or drop them) and waits for the claim to
+    /// be applied.
+    pub fn candidates(&mut self, queue: &QueueLog, limit: u64, max: usize, skip: &BTreeSet<u64>) -> Vec<u64> {
+        let mut out: Vec<u64> =
+            self.redeliver.iter().copied().filter(|o| *o < limit && !skip.contains(o)).take(max).collect();
         let mut o = queue.next_unsettled(self.cursor);
         while out.len() < max && o < limit {
-            if !self.in_flight.contains_key(&o) && !self.redeliver.contains(&o) {
+            if !self.in_flight.contains_key(&o) && !self.redeliver.contains(&o) && !skip.contains(&o) {
                 out.push(o);
             }
             o = queue.next_unsettled(o + 1);
@@ -265,6 +270,17 @@ impl Dispatcher {
     /// The count to persist for a message held back: its deliveries so far.
     pub fn count_to_persist(&self, queue: &QueueLog, offset: u64) -> u16 {
         queue.delivery_count(offset).saturating_add(self.extra.get(&offset).copied().unwrap_or(0)).saturating_add(1)
+    }
+
+    /// Deliveries of `offset` since its persisted count: redeliveries after
+    /// a disconnect, kept in memory only.
+    pub fn extra_of(&self, offset: u64) -> u16 {
+        self.extra.get(&offset).copied().unwrap_or(0)
+    }
+
+    /// Offsets with deliveries not yet persisted.
+    pub fn extra_offsets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.extra.keys().copied()
     }
 
     /// The messages in flight with `id`.

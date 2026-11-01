@@ -100,11 +100,18 @@ fn several_batches_frame_back_to_back() {
 }
 
 fn attributes() -> impl Strategy<Value = Attributes> {
-    (any::<bool>(), any::<bool>(), 0u8..4).prop_map(|(transactional, control, k)| Attributes {
+    (any::<bool>(), any::<bool>(), 0u8..6).prop_map(|(transactional, control, k)| Attributes {
         compression: Compression::None,
         transactional,
         control,
-        kind: [BatchKind::Data, BatchKind::Ack, BatchKind::QueueState, BatchKind::Timer][k as usize],
+        kind: [
+            BatchKind::Data,
+            BatchKind::Ack,
+            BatchKind::QueueState,
+            BatchKind::Timer,
+            BatchKind::DeadLetter,
+            BatchKind::Retire,
+        ][k as usize],
     })
 }
 
@@ -241,4 +248,68 @@ fn ack_and_queue_state_batches_round_trip() {
     let (qb, _) = Batch::parse(&q).unwrap();
     assert_eq!(queue_state_counts(&qb).unwrap(), counts);
     assert!(ack_ranges(&qb).is_err(), "kinds are not confused");
+}
+
+#[test]
+fn a_dead_lettered_message_keeps_its_content_and_says_where_it_came_from() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(
+        42,
+        Some(b"k"),
+        Some(b"v"),
+        &[(b"app", Some(b"1")), (dead_letter::REASON, Some(b"stale")), (dead_letter::OFFSET, Some(b"3"))],
+    );
+    let (src, _) = Batch::parse(&b.finish().unwrap()).unwrap();
+    let rec = &src.records().unwrap()[0];
+    let info = DeadLetterInfo {
+        queue: "jobs",
+        queue_id: 9,
+        offset: 17,
+        floor: 12,
+        reason: dead_letter::Reason::MaxDeliveries,
+        deliveries: 5,
+    };
+    let item = Batch::parse(&dead_letter_item(rec, info).unwrap()).unwrap().0;
+    let moved = &item.records().unwrap()[0];
+    assert_eq!((moved.key.as_deref(), moved.value.as_deref(), moved.timestamp), (Some(&b"k"[..]), Some(&b"v"[..]), 42));
+    let header = |name: &[u8]| {
+        let all: Vec<_> = moved.headers.iter().filter(|h| h.key[..] == *name).collect();
+        assert_eq!(all.len(), 1, "one {:?} header", String::from_utf8_lossy(name));
+        all[0].value.clone().unwrap()
+    };
+    assert_eq!(&header(b"app")[..], b"1");
+    assert_eq!(&header(dead_letter::REASON)[..], b"max-deliveries");
+    assert_eq!(&header(dead_letter::QUEUE)[..], b"jobs");
+    assert_eq!(&header(dead_letter::DELIVERIES)[..], b"5");
+    assert_eq!(dead_letter_origin(moved).unwrap(), Origin { queue_id: 9, offset: 17, floor: 12 });
+
+    let joined = Batch::parse(&dead_letter_batch(&[item.clone(), item], 1_000).unwrap()).unwrap().0;
+    assert_eq!(joined.attributes().kind, BatchKind::DeadLetter);
+    assert_eq!(joined.record_count(), 2);
+    assert!(joined.records().unwrap().iter().all(|r| r.timestamp == 1_000));
+    assert!(dead_letter_batch(&[src], 0).is_err(), "a record without an origin is refused");
+}
+
+#[test]
+fn timestamps_move_together() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(100, None, Some(b"a"), &[]);
+    b.push(130, None, Some(b"b"), &[]);
+    let mut raw = bytes::BytesMut::from(&b.finish().unwrap()[..]);
+    set_base_timestamp(&mut raw, 5_000).unwrap();
+    let (batch, _) = Batch::parse(&raw.freeze()).expect("checksum recomputed");
+    assert_eq!((batch.base_timestamp(), batch.max_timestamp()), (5_000, 5_030));
+    assert_eq!(batch.records().unwrap().iter().map(|r| r.timestamp).collect::<Vec<_>>(), vec![5_000, 5_030]);
+}
+
+#[test]
+fn retire_batches_round_trip() {
+    use dead_letter::Reason;
+    let entries = vec![(4, Reason::MaxDeliveries, 3), (9, Reason::Expired, 0)];
+    let out = Batch::parse(&retire_out_batch(1 << 40, &entries).unwrap()).unwrap().0;
+    assert_eq!(out.attributes().kind, BatchKind::Retire);
+    assert_eq!(retire(&out).unwrap(), Retire::Out { target: 1 << 40, entries });
+    let done = Batch::parse(&retire_done_batch(&[4, 9]).unwrap()).unwrap().0;
+    assert_eq!(retire(&done).unwrap(), Retire::Done(vec![4, 9]));
+    assert!(ack_ranges(&done).is_err(), "kinds are not confused");
 }

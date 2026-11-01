@@ -35,7 +35,7 @@ use lotse_raft::Role;
 use lotse_record::Batch;
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, outcome};
+use super::{Clients, ClusterView, Outbox, hint, outcome, retire};
 use crate::replica::{Error, Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
 
@@ -56,11 +56,28 @@ pub struct QueueConfig {
     /// How long a consumer may hold a message unacknowledged before its
     /// subscription ends and the message goes to someone else.
     pub ack_timeout: Duration,
+    /// What the queue does with a message it will not deliver (again).
+    pub limits: lotse_queue::Limits,
+    /// The queue that receives such messages (a resource id), if any; they
+    /// are dropped otherwise.
+    pub dead_letter: Option<u64>,
 }
 
 impl QueueConfig {
     /// RabbitMQ's default consumer timeout.
     pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+    /// A queue with the default ack timeout and no limits.
+    pub fn new(name: impl Into<String>, resource_id: u64, group: GroupId) -> Self {
+        QueueConfig {
+            name: name.into(),
+            resource_id,
+            group,
+            ack_timeout: Self::DEFAULT_ACK_TIMEOUT,
+            limits: lotse_queue::Limits::default(),
+            dead_letter: None,
+        }
+    }
 }
 
 /// How long an `Ack` or `Nack` may take to commit before it is answered with
@@ -88,20 +105,24 @@ pub(super) struct QueueWrite {
     release: Vec<u64>,
     /// Messages it acknowledges, counted once it is written.
     acked: u64,
+    /// Messages it claims for retiring, and those it notes as forwarded:
+    /// no longer in flight once it is decided.
+    marks: retire::Marks,
 }
 
 /// An ack or queue-state batch, and what follows once it is applied.
-struct QueueBatch {
-    batch: bytes::Bytes,
+pub(super) struct QueueBatch {
+    pub(super) batch: bytes::Bytes,
     /// Messages to deliver again.
-    release: Vec<u64>,
+    pub(super) release: Vec<u64>,
     /// Messages it acknowledges, for metrics.
-    acked: u64,
+    pub(super) acked: u64,
+    pub(super) marks: retire::Marks,
 }
 
 impl QueueBatch {
-    fn new(batch: bytes::Bytes) -> Self {
-        QueueBatch { batch, release: Vec::new(), acked: 0 }
+    pub(super) fn new(batch: bytes::Bytes) -> Self {
+        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default() }
     }
 }
 
@@ -307,18 +328,18 @@ impl Clients {
     }
 
     /// Proposes an ack or queue-state batch; see [`QueueBatch`].
-    fn write_queue<R: Runtime, S: StateMachine>(
+    pub(super) fn write_queue<R: Runtime, S: StateMachine>(
         &mut self,
         reply: Option<(Arc<Outbox>, u32)>,
         group: GroupId,
         replica: &mut Replica<R, S>,
-        QueueBatch { batch, release, acked }: QueueBatch,
+        QueueBatch { batch, release, acked, marks }: QueueBatch,
         now: Instant,
     ) {
         match replica.propose_internal(batch) {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let deadline = now + WRITE_TIMEOUT;
-                self.queue_writes.push(QueueWrite { reply, deadline, group, last, term, release, acked });
+                self.queue_writes.push(QueueWrite { reply, deadline, group, last, term, release, acked, marks });
             }
             Ok(_) => unreachable!("a queue batch is never a duplicate"),
             Err(_) => {
@@ -358,6 +379,9 @@ impl Clients {
                     if let Some(s) = self.queues.get_mut(&w.group).filter(|s| s.term == w.term) {
                         s.dispatcher.release(w.release);
                     }
+                    if let Some(r) = self.retiring.get_mut(&w.group).filter(|r| r.term() == w.term) {
+                        r.decided(&w.marks);
+                    }
                 }
                 None => {
                     if now >= w.deadline
@@ -383,8 +407,15 @@ impl Clients {
         for g in gone {
             self.stop_serving(g, ErrorCode::UNKNOWN_RESOURCE, None);
         }
+        self.retiring.retain(|g, _| groups.contains_key(g));
         for qc in view.queues {
             let Some(replica) = groups.get_mut(&qc.group) else { continue };
+            let (g, raft) = (qc.group, replica.raft_ref());
+            if raft.role() != Role::Leader {
+                self.retiring.remove(&g);
+            } else if raft.log().term_at(replica.applied()) == Some(raft.term()) {
+                self.retire(qc, view, replica).await?;
+            }
             let (g, raft) = (qc.group, replica.raft_ref());
             let current = raft.role() == Role::Leader && self.queues.get(&g).is_some_and(|s| s.term == raft.term());
             if !current {
@@ -429,7 +460,13 @@ impl Clients {
             }
 
             let s = self.queues.get_mut(&g).expect("serving");
-            let (delivered, bytes) = deliver(s, replica, limit, view.now).await?;
+            let none = std::collections::BTreeSet::new();
+            let skip = self.retiring.get(&g).map_or(&none, retire::Retiring::claiming);
+            let due = Due { now: view.now, unix_ms: view.unix_ms, limits: qc.limits };
+            let (delivered, bytes, late) = deliver(s, replica, limit, due, skip).await?;
+            if late && let Some(r) = self.retiring.get_mut(&g) {
+                r.scan_now();
+            }
             let stats = self.stats.group(g);
             stats.delivered += delivered;
             stats.fetch_bytes += bytes;
@@ -440,26 +477,54 @@ impl Clients {
     }
 }
 
+/// When deliveries happen, and what the queue allows.
+#[derive(Clone, Copy)]
+struct Due {
+    now: Instant,
+    unix_ms: u64,
+    limits: lotse_queue::Limits,
+}
+
 /// Hands out what credit allows, one stored batch at a time; returns how
-/// many messages it delivered and how many bytes it sent.
+/// many messages it delivered, how many bytes it sent, and whether it met
+/// messages that may not be delivered (too old, or delivered as often as the
+/// queue allows). Those wait for the next round's claim: a delivery never
+/// happens past the limits, whatever the scan has found.
 async fn deliver<R: Runtime, S: StateMachine>(
     s: &mut Serving,
     replica: &Replica<R, S>,
     limit: u64,
-    now: Instant,
-) -> Result<(u64, u64), Error> {
+    due: Due,
+    skip: &std::collections::BTreeSet<u64>,
+) -> Result<(u64, u64, bool), Error> {
+    let Due { now, unix_ms, limits } = due;
+    let mut skip = skip.clone();
+    let mut late = false;
     let q: &QueueLog = replica.queue().expect("a queue group");
     let mut budget = DELIVER_PER_ROUND;
     let mut total = 0;
     let mut bytes = 0u64;
     while budget > 0 {
         let max = (s.dispatcher.open_credit() as usize).min(budget);
-        let offsets = s.dispatcher.candidates(q, limit, max);
+        let offsets = s.dispatcher.candidates(q, limit, max, &skip);
         if offsets.is_empty() {
-            return Ok((total, bytes));
+            return Ok((total, bytes, late));
+        }
+        // Delivered as often as allowed already (a release this round may
+        // have counted one more): the next round's claim retires them.
+        let over: Vec<u64> = offsets
+            .iter()
+            .copied()
+            .filter(|o| limits.exhausted(u32::from(q.delivery_count(*o)) + u32::from(s.dispatcher.extra_of(*o))))
+            .collect();
+        if !over.is_empty() {
+            skip.extend(over);
+            late = true;
+            budget = budget.saturating_sub(1);
+            continue;
         }
         let owners: BTreeMap<SubscriptionId, ConnId> = s.dispatcher.subscriptions().collect();
-        let mut delivered = 0;
+        let (mut delivered, mut skipped) = (0, false);
         let mut rest = &offsets[..];
         while let Some(&first) = rest.first() {
             let read = replica.log().read(first, 1).await?;
@@ -468,6 +533,11 @@ async fn deliver<R: Runtime, S: StateMachine>(
             let n = rest.iter().take_while(|o| **o < batch.next_offset()).count();
             let (here, more) = rest.split_at(n);
             rest = more;
+            if limits.expired(batch.max_timestamp(), unix_ms) {
+                skip.extend(here.iter().copied());
+                (late, skipped) = (true, true);
+                continue;
+            }
             for (id, deliveries) in s.dispatcher.assign(q, here, raw.len() as u32, now) {
                 delivered += deliveries.len();
                 let push = DeliverPush {
@@ -486,11 +556,11 @@ async fn deliver<R: Runtime, S: StateMachine>(
                 }
             }
         }
-        if delivered == 0 {
-            return Ok((total, bytes)); // credit in messages, but none in bytes
+        if delivered == 0 && !skipped {
+            return Ok((total, bytes, late)); // credit in messages, but none in bytes
         }
         total += delivered as u64;
-        budget = budget.saturating_sub(delivered);
+        budget = budget.saturating_sub(delivered.max(1));
     }
-    Ok((total, bytes))
+    Ok((total, bytes, late))
 }

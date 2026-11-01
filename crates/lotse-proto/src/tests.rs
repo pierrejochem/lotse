@@ -136,6 +136,7 @@ fn requests() -> Vec<Request> {
         Request::RemoveNode(RemoveNodeRequest { node_id: 2 }),
         Request::DescribeNodes(DescribeNodesRequest),
         Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
+        Request::DeadLetter(DeadLetterRequest { queue_id: 1_099_511_627_777, batches: vec![Bytes::from_static(b"x")] }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,

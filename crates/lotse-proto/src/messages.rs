@@ -2954,3 +2954,29 @@ impl SettleVotersRequest {
         Ok(req)
     }
 }
+
+/// A queue's leader forwards messages to its dead-letter queue (internal,
+/// from a node). Answered with [`OutcomeResponse`] once the queue's leader
+/// has them committed. Sending a message again is harmless: the receiving
+/// queue knows what it took from the source (ADR 0055).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetterRequest {
+    /// The dead-letter queue.
+    pub queue_id: u64,
+    /// The messages, each a one-record batch that carries its origin in
+    /// its headers.
+    pub batches: Vec<Bytes>,
+}
+
+impl DeadLetterRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.queue_id);
+        w.array(&self.batches, |w, b| w.bytes(b));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DeadLetterRequest { queue_id: r.u64()?, batches: r.array(4, |r| r.bytes())? };
+        r.tags()?;
+        Ok(req)
+    }
+}

@@ -57,7 +57,7 @@ const SNAPSHOT: &str = "snapshot";
 /// Written when a replica's log was removed after the group moved off this
 /// node (ADR 0050): the tag of the decision that moved it.
 pub(crate) const MOVED: &str = "moved";
-pub(crate) const FORMAT: u8 = 10;
+pub(crate) const FORMAT: u8 = 11;
 
 /// What a replica applies committed batches to: a partition's producer state,
 /// a queue's delivery state, the cluster metadata.
@@ -530,7 +530,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let ty = if commit { lotse_record::ControlType::Commit } else { lotse_record::ControlType::Abort };
         let batch = lotse_record::control_batch(producer_id, epoch, ty, coordinator_epoch, 0)?;
         let parsed = Batch::parse(&batch)?.0;
-        let (first, last) = self.raft.propose(1, batch).map_err(ProposeError::NotLeader)?;
+        // One entry covers a batch's records: the broker's records hold one,
+        // a batch of dead letters many.
+        let (first, last) =
+            self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
         let term = self.raft.term();
         self.state.appended(first, last, term, &parsed);
         Ok(MarkerOutcome::Proposed { last, term })
@@ -540,7 +543,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// producer id allocation) as the leader.
     pub(crate) fn propose_internal(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {
         let parsed = Batch::parse(&batch)?.0;
-        let (first, last) = self.raft.propose(1, batch).map_err(ProposeError::NotLeader)?;
+        // One entry covers a batch's records: the broker's own records hold
+        // one, a batch of dead letters many.
+        let (first, last) =
+            self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
         let term = self.raft.term();
         self.state.appended(first, last, term, &parsed);
         Ok(Proposed { first, last, term: Some(term), duplicate: false })
@@ -683,7 +689,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let point = match self.retention {
             Retention::Keep => return None,
             Retention::State => applied,
-            Retention::Queue => self.state.queue.as_ref()?.floor(),
+            Retention::Queue => self.state.queue.as_ref()?.retention_floor(),
             Retention::Stream { ms, bytes } => {
                 let segs: Vec<lotse_log::SegmentInfo> = self.log.segments().collect();
                 let (old, _active) = segs.split_at(segs.len().saturating_sub(1));

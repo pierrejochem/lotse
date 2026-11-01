@@ -67,12 +67,14 @@ mod groups;
 mod nodes;
 pub(crate) use nodes::{managed_groups, moving};
 mod queues;
+mod retire;
 mod session;
 mod stats;
 
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
 pub use queues::QueueConfig;
+pub(crate) use retire::ForwardJob;
 use session::Session;
 pub(crate) use stats::{NetStats, NodeView};
 
@@ -251,6 +253,9 @@ pub(crate) struct ClusterView<'a> {
     /// The node itself, for metrics.
     pub(crate) node: NodeView<'a>,
     pub(crate) now: Instant,
+    /// The wall clock in milliseconds since the epoch: for stamping what
+    /// leaders append and for comparing with it, never for intervals.
+    pub(crate) unix_ms: u64,
     /// Who may do what.
     pub(crate) access: &'a Access,
 }
@@ -331,6 +336,10 @@ pub(crate) struct Clients {
     next_subscription: u32,
     /// Acks and delivery counts in flight.
     queue_writes: Vec<queues::QueueWrite>,
+    /// What queue leaders retire and forward, per group (ADR 0055).
+    retiring: BTreeMap<GroupId, retire::Retiring>,
+    /// Dead letters for the node to forward through the protocol.
+    forward_jobs: Vec<retire::ForwardJob>,
     /// The group coordinator's clocks.
     group_timers: groups::GroupTimers,
     /// Admin records in flight.
@@ -378,6 +387,7 @@ impl Clients {
             Request::Ack(req) => self.ack(outbox, id, req, view, groups),
             Request::Nack(req) => self.nack(outbox, id, req, view, groups),
             Request::Unsubscribe(req) => self.unsubscribe(outbox, id, req),
+            Request::DeadLetter(req) => self.dead_letter(outbox, id, req, view, groups),
             Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, view, groups),
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
             Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
@@ -444,7 +454,7 @@ impl Clients {
                         out.error = ErrorCode::INVALID_TXN_STATE;
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
                     }
-                    Some((g, replica)) => match replica.propose(p.batch.clone()) {
+                    Some((g, replica)) => match replica.propose(stamped_for_ttl(&p.batch, g, view)) {
                         Ok(Proposed { first, last, term, .. }) => {
                             out.base_offset = first - 1;
                             // A duplicate of an applied batch is written; anything
@@ -652,6 +662,20 @@ fn settle_markers<R: Runtime, S: StateMachine>(
 /// The fate of the entry proposed at `last` in `term`, once this node knows
 /// it: `NONE` (written), `NOT_LEADER` (replaced, not written), or
 /// `REQUEST_TIMED_OUT` (unknown: compacted). `None` while undecided here.
+/// The batch as the leader of a queue with a message TTL appends it: its
+/// timestamps moved to the leader's clock, so that a message's age does not
+/// depend on its producer's clock (ADR 0055). Other batches are as they came.
+fn stamped_for_ttl(batch: &Bytes, group: GroupId, view: &ClusterView<'_>) -> Bytes {
+    if !view.queues.iter().any(|q| q.group == group && q.limits.message_ttl_ms > 0) {
+        return batch.clone();
+    }
+    let mut copy = bytes::BytesMut::from(&batch[..]);
+    match lotse_record::set_base_timestamp(&mut copy, view.unix_ms as i64) {
+        Ok(()) => copy.freeze(),
+        Err(_) => batch.clone(), // refused by the replica as malformed
+    }
+}
+
 fn outcome(raft: &RaftGroup, last: u64, term: u64) -> Option<ErrorCode> {
     if raft.commit() < last {
         return None;

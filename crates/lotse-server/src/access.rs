@@ -128,7 +128,10 @@ impl Access {
             (_, Request::ApiVersions | Request::WhoAmI(_) | Request::Metadata(_) | Request::FindCoordinator(_)) => {
                 return Ok(());
             }
-            (Principal::Node(_) | Principal::Anonymous, Request::WriteTxnMarkers(_) | Request::SettleVoters(_)) => {
+            (
+                Principal::Node(_) | Principal::Anonymous,
+                Request::WriteTxnMarkers(_) | Request::SettleVoters(_) | Request::DeadLetter(_),
+            ) => {
                 return Ok(());
             }
             // A lagging node asks for the node list (ADR 0050); the metadata
@@ -136,9 +139,10 @@ impl Access {
             (Principal::Node(_), Request::DescribeNodes(_) | Request::DescribeMetrics(_)) => return Ok(()),
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
+            (_, Request::DeadLetter(_)) => return Err("only broker nodes forward dead letters".into()),
             (Principal::Node(id), _) => {
                 return Err(format!(
-                    "node {id} may only look up metadata, nodes and metrics, write markers and report voters"
+                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters and forward dead letters"
                 ));
             }
             (Principal::Anonymous, _) => return Ok(()),
@@ -203,6 +207,7 @@ impl Access {
             | Request::FindCoordinator(_)
             | Request::WriteTxnMarkers(_)
             | Request::SettleVoters(_)
+            | Request::DeadLetter(_)
             | Request::SaslHandshake(_)
             | Request::SaslAuthenticate(_) => Ok(()),
         }

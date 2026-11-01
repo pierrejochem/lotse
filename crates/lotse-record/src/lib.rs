@@ -97,6 +97,14 @@ pub enum BatchKind {
     QueueState,
     /// Due times for TTL and delayed delivery.
     Timer,
+    /// Messages moved here from another queue's dead-lettering (ADR 0055):
+    /// deliverable like data, but each record names where it came from, so
+    /// that a repeated move is recognised when the batch is applied.
+    DeadLetter,
+    /// Messages leaving a queue because of its limits: the claim that
+    /// settles them and obliges the leader to forward them, and the note
+    /// that they have been forwarded (ADR 0055).
+    Retire,
 }
 
 /// The `attributes` field, decoded.
@@ -129,6 +137,8 @@ impl Attributes {
             BatchKind::Ack => 1,
             BatchKind::QueueState => 2,
             BatchKind::Timer => 3,
+            BatchKind::DeadLetter => 4,
+            BatchKind::Retire => 5,
         };
         c | (u16::from(self.transactional) << 3) | (u16::from(self.control) << 4) | (k << 5)
     }
@@ -146,6 +156,8 @@ impl Attributes {
             1 => BatchKind::Ack,
             2 => BatchKind::QueueState,
             3 => BatchKind::Timer,
+            4 => BatchKind::DeadLetter,
+            5 => BatchKind::Retire,
             _ => return Err(Error::Malformed("unknown batch kind")),
         };
         if bits >> 8 != 0 {
@@ -309,6 +321,23 @@ pub fn stamp(batch: &mut [u8], base_offset: u64, term: u64) -> Result<(), Error>
     }
     put_u64(batch, 0, base_offset);
     put_u64(batch, 12, term);
+    Ok(())
+}
+
+/// Moves an encoded batch's timestamps so that its first record has `base_ts`,
+/// keeping the distances between records, and recomputes the checksum. The
+/// leader of a queue with a message TTL stamps the batches it appends with
+/// its own clock, so that a message's age does not depend on its producer's.
+pub fn set_base_timestamp(batch: &mut [u8], base_ts: i64) -> Result<(), Error> {
+    let len = peek_len(batch).ok_or(Error::Truncated)?;
+    if len < HEADER_LEN || batch.len() < len {
+        return Err(Error::Truncated);
+    }
+    let (old_base, old_max) = (get_i64(batch, 31), get_i64(batch, 39));
+    put_i64(batch, 31, base_ts);
+    put_i64(batch, 39, base_ts.wrapping_add(old_max.wrapping_sub(old_base)));
+    let crc = crc32c::crc32c(&batch[CRC_START..len]);
+    put_u32(batch, 21, crc);
     Ok(())
 }
 
@@ -671,6 +700,87 @@ pub fn ack_ranges(batch: &Batch) -> Result<Vec<(u64, u64)>, Error> {
     Ok(out)
 }
 
+/// What a RETIRE batch says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retire {
+    /// The leader claims these messages `(offset, reason, deliveries)`: they
+    /// are settled in this queue and must be forwarded to queue `target`.
+    Out {
+        /// Resource id of the dead-letter queue.
+        target: u64,
+        /// The messages.
+        entries: Vec<(u64, dead_letter::Reason, u16)>,
+    },
+    /// These claimed messages have been forwarded; nothing is owed for them.
+    Done(Vec<u64>),
+}
+
+/// Builds a RETIRE batch claiming `entries` for queue `target`.
+pub fn retire_out_batch(target: u64, entries: &[(u64, dead_letter::Reason, u16)]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    varint::put_i64(&mut value, 0);
+    varint::put_i64(&mut value, target as i64);
+    varint::put_i64(&mut value, entries.len() as i64);
+    for (offset, reason, deliveries) in entries {
+        varint::put_i64(&mut value, *offset as i64);
+        varint::put_i64(&mut value, i64::from(reason.code()));
+        varint::put_i64(&mut value, i64::from(*deliveries));
+    }
+    queue_batch(BatchKind::Retire, &value)
+}
+
+/// Builds a RETIRE batch noting that `offsets` have been forwarded.
+pub fn retire_done_batch(offsets: &[u64]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    varint::put_i64(&mut value, 1);
+    varint::put_i64(&mut value, offsets.len() as i64);
+    for offset in offsets {
+        varint::put_i64(&mut value, *offset as i64);
+    }
+    queue_batch(BatchKind::Retire, &value)
+}
+
+/// What a RETIRE batch says.
+pub fn retire(batch: &Batch) -> Result<Retire, Error> {
+    let value = queue_value(batch, BatchKind::Retire)?;
+    let mut rest = &value[..];
+    let mut next = || -> Result<u64, Error> {
+        let (v, n) = varint::get_i64(rest)?;
+        rest = &rest[n..];
+        u64::try_from(v).map_err(|_| Error::Malformed("negative number in retire batch"))
+    };
+    let out = match next()? {
+        0 => {
+            let target = next()?;
+            let count = next()?;
+            let mut entries = Vec::new();
+            for _ in 0..count {
+                let offset = next()?;
+                let reason = u8::try_from(next()?)
+                    .ok()
+                    .and_then(dead_letter::Reason::from_code)
+                    .ok_or(Error::Malformed("unknown dead-letter reason"))?;
+                let deliveries = u16::try_from(next()?).map_err(|_| Error::Malformed("delivery count out of range"))?;
+                entries.push((offset, reason, deliveries));
+            }
+            Retire::Out { target, entries }
+        }
+        1 => {
+            let count = next()?;
+            let mut offsets = Vec::new();
+            for _ in 0..count {
+                offsets.push(next()?);
+            }
+            Retire::Done(offsets)
+        }
+        _ => return Err(Error::Malformed("unknown retire batch")),
+    };
+    if !rest.is_empty() {
+        return Err(Error::Malformed("trailing bytes in retire batch"));
+    }
+    Ok(out)
+}
+
 /// Builds a QUEUE_STATE batch: delivery counts `(offset, count)` of a
 /// queue's messages, written on nack or ack timeout.
 pub fn queue_state_batch(counts: &[(u64, u16)]) -> Result<Bytes, Error> {
@@ -722,6 +832,164 @@ fn queue_value(batch: &Batch, kind: BatchKind) -> Result<Bytes, Error> {
     }
     let rec = batch.records()?.into_iter().next().ok_or(Error::Malformed("empty queue batch"))?;
     rec.value.ok_or(Error::Malformed("queue batch without value"))
+}
+
+/// Header names of a dead-lettered message (ADR 0055). Values are decimal
+/// text or the reason's name, so that a consumer can read them without a
+/// codec. They describe the latest move: the ones a message arrived with are
+/// replaced when it is dead-lettered again.
+pub mod dead_letter {
+    /// Why: [`Reason::name`].
+    pub const REASON: &[u8] = b"x-lotse-dead-letter-reason";
+    /// Name of the queue the message came from.
+    pub const QUEUE: &[u8] = b"x-lotse-dead-letter-queue";
+    /// Resource id of that queue; with the offset, the message's identity.
+    pub const QUEUE_ID: &[u8] = b"x-lotse-dead-letter-queue-id";
+    /// The message's offset in that queue.
+    pub const OFFSET: &[u8] = b"x-lotse-dead-letter-offset";
+    /// How often it had been delivered.
+    pub const DELIVERIES: &[u8] = b"x-lotse-dead-letter-deliveries";
+    /// The ack floor of that queue when the message was sent: every offset
+    /// below it is settled there, so it will not be sent again.
+    pub const FLOOR: &[u8] = b"x-lotse-dead-letter-floor";
+
+    /// Why a message was dead-lettered.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Reason {
+        /// It was delivered as often as the queue allows.
+        MaxDeliveries,
+        /// It waited longer than the queue's message TTL.
+        Expired,
+    }
+
+    impl Reason {
+        /// The code in a retire batch.
+        pub fn code(self) -> u8 {
+            match self {
+                Reason::MaxDeliveries => 0,
+                Reason::Expired => 1,
+            }
+        }
+
+        /// The reason a code stands for.
+        pub fn from_code(code: u8) -> Option<Reason> {
+            match code {
+                0 => Some(Reason::MaxDeliveries),
+                1 => Some(Reason::Expired),
+                _ => None,
+            }
+        }
+
+        /// The name in the reason header.
+        pub fn name(self) -> &'static str {
+            match self {
+                Reason::MaxDeliveries => "max-deliveries",
+                Reason::Expired => "expired",
+            }
+        }
+    }
+}
+
+/// Where a dead-lettered message came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    /// Resource id of the queue it was dead-lettered from.
+    pub queue_id: u64,
+    /// Its offset there.
+    pub offset: u64,
+    /// That queue's ack floor when it was sent.
+    pub floor: u64,
+}
+
+/// What the leader of a queue knows when it dead-letters a message.
+#[derive(Debug, Clone, Copy)]
+pub struct DeadLetterInfo<'a> {
+    /// Name of the source queue.
+    pub queue: &'a str,
+    /// Its resource id.
+    pub queue_id: u64,
+    /// The message's offset there.
+    pub offset: u64,
+    /// The source's ack floor.
+    pub floor: u64,
+    /// Why.
+    pub reason: dead_letter::Reason,
+    /// How often it was delivered.
+    pub deliveries: u16,
+}
+
+fn is_dead_letter_header(key: &[u8]) -> bool {
+    key.starts_with(b"x-lotse-dead-letter-")
+}
+
+/// A one-record data batch holding `record` as it was (key, value, headers,
+/// timestamp) plus the headers of [`dead_letter`] describing its move.
+pub fn dead_letter_item(record: &Record, info: DeadLetterInfo<'_>) -> Result<Bytes, Error> {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    let own: [(&[u8], String); 6] = [
+        (dead_letter::REASON, info.reason.name().to_string()),
+        (dead_letter::QUEUE, info.queue.to_string()),
+        (dead_letter::QUEUE_ID, info.queue_id.to_string()),
+        (dead_letter::OFFSET, info.offset.to_string()),
+        (dead_letter::DELIVERIES, info.deliveries.to_string()),
+        (dead_letter::FLOOR, info.floor.to_string()),
+    ];
+    let mut headers: Vec<(&[u8], Option<&[u8]>)> = record
+        .headers
+        .iter()
+        .filter(|h| !is_dead_letter_header(&h.key))
+        .map(|h| (&h.key[..], h.value.as_deref()))
+        .collect();
+    headers.extend(own.iter().map(|(k, v)| (*k, Some(v.as_bytes()))));
+    b.push(record.timestamp, record.key.as_deref(), record.value.as_deref(), &headers);
+    b.finish()
+}
+
+/// The origin a dead-lettered record names; an error if it names none or
+/// names it badly.
+pub fn dead_letter_origin(record: &Record) -> Result<Origin, Error> {
+    let number = |name: &[u8]| -> Result<u64, Error> {
+        let value = record
+            .headers
+            .iter()
+            .rev()
+            .find(|h| h.key[..] == *name)
+            .and_then(|h| h.value.as_ref())
+            .ok_or(Error::Malformed("dead-letter record without its origin"))?;
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(Error::Malformed("dead-letter origin is not a number"))
+    };
+    Ok(Origin {
+        queue_id: number(dead_letter::QUEUE_ID)?,
+        offset: number(dead_letter::OFFSET)?,
+        floor: number(dead_letter::FLOOR)?,
+    })
+}
+
+/// Joins the records of `items` (one-record batches from
+/// [`dead_letter_item`]) into one dead-letter batch stamped with `timestamp`,
+/// the time the leader of the receiving queue appends it.
+pub fn dead_letter_batch(items: &[Batch], timestamp: i64) -> Result<Bytes, Error> {
+    let mut b = BatchBuilder::new(BatchOptions {
+        attributes: Attributes {
+            compression: Compression::None,
+            transactional: false,
+            control: false,
+            kind: BatchKind::DeadLetter,
+        },
+        ..BatchOptions::default()
+    });
+    for item in items {
+        for r in item.records()? {
+            dead_letter_origin(&r)?;
+            let headers: Vec<(&[u8], Option<&[u8]>)> =
+                r.headers.iter().map(|h| (&h.key[..], h.value.as_deref())).collect();
+            b.push(timestamp, r.key.as_deref(), r.value.as_deref(), &headers);
+        }
+    }
+    b.finish()
 }
 
 /// What a control batch is.

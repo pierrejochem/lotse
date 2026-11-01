@@ -161,6 +161,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -236,6 +237,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            unix_ms: 0,
             access: &OPEN,
         };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
@@ -331,6 +333,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -396,6 +399,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 coordinator: Some(G),
                 node: NodeView::default(),
                 now,
+                unix_ms: 0,
                 access: &OPEN,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
@@ -443,6 +447,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             coordinator: Some(G),
             node: NodeView::default(),
             now,
+            unix_ms: 0,
             access: &OPEN,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
@@ -490,6 +495,8 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             resource_id: 7,
             group: G,
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+            limits: Default::default(),
+            dead_letter: None,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -504,6 +511,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -568,6 +576,8 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             resource_id: 7,
             group: G,
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+            limits: Default::default(),
+            dead_letter: None,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -582,6 +592,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -679,6 +690,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -770,6 +782,7 @@ fn offsets_for_a_released_partition_are_refused() {
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
+            unix_ms: 0,
             access: &OPEN,
         };
         let outbox = Arc::new(Outbox::default());
@@ -862,6 +875,173 @@ fn offsets_for_a_released_partition_are_refused() {
     });
 }
 
+/// A queue's limits through the admin requests: a dead-letter queue must be
+/// another queue, a queue others dead-letter into cannot be deleted, and the
+/// settings are described and changed like the ack timeout.
+#[test]
+fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() {
+    Sim::new(9).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "m", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let addrs = BTreeMap::new();
+        let voters = BTreeMap::new();
+        let mut clients = Clients::default();
+        let ask = async |clients: &mut Clients,
+                         groups: &mut Groups,
+                         queues: &[QueueConfig],
+                         exchanges: &[Exchange],
+                         requests: Vec<Request>| {
+            let view = ClusterView {
+                streams: &[],
+                queues,
+                exchanges,
+                deleted: &NOTHING_DELETED,
+                group_session: Duration::from_secs(1),
+                group_heartbeat: Duration::from_millis(100),
+                admin: AdminView {
+                    metadata: Some(G),
+                    nodes: &[1],
+                    configured_groups: 1,
+                    voters: &voters,
+                    ..AdminView::default()
+                },
+                client_addrs: &addrs,
+                coordinator: None,
+                node: NodeView::default(),
+                now: rt.now(),
+                unix_ms: 0,
+                access: &OPEN,
+            };
+            let mut outboxes = Vec::new();
+            for request in requests {
+                let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+                let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+                let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+                clients.handle(req, &view, groups).await.unwrap();
+                outboxes.push((outbox, key));
+            }
+            for _ in 0..5 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            outboxes
+                .into_iter()
+                .map(|(o, key)| match &drain(&o, key).0[..] {
+                    [r] => r.clone(),
+                    other => panic!("expected one answer, got {other:?}"),
+                })
+                .collect::<Vec<Response>>()
+        };
+        let create = |name: &str, dlq: Option<&str>, configs: Vec<(String, String)>| {
+            Request::CreateQueue(lotse_proto::CreateQueueRequest {
+                tenant: crate::DEFAULT_TENANT.into(),
+                name: name.into(),
+                priority_levels: 1,
+                single_active: false,
+                dlq: dlq.map(str::to_string),
+                replication: 1,
+                configs,
+            })
+        };
+        let configured = |groups: &Groups, names: &[&str]| -> Vec<QueueConfig> {
+            let state = groups[&G].metadata();
+            names
+                .iter()
+                .map(|n| {
+                    let q = &state.queues[&state.id_of(n).unwrap()];
+                    QueueConfig {
+                        name: q.name.clone(),
+                        resource_id: q.resource_id,
+                        group: q.group,
+                        ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+                        limits: Default::default(),
+                        dead_letter: None,
+                    }
+                })
+                .collect()
+        };
+        let admin_error = |r: &Response| match r {
+            Response::Admin(a) => a.error,
+            other => panic!("{other:?}"),
+        };
+        let answers = ask(&mut clients, &mut groups, &[], &[], vec![create("dead", None, vec![])]).await;
+        let [Response::Create(dead)] = &answers[..] else { panic!("{answers:?}") };
+        assert_eq!(dead.error, ErrorCode::NONE);
+        let queues = configured(&groups, &["dead"]);
+        let settings = vec![("max.deliveries".to_string(), "3".to_string())];
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &queues,
+            &[],
+            vec![
+                create("bad", Some("nowhere"), vec![]),
+                create("zero", None, vec![("max.deliveries".into(), "0".into())]),
+                create("work", Some("dead"), settings),
+            ],
+        )
+        .await;
+        let [Response::Create(bad), Response::Create(zero), Response::Create(work)] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert_eq!(
+            (bad.error, zero.error, work.error),
+            (ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST, ErrorCode::NONE)
+        );
+        let limits = groups[&G].metadata().queues[&work.resource_id].limits;
+        assert_eq!((limits.max_deliveries, limits.message_ttl_ms, limits.dead_letter), (3, 0, dead.resource_id));
+        let queues = configured(&groups, &["dead", "work"]);
+        let alter = |set: &[(&str, &str)], delete: &[&str], id| {
+            Request::AlterConfigs(lotse_proto::AlterConfigsRequest {
+                resource_id: id,
+                set: set.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                delete: delete.iter().map(|k| k.to_string()).collect(),
+            })
+        };
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &queues,
+            &[],
+            vec![
+                alter(&[("dead.letter.queue", "work")], &[], work.resource_id),
+                alter(&[("dead.letter.queue", "dead")], &[], dead.resource_id),
+                alter(&[("message.ttl.ms", "1500")], &[], work.resource_id),
+                Request::DeleteResource(lotse_proto::DeleteResourceRequest {
+                    resource_id: dead.resource_id,
+                    if_empty: false,
+                }),
+            ],
+        )
+        .await;
+        let described = ask(
+            &mut clients,
+            &mut groups,
+            &queues,
+            &[],
+            vec![Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest {
+                resource_ids: vec![work.resource_id],
+            })],
+        )
+        .await;
+        assert_eq!(admin_error(&answers[0]), ErrorCode::INVALID_REQUEST, "its own dead-letter queue");
+        assert_eq!(admin_error(&answers[1]), ErrorCode::INVALID_REQUEST, "dead -> work -> dead is a loop");
+        assert_eq!(admin_error(&answers[2]), ErrorCode::NONE);
+        assert_eq!(admin_error(&answers[3]), ErrorCode::INVALID_REQUEST, "work dead-letters into it");
+        let Response::DescribeConfigs(d) = &described[0] else { panic!("{:?}", described[0]) };
+        let shown: Vec<(&str, &str)> =
+            d.resources[0].configs.iter().map(|c| (c.key.as_str(), c.value.as_str())).collect();
+        assert!(shown.contains(&("max.deliveries", "3")) && shown.contains(&("message.ttl.ms", "1500")));
+        assert!(shown.contains(&("dead.letter.queue", "dead")), "{shown:?}");
+    });
+}
+
 /// A bind or an alter admitted before a delete of its queue, and applied
 /// after it, changed nothing: it must not be acknowledged. Two admitted in
 /// the same round before the delete always land in that order, a history
@@ -903,6 +1083,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 coordinator: None,
                 node: NodeView::default(),
                 now: rt.now(),
+                unix_ms: 0,
                 access: &OPEN,
             };
             let mut outboxes = Vec::new();
@@ -958,6 +1139,8 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             resource_id: q.resource_id,
             group: dq.group,
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+            limits: Default::default(),
+            dead_letter: None,
         }];
         let exchanges = [Exchange {
             name: "x".into(),

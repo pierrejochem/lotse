@@ -44,7 +44,9 @@ use lotse_rt::{Instant, Runtime};
 
 use super::{Clients, ClusterView, Outbox, hint, outcome};
 use crate::auth::Principal;
-use crate::metadata::{self, Change, MAX_PARTITIONS, StreamChange, StreamSettings};
+use crate::metadata::{
+    self, Change, MAX_PARTITIONS, MetadataState, QueueChange, QueueLimits, StreamChange, StreamSettings,
+};
 use crate::replica::{Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
 
@@ -102,10 +104,13 @@ pub(crate) enum AdminThen {
     Bound { exchange_id: u64, queue_id: u64 },
     /// An unbind.
     Unbound,
-    /// A delete.
-    Deleted,
+    /// A delete, which a queue named as a dead-letter queue survives.
+    Deleted { resource_id: u64 },
     /// A changed setting of a queue that may have been deleted since.
     Altered { resource_id: u64 },
+    /// Changed settings of a queue; refused when applied if its dead-letter
+    /// queue no longer fits.
+    AlteredQueue { resource_id: u64, change: QueueChange },
     /// A user's credential, a tenant or role bindings changed.
     Changed,
 }
@@ -116,7 +121,10 @@ impl AdminThen {
         match self {
             AdminThen::Created { .. } => created(code, resource_id, None, h),
             AdminThen::Bound { .. } | AdminThen::Unbound => outcome_response(code, h),
-            AdminThen::Deleted | AdminThen::Altered { .. } | AdminThen::Changed => admin_response(code, None, h),
+            AdminThen::Deleted { .. }
+            | AdminThen::Altered { .. }
+            | AdminThen::AlteredQueue { .. }
+            | AdminThen::Changed => admin_response(code, None, h),
         }
     }
 }
@@ -160,8 +168,13 @@ fn binding_data(b: &RoleBinding) -> RoleBindingData {
 /// Longest user name, bytes.
 const MAX_USER_NAME: usize = 255;
 
-/// The key of the one setting that can change so far.
+/// The settings of a queue.
 const ACK_TIMEOUT: &str = "ack.timeout.ms";
+const MAX_DELIVERIES: &str = "max.deliveries";
+const MESSAGE_TTL: &str = "message.ttl.ms";
+const DEAD_LETTER: &str = "dead.letter.queue";
+/// The most deliveries a limit may name: a delivery count is 16 bits.
+const MAX_DELIVERIES_LIMIT: u32 = u16::MAX as u32;
 const RETENTION_MS: &str = "retention.ms";
 const RETENTION_BYTES: &str = "retention.bytes";
 
@@ -184,6 +197,77 @@ fn set_stream(s: &mut StreamChange, key: &str, value: Option<&String>) -> Result
         return Err(format!("{key} is given twice"));
     }
     *slot = Some(parsed);
+    Ok(())
+}
+
+/// The queue `name` as a dead-letter queue of the queue `from` (0: one that
+/// is being created) of `tenant`: it must exist, belong to the same tenant,
+/// and not lead back to `from`.
+fn dead_letter_target(
+    view: &ClusterView<'_>,
+    state: &MetadataState,
+    from: u64,
+    tenant: &str,
+    name: &str,
+) -> Result<u64, String> {
+    let Some(target) = view.queues.iter().find(|q| q.name == name).map(|q| q.resource_id) else {
+        return Err(format!("there is no queue {name:?} to dead-letter into"));
+    };
+    if view.access.resources.get(&target).is_some_and(|(_, t)| t != tenant) {
+        return Err(format!("queue {name:?} belongs to another tenant than the queue"));
+    }
+    if target == from {
+        return Err("a queue cannot be its own dead-letter queue".into());
+    }
+    if !state.dead_letter_fits(from, tenant, target) {
+        return Err(format!("queue {name:?} would lead back to this queue (or is not a queue of tenant {tenant:?})"));
+    }
+    Ok(target)
+}
+
+/// Parses a queue setting a request gives: the key and, for a set, the
+/// value. `queue` resolves a dead-letter queue's name. A key given twice is
+/// refused.
+fn set_queue(
+    change: &mut QueueChange,
+    key: &str,
+    value: Option<&String>,
+    queue: &dyn Fn(&str) -> Result<u64, String>,
+) -> Result<(), String> {
+    let number = |what: &str, max: u64| -> Result<u64, String> {
+        match value {
+            None => Ok(0),
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) if n > 0 && n <= max => Ok(n),
+                _ => Err(format!("{key} = {v}: {what}")),
+            },
+        }
+    };
+    let twice = || format!("{key} is given twice");
+    match key {
+        ACK_TIMEOUT if change.ack_timeout_ms.is_none() => {
+            change.ack_timeout_ms = Some(number("a number of milliseconds above 0", u64::MAX)?)
+        }
+        MAX_DELIVERIES if change.max_deliveries.is_none() => {
+            let what = format!("a number of deliveries from 1 to {MAX_DELIVERIES_LIMIT}");
+            change.max_deliveries = Some(number(&what, u64::from(MAX_DELIVERIES_LIMIT))? as u32);
+        }
+        MESSAGE_TTL if change.message_ttl_ms.is_none() => {
+            change.message_ttl_ms = Some(number("a number of milliseconds above 0", i64::MAX as u64)?);
+        }
+        DEAD_LETTER if change.dead_letter.is_none() => {
+            change.dead_letter = Some(match value {
+                None => 0,
+                Some(name) => queue(name)?,
+            });
+        }
+        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER => return Err(twice()),
+        _ => {
+            return Err(format!(
+                "queues have no setting {key}; {ACK_TIMEOUT}, {MAX_DELIVERIES}, {MESSAGE_TTL} and {DEAD_LETTER} can be set"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -361,16 +445,21 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        // 0: the default, which `DescribeConfigs` reports as such.
-        let mut ack_timeout_ms = 0;
         let mut refused = None;
-        if req.priority_levels != 1 || req.single_active || req.dlq.is_some() {
-            refused = Some("priorities, single active consumer and dead-letter queues are not supported yet".into());
+        if req.priority_levels != 1 || req.single_active {
+            refused = Some("priorities and single active consumer are not supported yet".into());
         }
+        let mut given = QueueChange::default();
+        let mut wanted_dlq = req.dlq.clone();
         for (k, v) in &req.configs {
-            match (k.as_str(), v.parse::<u64>()) {
-                ("ack.timeout.ms", Ok(ms)) if ms > 0 => ack_timeout_ms = ms,
-                _ => refused = Some(format!("unsupported setting {k} = {v}")),
+            if k == DEAD_LETTER {
+                // The queue's own field and the setting say the same.
+                match &wanted_dlq {
+                    Some(other) if other != v => refused = Some(format!("{DEAD_LETTER} is given twice")),
+                    _ => wanted_dlq = Some(v.clone()),
+                }
+            } else if let Err(why) = set_queue(&mut given, k, Some(v), &|_| Ok(0)) {
+                refused = Some(why);
             }
         }
         if let Some(why) = refused {
@@ -380,8 +469,18 @@ impl Clients {
         else {
             return;
         };
+        let mut limits = given.applied_to(QueueLimits::default());
+        // 0: the default, which `DescribeConfigs` reports as such.
+        let ack_timeout_ms = given.ack_timeout_ms.unwrap_or(0);
+        if let Some(name) = wanted_dlq {
+            match dead_letter_target(view, replica.metadata(), 0, &req.tenant, &name) {
+                Ok(target) => limits.dead_letter = target,
+                Err(why) => return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None)),
+            }
+        }
         let voters = Self::place(view, replica, req.replication, 1).remove(0);
-        let change = Change::CreateQueue { name: req.name.clone(), tenant: req.tenant.clone(), voters, ack_timeout_ms };
+        let change =
+            Change::CreateQueue { name: req.name.clone(), tenant: req.tenant.clone(), voters, ack_timeout_ms, limits };
         let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
@@ -456,8 +555,18 @@ impl Clients {
         if let Err((code, why)) = runtime_resource(view, replica, req.resource_id) {
             return outbox.push(id, &admin_response(code, why, None));
         }
+        if let Some(user) = replica.metadata().is_dead_letter_of_any(req.resource_id) {
+            let why = format!("queue {user:?} dead-letters into it; change that setting first");
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
         let change = Change::Delete { resource_id: req.resource_id };
-        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Deleted);
+        self.propose_admin(
+            replica,
+            view.now,
+            &change,
+            (outbox, id),
+            AdminThen::Deleted { resource_id: req.resource_id },
+        );
     }
 
     pub(super) fn alter_configs<R: Runtime, S: StateMachine>(
@@ -492,27 +601,19 @@ impl Clients {
                 Change::AlterStream { resource_id: req.resource_id, change },
                 AdminThen::Altered { resource_id: req.resource_id },
             )
-        } else if replica.metadata().queues.contains_key(&req.resource_id) {
-            // `Some(0)` returns the ack timeout to its default.
-            let mut ack_timeout_ms = None;
-            let mut refused = None;
-            for (k, v) in &req.set {
-                match (k.as_str(), v.parse::<u64>()) {
-                    (ACK_TIMEOUT, Ok(ms)) if ms > 0 && ack_timeout_ms.is_none() => ack_timeout_ms = Some(ms),
-                    _ => refused = Some(format!("cannot set {k} = {v}; only {ACK_TIMEOUT} (> 0) can change, once")),
+        } else if let Some(queue) = replica.metadata().queues.get(&req.resource_id) {
+            // Each key once; 0 returns a setting to its default (off).
+            let state = replica.metadata();
+            let resolve = |name: &str| dead_letter_target(view, state, req.resource_id, &queue.tenant, name);
+            let mut change = QueueChange::default();
+            let changes = req.set.iter().map(|(k, v)| (k, Some(v))).chain(req.delete.iter().map(|k| (k, None)));
+            for (k, v) in changes {
+                if let Err(why) = set_queue(&mut change, k, v, &resolve) {
+                    return outbox.push(id, &refuse(why));
                 }
             }
-            for k in &req.delete {
-                match k.as_str() {
-                    ACK_TIMEOUT if ack_timeout_ms.is_none() => ack_timeout_ms = Some(0),
-                    _ => refused = Some(format!("cannot reset {k}; only {ACK_TIMEOUT} can change, once")),
-                }
-            }
-            let Some(ack_timeout_ms) = ack_timeout_ms.filter(|_| refused.is_none()) else {
-                return outbox.push(id, &refuse(refused.unwrap_or_else(|| "nothing to change".into())));
-            };
-            let change = Change::AlterQueue { resource_id: req.resource_id, ack_timeout_ms };
-            (change, AdminThen::Altered { resource_id: req.resource_id })
+            let then = AdminThen::AlteredQueue { resource_id: req.resource_id, change };
+            (Change::AlterQueue { resource_id: req.resource_id, change }, then)
         } else {
             return outbox.push(id, &refuse("exchanges have no settings that can change".into()));
         };
@@ -775,15 +876,34 @@ impl Clients {
         let state = replica.metadata();
         let default_ms = super::QueueConfig::DEFAULT_ACK_TIMEOUT.as_millis() as u64;
         let entry = |ms: u64, source| ConfigEntry { key: ACK_TIMEOUT.into(), value: ms.to_string(), source };
+        // A queue's limits: 0 (off) and no dead-letter queue are the defaults.
+        let limit_entries = |max: u32, ttl: u64, dlq: u64, source| {
+            let on = |set: bool| if set { source } else { config_source::DEFAULT };
+            let dlq_name = view.queues.iter().find(|q| q.resource_id == dlq).map_or(String::new(), |q| q.name.clone());
+            vec![
+                ConfigEntry { key: MAX_DELIVERIES.into(), value: max.to_string(), source: on(max != 0) },
+                ConfigEntry { key: MESSAGE_TTL.into(), value: ttl.to_string(), source: on(ttl != 0) },
+                ConfigEntry { key: DEAD_LETTER.into(), value: dlq_name, source: on(dlq != 0) },
+            ]
+        };
         let resources = req
             .resource_ids
             .iter()
             .map(|&resource_id| {
                 let configs = if let Some(q) = state.queues.get(&resource_id) {
-                    Some(vec![match q.ack_timeout_ms {
+                    let ack = match q.ack_timeout_ms {
                         0 => entry(default_ms, config_source::DEFAULT),
                         ms => entry(ms, config_source::DYNAMIC),
-                    }])
+                    };
+                    let l = q.limits;
+                    let mut all = vec![ack];
+                    all.extend(limit_entries(
+                        l.max_deliveries,
+                        l.message_ttl_ms,
+                        l.dead_letter,
+                        config_source::DYNAMIC,
+                    ));
+                    Some(all)
                 } else if let Some(st) = state.streams.get(&resource_id) {
                     Some(stream_configs(st.settings, view.admin.retention))
                 } else if state.exchanges.contains_key(&resource_id) {
@@ -793,7 +913,15 @@ impl Clients {
                 } else if let Some(q) =
                     view.queues.iter().find(|q| q.resource_id == resource_id && configured(q.resource_id))
                 {
-                    Some(vec![entry(q.ack_timeout.as_millis() as u64, config_source::STATIC)])
+                    let mut all = vec![entry(q.ack_timeout.as_millis() as u64, config_source::STATIC)];
+                    let l = q.limits;
+                    all.extend(limit_entries(
+                        l.max_deliveries,
+                        l.message_ttl_ms,
+                        q.dead_letter.unwrap_or(0),
+                        config_source::STATIC,
+                    ));
+                    Some(all)
                 } else if in_view(view, resource_id) && configured(resource_id) {
                     Some(Vec::new())
                 } else {
@@ -842,6 +970,18 @@ impl Clients {
                             if !state.queues.contains_key(resource_id) && !state.streams.contains_key(resource_id) =>
                         {
                             admin_response(ErrorCode::UNKNOWN_RESOURCE, None, None)
+                        }
+                        AdminThen::AlteredQueue { resource_id, change } => match state.queues.get(resource_id) {
+                            None => admin_response(ErrorCode::UNKNOWN_RESOURCE, None, None),
+                            Some(q) if change.holds_in(q) => admin_response(ErrorCode::NONE, None, None),
+                            Some(_) => {
+                                let why = "the change was refused when it applied (its dead-letter queue was deleted or no longer fits) or replaced since";
+                                admin_response(ErrorCode::INVALID_REQUEST, Some(why), None)
+                            }
+                        },
+                        AdminThen::Deleted { resource_id } if state.queues.contains_key(resource_id) => {
+                            let why = "a queue dead-letters into it; change that setting first";
+                            admin_response(ErrorCode::INVALID_REQUEST, Some(why), None)
                         }
                         then => then.answer(ErrorCode::NONE, 0, None),
                     };

@@ -328,6 +328,13 @@ enum Command {
         txn_id: String,
         term: u64,
     },
+    /// A queue leader's dead letters were forwarded, or could not be.
+    Forwarded {
+        group: GroupId,
+        term: u64,
+        offsets: Vec<u64>,
+        ok: bool,
+    },
 }
 
 #[derive(Default)]
@@ -639,6 +646,27 @@ async fn write_markers<R: Runtime>(
     shared.work.set();
 }
 
+/// Sends a queue leader's dead letters to the dead-letter queue and reports
+/// whether it has them. One attempt (the client retries what is retriable);
+/// the leader tries again later after a failure, which is safe: the queue
+/// that receives them knows what it took.
+async fn forward_dead_letters<R: Runtime>(
+    client: Arc<lotse_client::Client<R>>,
+    job: crate::client::ForwardJob,
+    shared: Arc<Shared>,
+) {
+    let crate::client::ForwardJob { group, term, target, offsets, batches } = job;
+    let stop = [&shared.stop];
+    let Some(result) = race(client.dead_letter(target, batches), &stop).await else { return };
+    shared.commands.lock().expect("commands lock").push_back(Command::Forwarded {
+        group,
+        term,
+        offsets,
+        ok: result.is_ok(),
+    });
+    shared.work.set();
+}
+
 /// What the main loop works with besides its groups.
 struct Around<'a, R> {
     links: &'a mut Links,
@@ -765,6 +793,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             coordinator: cfg.coordinator,
             node: NodeView { id: cfg.id, started, net: &shared.net, host },
             now: rt.now(),
+            unix_ms: rt.unix_time().as_millis() as u64,
             access: &known.access,
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
@@ -777,6 +806,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 }
                 Command::MarkersWritten { txn_id, term } => {
                     clients.markers_written(&txn_id, term, &view, groups);
+                    continue;
+                }
+                Command::Forwarded { group, term, offsets, ok } => {
+                    clients.forwarded(group, term, offsets, ok, &view, groups);
                     continue;
                 }
             };
@@ -808,6 +841,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         for job in clients.after_round(&view, groups).await? {
             let task = write_markers(rt.clone(), marker_client.clone(), job, shared.clone(), cfg.tick * 5);
             jobs.spawn(rt, task);
+        }
+        for job in clients.take_forward_jobs() {
+            jobs.spawn(rt, forward_dead_letters(marker_client.clone(), job, shared.clone()));
         }
         // After the round's answers: a request waiting on an entry learns
         // its fate before retention may compact it, which would leave the
@@ -1228,6 +1264,11 @@ impl Known {
                     0 => QueueConfig::DEFAULT_ACK_TIMEOUT,
                     ms => Duration::from_millis(ms),
                 },
+                limits: lotse_queue::Limits {
+                    max_deliveries: q.limits.max_deliveries,
+                    message_ttl_ms: q.limits.message_ttl_ms,
+                },
+                dead_letter: Some(q.limits.dead_letter).filter(|d| *d != 0),
             });
         }
         for x in state.exchanges.values() {

@@ -48,7 +48,7 @@ pub(crate) enum Change {
     /// A stream; one voter set per partition.
     CreateStream { name: String, tenant: String, partitions: Vec<Vec<NodeId>>, settings: StreamSettings },
     /// A queue and its voters; an ack timeout of 0 is the default.
-    CreateQueue { name: String, tenant: String, voters: Vec<NodeId>, ack_timeout_ms: u64 },
+    CreateQueue { name: String, tenant: String, voters: Vec<NodeId>, ack_timeout_ms: u64, limits: QueueLimits },
     /// An exchange.
     DeclareExchange { name: String, tenant: String, kind: ExchangeKind },
     /// A binding added to an exchange.
@@ -57,8 +57,11 @@ pub(crate) enum Change {
     Unbind { exchange_id: u64, binding: Binding },
     /// A resource deleted, with its groups.
     Delete { resource_id: u64 },
-    /// A queue's ack timeout changed; 0 returns it to the default.
-    AlterQueue { resource_id: u64, ack_timeout_ms: u64 },
+    /// Some of a queue's settings set or reset: the ack timeout (0 returns
+    /// it to the default) and the limits of ADR 0055 (0 switches them off).
+    /// The others stay as they are when this applies, so two changes of
+    /// different keys both hold.
+    AlterQueue { resource_id: u64, change: QueueChange },
     /// Some of a stream's settings set or reset; the others stay as they
     /// are when this applies, so two changes of different keys both hold.
     AlterStream { resource_id: u64, change: StreamChange },
@@ -155,6 +158,43 @@ pub(crate) struct DynStream {
     pub(crate) settings: StreamSettings,
 }
 
+/// What a queue does with a message it will not deliver (again) (ADR 0055);
+/// 0 switches each off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QueueLimits {
+    /// `max.deliveries`.
+    pub(crate) max_deliveries: u32,
+    /// `message.ttl.ms`.
+    pub(crate) message_ttl_ms: u64,
+    /// `dead.letter.queue`: the resource id of a queue of the same tenant.
+    pub(crate) dead_letter: u64,
+}
+
+/// What an `AlterQueue` does: each field is left (`None`) or set, 0
+/// returning it to its default or off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QueueChange {
+    pub(crate) ack_timeout_ms: Option<u64>,
+    pub(crate) max_deliveries: Option<u32>,
+    pub(crate) message_ttl_ms: Option<u64>,
+    pub(crate) dead_letter: Option<u64>,
+}
+
+impl QueueChange {
+    /// Whether the queue is as this change would leave it.
+    pub(crate) fn holds_in(&self, q: &DynQueue) -> bool {
+        self.ack_timeout_ms.is_none_or(|v| q.ack_timeout_ms == v) && self.applied_to(q.limits) == q.limits
+    }
+
+    /// `l` with this change.
+    pub(crate) fn applied_to(&self, mut l: QueueLimits) -> QueueLimits {
+        l.max_deliveries = self.max_deliveries.unwrap_or(l.max_deliveries);
+        l.message_ttl_ms = self.message_ttl_ms.unwrap_or(l.message_ttl_ms);
+        l.dead_letter = self.dead_letter.unwrap_or(l.dead_letter);
+        l
+    }
+}
+
 /// A queue created at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynQueue {
@@ -165,6 +205,7 @@ pub(crate) struct DynQueue {
     pub(crate) voters: Vec<NodeId>,
     /// 0: the default.
     pub(crate) ack_timeout_ms: u64,
+    pub(crate) limits: QueueLimits,
 }
 
 /// An exchange created at runtime.
@@ -222,7 +263,7 @@ pub(crate) struct MetadataState {
     pub(crate) target_at: BTreeMap<GroupId, u64>,
 }
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 impl MetadataState {
     /// The id of the runtime resource called `name`, if any.
@@ -234,6 +275,41 @@ impl MetadataState {
             .chain(self.exchanges.values().map(|x| (&x.name, x.resource_id)))
             .find(|(n, _)| n.as_str() == name)
             .map(|(_, id)| id)
+    }
+
+    /// Whether `target` is a fit dead-letter queue for the queue `from` of
+    /// `tenant`: another queue of the same tenant that does not (through its
+    /// own dead-letter queues) lead back to `from`. A configured queue (an
+    /// id below the runtime ones) is not known here: whoever proposed the
+    /// change checked it against the configuration, and it has no
+    /// dead-letter queue of its own.
+    pub(crate) fn dead_letter_fits(&self, from: u64, tenant: &str, target: u64) -> bool {
+        if target == from {
+            return false;
+        }
+        if target < DYNAMIC_BASE {
+            return true;
+        }
+        let Some(q) = self.queues.get(&target) else { return false };
+        if q.tenant != tenant {
+            return false;
+        }
+        let mut next = q.limits.dead_letter;
+        for _ in 0..=self.queues.len() {
+            if next == 0 {
+                return true;
+            }
+            if next == from {
+                return false;
+            }
+            next = self.queues.get(&next).map_or(0, |q| q.limits.dead_letter);
+        }
+        false
+    }
+
+    /// Whether some queue names `id` as its dead-letter queue.
+    pub(crate) fn is_dead_letter_of_any(&self, id: u64) -> Option<&str> {
+        self.queues.values().find(|q| q.limits.dead_letter == id).map(|q| q.name.as_str())
     }
 
     /// Whether applying a create in `tenant` may go ahead. Whether the
@@ -305,10 +381,14 @@ impl MetadataState {
                     self.streams.insert(id, DynStream { name, tenant, resource_id: id, partitions, settings });
                 }
             }
-            Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
-                if self.id_of(&name).is_none() && self.tenant_open(&tenant) {
+            Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits } => {
+                // A dead-letter queue deleted since the create was checked,
+                // or one of another tenant, leaves the queue unchanged:
+                // better not created than dead-lettering into the wrong place.
+                let fits = limits.dead_letter == 0 || self.dead_letter_fits(id, &tenant, limits.dead_letter);
+                if fits && self.id_of(&name).is_none() && self.tenant_open(&tenant) {
                     let group = group_id(index, 0);
-                    let q = DynQueue { name, tenant, resource_id: id, group, voters, ack_timeout_ms };
+                    let q = DynQueue { name, tenant, resource_id: id, group, voters, ack_timeout_ms, limits };
                     self.queues.insert(id, q);
                 }
             }
@@ -334,6 +414,11 @@ impl MetadataState {
                 }
             }
             Change::Delete { resource_id } => {
+                // A queue that another names as its dead-letter queue stays:
+                // what it receives would have nowhere to go.
+                if self.is_dead_letter_of_any(resource_id).is_some() {
+                    return Ok(());
+                }
                 let groups = if let Some(s) = self.streams.remove(&resource_id) {
                     s.partitions.len() as u32
                 } else if self.queues.remove(&resource_id).is_some() {
@@ -350,9 +435,21 @@ impl MetadataState {
                 self.bindings.remove(&resource_id);
                 self.deleted.insert(resource_id, groups);
             }
-            Change::AlterQueue { resource_id, ack_timeout_ms } => {
-                if let Some(q) = self.queues.get_mut(&resource_id) {
-                    q.ack_timeout_ms = ack_timeout_ms;
+            Change::AlterQueue { resource_id, change } => {
+                if let Some(q) = self.queues.get(&resource_id) {
+                    // All or nothing: a dead-letter queue that does not fit
+                    // (deleted, other tenant, a loop) refuses the whole change.
+                    let limits = change.applied_to(q.limits);
+                    let fits = limits.dead_letter == 0
+                        || limits.dead_letter == q.limits.dead_letter
+                        || self.dead_letter_fits(resource_id, &q.tenant, limits.dead_letter);
+                    if fits {
+                        let q = self.queues.get_mut(&resource_id).expect("checked");
+                        q.limits = limits;
+                        if let Some(ms) = change.ack_timeout_ms {
+                            q.ack_timeout_ms = ms;
+                        }
+                    }
                 }
             }
             Change::AlterStream { resource_id, change } => {
@@ -459,6 +556,7 @@ impl MetadataState {
             b.put_u64_le(q.group);
             put_nodes(&mut b, &q.voters);
             b.put_u64_le(q.ack_timeout_ms);
+            put_limits(&mut b, &q.limits);
         }
         b.put_u32_le(self.exchanges.len() as u32);
         for x in self.exchanges.values() {
@@ -550,7 +648,8 @@ impl MetadataState {
             let voters = get_nodes(b)?;
             need(b, 8)?;
             let ack_timeout_ms = b.get_u64_le();
-            s.queues.insert(resource_id, DynQueue { name, tenant, resource_id, group, voters, ack_timeout_ms });
+            let limits = get_limits(b)?;
+            s.queues.insert(resource_id, DynQueue { name, tenant, resource_id, group, voters, ack_timeout_ms, limits });
         }
         for _ in 0..count(b)? {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
@@ -647,12 +746,13 @@ fn change_bytes(change: &Change) -> Bytes {
             }
             put_settings(&mut b, settings);
         }
-        Change::CreateQueue { name, tenant, voters, ack_timeout_ms } => {
+        Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits } => {
             b.put_u8(1);
             put_str(&mut b, name);
             put_str(&mut b, tenant);
             put_nodes(&mut b, voters);
             b.put_u64_le(*ack_timeout_ms);
+            put_limits(&mut b, limits);
         }
         Change::DeclareExchange { name, tenant, kind } => {
             b.put_u8(2);
@@ -669,10 +769,18 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(5);
             b.put_u64_le(*resource_id);
         }
-        Change::AlterQueue { resource_id, ack_timeout_ms } => {
+        Change::AlterQueue { resource_id, change } => {
             b.put_u8(6);
             b.put_u64_le(*resource_id);
-            b.put_u64_le(*ack_timeout_ms);
+            let mask = u8::from(change.ack_timeout_ms.is_some())
+                | u8::from(change.max_deliveries.is_some()) << 1
+                | u8::from(change.message_ttl_ms.is_some()) << 2
+                | u8::from(change.dead_letter.is_some()) << 3;
+            b.put_u8(mask);
+            b.put_u64_le(change.ack_timeout_ms.unwrap_or(0));
+            b.put_u32_le(change.max_deliveries.unwrap_or(0));
+            b.put_u64_le(change.message_ttl_ms.unwrap_or(0));
+            b.put_u64_le(change.dead_letter.unwrap_or(0));
         }
         Change::AlterStream { resource_id, change } => {
             b.put_u8(11);
@@ -749,7 +857,8 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         1 => {
             let (name, tenant, voters) = (get_str(b)?, get_str(b)?, get_nodes(b)?);
             need(b, 8)?;
-            Change::CreateQueue { name, tenant, voters, ack_timeout_ms: b.get_u64_le() }
+            let ack_timeout_ms = b.get_u64_le();
+            Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits: get_limits(b)? }
         }
         2 => {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
@@ -768,8 +877,17 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             Change::Delete { resource_id: b.get_u64_le() }
         }
         6 => {
-            need(b, 16)?;
-            Change::AlterQueue { resource_id: b.get_u64_le(), ack_timeout_ms: b.get_u64_le() }
+            need(b, 8 + 1 + 8 + 4 + 8 + 8)?;
+            let resource_id = b.get_u64_le();
+            let mask = b.get_u8();
+            let (ack, max, ttl, dlq) = (b.get_u64_le(), b.get_u32_le(), b.get_u64_le(), b.get_u64_le());
+            let change = QueueChange {
+                ack_timeout_ms: (mask & 1 != 0).then_some(ack),
+                max_deliveries: (mask & 2 != 0).then_some(max),
+                message_ttl_ms: (mask & 4 != 0).then_some(ttl),
+                dead_letter: (mask & 8 != 0).then_some(dlq),
+            };
+            Change::AlterQueue { resource_id, change }
         }
         7 => {
             let user = get_str(b)?;
@@ -824,6 +942,17 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         return Err("metadata record has trailing bytes".into());
     }
     Ok(change)
+}
+
+fn put_limits(b: &mut BytesMut, l: &QueueLimits) {
+    b.put_u32_le(l.max_deliveries);
+    b.put_u64_le(l.message_ttl_ms);
+    b.put_u64_le(l.dead_letter);
+}
+
+fn get_limits(b: &mut &[u8]) -> Result<QueueLimits, String> {
+    need(b, 20)?;
+    Ok(QueueLimits { max_deliveries: b.get_u32_le(), message_ttl_ms: b.get_u64_le(), dead_letter: b.get_u64_le() })
 }
 
 fn need(b: &&[u8], n: usize) -> Result<(), String> {

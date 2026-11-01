@@ -89,6 +89,29 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.create(name, &req).await
     }
 
+    /// Creates a queue with settings: `ack.timeout.ms`, `max.deliveries` and
+    /// `message.ttl.ms` in `configs`, and the name of a queue of the same
+    /// tenant that receives the messages the limits retire (without one they
+    /// are dropped). Returns its id.
+    pub async fn create_queue_with(
+        &self,
+        name: &str,
+        replication: u8,
+        configs: &[(&str, &str)],
+        dead_letter: Option<&str>,
+    ) -> Result<u64, ClientError> {
+        let req = Request::CreateQueue(CreateQueueRequest {
+            name: name.into(),
+            tenant: self.cfg.tenant.clone(),
+            priority_levels: 1,
+            single_active: false,
+            dlq: dead_letter.map(str::to_string),
+            replication,
+            configs: configs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        });
+        self.create(name, &req).await
+    }
+
     /// Declares an exchange; returns its id.
     pub async fn declare_exchange(&self, name: &str, kind: ExchangeKind) -> Result<u64, ClientError> {
         let req = Request::DeclareExchange(DeclareExchangeRequest {

@@ -14,11 +14,13 @@
 #![warn(missing_docs)]
 
 mod dispatch;
+mod limits;
 mod log;
 mod ranges;
 
 pub use dispatch::{ConnId, Delivery, Dispatcher, SubscriptionId};
-pub use log::QueueLog;
+pub use limits::{Limits, exhausted};
+pub use log::{Owed, QueueLog};
 pub use ranges::RangeSet;
 
 #[cfg(test)]

@@ -39,6 +39,15 @@ impl RangeSet {
         self.ranges.insert(from, to);
     }
 
+    /// The part of the set at or above `from`.
+    pub fn from(&self, from: u64) -> RangeSet {
+        let mut out = RangeSet::new();
+        for (f, t) in self.iter() {
+            out.insert(f.max(from), t);
+        }
+        out
+    }
+
     /// Whether `offset` is in the set.
     pub fn contains(&self, offset: u64) -> bool {
         self.ranges.range(..=offset).next_back().is_some_and(|(_, &t)| offset < t)

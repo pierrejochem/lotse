@@ -119,6 +119,9 @@ impl ApiKey {
     pub const DESCRIBE_NODES: ApiKey = ApiKey(42);
     /// A group's leader reports the voters in place (internal, node to node).
     pub const SETTLE_VOTERS: ApiKey = ApiKey(43);
+    /// A queue's leader forwards messages to its dead-letter queue (internal,
+    /// node to node).
+    pub const DEAD_LETTER: ApiKey = ApiKey(44);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -141,7 +144,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 41] = [
+    pub const SUPPORTED: [ApiVersionRange; 42] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -183,6 +186,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::REMOVE_NODE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_NODES, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::SETTLE_VOTERS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DEAD_LETTER, min: 0, max: 0 },
     ];
 }
 
@@ -436,6 +440,8 @@ pub enum Request {
     DescribeNodes(DescribeNodesRequest),
     /// [`ApiKey::SETTLE_VOTERS`].
     SettleVoters(SettleVotersRequest),
+    /// [`ApiKey::DEAD_LETTER`].
+    DeadLetter(DeadLetterRequest),
 }
 
 impl Request {
@@ -483,6 +489,7 @@ impl Request {
             Request::RemoveNode(_) => ApiKey::REMOVE_NODE,
             Request::DescribeNodes(_) => ApiKey::DESCRIBE_NODES,
             Request::SettleVoters(_) => ApiKey::SETTLE_VOTERS,
+            Request::DeadLetter(_) => ApiKey::DEAD_LETTER,
         }
     }
 }
@@ -606,6 +613,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::RemoveNode(r) => r.put(&mut w),
         Request::DescribeNodes(r) => r.put(&mut w),
         Request::SettleVoters(r) => r.put(&mut w),
+        Request::DeadLetter(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -667,6 +675,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::REMOVE_NODE => Request::RemoveNode(RemoveNodeRequest::get(&mut r)?),
         ApiKey::DESCRIBE_NODES => Request::DescribeNodes(DescribeNodesRequest::get(&mut r)?),
         ApiKey::SETTLE_VOTERS => Request::SettleVoters(SettleVotersRequest::get(&mut r)?),
+        ApiKey::DEAD_LETTER => Request::DeadLetter(DeadLetterRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -785,7 +794,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::END_TXN => Response::EndTxn(EndTxnResponse::get(&mut r)?),
         ApiKey::WRITE_TXN_MARKERS => Response::WriteTxnMarkers(WriteTxnMarkersResponse::get(&mut r)?),
         ApiKey::SUBSCRIBE => Response::Subscribe(SubscribeResponse::get(&mut r)?),
-        ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE | ApiKey::BIND | ApiKey::UNBIND => {
+        ApiKey::ACK | ApiKey::NACK | ApiKey::UNSUBSCRIBE | ApiKey::BIND | ApiKey::UNBIND | ApiKey::DEAD_LETTER => {
             Response::Outcome(OutcomeResponse::get(&mut r)?)
         }
         ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {

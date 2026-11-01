@@ -752,6 +752,51 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// Internal, used by a queue's leader: forwards dead-lettered messages
+    /// (one-record batches that carry their origin) to the dead-letter queue
+    /// `resource_id`, retrying until its leader answers. Returns once the
+    /// queue has them committed. Sending the same message again is harmless.
+    pub async fn dead_letter(&self, resource_id: u64, batches: Vec<Bytes>) -> Result<(), ClientError> {
+        let name = self.name_of(resource_id).await?;
+        self.retrying(|| self.dead_letter_once(&name, resource_id, batches.clone())).await
+    }
+
+    async fn name_of(&self, resource_id: u64) -> Result<String, ClientError> {
+        let known = self.names.lock().expect("names lock").get(&resource_id).cloned();
+        if let Some(n) = known {
+            return Ok(n);
+        }
+        self.metadata(&[]).await?;
+        self.names
+            .lock()
+            .expect("names lock")
+            .get(&resource_id)
+            .cloned()
+            .ok_or_else(|| ClientError::UnknownStream(format!("#{resource_id}"), 0))
+    }
+
+    async fn dead_letter_once(&self, name: &str, resource_id: u64, batches: Vec<Bytes>) -> Result<(), Attempt> {
+        let (_, addr) = self.route(name, 0).await?;
+        let req = Request::DeadLetter(lotse_proto::DeadLetterRequest { queue_id: resource_id, batches });
+        let resp = match self.call(&addr, &req).await {
+            Ok(Response::Outcome(r)) => r,
+            Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            // Messages are recognised when they come again: send again.
+            Err(e) => {
+                self.forget(name, 0);
+                return Err(e.into());
+            }
+        };
+        match resp.error {
+            ErrorCode::NONE => Ok(()),
+            code if code.retriable() => {
+                self.forget(name, 0);
+                Err(Attempt::Retry(code.to_string()))
+            }
+            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+        }
+    }
+
     /// Internal, used by a node's transaction coordinator: writes a marker
     /// into one partition, retrying until its leader answers. Returns
     /// [`ErrorCode::NONE`] once the marker is written (or not needed), or
