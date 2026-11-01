@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# SDK build output
+sdk/**/build/
+.gradle/

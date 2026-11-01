@@ -2,10 +2,10 @@
 ADDR ?= 127.0.0.1:8080
 
 .DEFAULT_GOAL := help
-.PHONY: help dev stop build web test lint fmt check clean
+.PHONY: help dev stop build web test lint fmt check clean sdk-test sdk-vectors sdk-vectors-check
 
 help: ## List the targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-8s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-18s %s\n", $$1, $$2}'
 
 console/web/node_modules: console/web/package-lock.json
 	cd console/web && npm ci
@@ -38,6 +38,19 @@ fmt: ## Format the code
 check: ## What CI checks first: format, clippy, tests
 	cargo fmt --all --check
 	$(MAKE) lint test
+
+VECTORS = cargo run -q -p lotse-proto --features samples --example vectors --
+
+sdk-vectors: ## Regenerate the golden vectors in sdk/conformance from the Rust codec
+	$(VECTORS) sdk/conformance
+
+sdk-vectors-check: ## Fail if sdk/conformance differs from what the Rust codec writes now
+	@dir=$$(mktemp -d) && trap 'rm -rf "$$dir"' EXIT && \
+		$(VECTORS) "$$dir" && \
+		diff -r sdk/conformance "$$dir" && echo "sdk/conformance matches the Rust codec"
+
+sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK against them
+	cd sdk/java && ./gradlew test
 
 clean: ## Remove build output of the web app and cargo
 	rm -rf console/web/dist
