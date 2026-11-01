@@ -9,11 +9,11 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
 
 /** Finds the {@code lotse} executable the tests that need a real node or real certificates use. */
-final class LotseBinary {
+public final class LotseBinary {
     private LotseBinary() {}
 
     /** {@code LOTSE_BIN}, else the cargo target directory's debug build. {@code null} if there is none. */
-    static Path find() {
+    public static Path find() {
         String env = System.getenv("LOTSE_BIN");
         if (env != null && !env.isBlank()) {
             Path p = Path.of(env);
@@ -32,7 +32,7 @@ final class LotseBinary {
     }
 
     /** The executable, or the test is skipped with a message that says how to get one. */
-    static Path require() {
+    public static Path require() {
         Path bin = find();
         if (bin == null) {
             String why = "SKIPPED: no lotse executable. Build one with `cargo build -p lotse-node` and set LOTSE_BIN "
@@ -44,7 +44,7 @@ final class LotseBinary {
     }
 
     /** Runs the executable and returns its output; fails on a non-zero exit. */
-    static String run(Path bin, String... args) throws IOException, InterruptedException {
+    public static String run(Path bin, String... args) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>();
         command.add(bin.toString());
         command.addAll(List.of(args));
