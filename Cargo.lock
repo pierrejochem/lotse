@@ -859,6 +859,7 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "crc32c",
+ "lotse-auth",
  "lotse-record",
  "thiserror 2.0.21",
 ]

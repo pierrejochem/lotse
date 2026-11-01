@@ -21,12 +21,16 @@
 //! varints.txt       <kind> <value> <hex>
 //! crc32c.txt        <label> <hex of the input> <crc as 8 hex digits>
 //! error-codes.txt   <code> <name> <retriable>
+//! scram.txt         <label> <user hex> <password> <salt hex> <iterations> <client nonce> <server nonce>
+//!                   <client first hex> <server first hex> <client final hex> <server final hex>
+//!                   <stored key hex> <server key hex>
 //! ```
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use bytes::Bytes;
+use lotse_auth::scram::{ScramClient, ScramCredential, ScramServer};
 use lotse_proto::samples;
 use lotse_proto::{ApiKey, ErrorCode, Response, decode_request, encode_push, encode_request, encode_response};
 use lotse_record::{
@@ -405,5 +409,48 @@ fn main() {
         "error-codes.txt",
         "Error codes, their names and whether the same request may succeed later.\ncode name retriable",
         &codes,
+    );
+
+    // Whole SCRAM-SHA-512 exchanges with fixed nonces, from the broker's own
+    // implementation, so a client in another language can check itself
+    // byte for byte.
+    #[allow(clippy::type_complexity)]
+    let cases: [(&str, &str, &str, &[u8], u32, &str, &str); 5] = [
+        ("plain", "alice", "s3cret", b"0123456789abcdef", 4096, "clientnonce", "servernonce"),
+        ("escaped-user", "a,b=c", "pw", b"saltsaltsaltsalt", 4096, "cn", "sn"),
+        ("utf8-password", "bob", "p\u{e4}ssw\u{f6}rd \u{1f510}", b"\x00\x01\x02\xfe\xff-salt-bytes", 5000, "c1", "s1"),
+        ("empty-password", "carol", "", b"0123456789abcdef", 4096, "c2", "s2"),
+        ("long-salt", "dave", "a long password, with spaces and punctuation: =,", &[7u8; 64], 4097, "c3", "s3"),
+    ];
+    let scram: Vec<String> = cases
+        .iter()
+        .map(|(label, user, password, salt, iterations, cn, sn)| {
+            let credential = ScramCredential::new(password, salt, *iterations);
+            let mut client = ScramClient::new(user, password, cn);
+            let mut server = ScramServer::new();
+            let client_first = client.first();
+            let server_first = server.first(&client_first, |_| Some(credential.clone()), sn).expect("server first");
+            let client_final = client.respond(&server_first).expect("client final");
+            let (who, server_final) = server.last(&client_final).expect("server final");
+            assert_eq!(who, *user);
+            client.verify(&server_final).expect("the server proves itself");
+            format!(
+                "{label} {} {} {} {iterations} {cn} {sn} {} {} {} {} {} {}",
+                hex(user.as_bytes()),
+                nullable(Some(password.as_bytes())),
+                hex(salt),
+                hex(&client_first),
+                hex(&server_first),
+                hex(&client_final),
+                hex(&server_final),
+                hex(&credential.stored_key),
+                hex(&credential.server_key),
+            )
+        })
+        .collect();
+    out.write(
+        "scram.txt",
+        "SCRAM-SHA-512 exchanges with fixed nonces (no SASLprep: the password is its UTF-8 bytes), and the\ncredential for AlterUser. The password is written as = and its hex, so an empty one reads as =.\nlabel user_hex password salt_hex iterations client_nonce server_nonce client_first server_first client_final server_final stored_key server_key",
+        &scram,
     );
 }
