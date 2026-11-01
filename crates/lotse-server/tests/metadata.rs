@@ -620,7 +620,15 @@ async fn run(rt: SimRuntime) {
             assert!(configs.is_empty(), "{name} has settings: {configs:?}");
             continue;
         }
-        let [c] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        // The ack timeout, then the limits (ADR 0055), which this run never sets.
+        let [c, limits @ ..] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        let keys: Vec<(&str, &str, u8)> = limits.iter().map(|e| (e.key.as_str(), e.value.as_str(), e.source)).collect();
+        let off = lotse_proto::config_source::DEFAULT;
+        assert_eq!(
+            keys,
+            [("max.deliveries", "0", off), ("message.ttl.ms", "0", off), ("dead.letter.queue", "", off)],
+            "{name}: no limits were set"
+        );
         let tried = out.timeouts.get(name).cloned().unwrap_or_default();
         let ms: u64 = c.value.parse().expect("a number");
         match c.source {
