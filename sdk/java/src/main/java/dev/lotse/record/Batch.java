@@ -42,6 +42,8 @@ public final class Batch {
     public static final int MAGIC = 1;
     /** The largest batch accepted, header included. */
     public static final int MAX_BATCH_LEN = 1024 * 1024;
+    /** The most a compressed record block may decompress to. */
+    public static final int MAX_RECORDS_LEN = 16 * 1024 * 1024;
 
     static final int CRC_START = 25;
 
@@ -205,20 +207,28 @@ public final class Batch {
      * Decodes the records, checking that offset deltas run 0, 1, 2 and so on, that nothing is left over in a
      * record or after the last one, and that lengths and counts are not negative.
      *
-     * @throws RecordFormatException if the records are damaged or compressed
+     * <p>A compressed block is decompressed first, each time this is called.
+     *
+     * @throws RecordFormatException if the records are damaged, or compressed with a codec whose library is not on
+     *     the class path ({@link RecordFormatException.Kind#UNSUPPORTED_COMPRESSION})
      */
     public List<BatchRecord> records() {
-        if (attributes.compression() != Compression.NONE) {
-            throw new RecordFormatException(
-                    RecordFormatException.Kind.UNSUPPORTED_COMPRESSION,
-                    "compression codec " + attributes.compression() + " is not supported yet");
+        byte[] a;
+        int pos;
+        int end;
+        if (attributes.compression() == Compression.NONE) {
+            a = bytes.array();
+            pos = bytes.offset() + HEADER_LEN;
+            end = bytes.offset() + bytes.size();
+        } else {
+            a = Codecs.decompress(
+                    attributes.compression(), bytes.array(), bytes.offset() + HEADER_LEN, bytes.size() - HEADER_LEN);
+            pos = 0;
+            end = a.length;
         }
-        byte[] a = bytes.array();
-        int end = bytes.offset() + bytes.size();
         long baseOffset = baseOffset();
         long baseTs = baseTimestamp();
         long count = recordCount();
-        int pos = bytes.offset() + HEADER_LEN;
         List<BatchRecord> out = new ArrayList<>((int) Math.min(count, 1024));
         for (long expectedDelta = 0; expectedDelta < count; expectedDelta++) {
             Varint.Decoded len = Varint.getI64(a, pos, end);

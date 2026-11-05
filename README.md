@@ -172,7 +172,7 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 ## Known gaps
 
 - ListOffsets: a time lookup reads batch headers from the first segment that may hold the time (no time index), and finds batches, not records.
-- Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK does not decompress yet; `lotse-client` compresses only what the caller builds compressed.
+- Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK needs zstd-jni and lz4-java on its class path for them (ADR 0061); `lotse-client` compresses only what the caller builds compressed.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
 - Raft: snapshots travel in chunks (1 MiB by default), one in flight per follower and collected in memory before they are installed; pipelining chunks and spilling them to disk come later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
 - Transactional ids and consumer group ids are not scoped to tenants. A removed role binding takes effect on each node once it applies the metadata group. Revocation is a CRL file the operator copies to every node (no OCSP); an open connection whose certificate expires stays open; tokens are not checked for revocation before they expire.

@@ -14,11 +14,11 @@ public final class RecordFormatException extends RuntimeException {
         UNSUPPORTED_MAGIC,
         /** The CRC does not match the content. */
         CHECKSUM,
-        /** A batch is larger than {@link Batch#MAX_BATCH_LEN}. */
+        /** A batch is larger than {@link Batch#MAX_BATCH_LEN}, or its records than {@link Batch#MAX_RECORDS_LEN}. */
         TOO_LARGE,
         /** Header fields contradict each other or the records. */
         MALFORMED,
-        /** The batch uses a compression codec this library does not read. */
+        /** The batch uses a compression codec whose library is not on the class path, or cannot be loaded. */
         UNSUPPORTED_COMPRESSION
     }
 

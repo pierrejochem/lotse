@@ -95,24 +95,35 @@ public final class BatchBuilder {
     /**
      * Finishes the batch.
      *
-     * @throws RecordFormatException if the batch is empty, compressed or larger than {@link Batch#MAX_BATCH_LEN}
+     * <p>With a codec in the options, the record block is compressed; its library must be on the class path.
+     *
+     * @throws RecordFormatException if the batch is empty, larger than {@link Batch#MAX_BATCH_LEN}, compressed with
+     *     records of more than {@link Batch#MAX_RECORDS_LEN} bytes, or compressed with a codec whose library is
+     *     missing
      */
     public ByteString finish() {
         if (count == 0) {
             throw RecordFormatException.malformed("empty batch");
         }
-        if (options.attributes().compression() != Compression.NONE) {
-            throw new RecordFormatException(
-                    RecordFormatException.Kind.UNSUPPORTED_COMPRESSION,
-                    "compression codec " + options.attributes().compression() + " is not supported yet");
+        Compression codec = options.attributes().compression();
+        byte[] block = body.array();
+        int blockLen = body.size();
+        if (codec != Compression.NONE) {
+            if (blockLen > Batch.MAX_RECORDS_LEN) {
+                throw new RecordFormatException(
+                        RecordFormatException.Kind.TOO_LARGE,
+                        "records of " + blockLen + " bytes exceed what a compressed batch may hold");
+            }
+            block = Codecs.compress(codec, block, 0, blockLen);
+            blockLen = block.length;
         }
-        long total = (long) Batch.HEADER_LEN + body.size();
+        long total = (long) Batch.HEADER_LEN + blockLen;
         if (total > Batch.MAX_BATCH_LEN) {
             throw new RecordFormatException(
                     RecordFormatException.Kind.TOO_LARGE, "batch of " + total + " bytes exceeds the limit");
         }
         byte[] buf = new byte[(int) total];
-        System.arraycopy(body.array(), 0, buf, Batch.HEADER_LEN, body.size());
+        System.arraycopy(block, 0, buf, Batch.HEADER_LEN, blockLen);
         Batch.putU32(buf, 8, total - Batch.LEN_PREFIX);
         buf[20] = Batch.MAGIC;
         Batch.putU16(buf, 25, options.attributes().toBits());

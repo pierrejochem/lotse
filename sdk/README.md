@@ -6,7 +6,7 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 | --- | --- |
 | [`PROTOCOL.md`](PROTOCOL.md) | The protocol as an implementer needs it: byte layouts, the traps, what the vectors pin down |
 | [`conformance/`](conformance/) | Golden vectors, written by Rust and read by every SDK |
-| [`java/`](java/) | Java 17, no runtime dependencies, Gradle |
+| [`java/`](java/) | Java 17, Gradle; no runtime dependencies, two optional ones for compressed batches |
 
 ## Status
 
@@ -98,10 +98,28 @@ try (var connection = Connection.open(Address.parse("127.0.0.1:9092"), options))
 - Failures: `ConnectionException` (`requestSent()` tells whether the outcome is unknown), `RequestTimeoutException`, `BrokerException` (the node refused the request as a whole), `AuthenticationException`, `InsecureTransportException`.
 - Listeners for pushes run on the connection's reader thread: hand work to another thread. A write to a node that has stopped reading can block the writing thread until the operating system gives up; there is no write timeout in `Socket`.
 
+### Compressed batches
+
+Producers may compress a batch with zstd or lz4, and the broker serves it as sent (ADR 0058). To read such batches, or to write them, put both codec libraries on the class path ([ADR 0061](../docs/adr/0061-optional-codecs-in-the-java-sdk.md)):
+
+```kotlin
+// Gradle
+implementation("dev.lotse:lotse-client:0.0.1") {
+    capabilities { requireCapability("dev.lotse:lotse-client-compression") }
+}
+// or name them yourself, also in Maven
+implementation("com.github.luben:zstd-jni:1.5.7-16")
+implementation("at.yawk.lz4:lz4-java:1.11.0")
+```
+
+- Without them everything else works, and a compressed batch fails with `RecordFormatException` of kind `UNSUPPORTED_COMPRESSION`, naming the library to add. `Fetched.committedMessages()` and a queue consumer pass that exception on as it is.
+- zstd-jni ships native libraries for the common platforms; on one it has none for, zstd batches fail the same way.
+- To compress, name the codec in the batch's options: `new BatchBuilder(new BatchOptions(new Attributes(Compression.ZSTD, false, false, BatchKind.DATA), 0, 0, -1))`. A compressed batch holds at most 16 MiB of records and is at most 1 MiB itself. Nothing compresses by default.
+
 ## Build and test
 
 ```sh
-make sdk-test            # check the vectors against Rust, then run the Java tests
+make sdk-test            # check the vectors against Rust, then run the Java tests, with and without the codec libraries
 LOTSE_BIN=/path/to/lotse make sdk-test   # also the tests that need real certificates and a real node
 make sdk-vectors         # regenerate sdk/conformance after changing the protocol
 ```

@@ -203,15 +203,13 @@ class BatchChecksTest {
     }
 
     @Test
-    void aCompressedBatchParsesButIsNotDecoded() {
+    void aCompressedBatchParsesBeforeItsBlockIsDecoded() {
+        // The header is checked without the codec; the block only when the records are read.
         byte[] b = sample();
         Batch.putU16(b, 25, 1);
         Batch batch = Batch.parse(ByteString.copyOf(sum(b))).batch();
         assertEquals(Compression.ZSTD, batch.attributes().compression());
-        assertEquals(Kind.UNSUPPORTED_COMPRESSION, assertThrows(RecordFormatException.class, batch::records).kind());
-        BatchBuilder builder = new BatchBuilder(new BatchOptions(new Attributes(Compression.LZ4, false, false, BatchKind.DATA), 0, 0, -1));
-        builder.push(1, null, null);
-        assertEquals(Kind.UNSUPPORTED_COMPRESSION, assertThrows(RecordFormatException.class, builder::finish).kind());
+        assertEquals(Kind.MALFORMED, assertThrows(RecordFormatException.class, batch::records).kind());
     }
 
     @Test

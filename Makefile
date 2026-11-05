@@ -50,7 +50,7 @@ sdk-vectors-check: ## Fail if sdk/conformance differs from what the Rust codec w
 		diff -r sdk/conformance "$$dir" && echo "sdk/conformance matches the Rust codec"
 
 sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK against them
-	cd sdk/java && ./gradlew test
+	cd sdk/java && ./gradlew test testWithoutCodecs
 
 clean: ## Remove build output of the web app and cargo
 	rm -rf console/web/dist

@@ -243,7 +243,7 @@ Requests auf einer Verbindung werden gepipelined; Antworten kommen pro Partition
 
 Das Längenfeld ist das des Transports: Eine `Net`-Verbindung trägt ganze Frames, auf TCP mit `u32`-Präfix in Big-Endian-Byte-Order (alle anderen Felder sind Little-Endian), und der Codec beginnt danach. Eine Antwort, deren Body nur aus einem Fehlercode besteht (der Request ließ sich gar nicht bedienen, etwa `UNSUPPORTED_VERSION`), setzt das Flag `ERROR` (2).
 
-Client-SDKs für andere Sprachen (zuerst die JVM, ADR 0056) liegen in `sdk/`. Maßgeblich bleibt der Rust-Code; `sdk/PROTOCOL.md` beschreibt das Protokoll für Implementierer, und `sdk/conformance` enthält Golden Vectors, die `lotse-proto` schreibt und jedes SDK lesen und unverändert wieder schreiben muss.
+Client-SDKs für andere Sprachen (zuerst die JVM, ADR 0056) liegen in `sdk/`. Maßgeblich bleibt der Rust-Code; `sdk/PROTOCOL.md` beschreibt das Protokoll für Implementierer, und `sdk/conformance` enthält Golden Vectors, die `lotse-proto` schreibt und jedes SDK lesen und unverändert wieder schreiben muss. Das Java-SDK liest und schreibt zstd- und lz4-Batches über zstd-jni und lz4-java, optionale Abhängigkeiten; fehlen sie, lehnt es komprimierte Batches mit einem Fehler ab, der die fehlende Bibliothek nennt (ADR 0061).
 
 ### Verbindungsaufbau
 

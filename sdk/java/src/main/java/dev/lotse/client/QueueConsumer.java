@@ -261,6 +261,10 @@ public final class QueueConsumer implements AutoCloseable {
         try {
             records = Batch.parse(push.batch()).batch().records();
         } catch (RecordFormatException e) {
+            // A codec library missing here is no damage: say which one to add (ADR 0061).
+            if (e.kind() == RecordFormatException.Kind.UNSUPPORTED_COMPRESSION) {
+                throw e;
+            }
             throw new ClientException.Broker(ErrorCode.CORRUPT_BATCH, e.getMessage());
         }
         // The batch is as stored: it can hold messages that are not for this subscription.

@@ -1,12 +1,16 @@
 package dev.lotse.record;
 
-/** Compression of the record block. Only {@link #NONE} can be read or written so far. */
+/**
+ * Compression of the record block. {@link #ZSTD} and {@link #LZ4} need their libraries on the class path
+ * ({@code com.github.luben:zstd-jni}, {@code at.yawk.lz4:lz4-java}); without them such batches are refused with
+ * {@link RecordFormatException.Kind#UNSUPPORTED_COMPRESSION}.
+ */
 public enum Compression {
     /** Records are stored as is. */
     NONE(0),
-    /** zstd (not supported yet). */
+    /** One zstd frame. */
     ZSTD(1),
-    /** lz4 frame format (not supported yet). */
+    /** One LZ4 frame (the frame format, not the bare block format). */
     LZ4(2);
 
     private final int code;

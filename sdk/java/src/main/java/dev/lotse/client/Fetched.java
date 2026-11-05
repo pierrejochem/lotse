@@ -133,13 +133,22 @@ public final class Fetched {
         return out;
     }
 
-    /** The records of {@link #committedBatches()}, in offset order. */
+    /**
+     * The records of {@link #committedBatches()}, in offset order.
+     *
+     * @throws RecordFormatException of kind {@code UNSUPPORTED_COMPRESSION} if a batch is compressed with a codec
+     *     whose library is not on the class path
+     */
     public List<BatchRecord> committedMessages() {
         List<BatchRecord> out = new ArrayList<>();
         for (Batch b : committedBatches()) {
             try {
                 out.addAll(b.records());
             } catch (RecordFormatException e) {
+                // A codec library missing here is no damage: say which one to add (ADR 0061).
+                if (e.kind() == RecordFormatException.Kind.UNSUPPORTED_COMPRESSION) {
+                    throw e;
+                }
                 throw new ClientException.Broker(ErrorCode.CORRUPT_BATCH, e.getMessage());
             }
         }

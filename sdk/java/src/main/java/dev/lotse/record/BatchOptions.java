@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * Header fields chosen by the producer.
  *
- * @param attributes attributes; compression must be {@link Compression#NONE}
+ * @param attributes attributes; a codec other than {@link Compression#NONE} needs its library on the class path
  * @param producerId producer id, a {@code u64}; {@code 0} for producers that are not idempotent
  * @param producerEpoch producer epoch, a {@code u16}
  * @param baseSequence sequence number of the first record; {@code -1} when there is none
