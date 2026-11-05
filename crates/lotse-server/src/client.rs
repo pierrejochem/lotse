@@ -65,6 +65,7 @@ mod admin;
 mod coord;
 mod groups;
 mod nodes;
+mod offsets;
 pub(crate) use nodes::{managed_groups, moving};
 mod queues;
 mod retire;
@@ -422,6 +423,7 @@ impl Clients {
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
+            Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };

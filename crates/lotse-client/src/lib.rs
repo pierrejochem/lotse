@@ -197,6 +197,18 @@ impl ClientConfig {
     }
 }
 
+/// A point in a partition to look up with [`Client::list_offset`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetAt {
+    /// The first offset still stored.
+    Earliest,
+    /// The offset after the last one a read_committed reader may see.
+    Latest,
+    /// Milliseconds since the epoch: the first batch with a record at or
+    /// after it.
+    Time(i64),
+}
+
 /// Records read from one partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
@@ -966,6 +978,58 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 offset,
                 log_start: p.log_start_offset,
             })),
+            code => {
+                if code == ErrorCode::UNKNOWN_RESOURCE {
+                    self.forget(stream, partition);
+                }
+                Err(Attempt::Fail(ClientError::Broker { code, message: None }))
+            }
+        }
+    }
+
+    /// Where `at` falls in a partition, as a read_committed reader sees it
+    /// (ADR 0059): [`OffsetAt::Earliest`] is the first offset still stored,
+    /// [`OffsetAt::Latest`] the offset after the last one it may read, and
+    /// [`OffsetAt::Time`] the first offset of the first batch with a record
+    /// at or after that time, or the latest offset if there is none yet.
+    pub async fn list_offset(&self, stream: &str, partition: u32, at: OffsetAt) -> Result<u64, ClientError> {
+        self.retrying(|| self.list_offset_once(stream, partition, at)).await
+    }
+
+    async fn list_offset_once(&self, stream: &str, partition: u32, at: OffsetAt) -> Result<u64, Attempt> {
+        let (route, addr) = self.route(stream, partition).await?;
+        let timestamp = match at {
+            OffsetAt::Earliest => lotse_proto::list_offsets::EARLIEST,
+            OffsetAt::Latest => lotse_proto::list_offsets::LATEST,
+            OffsetAt::Time(ms) => ms.max(0),
+        };
+        let req = Request::ListOffsets(lotse_proto::ListOffsetsRequest {
+            isolation: isolation::COMMITTED,
+            resources: vec![lotse_proto::ListOffsetsResource {
+                resource_id: route.resource_id,
+                partitions: vec![lotse_proto::ListOffsetsPartition { partition, timestamp }],
+            }],
+        });
+        let resp = match self.call(&addr, &req).await {
+            Ok(Response::ListOffsets(r)) => r,
+            Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) => {
+                self.forget(stream, partition);
+                return Err(e.into());
+            }
+        };
+        let p = resp
+            .resources
+            .into_iter()
+            .next()
+            .and_then(|r| r.partitions.into_iter().next())
+            .ok_or_else(|| Attempt::Retry("empty list-offsets response".into()))?;
+        match p.error {
+            ErrorCode::NONE => Ok(p.offset),
+            code if code.retriable() => {
+                self.redirect(stream, partition, p.leader_hint);
+                Err(Attempt::Retry(code.to_string()))
+            }
             code => {
                 if code == ErrorCode::UNKNOWN_RESOURCE {
                     self.forget(stream, partition);

@@ -27,7 +27,7 @@ use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{Clock, Rng, Spawn};
 use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine, StreamConfig};
-use lotse_sim::{Sim, SimRuntime, check_seeds};
+use lotse_sim::{Sim, SimRuntime, check_few_seeds, check_seeds};
 
 #[derive(Debug, Default)]
 struct Nothing;
@@ -197,7 +197,12 @@ async fn processor(rt: SimRuntime, name: String, out: Arc<Mutex<Outcomes>>, stop
                 ..client_config()
             },
         );
-        let cfg = GroupConfig { session_timeout: SESSION, rebalance_timeout: SESSION, auto_commit: false };
+        let cfg = GroupConfig {
+            session_timeout: SESSION,
+            rebalance_timeout: SESSION,
+            auto_commit: false,
+            ..GroupConfig::default()
+        };
         let mut consumer = match client.join_group("pipe", &["in"], cfg).await {
             Ok(c) => c,
             Err(ClientError::GaveUp(..)) => continue,
@@ -379,4 +384,58 @@ async fn run(rt: SimRuntime) {
 #[test]
 fn a_consumer_group_processes_every_message_exactly_once() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
+}
+
+/// A group with no committed offsets starts where `start_from` says (ADR
+/// 0059): at the end, only what comes after; at a time, from the first batch
+/// with a record at or after it; at the start, everything.
+#[test]
+fn a_new_group_starts_where_it_is_told() {
+    check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let _w = World::new(rt.clone()).await;
+            let client = Client::new(rt.clone(), client_config());
+            // Old messages at 1,000 ms and 2,000 ms after the epoch, by the
+            // records' own timestamps, all into partition 0.
+            for (value, ts) in [("old-a", 1_000), ("old-b", 2_000)] {
+                let mut b = BatchBuilder::new(BatchOptions::default());
+                b.push(ts, None, Some(value.as_bytes()), &[]);
+                client.produce("in", 0, b.finish().unwrap()).await.expect("produced");
+            }
+            let read_all = async |group: &str, start_from, then: &[&str], want: usize| {
+                let cfg = GroupConfig { start_from, ..GroupConfig::default() };
+                let mut consumer = client.join_group(group, &["in"], cfg).await.expect("joined");
+                // Own partition 0 and know where to start before more comes.
+                let mut seen = Vec::new();
+                for _ in 0..50 {
+                    seen.extend(consumer.poll(TICK * 20).await.expect("polled").into_iter().map(value_of));
+                    if consumer.positions().contains_key(&("in".to_string(), 0)) {
+                        break;
+                    }
+                }
+                for value in then {
+                    let mut b = BatchBuilder::new(BatchOptions::default());
+                    b.push(3_000, None, Some(value.as_bytes()), &[]);
+                    client.produce("in", 0, b.finish().unwrap()).await.expect("produced");
+                }
+                for _ in 0..100 {
+                    if seen.len() >= want {
+                        break;
+                    }
+                    seen.extend(consumer.poll(TICK * 20).await.expect("polled").into_iter().map(value_of));
+                }
+                seen
+            };
+            let latest = read_all("from-latest", lotse_client::OffsetAt::Latest, &["new-1"], 1).await;
+            assert_eq!(latest, ["new-1"], "from the end: only what came after");
+            let timed = read_all("from-time", lotse_client::OffsetAt::Time(1_500), &["new-2"], 3).await;
+            assert_eq!(timed, ["old-b", "new-1", "new-2"], "from 1,500 ms: old-b and later");
+            let all = read_all("from-start", lotse_client::OffsetAt::Earliest, &[], 4).await;
+            assert_eq!(all, ["old-a", "old-b", "new-1", "new-2"], "from the start: everything");
+        })
+    });
+}
+
+fn value_of(r: lotse_client::GroupRecord) -> String {
+    String::from_utf8(r.record.value.expect("a value").to_vec()).unwrap()
 }

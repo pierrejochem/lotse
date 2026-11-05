@@ -97,6 +97,7 @@ public final class Frames {
             case 2 -> request = Request.FindCoordinator.read(r);
             case 3 -> request = Request.Produce.read(r);
             case 4 -> request = Request.Fetch.read(r);
+            case 5 -> request = Request.ListOffsets.read(r);
             case 6 -> request = Request.GroupHeartbeat.read(r);
             case 7 -> request = Request.CommitOffsets.read(r);
             case 8 -> request = Request.OffsetFetch.read(r);
@@ -207,6 +208,7 @@ public final class Frames {
             case 8 -> response = Response.OffsetFetch.read(r);
             case 3 -> response = Response.Produce.read(r);
             case 4 -> response = Response.Fetch.read(r);
+            case 5 -> response = Response.ListOffsets.read(r);
             default -> throw DecodeException.malformed("unknown API key");
         }
         r.finish();

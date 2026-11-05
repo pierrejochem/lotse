@@ -3021,3 +3021,139 @@ impl VerifyTxnRequest {
         Ok(req)
     }
 }
+
+/// What [`ListOffsetsPartition::timestamp`] may ask for besides a time.
+pub mod list_offsets {
+    /// The offset after the last one a reader may see: the high watermark,
+    /// or the last stable offset for read_committed.
+    pub const LATEST: i64 = -1;
+    /// The first offset still in the log.
+    pub const EARLIEST: i64 = -2;
+}
+
+/// Looks up offsets in stream partitions by time, or at either end (ADR 0059).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListOffsetsRequest {
+    /// [`isolation`]: what `LATEST` means and where a time lookup stops.
+    pub isolation: u8,
+    /// The partitions, per stream.
+    pub resources: Vec<ListOffsetsResource>,
+}
+
+/// The partitions of one stream to look up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListOffsetsResource {
+    /// The stream.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<ListOffsetsPartition>,
+}
+
+/// One partition to look up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListOffsetsPartition {
+    /// Partition number.
+    pub partition: u32,
+    /// Milliseconds since the epoch, or [`list_offsets::LATEST`] or
+    /// [`list_offsets::EARLIEST`].
+    pub timestamp: i64,
+}
+
+impl ListOffsetsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u8(self.isolation);
+        w.array(&self.resources, |w, res| {
+            w.u64(res.resource_id);
+            w.array(&res.partitions, |w, p| {
+                w.u32(p.partition);
+                w.i64(p.timestamp);
+                w.no_tags();
+            });
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let isolation = r.u8()?;
+        let resources = r.array(10, |r| {
+            let resource_id = r.u64()?;
+            let partitions = r.array(13, |r| {
+                let p = ListOffsetsPartition { partition: r.u32()?, timestamp: r.i64()? };
+                r.tags()?;
+                Ok(p)
+            })?;
+            r.tags()?;
+            Ok(ListOffsetsResource { resource_id, partitions })
+        })?;
+        r.tags()?;
+        Ok(ListOffsetsRequest { isolation, resources })
+    }
+}
+
+/// The answer for one partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListOffsetsPartitionResponse {
+    /// Partition number.
+    pub partition: u32,
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The offset: for a time, the first offset of the first data batch
+    /// with a record at or after it, or the latest offset if there is none.
+    pub offset: u64,
+    /// For a time lookup that found a batch, its newest record's
+    /// timestamp; -1 otherwise.
+    pub timestamp: i64,
+    /// The leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+/// The answers for one stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListOffsetsResourceResponse {
+    /// The stream.
+    pub resource_id: u64,
+    /// Its partitions.
+    pub partitions: Vec<ListOffsetsPartitionResponse>,
+}
+
+/// Answer to [`ListOffsetsRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListOffsetsResponse {
+    /// Per stream, in the order asked.
+    pub resources: Vec<ListOffsetsResourceResponse>,
+}
+
+impl ListOffsetsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.resources, |w, res| {
+            w.u64(res.resource_id);
+            w.array(&res.partitions, |w, p| {
+                w.u32(p.partition);
+                w.u16(p.error.0);
+                w.u64(p.offset);
+                w.i64(p.timestamp);
+                put_hint(w, p.leader_hint);
+            });
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let resources = r.array(10, |r| {
+            let resource_id = r.u64()?;
+            let partitions = r.array(23, |r| {
+                Ok(ListOffsetsPartitionResponse {
+                    partition: r.u32()?,
+                    error: ErrorCode(r.u16()?),
+                    offset: r.u64()?,
+                    timestamp: r.i64()?,
+                    leader_hint: get_hint(r)?,
+                })
+            })?;
+            r.tags()?;
+            Ok(ListOffsetsResourceResponse { resource_id, partitions })
+        })?;
+        r.tags()?;
+        Ok(ListOffsetsResponse { resources })
+    }
+}

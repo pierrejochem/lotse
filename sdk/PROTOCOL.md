@@ -217,6 +217,10 @@ The first record of a fresh partition is not at offset 0: the log begins with en
 
 `OFFSET_OUT_OF_RANGE` is not retried. The partition response's `log_start_offset` says where the log starts now; a reader that was overtaken by retention continues from there.
 
+### ListOffsets
+
+`ListOffsets` (key 5, ADR 0059) goes to the partition's leader, like `Fetch`, and answers per partition with an offset and a timestamp. `timestamp = -2` asks for the first offset still stored, `-1` for the offset after the last one the reader may see (the high watermark, or the last stable offset with `isolation = 1`), and a time in milliseconds since the epoch for the first offset of the first data batch whose newest record is at or after it; that batch's newest timestamp comes back too. If no batch qualifies, the answer is the latest offset with timestamp `-1`. Other negative timestamps are `INVALID_REQUEST`. A time lookup goes by batches: the batch it finds may begin with records older than the time asked for. A consumer group member uses it for a partition the group has committed no offset for, when it is told to start at the end or at a time.
+
 ## Client behaviour: queues
 
 These rules come from `crates/lotse-client/src/consumer.rs` and the push handling in `lib.rs`. A queue is a resource of kind 1 with one partition, 0, so routes, leader hints and `Produce` work as for a stream; messages are produced with a normal `Produce` to partition 0.

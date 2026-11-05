@@ -828,6 +828,44 @@ public sealed interface Response {
     }
 
     /**
+     * The node's answer to {@code ListOffsets}.
+     *
+     * @param resources per stream, in the order asked
+     */
+    record ListOffsets(List<ListOffsetsResourceResponse> resources) implements Response {
+        /** Creates the response. */
+        public ListOffsets {
+            resources = List.copyOf(resources);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.array(resources, (w1, res) -> {
+                w1.u64(res.resourceId());
+                w1.array(res.partitions(), (w2, p) -> {
+                    w2.u32(p.partition()).u16(p.error().code());
+                    w2.u64(p.offset()).i64(p.timestamp());
+                    Messages.putHint(w2, p.leaderHint());
+                });
+                w1.noTags();
+            });
+            w.noTags();
+        }
+
+        static ListOffsets read(Reader r) {
+            List<ListOffsetsResourceResponse> resources = r.array(10, r1 -> {
+                long id = r1.u64();
+                List<ListOffsetsPartitionResponse> partitions = r1.array(23, r2 -> new ListOffsetsPartitionResponse(
+                        r2.u32(), new ErrorCode(r2.u16()), r2.u64(), r2.i64(), Messages.getHint(r2)));
+                r1.tags();
+                return new ListOffsetsResourceResponse(id, partitions);
+            });
+            r.tags();
+            return new ListOffsets(resources);
+        }
+    }
+
+    /**
      * The node's answer to {@code Fetch}.
      *
      * @param throttleMs how long the client should wait before its next request, a {@code u32}

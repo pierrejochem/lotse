@@ -65,8 +65,10 @@ impl ApiKey {
     /// Read batches from stream partitions.
     pub const FETCH: ApiKey = ApiKey(4);
     /// A producer id and epoch for idempotent (and later transactional)
-    /// produce. Keys 5 to 15 are the stream and queue keys of the design.
+    /// produce. Keys 6 to 15 are the stream and queue keys of the design.
     pub const INIT_PRODUCER: ApiKey = ApiKey(16);
+    /// Looks up offsets by time or at either end of a partition.
+    pub const LIST_OFFSETS: ApiKey = ApiKey(5);
     /// Joins, stays in or leaves a consumer group.
     pub const GROUP_HEARTBEAT: ApiKey = ApiKey(6);
     /// Commits a group's offsets.
@@ -150,12 +152,13 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 43] = [
+    pub const SUPPORTED: [ApiVersionRange; 44] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PRODUCE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FETCH, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::LIST_OFFSETS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::INIT_PRODUCER, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::ADD_PARTITIONS_TO_TXN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::END_TXN, min: 0, max: 0 },
@@ -375,6 +378,8 @@ pub enum Request {
     Produce(ProduceRequest),
     /// [`ApiKey::FETCH`].
     Fetch(FetchRequest),
+    /// [`ApiKey::LIST_OFFSETS`].
+    ListOffsets(ListOffsetsRequest),
     /// [`ApiKey::INIT_PRODUCER`].
     InitProducer(InitProducerRequest),
     /// [`ApiKey::ADD_PARTITIONS_TO_TXN`].
@@ -462,6 +467,7 @@ impl Request {
             Request::FindCoordinator(_) => ApiKey::FIND_COORDINATOR,
             Request::Produce(_) => ApiKey::PRODUCE,
             Request::Fetch(_) => ApiKey::FETCH,
+            Request::ListOffsets(_) => ApiKey::LIST_OFFSETS,
             Request::InitProducer(_) => ApiKey::INIT_PRODUCER,
             Request::AddPartitionsToTxn(_) => ApiKey::ADD_PARTITIONS_TO_TXN,
             Request::EndTxn(_) => ApiKey::END_TXN,
@@ -559,6 +565,8 @@ pub enum Response {
     Produce(ProduceResponse),
     /// To [`Request::Fetch`].
     Fetch(FetchResponse),
+    /// To [`Request::ListOffsets`].
+    ListOffsets(ListOffsetsResponse),
     /// The request could not be served at all: an unsupported version
     /// ([`ErrorCode::UNSUPPORTED_VERSION`]), or a connection not
     /// authenticated or whose session ended ([`ErrorCode::UNAUTHORIZED`]).
@@ -588,6 +596,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::FindCoordinator(r) => r.put(&mut w),
         Request::Produce(r) => r.put(&mut w),
         Request::Fetch(r) => r.put(&mut w),
+        Request::ListOffsets(r) => r.put(&mut w),
         Request::InitProducer(r) => r.put(&mut w),
         Request::AddPartitionsToTxn(r) => r.put(&mut w),
         Request::EndTxn(r) => r.put(&mut w),
@@ -650,6 +659,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::FIND_COORDINATOR => Request::FindCoordinator(FindCoordinatorRequest::get(&mut r)?),
         ApiKey::PRODUCE => Request::Produce(ProduceRequest::get(&mut r)?),
         ApiKey::FETCH => Request::Fetch(FetchRequest::get(&mut r)?),
+        ApiKey::LIST_OFFSETS => Request::ListOffsets(ListOffsetsRequest::get(&mut r)?),
         ApiKey::INIT_PRODUCER => Request::InitProducer(InitProducerRequest::get(&mut r)?),
         ApiKey::ADD_PARTITIONS_TO_TXN => Request::AddPartitionsToTxn(AddPartitionsToTxnRequest::get(&mut r)?),
         ApiKey::END_TXN => Request::EndTxn(EndTxnRequest::get(&mut r)?),
@@ -726,6 +736,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::DescribeNodes(r) => r.put(&mut w),
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
+        Response::ListOffsets(r) => r.put(&mut w),
         Response::Error(code) => {
             w.u16(code.0);
             w.no_tags();
@@ -841,6 +852,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::OFFSET_FETCH => Response::OffsetFetch(OffsetFetchResponse::get(&mut r)?),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
+        ApiKey::LIST_OFFSETS => Response::ListOffsets(ListOffsetsResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),
     };
     r.finish()?;

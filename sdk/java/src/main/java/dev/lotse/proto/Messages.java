@@ -509,6 +509,63 @@ public final class Messages {
     public record AbortedTxn(long producerId, long firstOffset) {}
 
     /**
+     * One partition to look up with {@code ListOffsets}.
+     *
+     * @param partition partition number, a {@code u32}
+     * @param timestamp milliseconds since the epoch, or {@link ListOffsets#LATEST} or {@link ListOffsets#EARLIEST}
+     */
+    public record ListOffsetsPartition(long partition, long timestamp) {}
+
+    /**
+     * The partitions of one stream to look up.
+     *
+     * @param resourceId the stream, a {@code u64}
+     * @param partitions its partitions
+     */
+    public record ListOffsetsResource(long resourceId, List<ListOffsetsPartition> partitions) {
+        /** Creates the structure. */
+        public ListOffsetsResource {
+            partitions = List.copyOf(partitions);
+        }
+    }
+
+    /**
+     * The answer for one partition.
+     *
+     * @param partition partition number, a {@code u32}
+     * @param error outcome
+     * @param offset for a time, the first offset of the first data batch with a record at or after it, or the latest
+     *     offset if there is none; a {@code u64}
+     * @param timestamp for a time lookup that found a batch, its newest record's timestamp; -1 otherwise
+     * @param leaderHint the leader, with {@link ErrorCode#NOT_LEADER}; {@code null} if none
+     */
+    public record ListOffsetsPartitionResponse(
+            long partition, ErrorCode error, long offset, long timestamp, LeaderHint leaderHint) {}
+
+    /**
+     * The answers for one stream.
+     *
+     * @param resourceId the stream, a {@code u64}
+     * @param partitions its partitions
+     */
+    public record ListOffsetsResourceResponse(long resourceId, List<ListOffsetsPartitionResponse> partitions) {
+        /** Creates the structure. */
+        public ListOffsetsResourceResponse {
+            partitions = List.copyOf(partitions);
+        }
+    }
+
+    /** What {@link ListOffsetsPartition#timestamp} may ask for besides a time. */
+    public static final class ListOffsets {
+        private ListOffsets() {}
+
+        /** The offset after the last one a reader may see: the high watermark, or the last stable offset. */
+        public static final long LATEST = -1;
+        /** The first offset still in the log. */
+        public static final long EARLIEST = -2;
+    }
+
+    /**
      * What was read from one partition.
      *
      * @param partition partition number, a {@code u32}

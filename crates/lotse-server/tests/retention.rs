@@ -309,7 +309,12 @@ async fn member(
     until: Arc<Mutex<BTreeMap<u32, String>>>,
 ) {
     let client = Client::new(rt.clone(), client_config(n));
-    let cfg = GroupConfig { session_timeout: SESSION, rebalance_timeout: SESSION, auto_commit: true };
+    let cfg = GroupConfig {
+        session_timeout: SESSION,
+        rebalance_timeout: SESSION,
+        auto_commit: true,
+        ..GroupConfig::default()
+    };
     let mut seen_after: BTreeSet<String> = BTreeSet::new();
     let deadline = || rt.now() + Duration::from_secs(60);
     let mut give_up = None;

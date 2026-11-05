@@ -18,6 +18,8 @@ public record ApiKey(int id) {
     public static final ApiKey PRODUCE = new ApiKey(3);
     /** Reads batches from stream partitions. */
     public static final ApiKey FETCH = new ApiKey(4);
+    /** Looks up offsets by time or at either end of a partition. */
+    public static final ApiKey LIST_OFFSETS = new ApiKey(5);
     /** Joins, stays in or leaves a consumer group. */
     public static final ApiKey GROUP_HEARTBEAT = new ApiKey(6);
     /** Commits a group's offsets. */
@@ -110,6 +112,7 @@ public record ApiKey(int id) {
      */
     public static final List<ApiVersionRange> IMPLEMENTED = List.of(
             range(API_VERSIONS), range(METADATA), range(FIND_COORDINATOR), range(PRODUCE), range(FETCH),
+            range(LIST_OFFSETS),
             range(INIT_PRODUCER), range(ADD_PARTITIONS_TO_TXN), range(END_TXN), range(SUBSCRIBE), range(CREDIT),
             range(ACK), range(NACK), range(UNSUBSCRIBE), range(GROUP_HEARTBEAT), range(COMMIT_OFFSETS),
             range(OFFSET_FETCH), range(ADD_OFFSETS_TO_TXN), range(CREATE_STREAM), range(CREATE_QUEUE),

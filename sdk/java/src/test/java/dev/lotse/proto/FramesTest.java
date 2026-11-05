@@ -41,13 +41,13 @@ class FramesTest {
         assertEquals(77, e.header().correlationId());
         assertEquals(9, e.header().apiVersion());
         byte[] other = Frames.encodeRequest(5, new Request.ApiVersions());
-        other[0] = 5; // ListOffsets: not yet
+        other[0] = 9; // a key the design leaves free
         assertEquals(DecodeException.Kind.UNSUPPORTED, assertThrows(DecodeException.class, () -> Frames.decodeRequest(other)).kind());
     }
 
     @Test
     void theNodeInternalKeysAreOnlyConstants() {
-        for (ApiKey key : List.of(ApiKey.SETTLE_VOTERS, ApiKey.DEAD_LETTER, ApiKey.WRITE_TXN_MARKERS)) {
+        for (ApiKey key : List.of(ApiKey.SETTLE_VOTERS, ApiKey.DEAD_LETTER, ApiKey.VERIFY_TXN, ApiKey.WRITE_TXN_MARKERS)) {
             assertFalse(key.isImplemented(0));
             byte[] frame = Frames.encodeRequest(1, new Request.ApiVersions());
             frame[0] = (byte) key.id();
@@ -56,6 +56,7 @@ class FramesTest {
         }
         assertEquals(43, ApiKey.SETTLE_VOTERS.id());
         assertEquals(44, ApiKey.DEAD_LETTER.id());
+        assertEquals(45, ApiKey.VERIFY_TXN.id());
         assertEquals(1000, ApiKey.WRITE_TXN_MARKERS.id());
     }
 

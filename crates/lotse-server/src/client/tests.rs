@@ -1411,3 +1411,104 @@ fn a_compressed_batch_that_does_not_decode_is_never_written() {
         assert_eq!(batch.records().unwrap().len(), 50);
     });
 }
+
+fn timed_batch(ts: i64, records: u32) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    for i in 0..records {
+        b.push(ts + i64::from(i), None, Some(b"at a time"), &[]);
+    }
+    b.finish().unwrap()
+}
+
+/// `ListOffsets` (ADR 0059): the log start, the end a reader sees (the high
+/// watermark, or the last stable offset for read_committed), and the first
+/// data batch with a record at or after a time, over several segments.
+#[test]
+fn offsets_are_listed_at_both_ends_and_by_time() {
+    // Small segments, so that a lookup skips some; one segment, so that a
+    // read returns batches past the end.
+    for (seed, segment_bytes) in [(6, 300), (7, LogConfig::default().segment_bytes)] {
+        list_offsets_with(seed, segment_bytes);
+    }
+}
+
+fn list_offsets_with(seed: u64, segment_bytes: u64) {
+    Sim::new(seed).run(move |rt| async move {
+        let cfg = Config { pre_vote: false, ..Config::new(1, vec![1]) };
+        let log = LogConfig { segment_bytes, index_interval_bytes: 64 };
+        let mut r = Replica::open(rt.clone(), "g", cfg, Nothing, log).await.unwrap();
+        lead(&mut r).await;
+        // Batches at 100, 200, ... 800 ms, two records each; then an open
+        // transaction at 900 ms.
+        let mut firsts = Vec::new();
+        for i in 1..=8 {
+            let p = r.propose(timed_batch(i * 100, 2)).unwrap();
+            firsts.push(p.first - 1);
+            for _ in 0..3 {
+                r.process().await.unwrap();
+            }
+        }
+        let mut txn = bytes::BytesMut::from(&timed_batch(900, 1)[..]);
+        lotse_record::set_producer(&mut txn, 5, 0, 0).unwrap();
+        lotse_record::set_transactional(&mut txn, true).unwrap();
+        let open = r.propose(txn.freeze()).unwrap().first - 1;
+        for _ in 0..3 {
+            r.process().await.unwrap();
+        }
+        assert!(segment_bytes > 1000 || r.log().segment_count() > 2, "the batches span segments");
+        let hw = r.raft_ref().commit();
+        assert!(hw > open, "everything committed");
+
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let mut clients = Clients::default();
+        let outbox = Arc::new(Outbox::default());
+        let mut ask = async |isolation, timestamp| {
+            let req = Request::ListOffsets(lotse_proto::ListOffsetsRequest {
+                isolation,
+                resources: vec![lotse_proto::ListOffsetsResource {
+                    resource_id: 7,
+                    partitions: vec![lotse_proto::ListOffsetsPartition { partition: 0, timestamp }],
+                }],
+            });
+            let header = RequestHeader { api_key: ApiKey::LIST_OFFSETS, api_version: 0, correlation_id: 1, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request: req, principal: Principal::Anonymous };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
+            let Response::ListOffsets(r) = lotse_proto::decode_response(frame, ApiKey::LIST_OFFSETS).unwrap().1 else {
+                panic!()
+            };
+            let p = r.resources[0].partitions[0];
+            assert_eq!(p.error, ErrorCode::NONE);
+            (p.offset, p.timestamp)
+        };
+        use lotse_proto::{isolation::COMMITTED, isolation::UNCOMMITTED, list_offsets::*};
+        assert_eq!(ask(COMMITTED, EARLIEST).await, (0, -1), "the log start");
+        assert_eq!(ask(UNCOMMITTED, LATEST).await, (hw, -1), "the high watermark");
+        assert_eq!(ask(COMMITTED, LATEST).await, (open, -1), "read_committed stops before the open transaction");
+        assert_eq!(ask(COMMITTED, 0).await, (firsts[0], 101), "before everything: the first batch");
+        assert_eq!(ask(COMMITTED, 150).await, (firsts[1], 201), "the first batch with a record at or after");
+        assert_eq!(ask(COMMITTED, 201).await, (firsts[1], 201), "a batch whose newest record is at the time");
+        assert_eq!(ask(COMMITTED, 202).await, (firsts[2], 301));
+        assert_eq!(ask(COMMITTED, 801).await, (firsts[7], 801), "in the last segment");
+        assert_eq!(ask(COMMITTED, 850).await, (open, -1), "after everything committed: the end");
+        assert_eq!(ask(UNCOMMITTED, 850).await, (open, 900), "read_uncommitted sees the open transaction");
+        assert_eq!(ask(UNCOMMITTED, 5_000).await, (hw, -1), "after everything: the end");
+    });
+}

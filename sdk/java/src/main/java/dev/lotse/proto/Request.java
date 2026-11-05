@@ -141,6 +141,55 @@ public sealed interface Request {
     }
 
     /**
+     * Looks up offsets in stream partitions by time, or at either end.
+     *
+     * @param isolation see {@link Isolation}: what latest means and where a time lookup stops
+     * @param resources what to look up
+     */
+    record ListOffsets(int isolation, List<ListOffsetsResource> resources) implements Request {
+        /** Creates the request. */
+        public ListOffsets {
+            resources = List.copyOf(resources);
+        }
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.LIST_OFFSETS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u8(isolation);
+            w.array(resources, (w1, res) -> {
+                w1.u64(res.resourceId());
+                w1.array(res.partitions(), (w2, p) -> {
+                    w2.u32(p.partition());
+                    w2.i64(p.timestamp());
+                    w2.noTags();
+                });
+                w1.noTags();
+            });
+            w.noTags();
+        }
+
+        static ListOffsets read(Reader r) {
+            int isolation = r.u8();
+            List<ListOffsetsResource> resources = r.array(10, r1 -> {
+                long id = r1.u64();
+                List<ListOffsetsPartition> partitions = r1.array(13, r2 -> {
+                    ListOffsetsPartition p = new ListOffsetsPartition(r2.u32(), r2.i64());
+                    r2.tags();
+                    return p;
+                });
+                r1.tags();
+                return new ListOffsetsResource(id, partitions);
+            });
+            r.tags();
+            return new ListOffsets(isolation, resources);
+        }
+    }
+
+    /**
      * Reads batches from stream partitions, waiting up to {@code maxWaitMs} for at least {@code minBytes}.
      *
      * @param maxWaitMs longest wait for {@code minBytes}, a {@code u32}

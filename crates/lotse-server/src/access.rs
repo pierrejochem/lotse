@@ -162,6 +162,7 @@ impl Access {
         match req {
             Request::Produce(r) => on(Write, &mut r.resources.iter().map(|x| x.resource_id)),
             Request::Fetch(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
+            Request::ListOffsets(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
             Request::AddPartitionsToTxn(r) => on(Write, &mut r.resources.iter().map(|x| x.resource_id)),
             // A producer id or the end of one's own transaction grants
             // nothing by itself: writing needs the role per resource.

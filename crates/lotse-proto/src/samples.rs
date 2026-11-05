@@ -207,6 +207,17 @@ pub fn requests() -> Vec<Request> {
         Request::DescribeRoleBindings(DescribeRoleBindingsRequest),
         Request::WhoAmI(WhoAmIRequest),
         Request::DescribeMetrics(DescribeMetricsRequest),
+        Request::ListOffsets(ListOffsetsRequest {
+            isolation: isolation::COMMITTED,
+            resources: vec![ListOffsetsResource {
+                resource_id: 7,
+                partitions: vec![
+                    ListOffsetsPartition { partition: 0, timestamp: list_offsets::EARLIEST },
+                    ListOffsetsPartition { partition: 1, timestamp: list_offsets::LATEST },
+                    ListOffsetsPartition { partition: 2, timestamp: 1_700_000_000_000 },
+                ],
+            }],
+        }),
     ]
 }
 
@@ -650,6 +661,37 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
+        (
+            ApiKey::LIST_OFFSETS,
+            Response::ListOffsets(ListOffsetsResponse {
+                resources: vec![ListOffsetsResourceResponse {
+                    resource_id: 7,
+                    partitions: vec![
+                        ListOffsetsPartitionResponse {
+                            partition: 0,
+                            error: ErrorCode::NONE,
+                            offset: 12,
+                            timestamp: -1,
+                            leader_hint: None,
+                        },
+                        ListOffsetsPartitionResponse {
+                            partition: 2,
+                            error: ErrorCode::NONE,
+                            offset: 40,
+                            timestamp: 1_700_000_000_250,
+                            leader_hint: None,
+                        },
+                        ListOffsetsPartitionResponse {
+                            partition: 1,
+                            error: ErrorCode::NOT_LEADER,
+                            offset: 0,
+                            timestamp: -1,
+                            leader_hint: Some(LeaderHint { leader: 3, term: 8 }),
+                        },
+                    ],
+                }],
+            }),
+        ),
     ]
 }
 

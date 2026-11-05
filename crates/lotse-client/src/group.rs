@@ -25,6 +25,7 @@ use lotse_proto::{
 };
 use lotse_rt::{Clock, Instant, Net, Rng, Spawn};
 
+use crate::OffsetAt;
 use crate::{Attempt, Client, ClientError, Transaction};
 
 /// How a group member behaves.
@@ -38,6 +39,9 @@ pub struct GroupConfig {
     /// Commit a revoked partition's position before releasing it. Off for
     /// exactly-once processing, where offsets go with each transaction.
     pub auto_commit: bool,
+    /// Where to start reading a partition the group has committed no
+    /// offset for (ADR 0059): the log start by default, the end, or a time.
+    pub start_from: OffsetAt,
 }
 
 impl Default for GroupConfig {
@@ -46,6 +50,7 @@ impl Default for GroupConfig {
             session_timeout: Duration::from_secs(45),
             rebalance_timeout: Duration::from_secs(60),
             auto_commit: true,
+            start_from: OffsetAt::Earliest,
         }
     }
 }
@@ -348,7 +353,17 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
                 if p.error != ErrorCode::NONE {
                     continue;
                 }
-                let start = if p.offset == NO_OFFSET { 0 } else { p.offset };
+                let start = match (p.offset, self.cfg.start_from) {
+                    // From the start: a position below the log start goes
+                    // on from there anyway.
+                    (NO_OFFSET, OffsetAt::Earliest) => 0,
+                    (NO_OFFSET, at) => match c.list_offset(&name, p.partition, at).await {
+                        Ok(offset) => offset,
+                        // Asked again with the next fetch of positions.
+                        Err(_) => continue,
+                    },
+                    (offset, _) => offset,
+                };
                 if let Some(slot) = self.owned.get_mut(&(name.clone(), p.partition)) {
                     *slot = Some(start);
                 }

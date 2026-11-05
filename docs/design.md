@@ -126,6 +126,10 @@ Producer-IDs vergibt die Koordinator-Gruppe: `InitProducer` schlägt dort einen 
 - **Last Stable Offset (LSO)** = min(HW, `first_offset` aller offenen Txns).
 - `read_committed`-Consumer lesen bis LSO und überspringen abgebrochene Batches anhand der Liste, die `Fetch` mitliefert, ohne das Log zu scannen. Die Replica hält offene Transaktionen und abgebrochene Bereiche im Speicher und im Raft-Snapshot (ADR 0029). Der LSO liegt nie hinter dem angewendeten Index: Darüber ist das Schicksal einer Transaktion hier noch nicht bekannt.
 
+### Offsets nachschlagen
+
+`ListOffsets` (Key 5, ADR 0059) beantwortet der Leader einer Partition mit denselben Grenzen wie `Fetch`: `-2` ist der Log-Start, `-1` das Ende, das der Leser sieht (HW, bei read_committed LSO), eine Zeit in Millisekunden der erste Offset des ersten Daten-Batches, dessen neuester Record zu dieser Zeit oder später liegt, samt dessen Zeitstempel; gibt es keinen, kommt das Ende zurück. Segmente, deren neuester Zeitstempel älter ist, werden übersprungen, ab dem ersten passenden liest der Leader Batch-Header der Reihe nach; eine Zeitindex-Datei gibt es nicht. Ein Mitglied einer Consumer-Gruppe beginnt eine Partition ohne committeten Offset dort, wo `GroupConfig::start_from` es sagt: am Anfang (Standard), am Ende oder zu einer Zeit.
+
 ### Transaktions-Koordinator
 
 Der Koordinator führt die interne Partition `__txn_state` als eigene Raft-Gruppe.
