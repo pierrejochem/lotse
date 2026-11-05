@@ -511,6 +511,21 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         Ok(Proposed { first, last, term: Some(term), duplicate: false })
     }
 
+    /// The producer id and epoch of `batch` if this leader must ask the
+    /// transaction coordinator before it takes it (ADR 0057): a
+    /// transactional batch whose producer has no transaction open here yet.
+    /// `None` for anything [`Replica::propose`] decides alone, refusals
+    /// included.
+    pub(crate) fn opens_txn(&self, batch: &Bytes) -> Option<(u64, u16)> {
+        if self.raft.role() != lotse_raft::Role::Leader {
+            return None;
+        }
+        let (parsed, _) = Batch::parse(batch).ok()?;
+        let pid = parsed.producer_id();
+        (parsed.attributes().transactional && pid != 0 && !self.state.txns.has_open(pid))
+            .then(|| (pid, parsed.producer_epoch()))
+    }
+
     /// Proposes the marker the coordinator asks for, if it is still needed.
     pub(crate) fn propose_marker(
         &mut self,

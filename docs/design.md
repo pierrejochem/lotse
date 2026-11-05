@@ -131,7 +131,7 @@ Producer-IDs vergibt die Koordinator-Gruppe: `InitProducer` schlägt dort einen 
 Der Koordinator führt die interne Partition `__txn_state` als eigene Raft-Gruppe.
 
 1. `InitProducer` vergibt `producer_id` und Epoch (Fencing alter Instanzen).
-2. `AddPartitions` persistiert die Mitglieder der Transaktion.
+2. `AddPartitions` persistiert die Mitglieder der Transaktion. Eine Partition nimmt den ersten transaktionalen Batch eines Producers pro Epoch erst an, wenn der Koordinator bestätigt, dass die Transaktion offen ist und die Partition enthält (intern `VerifyTxn`, ADR 0057); bis dahin wartet der Batch, und ohne Bestätigung wird nichts geschrieben. So gibt es in einer Partition nur Transaktionen, die der Koordinator kennt und deshalb auch beendet, und kein Client kann den LSO dauerhaft aufhalten.
 3. `EndTxn` schreibt `PREPARE_COMMIT` (bzw. `PREPARE_ABORT`) in `__txn_state`.
 4. COMMIT- bzw. ABORT-Marker gehen an jede beteiligte Partition (idempotent, mit Retry).
 5. `COMPLETE_COMMIT` schließt die Transaktion ab.
@@ -437,6 +437,10 @@ WriteTxnMarkers    <- markers: array{producer_id u64, producer_epoch u16, commit
                                      resources: array{resource_id u64, partitions array<u32>}}
                    -> markers: array{producer_id u64,
                                      resources: array{resource_id u64, partitions: array{partition u32, error u16}}}
+
+VerifyTxn          <- txn_id string, producer_id u64, producer_epoch u16,        // intern, Key 45
+                      resource_id u64, partition u32
+                   -> error u16, leader_hint?   // NONE, INVALID_TXN_STATE, PRODUCER_FENCED, CONCURRENT_TRANSACTIONS
 ```
 
 ### Admin

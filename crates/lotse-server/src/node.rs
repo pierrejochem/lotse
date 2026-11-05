@@ -328,6 +328,12 @@ enum Command {
         txn_id: String,
         term: u64,
     },
+    /// The transaction coordinator answered a partition leader's question,
+    /// or could not be asked (ADR 0057).
+    Verified {
+        key: crate::client::VerifyKey,
+        error: lotse_proto::ErrorCode,
+    },
     /// A queue leader's dead letters were forwarded, or could not be.
     Forwarded {
         group: GroupId,
@@ -667,6 +673,26 @@ async fn forward_dead_letters<R: Runtime>(
     shared.work.set();
 }
 
+/// Asks the transaction coordinator whether a transaction is open and holds
+/// a partition, and hands the answer to the main loop (ADR 0057). Any
+/// failure to ask counts as a refusal the producer may retry: nothing was
+/// written.
+async fn verify_txn<R: Runtime>(
+    client: Arc<lotse_client::Client<R>>,
+    job: crate::client::VerifyJob,
+    shared: Arc<Shared>,
+) {
+    let stop = [&shared.stop];
+    let Some(result) = race(client.verify_txn(job.request), &stop).await else { return };
+    let error = match result {
+        Ok(()) => lotse_proto::ErrorCode::NONE,
+        Err(lotse_client::ClientError::Broker { code, .. }) if !code.retriable() => code,
+        Err(_) => lotse_proto::ErrorCode::COORDINATOR_NOT_AVAILABLE,
+    };
+    shared.commands.lock().expect("commands lock").push_back(Command::Verified { key: job.key, error });
+    shared.work.set();
+}
+
 /// What the main loop works with besides its groups.
 struct Around<'a, R> {
     links: &'a mut Links,
@@ -812,6 +838,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.forwarded(group, term, offsets, ok, &view, groups);
                     continue;
                 }
+                Command::Verified { key, error } => {
+                    clients.verified(key, error, &view, groups);
+                    continue;
+                }
             };
             let res = match groups.get_mut(&group) {
                 Some(g) => g.propose(batch).map(|p| (p.first, p.last)).map_err(|e: ProposeError| e.to_string()),
@@ -844,6 +874,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         for job in clients.take_forward_jobs() {
             jobs.spawn(rt, forward_dead_letters(marker_client.clone(), job, shared.clone()));
+        }
+        for job in clients.take_verify_jobs() {
+            jobs.spawn(rt, verify_txn(marker_client.clone(), job, shared.clone()));
         }
         // After the round's answers: a request waiting on an entry learns
         // its fate before retention may compact it, which would leave the

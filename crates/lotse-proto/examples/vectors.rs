@@ -193,7 +193,10 @@ fn main() {
         // Node-internal keys (43, 44, 1000) are not part of the client protocol.
         .zip(samples::requests())
         .filter(|(_, req)| {
-            !matches!(req.api_key(), ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER | ApiKey::WRITE_TXN_MARKERS)
+            !matches!(
+                req.api_key(),
+                ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER | ApiKey::WRITE_TXN_MARKERS | ApiKey::VERIFY_TXN
+            )
         })
         .map(|(line, _)| line)
         .collect();
@@ -207,7 +210,10 @@ fn main() {
         .iter()
         .enumerate()
         .filter(|(_, (key, _))| {
-            !matches!(*key, ApiKey::WRITE_TXN_MARKERS | ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER)
+            !matches!(
+                *key,
+                ApiKey::WRITE_TXN_MARKERS | ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER | ApiKey::VERIFY_TXN
+            )
         })
         .map(|(i, (key, resp))| {
             let frame = encode_response(i as u32, resp);

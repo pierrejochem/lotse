@@ -2980,3 +2980,44 @@ impl DeadLetterRequest {
         Ok(req)
     }
 }
+
+/// A partition's leader asks the transaction coordinator, before it takes a
+/// producer's first transactional batch of an epoch, whether that
+/// transaction is open and holds the partition (internal, from a node).
+/// Answered with [`OutcomeResponse`]: `NONE` if so, `INVALID_TXN_STATE` if
+/// not, `PRODUCER_FENCED` for an older epoch (ADR 0057).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyTxnRequest {
+    /// The transactional id the produce came with.
+    pub txn_id: String,
+    /// The batch's producer id.
+    pub producer_id: u64,
+    /// The batch's producer epoch.
+    pub producer_epoch: u16,
+    /// The partition's stream or queue.
+    pub resource_id: u64,
+    /// The partition.
+    pub partition: u32,
+}
+
+impl VerifyTxnRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.txn_id);
+        w.u64(self.producer_id);
+        w.u16(self.producer_epoch);
+        w.u64(self.resource_id);
+        w.u32(self.partition);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = VerifyTxnRequest {
+            txn_id: r.string()?,
+            producer_id: r.u64()?,
+            producer_epoch: r.u16()?,
+            resource_id: r.u64()?,
+            partition: r.u32()?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}

@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use lotse_proto::{
     AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, CommitOffsetsResponse, EndTxnRequest, EndTxnResponse,
-    ErrorCode, GroupHeartbeatResponse, InitProducerRequest, InitProducerResponse, Response, TxnPartitionResult,
-    TxnResourceResult,
+    ErrorCode, GroupHeartbeatResponse, InitProducerRequest, InitProducerResponse, OutcomeResponse, Response,
+    TxnPartitionResult, TxnResourceResult, VerifyTxnRequest,
 };
 use lotse_rt::{Instant, Runtime};
 
@@ -311,6 +311,28 @@ impl Clients {
         self.write(replica, view.now, &req.txn_id, &meta, Some((outbox, id)), Then::Add(resp));
     }
 
+    /// `VerifyTxn`: a partition's leader asks, before it takes a producer's
+    /// first transactional batch of an epoch, whether the transaction is
+    /// open and holds that partition (ADR 0057).
+    pub(super) fn verify_txn<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: VerifyTxnRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let (_, replica) = match Self::coordinator(view, groups) {
+            Ok(c) => c,
+            Err((error, leader_hint)) => {
+                return outbox.push(id, &Response::Outcome(OutcomeResponse { error, leader_hint }));
+            }
+        };
+        let busy = self.busy.contains(&Busy::Txn(req.txn_id.clone()));
+        let error = verdict(replica.coordinator().get(&req.txn_id), busy, &req);
+        outbox.push(id, &Response::Outcome(OutcomeResponse { error, leader_hint: None }));
+    }
+
     pub(super) fn end_txn<R: Runtime, S: StateMachine>(
         &mut self,
         outbox: Arc<Outbox>,
@@ -498,4 +520,25 @@ impl Clients {
         let meta = TxnMeta { phase, partitions: BTreeSet::new(), offsets: Default::default(), ..m };
         self.write(replica, view.now, txn_id, &meta, None, Then::Nothing);
     }
+}
+
+/// The coordinator's answer to `VerifyTxn` for the transactional id's
+/// applied state `meta`; `busy` while a change to it is being written.
+pub(crate) fn verdict(meta: Option<&TxnMeta>, busy: bool, req: &VerifyTxnRequest) -> ErrorCode {
+    let Some(m) = meta else { return ErrorCode::INVALID_TXN_STATE };
+    if m.producer_id != req.producer_id || req.producer_epoch < m.epoch {
+        return ErrorCode::PRODUCER_FENCED;
+    }
+    // What is being written may end the transaction or add the partition:
+    // ask again once it is decided.
+    if busy {
+        return ErrorCode::CONCURRENT_TRANSACTIONS;
+    }
+    if req.producer_epoch != m.epoch
+        || m.phase != Phase::Ongoing
+        || !m.partitions.contains(&(req.resource_id, req.partition))
+    {
+        return ErrorCode::INVALID_TXN_STATE;
+    }
+    ErrorCode::NONE
 }

@@ -130,7 +130,7 @@ impl Access {
             }
             (
                 Principal::Node(_) | Principal::Anonymous,
-                Request::WriteTxnMarkers(_) | Request::SettleVoters(_) | Request::DeadLetter(_),
+                Request::WriteTxnMarkers(_) | Request::SettleVoters(_) | Request::DeadLetter(_) | Request::VerifyTxn(_),
             ) => {
                 return Ok(());
             }
@@ -140,9 +140,10 @@ impl Access {
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
             (_, Request::DeadLetter(_)) => return Err("only broker nodes forward dead letters".into()),
+            (_, Request::VerifyTxn(_)) => return Err("only broker nodes verify transactions".into()),
             (Principal::Node(id), _) => {
                 return Err(format!(
-                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters and forward dead letters"
+                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters, forward dead letters and verify transactions"
                 ));
             }
             (Principal::Anonymous, _) => return Ok(()),
@@ -208,6 +209,7 @@ impl Access {
             | Request::WriteTxnMarkers(_)
             | Request::SettleVoters(_)
             | Request::DeadLetter(_)
+            | Request::VerifyTxn(_)
             | Request::SaslHandshake(_)
             | Request::SaslAuthenticate(_) => Ok(()),
         }

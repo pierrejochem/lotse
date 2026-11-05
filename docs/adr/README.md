@@ -61,5 +61,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0054 | [A moved replica does not elect itself](0054-a-moved-replica-does-not-elect-itself.md) | Accepted |
 | 0055 | [Dead-letter queues and message TTL](0055-dead-letter-queues-and-message-ttl.md) | Accepted |
 | 0056 | [Client SDKs for the JVM](0056-client-sdks-for-the-jvm.md) | Accepted |
+| 0057 | [Partitions verify transactions with the coordinator](0057-partitions-verify-transactions-with-the-coordinator.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

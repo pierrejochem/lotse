@@ -47,8 +47,8 @@ use lotse_proto::{
     FetchPartitionResponse, FetchRequest, FetchResourceResponse, FetchResponse, FindCoordinatorRequest,
     FindCoordinatorResponse, InitProducerResponse, LeaderHint, MarkerResult, MetadataRequest, MetadataResponse,
     PartitionMetadata, ProducePartitionResponse, ProduceRequest, ProduceResourceResponse, ProduceResponse, Request,
-    RequestHeader, ResourceMetadata, Response, TxnPartitionResult, TxnResourceResult, WriteTxnMarkersRequest,
-    WriteTxnMarkersResponse, coordinator, isolation, kind,
+    RequestHeader, ResourceMetadata, Response, TxnPartitionResult, TxnResourceResult, VerifyTxnRequest,
+    WriteTxnMarkersRequest, WriteTxnMarkersResponse, coordinator, isolation, kind,
 };
 use lotse_raft::{NodeId, RaftGroup, Role};
 use lotse_record::Batch;
@@ -70,6 +70,7 @@ mod queues;
 mod retire;
 mod session;
 mod stats;
+mod verify;
 
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
@@ -77,6 +78,7 @@ pub use queues::QueueConfig;
 pub(crate) use retire::ForwardJob;
 use session::Session;
 pub(crate) use stats::{NetStats, NodeView};
+pub(crate) use verify::{Key as VerifyKey, VerifyJob};
 
 /// A stream and the Raft group of each of its partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +215,8 @@ struct PendingProduce {
     deadline: Instant,
     response: ProduceResponse,
     waiting: Vec<Waiting>,
+    /// Batches waiting for the transaction coordinator (ADR 0057).
+    held: Vec<verify::Held>,
 }
 
 /// An `InitProducer` waiting for its allocation entry to commit.
@@ -340,6 +344,8 @@ pub(crate) struct Clients {
     retiring: BTreeMap<GroupId, retire::Retiring>,
     /// Dead letters for the node to forward through the protocol.
     forward_jobs: Vec<retire::ForwardJob>,
+    /// Transactions this node asks the coordinator about (ADR 0057).
+    verify: verify::Verifying,
     /// The group coordinator's clocks.
     group_timers: groups::GroupTimers,
     /// Admin records in flight.
@@ -380,6 +386,7 @@ impl Clients {
                 None => self.init_producer(outbox, id, view, groups),
             },
             Request::AddPartitionsToTxn(req) => self.add_partitions(outbox, id, req, view, groups),
+            Request::VerifyTxn(req) => self.verify_txn(outbox, id, req, view, groups),
             Request::EndTxn(req) => self.end_txn(outbox, id, req, view, groups),
             Request::WriteTxnMarkers(req) => self.write_markers(outbox, id, req, view, groups),
             Request::Subscribe(req) => self.subscribe(outbox, id, req, view, groups),
@@ -436,6 +443,7 @@ impl Clients {
     ) {
         let mut response = ProduceResponse { throttle_ms: 0, resources: Vec::new() };
         let mut waiting = Vec::new();
+        let mut held = Vec::new();
         for (ri, res) in req.resources.into_iter().enumerate() {
             let mut partitions = Vec::new();
             for (pi, p) in res.partitions.into_iter().enumerate() {
@@ -454,54 +462,40 @@ impl Clients {
                         out.error = ErrorCode::INVALID_TXN_STATE;
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
                     }
-                    Some((g, replica)) => match replica.propose(stamped_for_ttl(&p.batch, g, view)) {
-                        Ok(Proposed { first, last, term, .. }) => {
-                            out.base_offset = first - 1;
-                            // A duplicate of an applied batch is written; anything
-                            // else (new, or the original still in flight) is
-                            // answered once its entry's commit decides.
-                            if let Some(term) = term {
+                    Some((g, replica)) => {
+                        let batch = stamped_for_ttl(&p.batch, g, view);
+                        match (req.txn_id.as_ref(), replica.opens_txn(&batch)) {
+                            // The producer's first batch of a transaction
+                            // here: only if the coordinator knows of it
+                            // (ADR 0057).
+                            (Some(txn_id), Some((producer_id, epoch))) => {
+                                let key = verify::Key { group: g, producer_id, epoch };
+                                self.verify.ask(
+                                    key,
+                                    VerifyTxnRequest {
+                                        txn_id: txn_id.clone(),
+                                        producer_id,
+                                        producer_epoch: epoch,
+                                        resource_id: res.resource_id,
+                                        partition: p.partition,
+                                    },
+                                );
                                 let bytes = p.batch.len() as u64;
-                                let records = Batch::parse(&p.batch).map_or(0, |(b, _)| b.record_count() as u64);
-                                waiting.push(Waiting {
-                                    resource: ri,
-                                    partition: pi,
-                                    group: g,
-                                    last,
-                                    term,
-                                    bytes,
-                                    records,
-                                });
+                                held.push(verify::Held { resource: ri, partition: pi, key, batch, bytes });
+                            }
+                            _ => {
+                                let bytes = p.batch.len() as u64;
+                                waiting.extend(propose_one(replica, g, batch, bytes, &mut out, (ri, pi)));
                             }
                         }
-                        Err(ProposeError::NotLeader(_)) => {
-                            out.error = ErrorCode::NOT_LEADER;
-                            out.leader_hint = hint(replica.raft_ref());
-                        }
-                        Err(e @ ProposeError::OutOfOrderSequence { .. }) => {
-                            out.error = ErrorCode::OUT_OF_ORDER_SEQUENCE;
-                            out.error_msg = Some(e.to_string());
-                        }
-                        Err(e @ ProposeError::ProducerFenced { .. }) => {
-                            out.error = ErrorCode::PRODUCER_FENCED;
-                            out.error_msg = Some(e.to_string());
-                        }
-                        Err(e @ ProposeError::InvalidTxnState(_)) => {
-                            out.error = ErrorCode::INVALID_TXN_STATE;
-                            out.error_msg = Some(e.to_string());
-                        }
-                        Err(e) => {
-                            out.error = ErrorCode::CORRUPT_BATCH;
-                            out.error_msg = Some(e.to_string());
-                        }
-                    },
+                    }
                 }
                 partitions.push(out);
             }
             response.resources.push(ProduceResourceResponse { resource_id: res.resource_id, partitions });
         }
         let deadline = view.now + Duration::from_millis(u64::from(req.timeout_ms));
-        let pending = PendingProduce { outbox, correlation_id, arrived: view.now, deadline, response, waiting };
+        let pending = PendingProduce { outbox, correlation_id, arrived: view.now, deadline, response, waiting, held };
         if let Some(p) = settle(pending, view, groups, &mut self.stats) {
             self.produces.push(p);
         }
@@ -743,11 +737,61 @@ fn settle<R: Runtime, S: StateMachine>(
         }
         true
     });
-    if p.waiting.is_empty() {
+    if timed_out {
+        for h in p.held.drain(..) {
+            let out = &mut p.response.resources[h.resource].partitions[h.partition];
+            out.error = ErrorCode::REQUEST_TIMED_OUT;
+            out.error_msg = Some("not written: the transaction coordinator did not answer in time".into());
+        }
+    }
+    if p.waiting.is_empty() && p.held.is_empty() {
         p.outbox.push(p.correlation_id, &Response::Produce(p.response));
         return None;
     }
     Some(p)
+}
+
+/// Proposes one partition's batch and fills in its answer: a [`Waiting`]
+/// for a batch whose commit decides, `None` for one answered now.
+fn propose_one<R: Runtime, S: StateMachine>(
+    replica: &mut Replica<R, S>,
+    g: GroupId,
+    batch: Bytes,
+    bytes: u64,
+    out: &mut ProducePartitionResponse,
+    (ri, pi): (usize, usize),
+) -> Option<Waiting> {
+    let records = Batch::parse(&batch).map_or(0, |(b, _)| b.record_count() as u64);
+    match replica.propose(batch) {
+        Ok(Proposed { first, last, term, .. }) => {
+            out.base_offset = first - 1;
+            // A duplicate of an applied batch is written; anything else (new,
+            // or the original still in flight) is answered once its entry's
+            // commit decides.
+            return term.map(|term| Waiting { resource: ri, partition: pi, group: g, last, term, bytes, records });
+        }
+        Err(ProposeError::NotLeader(_)) => {
+            out.error = ErrorCode::NOT_LEADER;
+            out.leader_hint = hint(replica.raft_ref());
+        }
+        Err(e @ ProposeError::OutOfOrderSequence { .. }) => {
+            out.error = ErrorCode::OUT_OF_ORDER_SEQUENCE;
+            out.error_msg = Some(e.to_string());
+        }
+        Err(e @ ProposeError::ProducerFenced { .. }) => {
+            out.error = ErrorCode::PRODUCER_FENCED;
+            out.error_msg = Some(e.to_string());
+        }
+        Err(e @ ProposeError::InvalidTxnState(_)) => {
+            out.error = ErrorCode::INVALID_TXN_STATE;
+            out.error_msg = Some(e.to_string());
+        }
+        Err(e) => {
+            out.error = ErrorCode::CORRUPT_BATCH;
+            out.error_msg = Some(e.to_string());
+        }
+    }
+    None
 }
 
 /// Answers an `InitProducer` once its allocation entry is committed here.

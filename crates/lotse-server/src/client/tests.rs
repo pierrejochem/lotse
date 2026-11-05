@@ -1260,3 +1260,117 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
         );
     });
 }
+
+/// A transactional batch is taken only once the coordinator has said that
+/// its transaction is open and holds the partition (ADR 0057): until then
+/// it waits, written nowhere; refused, it is never written; once a batch is
+/// in, the transaction is open here and later batches need no question.
+#[test]
+fn a_transactional_batch_waits_for_the_coordinator() {
+    Sim::new(4).run(|rt| async move {
+        let mut r = single(&rt).await;
+        lead(&mut r).await;
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let produce = |pid, epoch, seq, correlation_id| ClientRequest {
+            outbox: outbox.clone(),
+            header: RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id, flags: 0 },
+            request: Request::Produce(ProduceRequest {
+                txn_id: Some("app".into()),
+                timeout_ms: 60_000,
+                resources: vec![ProduceResource {
+                    resource_id: 7,
+                    partitions: vec![ProducePartition { partition: 0, batch: transactional_batch(pid, epoch, seq) }],
+                }],
+            }),
+            principal: Principal::Anonymous,
+        };
+        let last = groups[&G].raft_ref().last_index();
+
+        // Two batches of producer 5 at epoch 1: one question.
+        clients.handle(produce(5, 1, 0, 1), &view, &mut groups).await.unwrap();
+        clients.handle(produce(5, 1, 0, 2), &view, &mut groups).await.unwrap();
+        let jobs = clients.take_verify_jobs();
+        assert_eq!(jobs.len(), 1, "one question per partition, producer and epoch");
+        let job = &jobs[0];
+        assert_eq!((job.request.txn_id.as_str(), job.request.producer_id, job.request.producer_epoch), ("app", 5, 1));
+        assert_eq!((job.request.resource_id, job.request.partition), (7, 0));
+        assert!(answers(&outbox).is_empty(), "held, not answered");
+        assert_eq!(groups[&G].raft_ref().last_index(), last, "and not written");
+
+        // The coordinator knows of no such transaction: both refused.
+        clients.verified(job.key, ErrorCode::INVALID_TXN_STATE, &view, &mut groups);
+        let got = answers(&outbox);
+        assert_eq!(got.len(), 2);
+        for a in got {
+            let Response::Produce(p) = a else { panic!("{a:?}") };
+            assert_eq!(p.resources[0].partitions[0].error, ErrorCode::INVALID_TXN_STATE);
+        }
+        assert_eq!(groups[&G].raft_ref().last_index(), last, "nothing written");
+        assert!(groups[&G].opens_txn(&transactional_batch(5, 1, 0)).is_some(), "no transaction open");
+
+        // Asked again and confirmed: written.
+        clients.handle(produce(5, 1, 0, 3), &view, &mut groups).await.unwrap();
+        let jobs = clients.take_verify_jobs();
+        assert_eq!(jobs.len(), 1, "asked again after the refusal");
+        clients.verified(jobs[0].key, ErrorCode::NONE, &view, &mut groups);
+        assert_eq!(groups[&G].raft_ref().last_index(), last + 1, "written once confirmed");
+        assert!(groups[&G].opens_txn(&transactional_batch(5, 1, 1)).is_none(), "the transaction is open here now");
+        clients.handle(produce(5, 1, 1, 4), &view, &mut groups).await.unwrap();
+        assert!(clients.take_verify_jobs().is_empty(), "later batches need no question");
+        assert_eq!(groups[&G].raft_ref().last_index(), last + 2);
+    });
+}
+
+#[test]
+fn the_coordinator_confirms_only_an_open_transaction_with_the_partition() {
+    use crate::coordinator::{Phase, TxnMeta};
+    use coord::verdict;
+    let meta = TxnMeta {
+        producer_id: 5,
+        epoch: 2,
+        phase: Phase::Ongoing,
+        timeout_ms: 60_000,
+        partitions: BTreeSet::from([(7, 0)]),
+        offsets: BTreeMap::new(),
+    };
+    let ask = |producer_id, producer_epoch, partition| lotse_proto::VerifyTxnRequest {
+        txn_id: "app".into(),
+        producer_id,
+        producer_epoch,
+        resource_id: 7,
+        partition,
+    };
+    assert_eq!(verdict(Some(&meta), false, &ask(5, 2, 0)), ErrorCode::NONE);
+    assert_eq!(verdict(None, false, &ask(5, 2, 0)), ErrorCode::INVALID_TXN_STATE, "an unknown transactional id");
+    assert_eq!(verdict(Some(&meta), false, &ask(5, 2, 1)), ErrorCode::INVALID_TXN_STATE, "a partition never added");
+    assert_eq!(verdict(Some(&meta), false, &ask(5, 1, 0)), ErrorCode::PRODUCER_FENCED, "an older epoch");
+    assert_eq!(verdict(Some(&meta), false, &ask(6, 2, 0)), ErrorCode::PRODUCER_FENCED, "another producer");
+    assert_eq!(
+        verdict(Some(&meta), true, &ask(5, 2, 0)),
+        ErrorCode::CONCURRENT_TRANSACTIONS,
+        "while a change is written"
+    );
+    let ended = TxnMeta { phase: Phase::PrepareCommit, ..meta.clone() };
+    assert_eq!(verdict(Some(&ended), false, &ask(5, 2, 0)), ErrorCode::INVALID_TXN_STATE, "ending");
+    let empty = TxnMeta { phase: Phase::Empty, partitions: BTreeSet::new(), ..meta };
+    assert_eq!(verdict(Some(&empty), false, &ask(5, 2, 0)), ErrorCode::INVALID_TXN_STATE, "none open");
+}

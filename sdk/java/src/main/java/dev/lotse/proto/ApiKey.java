@@ -92,6 +92,8 @@ public record ApiKey(int id) {
     public static final ApiKey SETTLE_VOTERS = new ApiKey(43);
     /** Node to node, not for clients: a queue's leader forwards messages to its dead-letter queue. */
     public static final ApiKey DEAD_LETTER = new ApiKey(44);
+    /** Node to node, not for clients: a partition leader asks the coordinator whether a transaction is open. */
+    public static final ApiKey VERIFY_TXN = new ApiKey(45);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
     public static final ApiKey WRITE_TXN_MARKERS = new ApiKey(1000);
 
@@ -104,7 +106,7 @@ public record ApiKey(int id) {
 
     /**
      * The client-facing keys this library has request and response types for, all at version 0. The node-internal
-     * keys 43, 44 and 1000 are constants only.
+     * keys 43, 44, 45 and 1000 are constants only.
      */
     public static final List<ApiVersionRange> IMPLEMENTED = List.of(
             range(API_VERSIONS), range(METADATA), range(FIND_COORDINATOR), range(PRODUCE), range(FETCH),

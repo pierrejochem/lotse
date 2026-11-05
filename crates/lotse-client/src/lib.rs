@@ -797,6 +797,30 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// Internal, used by a partition's leader before it takes a producer's
+    /// first transactional batch of an epoch (ADR 0057): asks the
+    /// transaction coordinator whether `req` names an open transaction that
+    /// holds the partition. `Ok(())` if so; otherwise the coordinator's
+    /// answer, such as `INVALID_TXN_STATE` or `PRODUCER_FENCED`.
+    pub async fn verify_txn(&self, req: lotse_proto::VerifyTxnRequest) -> Result<(), ClientError> {
+        self.retrying(|| self.verify_txn_once(&req)).await
+    }
+
+    async fn verify_txn_once(&self, req: &lotse_proto::VerifyTxnRequest) -> Result<(), Attempt> {
+        let request = Request::VerifyTxn(req.clone());
+        let Response::Outcome(r) = self.call_coordinator(&req.txn_id, &request).await? else {
+            return Err(Attempt::Retry("unexpected response".into()));
+        };
+        match r.error {
+            ErrorCode::NONE => Ok(()),
+            code if code.retriable() => {
+                self.forget_coordinator();
+                Err(Attempt::Retry(code.to_string()))
+            }
+            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+        }
+    }
+
     /// Internal, used by a node's transaction coordinator: writes a marker
     /// into one partition, retrying until its leader answers. Returns
     /// [`ErrorCode::NONE`] once the marker is written (or not needed), or

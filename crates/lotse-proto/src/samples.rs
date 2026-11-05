@@ -145,6 +145,13 @@ pub fn requests() -> Vec<Request> {
         Request::DescribeNodes(DescribeNodesRequest),
         Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
         Request::DeadLetter(DeadLetterRequest { queue_id: 1_099_511_627_777, batches: vec![Bytes::from_static(b"x")] }),
+        Request::VerifyTxn(VerifyTxnRequest {
+            txn_id: "orders-app".into(),
+            producer_id: 4_000,
+            producer_epoch: 3,
+            resource_id: 1_099_511_627_776,
+            partition: 2,
+        }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,
