@@ -18,6 +18,8 @@
 //! batch-records.txt <label> <index> <offset> <timestamp> <key> <value> <headers>
 //! batch-ops.txt     <op> <arguments> <input hex> <output hex>
 //! fetch-records.hex <label> <hex of several batches in a row>
+//! compressed.hex    <label> <hex of one batch with a zstd or lz4 record block>
+//! compressed-records.txt <label> <index> <offset> <timestamp> <key> <value> <headers>
 //! varints.txt       <kind> <value> <hex>
 //! crc32c.txt        <label> <hex of the input> <crc as 8 hex digits>
 //! error-codes.txt   <code> <name> <retriable>
@@ -177,6 +179,50 @@ fn batches() -> Vec<(String, Bytes)> {
     out
 }
 
+/// The records of `b` as lines of batch-records.txt.
+fn record_lines(label: &str, b: &Batch) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (i, r) in b.records().expect("records").iter().enumerate() {
+        let Record { offset, timestamp, key, value, headers } = r;
+        let headers = if headers.is_empty() {
+            "-".to_string()
+        } else {
+            headers
+                .iter()
+                .map(|h| format!("{}:{}", hex(&h.key), nullable(h.value.as_deref())))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        // Large fields are shortened to their length and a checksum, to keep the file readable.
+        let shorten = |v: &Option<Bytes>| match v {
+            Some(b) if b.len() > 64 => format!("#{}:{:08x}", b.len(), crc32c::crc32c(b)),
+            other => nullable(other.as_deref()),
+        };
+        lines.push(format!("{label} {i} {offset} {timestamp} {} {} {headers}", shorten(key), shorten(value)));
+    }
+    lines
+}
+
+/// The same records as data-stamped and data-large, compressed.
+fn compressed_batches() -> Vec<(String, Bytes)> {
+    let mut out = Vec::new();
+    for (name, codec) in [("zstd", Compression::Zstd), ("lz4", Compression::Lz4)] {
+        let mut options = BatchOptions::default();
+        options.attributes.compression = codec;
+        let mut b = BatchBuilder::new(options);
+        b.push(TS, Some(b"k1"), Some(b"v1"), &[(b"h", Some(b"x")), (b"n", None)]);
+        b.push(TS + 5, None, None, &[]);
+        b.push(TS - 1, Some(b""), Some(b""), &[(b"", Some(b""))]);
+        out.push((format!("{name}-stamped"), stamped(b.finish().expect("batch"), 100, 7)));
+        let (key, value) = (vec![0xabu8; 200], vec![0xcdu8; 20_000]);
+        let mut b = BatchBuilder::new(options);
+        b.push(TS, Some(&key), Some(&value), &[]);
+        b.push(-TS, Some(b"negative"), None, &[]);
+        out.push((format!("{name}-large"), b.finish().expect("batch")));
+    }
+    out
+}
+
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("usage: vectors <output directory>"));
     std::fs::create_dir_all(&dir).expect("creating the output directory");
@@ -269,24 +315,7 @@ fn main() {
             b.record_count(),
             b.len(),
         ));
-        for (i, r) in b.records().expect("records").iter().enumerate() {
-            let Record { offset, timestamp, key, value, headers } = r;
-            let headers = if headers.is_empty() {
-                "-".to_string()
-            } else {
-                headers
-                    .iter()
-                    .map(|h| format!("{}:{}", hex(&h.key), nullable(h.value.as_deref())))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            // Large fields are shortened to their length and a checksum, to keep the file readable.
-            let shorten = |v: &Option<Bytes>| match v {
-                Some(b) if b.len() > 64 => format!("#{}:{:08x}", b.len(), crc32c::crc32c(b)),
-                other => nullable(other.as_deref()),
-            };
-            records.push(format!("{label} {i} {offset} {timestamp} {} {} {headers}", shorten(key), shorten(value)));
-        }
+        records.extend(record_lines(label, &b));
     }
     out.write(
         "batch-fields.txt",
@@ -327,6 +356,24 @@ fn main() {
 
     // A fetch response's records: several batches back to back.
     let join = |labels: &[&str]| labels.iter().flat_map(|l| by(l)).collect::<Vec<u8>>();
+    let compressed = compressed_batches();
+    let lines: Vec<String> = compressed.iter().map(|(l, b)| format!("{l} {}", hex(b))).collect();
+    out.write(
+        "compressed.hex",
+        "Batches whose record block is one zstd or one LZ4 frame (ADR 0058). Once decompressed, each block\nreads like that of data-stamped (zstd-, lz4-stamped) or data-large (zstd-, lz4-large).\nlabel hex",
+        &lines,
+    );
+    let mut records = Vec::new();
+    for (label, bytes) in &compressed {
+        let (b, _) = Batch::parse(bytes).expect("a valid batch");
+        records.extend(record_lines(label, &b));
+    }
+    out.write(
+        "compressed-records.txt",
+        "Records of each batch in compressed.hex, written as in batch-records.txt.\nlabel index offset timestamp key value headers",
+        &records,
+    );
+
     let fetches = [
         ("fetch-data", join(&["data-stamped", "idempotent", "transactional", "control-commit"])),
         ("fetch-mixed", join(&["control-abort", "raft-noop", "ack", "data-large", "dead-letter"])),

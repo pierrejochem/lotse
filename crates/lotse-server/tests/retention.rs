@@ -59,7 +59,13 @@ fn now_ms(rt: &SimRuntime) -> i64 {
 }
 
 fn batch(value: &str, ts: i64) -> Bytes {
-    let mut b = BatchBuilder::new(BatchOptions::default());
+    // Batches come plain, zstd and lz4 (ADR 0058): replicas, snapshots,
+    // retention and readers handle them all alike.
+    let mut options = BatchOptions::default();
+    options.attributes.compression =
+        [lotse_record::Compression::None, lotse_record::Compression::Zstd, lotse_record::Compression::Lz4]
+            [value.len() % 3];
+    let mut b = BatchBuilder::new(options);
     b.push(ts, None, Some(value.as_bytes()), &[]);
     b.finish().unwrap()
 }

@@ -53,7 +53,13 @@ const STREAM: &str = "orders";
 const PARTITIONS: u32 = 2;
 
 fn batch(value: &str, records: u64) -> Bytes {
-    let mut b = BatchBuilder::new(BatchOptions::default());
+    // Batches come plain, zstd and lz4 (ADR 0058): replicas, snapshots,
+    // retention and readers handle them all alike.
+    let mut options = BatchOptions::default();
+    options.attributes.compression =
+        [lotse_record::Compression::None, lotse_record::Compression::Zstd, lotse_record::Compression::Lz4]
+            [value.len() % 3];
+    let mut b = BatchBuilder::new(options);
     for _ in 0..records {
         b.push(0, None, Some(value.as_bytes()), &[]);
     }

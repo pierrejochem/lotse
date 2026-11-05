@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 bytes.workspace = true
 crc32c.workspace = true
+lz4_flex.workspace = true
 thiserror.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

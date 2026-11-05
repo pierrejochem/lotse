@@ -1374,3 +1374,40 @@ fn the_coordinator_confirms_only_an_open_transaction_with_the_partition() {
     let empty = TxnMeta { phase: Phase::Empty, partitions: BTreeSet::new(), ..meta };
     assert_eq!(verdict(Some(&empty), false, &ask(5, 2, 0)), ErrorCode::INVALID_TXN_STATE, "none open");
 }
+
+/// A compressed batch is decoded once when it is produced (ADR 0058): one
+/// whose block does not decode is refused and never written; a good one is
+/// written as it came, still compressed.
+#[test]
+fn a_compressed_batch_that_does_not_decode_is_never_written() {
+    Sim::new(5).run(|rt| async move {
+        let mut r = single(&rt).await;
+        lead(&mut r).await;
+        let mut options = BatchOptions::default();
+        options.attributes.compression = lotse_record::Compression::Zstd;
+        let mut b = BatchBuilder::new(options);
+        for _ in 0..50 {
+            b.push(0, None, Some(b"compressible, compressible"), &[]);
+        }
+        let good = b.finish().unwrap();
+        // Damage the compressed block, then fix the checksum as a careless
+        // producer would have computed it.
+        let mut bad = bytes::BytesMut::from(&good[..]);
+        let mid = lotse_record::HEADER_LEN + (bad.len() - lotse_record::HEADER_LEN) / 2;
+        bad[mid] ^= 0xff;
+        bad[lotse_record::HEADER_LEN] ^= 0xff;
+        let crc = crc32c::crc32c(&bad[25..]);
+        bad[21..25].copy_from_slice(&crc.to_le_bytes());
+        let bad = bad.freeze();
+        assert!(Batch::parse(&bad).is_ok(), "header and checksum are fine");
+        let last = r.raft_ref().last_index();
+        assert!(matches!(r.propose(bad), Err(ProposeError::Invalid(_))), "refused");
+        assert_eq!(r.raft_ref().last_index(), last, "and not written");
+        let p = r.propose(good.clone()).expect("a good compressed batch");
+        r.process().await.unwrap();
+        let stored = r.log().read(p.first, 1 << 20).await.unwrap();
+        let (batch, _) = Batch::parse(&stored).unwrap();
+        assert_eq!(batch.attributes().compression, lotse_record::Compression::Zstd, "stored compressed");
+        assert_eq!(batch.records().unwrap().len(), 50);
+    });
+}

@@ -490,6 +490,12 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         if parsed.attributes().transactional && parsed.producer_id() == 0 {
             return Err(ProposeError::InvalidTxnState("a transactional batch needs a producer id"));
         }
+        // A compressed block is decoded once here (ADR 0058): what does not
+        // decode, decodes to too much or holds other records than its
+        // header says never reaches the log, where every reader would fail.
+        if parsed.attributes().compression != lotse_record::Compression::None {
+            parsed.records().map_err(ProposeError::Invalid)?;
+        }
         // Only a leader answers for the log, duplicates included.
         if self.raft.role() != lotse_raft::Role::Leader {
             return Err(ProposeError::NotLeader(NotLeader { leader: self.raft.leader() }));

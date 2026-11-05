@@ -1,0 +1,12 @@
+# Records of each batch in compressed.hex, written as in batch-records.txt.
+# label index offset timestamp key value headers
+zstd-stamped 0 100 1700000000000 =6b31 =7631 68:=78,6e:-
+zstd-stamped 1 101 1700000000005 - - -
+zstd-stamped 2 102 1699999999999 = = :=
+zstd-large 0 0 1700000000000 #200:d7a4e987 #20000:d7a2ca3d -
+zstd-large 1 1 -1700000000000 =6e65676174697665 - -
+lz4-stamped 0 100 1700000000000 =6b31 =7631 68:=78,6e:-
+lz4-stamped 1 101 1700000000005 - - -
+lz4-stamped 2 102 1699999999999 = = :=
+lz4-large 0 0 1700000000000 #200:d7a4e987 #20000:d7a2ca3d -
+lz4-large 1 1 -1700000000000 =6e65676174697665 - -

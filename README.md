@@ -165,7 +165,7 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 
 ## Known gaps
 
-- Compression codecs (zstd, lz4) are declared in the format but not implemented; compressed batches are rejected.
+- Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK does not decompress yet; `lotse-client` compresses only what the caller builds compressed.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
 - Raft: snapshots travel in chunks (1 MiB by default), one in flight per follower and collected in memory before they are installed; pipelining chunks and spilling them to disk come later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
 - Transactional ids and consumer group ids are not scoped to tenants. A removed role binding takes effect on each node once it applies the metadata group. Certificates are read once at start (no reloading, no revocation check); tokens are not checked for revocation before they expire.

@@ -65,13 +65,80 @@ fn empty_batches_cannot_be_built() {
     assert!(BatchBuilder::new(BatchOptions::default()).finish().is_err());
 }
 
+/// A compressed batch with `block` as its record block, the header filled
+/// in as the builder would: what a careless or hostile producer could send.
+fn with_block(codec: Compression, count: u32, block: &[u8]) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    for _ in 0..count {
+        b.push(0, None, Some(b"x"), &[]);
+    }
+    let plain = b.finish().unwrap();
+    let mut buf = BytesMut::from(&plain[..HEADER_LEN]);
+    buf.extend_from_slice(block);
+    let len = (buf.len() - LEN_PREFIX) as u32;
+    buf[8..12].copy_from_slice(&len.to_le_bytes());
+    let attrs = Attributes { compression: codec, ..BatchOptions::default().attributes };
+    buf[25..27].copy_from_slice(&attrs.to_bits().to_le_bytes());
+    let crc = crc32c::crc32c(&buf[25..]);
+    buf[21..25].copy_from_slice(&crc.to_le_bytes());
+    buf.freeze()
+}
+
 #[test]
-fn compressed_batches_are_refused_until_codecs_exist() {
+fn compressed_batches_are_smaller_and_read_the_same() {
+    let records: Vec<Rec> =
+        (0..200).map(|i| (i, None, Some(b"the same value, again and again".to_vec()), vec![])).collect();
+    let plain = build(BatchOptions::default(), &records);
+    for codec in [Compression::Zstd, Compression::Lz4] {
+        let mut opts = BatchOptions::default();
+        opts.attributes.compression = codec;
+        let bytes = build(opts, &records);
+        assert!(bytes.len() * 4 < plain.len(), "{codec:?}: {} of {} bytes", bytes.len(), plain.len());
+        let (batch, _) = Batch::parse(&bytes).unwrap();
+        assert_eq!(batch.attributes().compression, codec);
+        let (plain_batch, _) = Batch::parse(&plain).unwrap();
+        assert_eq!(batch.records().unwrap(), plain_batch.records().unwrap(), "{codec:?}");
+    }
+}
+
+#[test]
+fn a_compressed_block_that_does_not_decode_is_refused() {
+    for codec in [Compression::Zstd, Compression::Lz4] {
+        let bytes = with_block(codec, 1, b"not compressed at all");
+        let (batch, _) = Batch::parse(&bytes).expect("the header and CRC are fine");
+        assert!(matches!(batch.records(), Err(Error::Codec(c, _)) if c == codec), "{codec:?}");
+    }
+}
+
+#[test]
+fn a_compressed_block_may_not_decode_beyond_the_limit() {
+    // 17 MiB of zeros compress to a few KiB: a small batch, a large block.
+    let zeros = vec![0u8; MAX_RECORDS_LEN + 1024 * 1024];
+    let zstd = zstd::bulk::compress(&zeros, 3).unwrap();
+    let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
+    std::io::Write::write_all(&mut enc, &zeros).unwrap();
+    let lz4 = enc.finish().unwrap();
+    for (codec, block) in [(Compression::Zstd, zstd), (Compression::Lz4, lz4)] {
+        assert!(block.len() < MAX_BATCH_LEN, "{codec:?} fits a batch");
+        let (batch, _) = Batch::parse(&with_block(codec, 1, &block)).unwrap();
+        assert_eq!(batch.records().unwrap_err(), Error::DecompressedTooLarge, "{codec:?}");
+    }
+    // Nor may a builder make one.
     let mut opts = BatchOptions::default();
     opts.attributes.compression = Compression::Zstd;
     let mut b = BatchBuilder::new(opts);
-    b.push(0, None, Some(b"x"), &[]);
-    assert_eq!(b.finish().unwrap_err(), Error::UnsupportedCompression(Compression::Zstd));
+    b.push(0, None, Some(&zeros), &[]);
+    assert_eq!(b.finish().unwrap_err(), Error::DecompressedTooLarge);
+}
+
+#[test]
+fn a_compressed_block_with_fewer_records_than_its_header_is_refused() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(b"one"), &[]);
+    let one = b.finish().unwrap();
+    let block = zstd::bulk::compress(&one[HEADER_LEN..], 3).unwrap();
+    let (batch, _) = Batch::parse(&with_block(Compression::Zstd, 2, &block)).unwrap();
+    assert!(batch.records().is_err(), "the header says two");
 }
 
 #[test]
@@ -100,8 +167,8 @@ fn several_batches_frame_back_to_back() {
 }
 
 fn attributes() -> impl Strategy<Value = Attributes> {
-    (any::<bool>(), any::<bool>(), 0u8..6).prop_map(|(transactional, control, k)| Attributes {
-        compression: Compression::None,
+    (any::<bool>(), any::<bool>(), 0u8..6, 0u8..3).prop_map(|(transactional, control, k, c)| Attributes {
+        compression: [Compression::None, Compression::Zstd, Compression::Lz4][c as usize],
         transactional,
         control,
         kind: [

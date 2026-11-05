@@ -41,6 +41,12 @@ pub const LEN_PREFIX: usize = 12;
 pub const MAGIC: u8 = 1;
 /// Largest batch accepted, header included.
 pub const MAX_BATCH_LEN: usize = 1024 * 1024;
+/// Largest record block of a compressed batch once decompressed: a batch
+/// that would decompress to more is refused, so a small batch cannot make
+/// a reader allocate without bound (ADR 0058).
+pub const MAX_RECORDS_LEN: usize = 16 * 1024 * 1024;
+/// zstd level the [`BatchBuilder`] compresses at: zstd's default.
+pub const ZSTD_LEVEL: i32 = 3;
 
 const CRC_START: usize = 25;
 
@@ -70,9 +76,12 @@ pub enum Error {
     /// Header fields contradict each other or the records.
     #[error("malformed batch: {0}")]
     Malformed(&'static str),
-    /// The batch uses a compression codec this build does not support.
-    #[error("compression codec {0:?} is not supported yet")]
-    UnsupportedCompression(Compression),
+    /// A codec failed: a compressed record block does not decode.
+    #[error("compression codec {0:?} failed: {1}")]
+    Codec(Compression, String),
+    /// A compressed record block decodes to more than [`MAX_RECORDS_LEN`].
+    #[error("compressed record block decodes to more than {MAX_RECORDS_LEN} bytes")]
+    DecompressedTooLarge,
 }
 
 /// Compression of the record block.
@@ -80,10 +89,47 @@ pub enum Error {
 pub enum Compression {
     /// Records are stored as is.
     None,
-    /// zstd (not implemented yet).
+    /// The record block is one zstd frame.
     Zstd,
-    /// lz4 frame format (not implemented yet).
+    /// The record block is one lz4 frame (the LZ4 frame format, not the
+    /// bare block format).
     Lz4,
+}
+
+impl Compression {
+    /// Compresses a record block.
+    fn compress(self, block: &[u8]) -> Result<Vec<u8>, Error> {
+        use std::io::Write as _;
+        match self {
+            Compression::None => Ok(block.to_vec()),
+            Compression::Zstd => zstd::bulk::compress(block, ZSTD_LEVEL).map_err(|e| Error::Codec(self, e.to_string())),
+            Compression::Lz4 => {
+                let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::with_capacity(block.len() / 2 + 64));
+                enc.write_all(block).map_err(|e| Error::Codec(self, e.to_string()))?;
+                enc.finish().map_err(|e| Error::Codec(self, e.to_string()))
+            }
+        }
+    }
+
+    /// Decompresses a record block, refusing one that decodes to more than
+    /// [`MAX_RECORDS_LEN`] bytes before it gets there.
+    fn decompress(self, block: &[u8]) -> Result<Bytes, Error> {
+        use std::io::Read as _;
+        let limit = MAX_RECORDS_LEN as u64 + 1;
+        let mut out = Vec::new();
+        let read = match self {
+            Compression::None => return Ok(Bytes::copy_from_slice(block)),
+            Compression::Zstd => {
+                zstd::stream::read::Decoder::new(block).and_then(|d| d.take(limit).read_to_end(&mut out))
+            }
+            Compression::Lz4 => lz4_flex::frame::FrameDecoder::new(block).take(limit).read_to_end(&mut out),
+        };
+        read.map_err(|e| Error::Codec(self, e.to_string()))?;
+        if out.len() > MAX_RECORDS_LEN {
+            return Err(Error::DecompressedTooLarge);
+        }
+        Ok(Bytes::from(out))
+    }
 }
 
 /// What a batch carries. Queue state lives in the same log as the data.
@@ -208,7 +254,8 @@ pub struct Record {
 /// Header fields chosen by the producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchOptions {
-    /// Attributes; compression must be [`Compression::None`] for now.
+    /// Attributes; with a codec, [`BatchBuilder::finish`] compresses the
+    /// record block.
     pub attributes: Attributes,
     /// Producer ID, 0 for non-idempotent producers.
     pub producer_id: u64,
@@ -250,7 +297,8 @@ impl BatchBuilder {
         self.count == 0
     }
 
-    /// Encoded size if the batch were finished now.
+    /// Encoded size if the batch were finished now without compression: an
+    /// upper bound for a compressed one, give or take the codec's frame.
     pub fn encoded_len(&self) -> usize {
         HEADER_LEN + self.body.len()
     }
@@ -288,15 +336,17 @@ impl BatchBuilder {
         if self.count == 0 {
             return Err(Error::Malformed("empty batch"));
         }
-        if self.options.attributes.compression != Compression::None {
-            return Err(Error::UnsupportedCompression(self.options.attributes.compression));
+        let codec = self.options.attributes.compression;
+        if codec != Compression::None && self.body.len() > MAX_RECORDS_LEN {
+            return Err(Error::DecompressedTooLarge);
         }
-        let total = HEADER_LEN + self.body.len();
+        let body = if codec == Compression::None { self.body } else { codec.compress(&self.body)? };
+        let total = HEADER_LEN + body.len();
         if total > MAX_BATCH_LEN {
             return Err(Error::TooLarge(total));
         }
         let mut buf = BytesMut::zeroed(HEADER_LEN);
-        buf.extend_from_slice(&self.body);
+        buf.extend_from_slice(&body);
         put_u32(&mut buf, 8, (total - LEN_PREFIX) as u32);
         buf[20] = MAGIC;
         put_u16(&mut buf, 25, self.options.attributes.to_bits());
@@ -477,14 +527,21 @@ impl Batch {
         get_u32(&self.bytes, 61)
     }
 
-    /// Decodes the records. Fails on compressed batches until codecs land.
-    pub fn records(&self) -> Result<Vec<Record>, Error> {
-        if self.attributes.compression != Compression::None {
-            return Err(Error::UnsupportedCompression(self.attributes.compression));
+    /// The record block, decompressed if the batch is compressed. Keys,
+    /// values and headers of [`Batch::records`] point into it.
+    pub fn record_block(&self) -> Result<Bytes, Error> {
+        match self.attributes.compression {
+            Compression::None => Ok(self.bytes.slice(HEADER_LEN..)),
+            codec => codec.decompress(&self.bytes[HEADER_LEN..]),
         }
+    }
+
+    /// Decodes the records, decompressing the block first if need be.
+    pub fn records(&self) -> Result<Vec<Record>, Error> {
+        let block = self.record_block()?;
         let base_offset = self.base_offset();
         let base_ts = self.base_timestamp();
-        let mut rest = &self.bytes[HEADER_LEN..];
+        let mut rest = &block[..];
         let mut out = Vec::with_capacity(self.record_count() as usize);
         for expected_delta in 0..self.record_count() {
             let (len, n) = varint::get_i64(rest)?;
@@ -495,7 +552,7 @@ impl Batch {
             }
             let (rec, tail) = rest.split_at(len);
             rest = tail;
-            let mut r = Cursor { buf: rec, base: &self.bytes, start: self.bytes.len() - tail.len() - len };
+            let mut r = Cursor { buf: rec, base: &block, start: block.len() - tail.len() - len };
             let _attributes = r.byte()?;
             let ts_delta = r.i64()?;
             let offset_delta = r.i32()?;

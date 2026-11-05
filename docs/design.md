@@ -83,7 +83,7 @@ header_count    varint
   [h_key_len varint, h_key bytes, h_val_len varint, h_val bytes]*
 ```
 
-Komprimiert (zstd oder lz4, laut `attributes`) wird nur der Record-Block. Der Header bleibt immer unkomprimiert, damit Raft, Indizes und Transaktionslogik nie dekomprimieren müssen.
+Komprimiert (zstd oder lz4, laut `attributes`) wird nur der Record-Block. Der Header bleibt immer unkomprimiert, damit Raft, Indizes und Transaktionslogik nie dekomprimieren müssen. Der Block ist ein zstd-Frame (libzstd, Level 3) oder ein LZ4-Frame (Frame-Format, `lz4_flex`); die CRC läuft über die komprimierten Bytes, und entpackt darf er höchstens 16 MiB groß sein, ein Leser bricht beim Entpacken darüber ab. Der Leader entpackt einen komprimierten Batch beim Produce einmal und lehnt ihn ab (`CORRUPT_BATCH`), wenn er sich nicht entpacken lässt oder andere Records enthält, als der Header sagt; danach wird er komprimiert gespeichert, repliziert und ausgeliefert. Ob komprimiert wird, entscheidet der Producer pro Batch (ADR 0058).
 
 ## Transaktionen & Exactly-once
 

@@ -93,7 +93,9 @@ offset size field
 
 `base_offset` and `term` sit before the checksummed range: the leader stamps them without invalidating the CRC. A client sends both as zero.
 
-Kinds: 0 data, 1 ack, 2 queue state, 3 timer, 4 dead letter, 5 retire. Compression: 0 none, 1 zstd, 2 lz4; only 0 is readable so far. Bits 8 to 15 must be zero.
+Kinds: 0 data, 1 ack, 2 queue state, 3 timer, 4 dead letter, 5 retire. Compression: 0 none, 1 zstd, 2 lz4. Bits 8 to 15 must be zero.
+
+**Compression** (ADR 0058) covers the record block only; the header stays as it is, and the CRC is over the compressed bytes. With zstd the block is one zstd frame; with lz4 it is one LZ4 frame (the frame format with its magic `04 22 4d 18`, not the bare block format). Once decompressed the block reads exactly like an uncompressed one, and it is at most 16 MiB: a reader stops decompressing past that and treats the batch as damaged. The batch itself, compressed, stays within 1 MiB. A node checks a compressed batch's records when it is produced and refuses one that does not decode (`CORRUPT_BATCH`); it stores, replicates and serves the batch compressed, so a consumer must read every codec its producers use. Control batches are never compressed.
 
 A record, every `varint` ZigZag:
 
@@ -105,7 +107,7 @@ length varint | attributes i8 (0) | ts_delta varint | offset_delta varint
 
 `ts_delta` is relative to `base_ts` and wraps like a signed 64-bit subtraction; `offset_delta` is the record's index and must run 0, 1, 2, and so on. A header key is never null.
 
-**Checks a parser makes**, in this order: the buffer holds the 12-byte prefix; the length is at most 1 MiB (the length is a `u32`, so test it without overflow); it is at least 65; the whole batch is present; `magic` is 1; the CRC matches; the attributes are valid; `record_count` is not 0; `last_offset_delta == record_count - 1`; `max_ts >= base_ts`; a control batch holds exactly one record. Decoding the records adds: consecutive offset deltas, no bytes left inside a record, no bytes left after the last record, lengths and counts not negative, and every length within the record.
+**Checks a parser makes**, in this order: the buffer holds the 12-byte prefix; the length is at most 1 MiB (the length is a `u32`, so test it without overflow); it is at least 65; the whole batch is present; `magic` is 1; the CRC matches; the attributes are valid; `record_count` is not 0; `last_offset_delta == record_count - 1`; `max_ts >= base_ts`; a control batch holds exactly one record. Decoding the records adds: the block decompresses, to at most 16 MiB; consecutive offset deltas, no bytes left inside a record, no bytes left after the last record, lengths and counts not negative, and every length within the record.
 
 **Editing in place.** A client sets producer fields (`set_producer`), the transactional bit (`set_transactional`) and, for the leader's TTL stamping, the base timestamp, on the encoded bytes and recomputes the CRC over bytes 25 to the end of that batch. `BatchBuilder` takes the first record's timestamp as `base_ts` and the largest as `max_ts`; it does not read a clock.
 
