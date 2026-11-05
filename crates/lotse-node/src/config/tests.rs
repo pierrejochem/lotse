@@ -108,6 +108,11 @@ required = false
         err(&local.replace("plaintext_on_loopback = true", "plaintext_on_loopback = true\nca = \"x\""))
             .contains("choose one")
     );
+    assert!(
+        err(&local.replace("plaintext_on_loopback = true", "plaintext_on_loopback = true\ncrl = \"x\""))
+            .contains("choose one"),
+        "a revocation list without TLS would protect nothing"
+    );
 }
 
 #[test]

@@ -120,6 +120,11 @@ pub struct Tls {
     /// The node's private key, PEM.
     #[serde(default)]
     pub key: Option<String>,
+    /// The CA's certificate revocation list, PEM (ADR 0060): a certificate
+    /// it names is refused in every handshake. `lotse certs --revoke`
+    /// writes it; the same file goes to every node.
+    #[serde(default)]
+    pub crl: Option<String>,
     /// No TLS: allowed only when every address is on loopback, for trying
     /// a cluster on one machine.
     #[serde(default)]
@@ -248,7 +253,7 @@ impl ClusterFile {
             return invalid("cluster.segment_bytes must be at least 4096".into());
         }
         if self.tls.plaintext_on_loopback {
-            if self.tls.ca.is_some() || self.tls.cert.is_some() || self.tls.key.is_some() {
+            if self.tls.ca.is_some() || self.tls.cert.is_some() || self.tls.key.is_some() || self.tls.crl.is_some() {
                 return invalid("[tls] names certificates and plaintext_on_loopback; choose one".into());
             }
             for n in &self.nodes {
@@ -364,6 +369,11 @@ impl ClusterFile {
             },
             join: false,
         })
+    }
+
+    /// The revocation list's path, if `[tls]` names one.
+    pub fn crl_path(&self) -> Option<PathBuf> {
+        self.tls.crl.as_deref().map(PathBuf::from)
     }
 
     /// Node `id`'s CA, certificate and key paths; `None` without TLS.

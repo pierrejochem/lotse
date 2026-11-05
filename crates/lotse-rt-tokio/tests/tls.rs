@@ -163,3 +163,122 @@ async fn plain_tcp_is_opt_in_and_loopback_only() {
     let client_only = rt().with_tls(DevCa::new().client_tls(None).unwrap());
     assert!(client_only.listen("127.0.0.1:0", Link::Client).await.is_err());
 }
+
+/// TLS from the CA, the certificate `c` and a revocation list naming `revoked`.
+fn tls_with_crl(ca: &DevCa, c: &lotse_rt_tokio::dev_certs::Issued, revoked: &[&str]) -> TlsConfig {
+    let crl = ca.crl(revoked);
+    TlsConfig::from_pem_with_crl(
+        ca.ca_pem().as_bytes(),
+        Some((c.cert_pem.as_bytes(), c.key_pem.as_bytes())),
+        Some(crl.as_bytes()),
+    )
+    .unwrap()
+}
+
+/// A client showing the certificate `c`.
+fn client(ca: &DevCa, c: &lotse_rt_tokio::dev_certs::Issued) -> TokioRuntime {
+    rt().with_tls(
+        TlsConfig::from_pem(ca.ca_pem().as_bytes(), Some((c.cert_pem.as_bytes(), c.key_pem.as_bytes()))).unwrap(),
+    )
+}
+
+/// Whether a connection is open both ways: a frame sent on one end arrives
+/// at the other.
+async fn talks(a: &lotse_rt_tokio::TokioConn, b: &lotse_rt_tokio::TokioConn) -> bool {
+    if a.send(Bytes::from_static(b"ping")).await.is_err() {
+        return false;
+    }
+    matches!(tokio::time::timeout(Duration::from_secs(5), b.recv()).await, Ok(Ok(Some(f))) if &f[..] == b"ping")
+}
+
+#[tokio::test]
+async fn a_revoked_certificate_is_refused_in_the_handshake() {
+    let ca = DevCa::new();
+    let (n1, alice, bob) = (ca.node(1, &["127.0.0.1"]), ca.principal("alice"), ca.principal("bob"));
+    let server = rt().with_tls(tls_with_crl(&ca, &n1, &[&alice.cert_pem]));
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let addr = l.local_addr();
+
+    if let Ok(conn) = client(&ca, &alice).connect(&addr, Link::Client).await {
+        assert!(refused(&conn).await, "the listener refuses a revoked client certificate");
+    }
+    assert!(accepted(&l).await.is_none());
+    let b = client(&ca, &bob).connect(&addr, Link::Client).await.unwrap();
+    let s = accepted(&l).await.expect("a certificate the list does not name is let in");
+    assert!(talks(&b, &s).await);
+
+    // The other way round: a dialler with the list refuses a revoked server.
+    let n2 = ca.node(2, &["127.0.0.1"]);
+    let revoked_server = rt().with_tls(tls_with_crl(&ca, &n2, &[]));
+    let l2 = revoked_server.listen("127.0.0.1:0", Link::Node).await.unwrap();
+    let n3 = ca.node(3, &["127.0.0.1"]);
+    let dialler = rt().with_tls(tls_with_crl(&ca, &n3, &[&n2.cert_pem]));
+    assert!(dialler.connect(&l2.local_addr(), Link::Node).await.is_err(), "a revoked node is not dialled");
+}
+
+#[tokio::test]
+async fn a_reload_ends_the_connections_it_revokes_and_nothing_else() {
+    let ca = DevCa::new();
+    let (n1, alice, bob) = (ca.node(1, &["127.0.0.1"]), ca.principal("alice"), ca.principal("bob"));
+    let server = rt().with_tls(tls_with_crl(&ca, &n1, &[]));
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let addr = l.local_addr();
+    let a = client(&ca, &alice).connect(&addr, Link::Client).await.unwrap();
+    let sa = accepted(&l).await.unwrap();
+    let b = client(&ca, &bob).connect(&addr, Link::Client).await.unwrap();
+    let sb = accepted(&l).await.unwrap();
+    assert!(talks(&a, &sa).await && talks(&b, &sb).await);
+
+    // A clone shares the material: reloading through it reaches the listener.
+    let waiting = {
+        let sa = std::sync::Arc::new(sa);
+        let s = sa.clone();
+        (tokio::spawn(async move { s.recv().await }), sa)
+    };
+    assert_eq!(server.clone().reload_tls(tls_with_crl(&ca, &n1, &[&alice.cert_pem])), 1, "alice's one connection");
+    let ended = tokio::time::timeout(Duration::from_secs(5), waiting.0).await.expect("a waiting recv ends").unwrap();
+    assert!(ended.is_err(), "a recv already waiting fails");
+    assert!(waiting.1.send(Bytes::from_static(b"x")).await.is_err(), "and every call after");
+    assert!(talks(&b, &sb).await && talks(&sb, &b).await, "bob's connection goes on");
+
+    if let Ok(conn) = client(&ca, &alice).connect(&addr, Link::Client).await {
+        assert!(refused(&conn).await, "alice cannot come back");
+    }
+    assert!(accepted(&l).await.is_none());
+    assert_eq!(server.reload_tls(tls_with_crl(&ca, &n1, &[&alice.cert_pem])), 0, "nothing left to end");
+}
+
+#[tokio::test]
+async fn a_reload_reaches_the_next_handshake() {
+    // A node's certificate replaced, here by one from a new CA, is what the
+    // next dialler sees; the listener stays where it is.
+    let (old, new) = (DevCa::new(), DevCa::new());
+    let server = node(&old, 1);
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let addr = l.local_addr();
+    let trusts_new = rt().with_tls(new.client_tls(None).unwrap());
+    assert!(trusts_new.connect(&addr, Link::Client).await.is_err());
+    assert_eq!(server.reload_tls(new.node_tls(1, &["127.0.0.1"]).unwrap()), 0);
+    let conn = trusts_new.connect(&addr, Link::Client).await.expect("the new certificate is shown");
+    assert!(talks(&conn, &accepted(&l).await.unwrap()).await);
+    let trusts_old = rt().with_tls(old.client_tls(None).unwrap());
+    assert!(trusts_old.connect(&addr, Link::Client).await.is_err(), "the old one is gone");
+}
+
+#[test]
+fn a_revocation_list_that_does_not_parse_is_refused() {
+    let ca = DevCa::new();
+    let n = ca.node(1, &["127.0.0.1"]);
+    let id = Some((n.cert_pem.as_bytes(), n.key_pem.as_bytes()));
+    assert!(TlsConfig::from_pem_with_crl(ca.ca_pem().as_bytes(), id, Some(b"nothing here")).is_err());
+    let bad = "-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n";
+    assert!(TlsConfig::from_pem_with_crl(ca.ca_pem().as_bytes(), id, Some(bad.as_bytes())).is_err());
+}
+
+#[test]
+fn a_key_that_is_not_the_certificates_is_refused() {
+    // A certificate renewed in place, read between its two files.
+    let ca = DevCa::new();
+    let (a, b) = (ca.node(1, &["127.0.0.1"]), ca.node(1, &["127.0.0.1"]));
+    assert!(TlsConfig::from_pem(ca.ca_pem().as_bytes(), Some((a.cert_pem.as_bytes(), b.key_pem.as_bytes()))).is_err());
+}

@@ -19,11 +19,12 @@ x509-parser.workspace = true
 webpki-roots.workspace = true
 ring.workspace = true
 rcgen = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "fs"] }
+time = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "fs", "macros"] }
 
 [features]
 # A throwaway CA for tests and local clusters.
-dev-certs = ["dep:rcgen"]
+dev-certs = ["dep:rcgen", "dep:time"]
 
 [dev-dependencies]
 lotse-rt-tokio = { path = ".", features = ["dev-certs"] }

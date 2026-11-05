@@ -2,8 +2,11 @@
 //! for production, where certificates come from the operator's CA.
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyIdMethod, KeyPair, KeyUsagePurpose, RevokedCertParams, SanType, SerialNumber,
 };
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject as _;
 
 use crate::tls::{TlsConfig, TlsError};
 
@@ -81,6 +84,34 @@ impl DevCa {
             }
             None => TlsConfig::from_pem(self.ca_pem().as_bytes(), None),
         }
+    }
+
+    /// A certificate revocation list, PEM, signed by this CA and naming the
+    /// certificates in `revoked` (each PEM).
+    pub fn crl(&self, revoked: &[&str]) -> String {
+        let now = time::OffsetDateTime::now_utc();
+        let revoked_certs = revoked
+            .iter()
+            .map(|pem| {
+                let der = CertificateDer::from_pem_slice(pem.as_bytes()).expect("a certificate");
+                let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("a certificate");
+                RevokedCertParams {
+                    serial_number: SerialNumber::from_slice(cert.raw_serial()),
+                    revocation_time: now,
+                    reason_code: None,
+                    invalidity_date: None,
+                }
+            })
+            .collect();
+        let params = CertificateRevocationListParams {
+            this_update: now - time::Duration::minutes(1),
+            next_update: now + time::Duration::days(1),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs,
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+        params.signed_by(&self.cert, &self.key).expect("a signed revocation list").pem().expect("PEM")
     }
 
     fn issue(&self, common_name: &str, sans: Vec<SanType>, server: bool) -> Issued {

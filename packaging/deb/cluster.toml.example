@@ -27,6 +27,7 @@ client = "10.0.0.3:9000"
 ca = "/etc/lotse/ca.pem"
 cert = "/etc/lotse/node-{id}.pem"
 key = "/etc/lotse/node-{id}.key"
+crl = "/etc/lotse/crl.pem"   # `lotse certs --revoke <cert>` adds to it; same file on every node
 
 [retention]
 ms = 604800000      # 7 days; -1 keeps everything

@@ -53,16 +53,77 @@ impl StateMachine for NoStateMachine {
     }
 }
 
+/// How often a running node looks at its certificate files (ADR 0060).
+pub const TLS_RELOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The runtime node `id` runs on: its data directory, and TLS with its
 /// certificate or, if the file says so, plain TCP on loopback.
 pub fn runtime(file: &ClusterFile, id: u64) -> Result<TokioRuntime, RunError> {
     let dir = file.data_dir(id);
     std::fs::create_dir_all(&dir).map_err(|source| RunError::DataDir { path: dir.display().to_string(), source })?;
     let rt = TokioRuntime::new(dir);
-    Ok(match file.tls_paths(id) {
-        Some((ca, cert, key)) => rt.with_tls(TlsConfig::from_files(ca, Some((cert, key)))?),
+    Ok(match tls_files(file, id)? {
+        Some((_, tls)) => rt.with_tls(tls),
         None => rt.plaintext_on_loopback(),
     })
+}
+
+/// The bytes of the files TLS was loaded from, in the order `[tls]` names them.
+pub type FileContents = Vec<Vec<u8>>;
+
+/// Node `id`'s TLS from the files `[tls]` names, together with those files'
+/// contents, which say whether anything changed since; `None` without TLS.
+pub fn tls_files(file: &ClusterFile, id: u64) -> Result<Option<(FileContents, TlsConfig)>, RunError> {
+    let Some((ca, cert, key)) = file.tls_paths(id) else { return Ok(None) };
+    let mut paths = vec![ca, cert, key];
+    paths.extend(file.crl_path());
+    let mut contents = Vec::new();
+    for p in &paths {
+        contents.push(
+            std::fs::read(p).map_err(|source| {
+                RunError::Tls(lotse_rt_tokio::TlsError::Io { path: p.display().to_string(), source })
+            })?,
+        );
+    }
+    let crl = contents.get(3).map(Vec::as_slice);
+    let tls = TlsConfig::from_pem_with_crl(&contents[0], Some((&contents[1], &contents[2])), crl)?;
+    Ok(Some((contents, tls)))
+}
+
+/// Looks at node `id`'s certificate files every [`TLS_RELOAD_EVERY`] and
+/// gives the runtime what changed: a renewed certificate, a new CA bundle,
+/// a longer revocation list. Files that do not make a working configuration
+/// (half written, a key that does not match) are reported and the old
+/// material kept, so a mistake never takes a running node off the network.
+pub async fn reload_tls(rt: TokioRuntime, file: ClusterFile, id: u64) {
+    reload_tls_every(rt, file, id, TLS_RELOAD_EVERY).await
+}
+
+/// [`reload_tls`], looking every `every`.
+pub async fn reload_tls_every(rt: TokioRuntime, file: ClusterFile, id: u64, every: std::time::Duration) {
+    let mut seen = match tls_files(&file, id) {
+        Ok(Some((contents, _))) => contents,
+        _ => return,
+    };
+    let mut failing = false;
+    loop {
+        tokio::time::sleep(every).await;
+        match tls_files(&file, id) {
+            Ok(Some((contents, tls))) if contents != seen => {
+                let closed = rt.reload_tls(tls);
+                tracing::info!(node = id, revoked_connections_closed = closed, "TLS files changed: reloaded");
+                seen = contents;
+                failing = false;
+            }
+            Ok(_) => failing = false,
+            Err(e) => {
+                if !failing {
+                    tracing::warn!(node = id, error = %e, "TLS files do not load; keeping the material in use");
+                }
+                failing = true;
+            }
+        }
+    }
 }
 
 /// Runs node `id` of the cluster in `file` until `shutdown` completes,
@@ -81,6 +142,8 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
         tls = file.tls_paths(id).is_some(),
         "starting"
     );
+    // Stops with this function, however it returns.
+    let _reload = AbortOnDrop(tokio::spawn(reload_tls(rt.clone(), file.clone(), id)).abort_handle());
     let node = Node::start(rt, cfg, |_| NoStateMachine).await?;
     let handle = node.handle();
     let stopped = node.join();
@@ -100,6 +163,15 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     stopped.await?;
     tracing::info!(node = id, "stopped");
     Ok(())
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// A client acting for an admin, reaching the nodes the file names: with a

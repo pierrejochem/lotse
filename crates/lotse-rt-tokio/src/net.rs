@@ -2,14 +2,15 @@
 
 use std::future::Future;
 use std::io::{self, ErrorKind};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use lotse_rt::{Conn, Link, Listener, MAX_FRAME, Net, PeerIdentity};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::TokioRuntime;
 use crate::tls::{TlsConfig, identity_of};
@@ -22,8 +23,63 @@ pub(crate) enum Security {
     Unset,
     /// Plain TCP, loopback only.
     Plain,
-    /// TLS 1.3.
-    Tls(TlsConfig),
+    /// TLS 1.3, with material that may be replaced while running.
+    Tls(Arc<Shared>),
+}
+
+/// TLS material shared by a runtime and its clones, and the connections made
+/// with it, so that new material reaches every listener and connection.
+#[derive(Debug)]
+pub(crate) struct Shared {
+    current: RwLock<TlsConfig>,
+    conns: Mutex<Vec<Weak<Watch>>>,
+}
+
+/// What a reload needs to know about one connection: the certificate the
+/// other end showed, and a way to end it.
+#[derive(Debug)]
+struct Watch {
+    cert: Vec<u8>,
+    closed: AtomicBool,
+    wake: Notify,
+}
+
+impl Shared {
+    pub(crate) fn new(tls: TlsConfig) -> Arc<Shared> {
+        Arc::new(Shared { current: RwLock::new(tls), conns: Mutex::new(Vec::new()) })
+    }
+
+    fn current(&self) -> TlsConfig {
+        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Remembers a connection whose other end showed `cert`, so that a later
+    /// revocation can end it.
+    fn watch(&self, cert: Option<&rustls::pki_types::CertificateDer<'_>>) -> Option<Arc<Watch>> {
+        let cert = cert?;
+        let w = Arc::new(Watch { cert: cert.to_vec(), closed: AtomicBool::new(false), wake: Notify::new() });
+        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+        conns.retain(|c| c.strong_count() > 0);
+        conns.push(Arc::downgrade(&w));
+        Some(w)
+    }
+
+    /// Takes `tls` for every handshake from now on and ends the connections
+    /// whose certificate it revokes; returns how many.
+    pub(crate) fn reload(&self, tls: TlsConfig) -> usize {
+        let mut closed = 0;
+        {
+            let conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+            for w in conns.iter().filter_map(Weak::upgrade) {
+                if tls.revokes(&w.cert) && !w.closed.swap(true, Ordering::SeqCst) {
+                    w.wake.notify_waiters();
+                    closed += 1;
+                }
+            }
+        }
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = tls;
+        closed
+    }
 }
 
 /// How long a TLS handshake may take before the connection is dropped.
@@ -77,6 +133,8 @@ pub struct TokioConn {
     rd: tokio::sync::Mutex<Reader>,
     wr: tokio::sync::Mutex<Writer>,
     peer: Option<PeerIdentity>,
+    /// Set for TLS connections whose other end showed a certificate.
+    watch: Option<Arc<Watch>>,
 }
 
 impl std::fmt::Debug for TokioConn {
@@ -86,9 +144,30 @@ impl std::fmt::Debug for TokioConn {
 }
 
 impl TokioConn {
-    fn new<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, peer: Option<PeerIdentity>) -> Self {
+    fn new<S: AsyncRead + AsyncWrite + Send + 'static>(
+        stream: S,
+        peer: Option<PeerIdentity>,
+        watch: Option<Arc<Watch>>,
+    ) -> Self {
         let (rd, wr) = tokio::io::split(stream);
-        TokioConn { rd: tokio::sync::Mutex::new(Box::new(rd)), wr: tokio::sync::Mutex::new(Box::new(wr)), peer }
+        TokioConn { rd: tokio::sync::Mutex::new(Box::new(rd)), wr: tokio::sync::Mutex::new(Box::new(wr)), peer, watch }
+    }
+
+    /// Runs `io` unless or until the connection is revoked; a revoked
+    /// connection fails every call from then on.
+    async fn unless_revoked<T>(&self, io: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+        let Some(w) = &self.watch else { return io.await };
+        let revoked = || io::Error::new(ErrorKind::ConnectionAborted, "the other end's certificate was revoked");
+        let woken = w.wake.notified();
+        // Checked after `notified` exists, so a revocation in between is not
+        // missed.
+        if w.closed.load(Ordering::SeqCst) {
+            return Err(revoked());
+        }
+        tokio::select! {
+            r = io => r,
+            () = woken => Err(revoked()),
+        }
     }
 }
 
@@ -109,18 +188,25 @@ fn checked(
     Ok(identity)
 }
 
-async fn handshake_in(tcp: tokio::net::TcpStream, cfg: Arc<rustls::ServerConfig>, link: Link) -> io::Result<TokioConn> {
+async fn handshake_in(
+    tcp: tokio::net::TcpStream,
+    cfg: Arc<rustls::ServerConfig>,
+    link: Link,
+    shared: Arc<Shared>,
+) -> io::Result<TokioConn> {
     let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
     let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp))
         .await
         .map_err(|_| io::Error::new(ErrorKind::TimedOut, "TLS handshake timed out"))??;
-    let peer = checked(link, tls.get_ref().1.peer_certificates())?;
-    Ok(TokioConn::new(tls, peer))
+    let certs = tls.get_ref().1.peer_certificates();
+    let peer = checked(link, certs)?;
+    let watch = shared.watch(certs.and_then(|c| c.first()));
+    Ok(TokioConn::new(tls, peer, watch))
 }
 
 async fn accept_loop(
     tcp: tokio::net::TcpListener,
-    tls: Option<Arc<rustls::ServerConfig>>,
+    tls: Option<Arc<Shared>>,
     link: Link,
     out: mpsc::Sender<(TokioConn, String)>,
 ) {
@@ -140,14 +226,17 @@ async fn accept_loop(
         let peer = peer.to_string();
         match &tls {
             None => {
-                if out.send((TokioConn::new(stream, None), peer)).await.is_err() {
+                if out.send((TokioConn::new(stream, None, None), peer)).await.is_err() {
                     return;
                 }
             }
-            Some(cfg) => {
-                let (cfg, out) = (cfg.clone(), out.clone());
+            Some(shared) => {
+                // The material of the moment: a reload reaches the next
+                // handshake.
+                let Some(cfg) = shared.current().server(link) else { continue };
+                let (shared, out) = (shared.clone(), out.clone());
                 tokio::spawn(async move {
-                    match handshake_in(stream, cfg, link).await {
+                    match handshake_in(stream, cfg, link, shared).await {
                         Ok(conn) => {
                             let _ = out.send((conn, peer)).await;
                         }
@@ -173,9 +262,12 @@ impl Net for TokioRuntime {
                     tracing::warn!(%addr, "listening with plain TCP: nothing is encrypted or authenticated");
                     None
                 }
-                Security::Tls(t) => Some(t.server(link).ok_or_else(|| {
-                    io::Error::new(ErrorKind::InvalidInput, "listening with TLS needs a certificate and key")
-                })?),
+                Security::Tls(t) => {
+                    t.current().server(link).ok_or_else(|| {
+                        io::Error::new(ErrorKind::InvalidInput, "listening with TLS needs a certificate and key")
+                    })?;
+                    Some(t.clone())
+                }
             };
             let tcp = tokio::net::TcpListener::bind(&addr).await?;
             let addr = tcp.local_addr()?.to_string();
@@ -194,7 +286,7 @@ impl Net for TokioRuntime {
                     loopback_only(&addr).await?;
                     let tcp = tokio::net::TcpStream::connect(&addr).await?;
                     tcp.set_nodelay(true)?;
-                    Ok(TokioConn::new(tcp, None))
+                    Ok(TokioConn::new(tcp, None, None))
                 }
                 Security::Tls(t) => {
                     let host = addr.rsplit_once(':').map_or(addr.as_str(), |(h, _)| h);
@@ -203,12 +295,14 @@ impl Net for TokioRuntime {
                         .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("{host}: {e}")))?;
                     let tcp = tokio::net::TcpStream::connect(&addr).await?;
                     tcp.set_nodelay(true)?;
-                    let connector = tokio_rustls::TlsConnector::from(t.client(link));
+                    let connector = tokio_rustls::TlsConnector::from(t.current().client(link));
                     let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(name, tcp))
                         .await
                         .map_err(|_| io::Error::new(ErrorKind::TimedOut, "TLS handshake timed out"))??;
-                    let peer = checked(link, tls.get_ref().1.peer_certificates())?;
-                    Ok(TokioConn::new(tls, peer))
+                    let certs = tls.get_ref().1.peer_certificates();
+                    let peer = checked(link, certs)?;
+                    let watch = t.watch(certs.and_then(|c| c.first()));
+                    Ok(TokioConn::new(tls, peer, watch))
                 }
             }
         }
@@ -236,13 +330,26 @@ impl Conn for TokioConn {
         if frame.len() > MAX_FRAME {
             return Err(io::Error::new(ErrorKind::InvalidInput, "frame too large"));
         }
-        let mut wr = self.wr.lock().await;
-        wr.write_all(&(frame.len() as u32).to_be_bytes()).await?;
-        wr.write_all(&frame).await?;
-        wr.flush().await
+        self.unless_revoked(async {
+            let mut wr = self.wr.lock().await;
+            wr.write_all(&(frame.len() as u32).to_be_bytes()).await?;
+            wr.write_all(&frame).await?;
+            wr.flush().await
+        })
+        .await
     }
 
     async fn recv(&self) -> io::Result<Option<Bytes>> {
+        self.unless_revoked(self.recv_frame()).await
+    }
+
+    fn peer_identity(&self) -> Option<PeerIdentity> {
+        self.peer.clone()
+    }
+}
+
+impl TokioConn {
+    async fn recv_frame(&self) -> io::Result<Option<Bytes>> {
         let mut rd = self.rd.lock().await;
         let mut len = [0u8; 4];
         // A clean close lands between frames; anywhere else it is an error.
@@ -265,9 +372,5 @@ impl Conn for TokioConn {
         let mut buf = BytesMut::zeroed(len);
         rd.read_exact(&mut buf).await?;
         Ok(Some(buf.freeze()))
-    }
-
-    fn peer_identity(&self) -> Option<PeerIdentity> {
-        self.peer.clone()
     }
 }

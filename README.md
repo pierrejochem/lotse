@@ -64,6 +64,7 @@ client = "10.0.0.3:9000"
 ca = "/etc/lotse/ca.pem"
 cert = "/etc/lotse/node-{id}.pem"
 key = "/etc/lotse/node-{id}.key"
+crl = "/etc/lotse/crl.pem"  # revoked certificates, written by `lotse certs --revoke`
 
 [retention]
 ms = 604800000             # 7 days, the default; -1 keeps everything
@@ -75,12 +76,17 @@ admins = ["alice"]         # signs in with the certificate below
 ```sh
 cargo build --release -p lotse-node                               # target/release/lotse
 lotse check --config cluster.toml                                 # what the file describes
-lotse certs --config cluster.toml                                 # a CA and a certificate per node, at the [tls] paths
+lotse certs --config cluster.toml                                 # a CA, a certificate per node (one year) and an empty revocation list
 lotse certs --config cluster.toml --client alice --out ./alice    # the first admin's client certificate
 lotse run --config cluster.toml --node 1                          # on each machine, its own id
 ```
 
-`lotse certs` keeps what exists, so it can run again after a node is added to the file; keep `ca.key` off the nodes.
+`lotse certs` keeps what exists, so it can run again after a node is added to the file; keep `ca.key` off the nodes. Certificates last a year (`--days` for another length), the CA ten; `lotse check` warns 30 days before one ends. A running node reads its certificate files every 10 s and takes up a renewed certificate or a new revocation list without a restart (ADR 0060):
+
+```sh
+rm /etc/lotse/node-2.pem /etc/lotse/node-2.key && lotse certs --config cluster.toml   # renew node 2's certificate
+lotse certs --config cluster.toml --revoke alice/alice.pem         # then copy crl.pem to every node
+```
 
 To add a node, give it a `[[node]]` entry, make its certificate, announce it and start it with `--join`; to remove one, drain it. Its replicas move to other nodes, then it leaves the list and stops by itself (ADR 0048, ADR 0051). A new node fills up by itself: replicas and leadership move onto it until the nodes are even (ADR 0050).
 
@@ -169,13 +175,13 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 - Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK does not decompress yet; `lotse-client` compresses only what the caller builds compressed.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
 - Raft: snapshots travel in chunks (1 MiB by default), one in flight per follower and collected in memory before they are installed; pipelining chunks and spilling them to disk come later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
-- Transactional ids and consumer group ids are not scoped to tenants. A removed role binding takes effect on each node once it applies the metadata group. Certificates are read once at start (no reloading, no revocation check); tokens are not checked for revocation before they expire.
+- Transactional ids and consumer group ids are not scoped to tenants. A removed role binding takes effect on each node once it applies the metadata group. Revocation is a CRL file the operator copies to every node (no OCSP); an open connection whose certificate expires stays open; tokens are not checked for revocation before they expire.
 - Native protocol: only `ApiVersions`, `Metadata`, `FindCoordinator`, `Produce`, `Fetch`, `ListOffsets`, `InitProducer`, `AddPartitionsToTxn`, `EndTxn`, `WriteTxnMarkers`, the queue, group and admin keys. A plain idempotent producer's id does not survive a client restart (transactional ids do), and a producer evicted from a full partition loses its deduplication. `Fetch` copies through the log rather than using `sendfile`.
 - Transactions: one coordinator group serves all transactional ids; `AddAcksToTxn` and `AddOffsetsToTxn` are not there yet; aborted ranges stay in the partition's state even below its log start.
 - Queues: exchanges are routed by the client (no `Publish` wire key), with bindings it may have cached for up to `metadata_max_age`, one message per publish; dead-letter queues and message TTL are per-queue settings (ADR 0055; a retired message is dropped without a dead-letter queue, and a failover may expire a message a consumer still holds), but no delay, priorities, single active consumer or transactional acks. Delivery counts are written only on requeue and ack timeout, so after a failover they may start over. Settled offsets stay in the ack index as ranges even below the log start, which retention moves up to the ack floor.
 - Consumer groups: one coordinator group serves all groups and transactional ids; no static membership or regex subscriptions; every heartbeat that changes a group writes the whole group.
 - Retention: whole segments only, so a partition keeps up to a segment more than its limits; age goes by the timestamps producers write; streams from the node configuration take the node's defaults and cannot be changed at runtime; no compaction.
-- The binary: certificates from `lotse certs` do not expire and are read once at start. Releases and the image are built only by GitHub Actions; the package targets systemd systems.
+- The binary: Releases and the image are built only by GitHub Actions; the package targets systemd systems.
 - Nodes: four groups move at a time, each as a full copy through Raft; rebalancing moves by replica count and only uses size to choose which group goes (ADR 0052), so nodes with equal counts and very different sizes stay as they are; traffic is not weighed; a drained node exits by itself (ADR 0051) and must join under a new id to come back; one that cannot reach any node it lists keeps running until it can.
 - Metadata: only a queue's ack timeout and a stream's retention can change; no conditional delete (`if_empty`), no authorisation; tombstones of deleted resources are kept for ever; right after a change some brokers do not know it yet.
 - Console: chart history (about 10 KiB per stream or queue for 24 h) covers only what the sampler may see. The oldest record's age, open transactions per stream, bytes in flight per consumer, zones and disk limits are not reported. Purge, requeue and moving leaders have no API yet, so the UI does not offer them. On a phone the navigation sits above the page instead of collapsing into a menu.

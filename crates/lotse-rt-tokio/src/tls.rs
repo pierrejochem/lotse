@@ -13,7 +13,14 @@
 //!   principal.
 //!
 //! Only TLS 1.3 is spoken.
+//!
+//! A certificate revocation list may come with the CA (ADR 0060): every
+//! handshake checks the other end's certificate against it, and a runtime
+//! given new material ([`crate::TokioRuntime::reload_tls`]) closes the
+//! connections of certificates it now revokes. Only end-entity certificates
+//! are checked; a certificate whose issuer has no list here is not revoked.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -21,7 +28,7 @@ use lotse_rt::{Link, PeerIdentity};
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme};
 
@@ -63,6 +70,9 @@ impl fmt::Debug for TlsConfig {
 }
 
 pub(crate) struct Tls {
+    /// `(issuer, serial)` of every certificate the revocation list names,
+    /// both as their DER encodings.
+    revoked: BTreeSet<(Vec<u8>, Vec<u8>)>,
     node_server: Option<Arc<ServerConfig>>,
     client_server: Option<Arc<ServerConfig>>,
     node_client: Arc<ClientConfig>,
@@ -74,6 +84,33 @@ impl TlsConfig {
     /// certificate chain and private key. A node needs both; a client needs
     /// them only to authenticate with a certificate.
     pub fn from_pem(ca: &[u8], identity: Option<(&[u8], &[u8])>) -> Result<TlsConfig, TlsError> {
+        TlsConfig::from_pem_with_crl(ca, identity, None)
+    }
+
+    /// [`TlsConfig::from_pem`] with a certificate revocation list (PEM, one
+    /// or more `X509 CRL` blocks) that every handshake checks.
+    pub fn from_pem_with_crl(
+        ca: &[u8],
+        identity: Option<(&[u8], &[u8])>,
+        crl: Option<&[u8]>,
+    ) -> Result<TlsConfig, TlsError> {
+        let mut crls = Vec::new();
+        let mut revoked = BTreeSet::new();
+        if let Some(pem) = crl {
+            for der in CertificateRevocationListDer::pem_slice_iter(pem) {
+                let der = der.map_err(|e| TlsError::Pem { what: "the revocation list", detail: e.to_string() })?;
+                let (_, list) = <x509_parser::revocation_list::CertificateRevocationList as x509_parser::prelude::FromDer<_>>::from_der(der.as_ref())
+                    .map_err(|e| TlsError::Pem { what: "the revocation list", detail: e.to_string() })?;
+                let issuer = list.issuer().as_raw().to_vec();
+                for r in list.iter_revoked_certificates() {
+                    revoked.insert((issuer.clone(), r.raw_serial().to_vec()));
+                }
+                crls.push(der);
+            }
+            if crls.is_empty() {
+                return Err(TlsError::Pem { what: "the revocation list", detail: "no CRL found".into() });
+            }
+        }
         let mut roots = RootCertStore::empty();
         let mut any = false;
         for cert in CertificateDer::pem_slice_iter(ca) {
@@ -104,7 +141,10 @@ impl TlsConfig {
 
         let server = |required: bool| -> Result<Option<Arc<ServerConfig>>, TlsError> {
             let Some((chain, key)) = &identity else { return Ok(None) };
-            let verifier = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone());
+            let verifier = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+                .with_crls(crls.clone())
+                .only_check_end_entity_revocation()
+                .allow_unknown_revocation_status();
             let verifier = if required { verifier } else { verifier.allow_unauthenticated() };
             let verifier = verifier.build().map_err(|e| rustls::Error::General(e.to_string()))?;
             let mut cfg = ServerConfig::builder_with_provider(provider.clone())
@@ -118,6 +158,9 @@ impl TlsConfig {
             Ok(Some(Arc::new(cfg)))
         };
         let webpki = WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
+            .with_crls(crls.clone())
+            .only_check_end_entity_revocation()
+            .allow_unknown_revocation_status()
             .build()
             .map_err(|e| rustls::Error::General(e.to_string()))?;
         let client = |verifier: Arc<dyn ServerCertVerifier>| -> Result<Arc<ClientConfig>, TlsError> {
@@ -133,6 +176,7 @@ impl TlsConfig {
         };
         Ok(TlsConfig {
             inner: Arc::new(Tls {
+                revoked,
                 node_server: server(true)?,
                 client_server: server(false)?,
                 node_client: client(Arc::new(ChainOnly(webpki.clone())))?,
@@ -146,6 +190,15 @@ impl TlsConfig {
         ca: impl AsRef<std::path::Path>,
         identity: Option<(impl AsRef<std::path::Path>, impl AsRef<std::path::Path>)>,
     ) -> Result<TlsConfig, TlsError> {
+        TlsConfig::from_files_with_crl(ca, identity, None::<&std::path::Path>)
+    }
+
+    /// [`TlsConfig::from_pem_with_crl`] from files.
+    pub fn from_files_with_crl(
+        ca: impl AsRef<std::path::Path>,
+        identity: Option<(impl AsRef<std::path::Path>, impl AsRef<std::path::Path>)>,
+        crl: Option<impl AsRef<std::path::Path>>,
+    ) -> Result<TlsConfig, TlsError> {
         let read = |p: &std::path::Path| {
             std::fs::read(p).map_err(|source| TlsError::Io { path: p.display().to_string(), source })
         };
@@ -154,7 +207,25 @@ impl TlsConfig {
             Some((c, k)) => Some((read(c.as_ref())?, read(k.as_ref())?)),
             None => None,
         };
-        TlsConfig::from_pem(&ca, identity.as_ref().map(|(c, k)| (c.as_slice(), k.as_slice())))
+        let crl = match crl {
+            Some(p) => Some(read(p.as_ref())?),
+            None => None,
+        };
+        TlsConfig::from_pem_with_crl(&ca, identity.as_ref().map(|(c, k)| (c.as_slice(), k.as_slice())), crl.as_deref())
+    }
+
+    /// Whether the revocation list names `cert` (an end-entity certificate,
+    /// DER), by its issuer and serial number.
+    pub fn revokes(&self, cert: &[u8]) -> bool {
+        if self.inner.revoked.is_empty() {
+            return false;
+        }
+        match x509_parser::parse_x509_certificate(cert) {
+            Ok((_, c)) => self.inner.revoked.contains(&(c.issuer().as_raw().to_vec(), c.raw_serial().to_vec())),
+            // It passed a handshake, so it parses; if not, it is no
+            // certificate this list could name.
+            Err(_) => false,
+        }
     }
 
     pub(crate) fn server(&self, link: Link) -> Option<Arc<ServerConfig>> {

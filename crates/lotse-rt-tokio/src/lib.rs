@@ -97,7 +97,18 @@ impl TokioRuntime {
 
     /// The same runtime speaking TLS 1.3 on every connection.
     pub fn with_tls(self, tls: TlsConfig) -> Self {
-        TokioRuntime { security: net::Security::Tls(tls), ..self }
+        TokioRuntime { security: net::Security::Tls(net::Shared::new(tls)), ..self }
+    }
+
+    /// Replaces the TLS material of this runtime and all its clones (ADR
+    /// 0060): every handshake from now on uses `tls`, and every open
+    /// connection whose other end showed a certificate `tls` revokes is
+    /// ended. Returns how many were. Does nothing to a runtime without TLS.
+    pub fn reload_tls(&self, tls: TlsConfig) -> usize {
+        match &self.security {
+            net::Security::Tls(shared) => shared.reload(tls),
+            _ => 0,
+        }
     }
 
     /// The same runtime speaking plain TCP, which it then allows only to and

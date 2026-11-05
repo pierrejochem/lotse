@@ -13,8 +13,9 @@ lotse: one node of a Lotse cluster
 
 usage:
   lotse run   --config <cluster.toml> --node <id> [--join]
-  lotse certs --config <cluster.toml>
-  lotse certs --config <cluster.toml> --client <principal> --out <dir>
+  lotse certs --config <cluster.toml> [--days <n>]
+  lotse certs --config <cluster.toml> --client <principal> --out <dir> [--days <n>]
+  lotse certs --config <cluster.toml> --revoke <cert.pem>
   lotse check --config <cluster.toml>
   lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port>] <admin>
   lotse node remove --config <cluster.toml> --node <id> <admin>
@@ -27,8 +28,13 @@ run    runs the node; stops on Ctrl-C or SIGTERM. LOTSE_LOG sets the log
        LOTSE_NODE, LOTSE_JOIN=1 and LOTSE_CONFIG stand in for the flags.
 certs  makes the cluster's CA and every node's certificate where [tls] says,
        keeping those that exist; with --client, a certificate for a
-       principal, such as an admin named in auth.admins.
-check  reads the file and says what it describes.
+       principal, such as an admin named in auth.admins. New certificates
+       are valid for --days (default 365), a new CA for 3650. --revoke adds
+       a certificate to the revocation list [tls] crl names; copy the list
+       to every node, which picks it up within 10 s, as it does renewed
+       certificates.
+check  reads the file and says what it describes, and which certificates
+       expire within 30 days.
 node   adds a node (addresses from its [[node]] entry unless given), drains
        and removes one, or lists them.
        <admin> is --cert <file> --key <file> (a client certificate) or
@@ -46,6 +52,8 @@ struct Args {
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
     user: Option<String>,
+    days: Option<u32>,
+    revoke: Option<PathBuf>,
 }
 
 fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -66,6 +74,12 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
             "--cert" => a.cert = Some(PathBuf::from(value()?)),
             "--key" => a.key = Some(PathBuf::from(value()?)),
             "--user" => a.user = Some(value()?),
+            "--days" => {
+                let v = value()?;
+                let days = v.parse().ok().filter(|d| *d > 0);
+                a.days = Some(days.ok_or_else(|| format!("--days {v}: a number of days, at least 1"))?);
+            }
+            "--revoke" => a.revoke = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -163,12 +177,23 @@ async fn shutdown() {
 
 fn certs(a: &Args) -> Result<(), String> {
     let file = load(a)?;
+    if let Some(cert) = &a.revoke {
+        if a.client.is_some() || a.days.is_some() {
+            return Err("--revoke goes alone".into());
+        }
+        let r = certs::revoke(&file, cert).map_err(|e| e.to_string())?;
+        let what = if r.already { "already revoked" } else { "revoked" };
+        println!("{what}: serial {} ({})", r.serial, cert.display());
+        println!("wrote {}: copy it to every node; each picks it up within 10 s", r.crl.display());
+        return Ok(());
+    }
+    let days = a.days.unwrap_or(certs::LEAF_DAYS);
     let outcomes = match &a.client {
         Some(principal) => {
             let out = a.out.as_ref().ok_or("--client needs --out <dir>")?;
-            certs::client_cert(&file, principal, out)
+            certs::client_cert(&file, principal, out, days)
         }
-        None => certs::node_certs(&file),
+        None => certs::node_certs(&file, days),
     }
     .map_err(|e| e.to_string())?;
     for o in outcomes {
@@ -193,6 +218,7 @@ fn check(a: &Args) -> Result<(), String> {
     let ids: Vec<String> = file.nodes.iter().map(|n| n.id.to_string()).collect();
     println!("{} nodes: {}", file.nodes.len(), ids.join(", "));
     println!("TLS: {}", if file.tls_paths(0).is_some() { "certificates from [tls]" } else { "none, loopback only" });
+    expiry(&file);
     let c = file.node_config(file.nodes[0].id).map_err(|e| e.to_string())?;
     let limit = |v: Option<u64>, unit: &str| v.map_or("no limit".to_string(), |v| format!("{v} {unit}"));
     println!("retention: {} by age, {} per partition", limit(c.retention.ms, "ms"), limit(c.retention.bytes, "bytes"));
@@ -213,6 +239,30 @@ fn check(a: &Args) -> Result<(), String> {
         println!("clients: no authentication, everyone may do everything");
     }
     Ok(())
+}
+
+/// Within this, `check` names a certificate that is about to expire.
+const EXPIRY_WARNING_DAYS: i64 = 30;
+
+/// Says which of the CA and node certificates on this machine expire soon
+/// or have expired; files that are not here (on another node) are skipped.
+fn expiry(file: &ClusterFile) {
+    let mut paths: Vec<PathBuf> = file.tls.ca.iter().map(PathBuf::from).collect();
+    for n in &file.nodes {
+        paths.extend(file.tls_paths(n.id).map(|(_, cert, _)| cert));
+    }
+    paths.sort();
+    paths.dedup();
+    for p in paths.iter().filter(|p| p.exists()) {
+        match certs::expires_in(p) {
+            Ok(s) if s <= 0 => println!("warning: {} has expired", p.display()),
+            Ok(s) if s < EXPIRY_WARNING_DAYS * 86_400 => {
+                println!("warning: {} expires in {} days", p.display(), s / 86_400)
+            }
+            Ok(_) => {}
+            Err(e) => println!("warning: {e}"),
+        }
+    }
 }
 
 /// `lotse node add | remove | list`, as the admin the flags name.

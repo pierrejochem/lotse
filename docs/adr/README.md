@@ -64,5 +64,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0057 | [Partitions verify transactions with the coordinator](0057-partitions-verify-transactions-with-the-coordinator.md) | Accepted |
 | 0058 | [zstd and lz4 compression](0058-zstd-and-lz4-compression.md) | Accepted |
 | 0059 | [ListOffsets](0059-list-offsets.md) | Accepted |
+| 0060 | [Certificate renewal and revocation](0060-certificate-renewal-and-revocation.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
