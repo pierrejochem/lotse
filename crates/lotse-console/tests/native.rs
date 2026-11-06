@@ -212,6 +212,106 @@ async fn the_console_shows_a_real_cluster() {
     let (_, n) = get(&app, "/api/v1/clusters/local/nodes").await;
     assert!(n["upgrade"].is_null() && n["events"].as_array().unwrap().is_empty());
 
+    // A queue with a dead-letter queue (ADR 0055), made from the console.
+    let work = json!({"name": "work", "priority_levels": 1, "single_active": false,
+        "dlq": "work.dlq", "max_deliveries": 1, "create_dlq": true});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(work)).await;
+    assert_eq!(status, StatusCode::CREATED, "{done}");
+    let mut q = Value::Null;
+    for _ in 0..50 {
+        let (status, got) = get(&app, "/api/v1/clusters/local/queues/work").await;
+        if status == StatusCode::OK {
+            q = got;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!((q["dlq"].as_str(), q["max_deliveries"].as_u64()), (Some("work.dlq"), Some(1)), "{q}");
+
+    // Purge (ADR 0064): the name typed again, then the five ready jobs go.
+    let (status, err) =
+        call(&app, "POST", "/api/v1/clusters/local/queues/jobs/purge", Some(json!({"confirm": "job"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let (status, done) =
+        call(&app, "POST", "/api/v1/clusters/local/queues/jobs/purge", Some(json!({"confirm": "jobs"}))).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["message"], "Purged 5 messages from jobs.", "{done}");
+    assert_eq!(done["cli"], "lotse-cli queue purge jobs");
+    // The console samples the cluster about once a second.
+    let mut purged = false;
+    for _ in 0..50 {
+        let (_, q) = get(&app, "/api/v1/clusters/local/queues/jobs").await;
+        if q["ready"] == 0 {
+            purged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(purged, "nothing ready in jobs");
+
+    // Requeue: a message that failed once goes to the dead-letter queue, and
+    // from there back.
+    for _ in 0..50 {
+        if client.produce("work", 0, batch("task")).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    {
+        let mut c = client.subscribe("work", 1).await.expect("subscribe");
+        let m = c.next(Duration::from_secs(5)).await.expect("next").expect("the task");
+        c.nack(&m, true).await.expect("nack");
+        c.close().await;
+    }
+    let mut dead = false;
+    for _ in 0..100 {
+        let (_, d) = get(&app, "/api/v1/clusters/local/queues/work.dlq").await;
+        if d["ready"] == 1 {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(dead, "the task reaches the dead-letter queue");
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues/work.dlq/requeue", None).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["message"], "Requeued 1 message from work.dlq to their queues.", "{done}");
+    let mut emptied = false;
+    for _ in 0..50 {
+        let (_, d) = get(&app, "/api/v1/clusters/local/queues/work.dlq").await;
+        if d["ready"] == 0 {
+            emptied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(emptied, "nothing left in the dead-letter queue");
+
+    // Moving a leader (ADR 0065): to another replica, pinned, then unpinned.
+    let (_, q) = get(&app, "/api/v1/clusters/local/queues/work").await;
+    let leader = q["levels"][0]["leader"].as_str().unwrap().to_string();
+    let to = ["node-1", "node-2", "node-3"].into_iter().find(|n| *n != leader).unwrap();
+    let bad = json!({"resource": "work", "partition": 0, "node": "node-9"});
+    let (status, err) = call(&app, "POST", "/api/v1/clusters/local/leaders", Some(bad)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let pin = json!({"resource": "work", "partition": 0, "node": to});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/leaders", Some(pin)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let mut moved = false;
+    for _ in 0..300 {
+        let (_, q) = get(&app, "/api/v1/clusters/local/queues/work").await;
+        if q["levels"][0]["leader"] == to {
+            moved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(moved, "the leader moves to {to}");
+    let unpin = json!({"resource": "work", "partition": 0, "node": null});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/leaders", Some(unpin)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["cli"], "lotse-cli leader unpin work --partition 0");
+
     // A node that stops shows as not answering.
     nodes[2].handle().stop();
     let stopped = nodes.pop().unwrap();

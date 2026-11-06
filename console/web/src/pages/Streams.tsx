@@ -2,6 +2,7 @@ import * as Tabs from '@radix-ui/react-tabs';
 import { Link, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
+import { MoveLeaderButton } from '../components/Actions';
 import { Chip, Failed, Hint, Loading, Sparkline, Stats } from '../components/ui';
 import { NONE, bytes, count, duration, rate } from '../format';
 
@@ -59,7 +60,7 @@ function replicaLabel(r: S['Replica']) {
   return `${r.node}: in sync`;
 }
 
-function Partitions({ d }: { d: S['StreamDetail'] }) {
+function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
   return (
     <section className="stack" aria-label="Partitions">
       <div className="table-wrap">
@@ -82,7 +83,10 @@ function Partitions({ d }: { d: S['StreamDetail'] }) {
               return (
                 <tr key={p.id}>
                   <th scope="row" className="mono">P{p.id}</th>
-                  <td><span className="mono">{p.leader}</span> <span className="muted">· term {p.term}</span></td>
+                  <td>
+                    <span className="mono">{p.leader}</span> <span className="muted">· term {p.term}</span>{' '}
+                    <MoveLeaderButton cluster={cluster} resource={d.name} partition={p.id} leader={p.leader} replicas={p.replicas.map((r) => r.node)} />
+                  </td>
                   <td>
                     <span style={{ display: 'inline-flex', gap: 4 }}>
                       {p.replicas.map((r) => (
@@ -247,7 +251,7 @@ export function StreamDetail() {
           <Tabs.Trigger value="groups">Consumer groups <span className="tag" style={{ marginLeft: 4, padding: '0 6px', fontSize: 12 }}>{d.groups.length}</span></Tabs.Trigger>
           <Tabs.Trigger value="config">Config</Tabs.Trigger>
         </Tabs.List>
-        <Tabs.Content value="partitions" className="tabs-content"><Partitions d={d} /></Tabs.Content>
+        <Tabs.Content value="partitions" className="tabs-content"><Partitions d={d} cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="groups" className="tabs-content"><Groups d={d} /></Tabs.Content>
         <Tabs.Content value="config" className="tabs-content"><Config d={d} /></Tabs.Content>
       </Tabs.Root>

@@ -121,3 +121,44 @@ export function usePauseUpgrade(cluster: string) {
     onSuccess: () => void qc.invalidateQueries({ queryKey: keys.nodes(cluster) }),
   });
 }
+
+/** Purges a queue's ready messages; `confirm` is the queue's name typed again (ADR 0064). */
+export function usePurgeQueue(cluster: string, name: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (confirm: string) =>
+      unwrap(
+        api.POST('/api/v1/clusters/{cluster}/queues/{name}/purge', {
+          params: { path: { cluster, name } },
+          body: { confirm },
+        }),
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.queue(cluster, name) });
+      void qc.invalidateQueries({ queryKey: keys.queues(cluster) });
+    },
+  });
+}
+
+/** Moves a dead-letter queue's messages back to the queues they came from (ADR 0064). */
+export function useRequeue(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (dlq: string) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/queues/{name}/requeue', { params: { path: { cluster, name: dlq } } })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['queue', cluster] }),
+  });
+}
+
+/** Pins a partition's leader to a replica, or unpins it with `node: null` (ADR 0065). */
+export function useMoveLeader(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: S['MoveLeader']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/leaders', { params: { path: { cluster } }, body })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stream', cluster] });
+      void qc.invalidateQueries({ queryKey: ['queue', cluster] });
+    },
+  });
+}

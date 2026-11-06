@@ -37,12 +37,28 @@ use crate::model::*;
         queues,
         queue,
         create_queue,
+        purge_queue,
+        requeue,
+        move_leader,
         tenants,
         metrics
     ),
     components(schemas(ErrorBody, Tone, Chip, PhaseState, ReplicaState, TxnState, Isolation, Range))
 )]
 pub struct ApiDoc;
+
+/// `n messages`, with thousands grouped as everywhere in the console.
+fn messages(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{out} message{}", if n == 1 { "" } else { "s" })
+}
 
 fn cluster(st: &AppState, id: &str) -> ApiResult<Arc<dyn Cluster>> {
     st.clusters
@@ -178,6 +194,66 @@ pub async fn queue(
     Ok(Json(cluster(&st, &id)?.queue(&who, &name).await?))
 }
 
+/// Settles a queue's ready messages: what consumers hold stays theirs.
+/// Destructive: the body names the queue again.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues/{name}/purge",
+    params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Queue name")),
+    request_body = PurgeQueue,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub async fn purge_queue(
+    State(st): State<AppState>,
+    who: Identity,
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<PurgeQueue>,
+) -> ApiResult<Json<Done>> {
+    if req.confirm != name {
+        return Err(ApiError::BadRequest(format!("Type the queue's name, {name}, to purge it.")));
+    }
+    let n = cluster(&st, &id)?.purge_queue(&who, &name).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, queue = %name, purged = n, "queue purged");
+    let message = format!("Purged {} from {name}.", messages(n));
+    Ok(Json(Done { message, cli: cli::purge_queue(&name) }))
+}
+
+/// Moves the ready messages of a dead-letter queue back to the queues they
+/// came from, each once.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues/{name}/requeue",
+    params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Dead-letter queue name")),
+    responses((status = 200, body = Done), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub async fn requeue(
+    State(st): State<AppState>,
+    who: Identity,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<Json<Done>> {
+    let n = cluster(&st, &id)?.requeue(&who, &name).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, queue = %name, requeued = n, "dead letters requeued");
+    let message = format!("Requeued {} from {name} to their queues.", messages(n));
+    Ok(Json(Done { message, cli: cli::requeue(&name) }))
+}
+
+/// Pins a partition's leader to one of its replicas, or unpins it.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/leaders",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = MoveLeader,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub async fn move_leader(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<MoveLeader>,
+) -> ApiResult<Json<Done>> {
+    cluster(&st, &id)?.move_leader(&who, &req).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, resource = %req.resource, partition = req.partition, node = ?req.node, "leader pinned");
+    let message = match &req.node {
+        Some(node) => format!(
+            "Partition {} of {} is pinned to {node}. Its leader moves there within a few seconds.",
+            req.partition, req.resource
+        ),
+        None => format!("Partition {} of {} is unpinned. Leaders spread by themselves.", req.partition, req.resource),
+    };
+    Ok(Json(Done { message, cli: cli::move_leader(&req) }))
+}
+
 /// Creates a queue.
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues",
     params(("cluster" = String, Path, description = "Cluster ID")),
@@ -272,4 +348,15 @@ pub async fn metrics(
         QueryError::ClusterWide(_) => ApiError::Forbidden(e.to_string()),
     })?;
     Ok(Json(Series { name: (*name).into(), unit: (*unit).into(), points }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn counts_of_messages_read_as_elsewhere() {
+        assert_eq!(super::messages(0), "0 messages");
+        assert_eq!(super::messages(1), "1 message");
+        assert_eq!(super::messages(1_942), "1,942 messages");
+        assert_eq!(super::messages(18_442_107), "18,442,107 messages");
+    }
 }

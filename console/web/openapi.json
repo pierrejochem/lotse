@@ -32,6 +32,76 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/leaders": {
+      "post": {
+        "tags": [],
+        "summary": "Pins a partition's leader to one of its replicas, or unpins it.",
+        "operationId": "move_leader",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveLeader"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/metrics": {
       "get": {
         "tags": [],
@@ -313,6 +383,144 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QueueDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/queues/{name}/purge": {
+      "post": {
+        "tags": [],
+        "summary": "Settles a queue's ready messages: what consumers hold stays theirs.\nDestructive: the body names the queue again.",
+        "operationId": "purge_queue",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurgeQueue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/queues/{name}/requeue": {
+      "post": {
+        "tags": [],
+        "summary": "Moves the ready messages of a dead-letter queue back to the queues they\ncame from, each once.",
+        "operationId": "requeue",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Dead-letter queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1058,6 +1266,33 @@
           }
         }
       },
+      "MoveLeader": {
+        "type": "object",
+        "description": "Request to pin a partition's leader to one of its replicas, or to unpin\nit (ADR 0065).",
+        "required": [
+          "resource",
+          "partition"
+        ],
+        "properties": {
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node to lead it, as the console names nodes; `None` unpins it so\nthat leaders spread by themselves again."
+          },
+          "partition": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The partition; 0 for a queue.",
+            "minimum": 0
+          },
+          "resource": {
+            "type": "string",
+            "description": "The stream or queue."
+          }
+        }
+      },
       "Node": {
         "type": "object",
         "description": "A broker node.",
@@ -1486,6 +1721,19 @@
             "format": "int64",
             "description": "Messages ready.",
             "minimum": 0
+          }
+        }
+      },
+      "PurgeQueue": {
+        "type": "object",
+        "description": "Request to purge a queue's ready messages (ADR 0064). Destructive, so\nthe queue's name must be typed again.",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "The queue's name, typed by the user."
           }
         }
       },

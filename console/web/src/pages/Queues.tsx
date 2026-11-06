@@ -1,5 +1,6 @@
 import { Link, useParams } from 'react-router-dom';
-import { useQueue, useQueues } from '../api/queries';
+import { useNodes, useQueue, useQueues } from '../api/queries';
+import { MoveLeaderButton, PurgeButton, RequeueButton } from '../components/Actions';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
 import { Bar, Chip, Failed, Loading, Stats } from '../components/ui';
 import { NONE, bytes, clock, count, duration } from '../format';
@@ -48,9 +49,19 @@ export function QueueList() {
   );
 }
 
+/** The nodes a queue level may be led by: the queue's detail names only the leader, so every node of the cluster. */
+function useReplicas(cluster: string) {
+  const nodes = useNodes(cluster);
+  return (leader: string) => {
+    const names = nodes.data?.nodes.map((n) => n.id) ?? [];
+    return names.includes(leader) ? names : [leader, ...names];
+  };
+}
+
 export function QueueDetail() {
   const { cluster = '', name = '' } = useParams();
   const q = useQueue(cluster, name);
+  const replicasOf = useReplicas(cluster);
   if (q.isPending) return <main className="page"><Loading /></main>;
   if (q.isError) return <main className="page"><Failed error={q.error} retry={() => q.refetch()} /></main>;
   const d = q.data;
@@ -60,7 +71,10 @@ export function QueueDetail() {
     <main className="page">
       <div className="stack" style={{ '--gap': '10px' } as React.CSSProperties}>
         <span className="label">Queue{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
-        <h1 className="h1 mono">{d.name}</h1>
+        <div className="between">
+          <h1 className="h1 mono">{d.name}</h1>
+          <PurgeButton cluster={cluster} queue={d.name} ready={d.ready} />
+        </div>
         <div className="row" style={{ gap: 8 }}>
           <span className="tag">{d.levels.length} priority level{d.levels.length === 1 ? '' : 's'}</span>
           {d.single_active && <span className="tag">Single active consumer</span>}
@@ -92,7 +106,8 @@ export function QueueDetail() {
             <div key={l.level} className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
               <div className="between">
                 <span style={{ fontWeight: 600 }}>
-                  {levelName(l.level, d.levels.length)} <span className="small muted" style={{ fontWeight: 400 }}>leader <span className="mono">{l.leader}</span></span>
+                  {levelName(l.level, d.levels.length)} <span className="small muted" style={{ fontWeight: 400 }}>leader <span className="mono">{l.leader}</span></span>{' '}
+                  <MoveLeaderButton cluster={cluster} resource={d.name} partition={l.level} leader={l.leader} replicas={replicasOf(l.leader)} />
                 </span>
                 <span className="num" style={{ fontSize: 14 }}>
                   <strong>{count(l.ready)}</strong> ready{l.ready > 0 && ` · oldest ${duration(l.oldest_ms)}`}
@@ -161,9 +176,12 @@ export function QueueDetail() {
 
       {d.dlq && (
         <section className="stack" aria-labelledby="dlq-title">
-          <h2 id="dlq-title" className="h2">
-            Dead letters <span className="muted" style={{ fontSize: 15, fontWeight: 500 }}>in <code>{d.dlq}</code></span>
-          </h2>
+          <div className="between">
+            <h2 id="dlq-title" className="h2">
+              Dead letters <span className="muted" style={{ fontSize: 15, fontWeight: 500 }}>in <code>{d.dlq}</code></span>
+            </h2>
+            <RequeueButton cluster={cluster} dlq={d.dlq} />
+          </div>
           <div className="table-wrap">
             {d.dead_letters.length === 0 ? (
               <p className="empty">No dead letters.</p>

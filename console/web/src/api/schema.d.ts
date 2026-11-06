@@ -21,6 +21,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/leaders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pins a partition's leader to one of its replicas, or unpins it. */
+        post: operations["move_leader"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/metrics": {
         parameters: {
             query?: never;
@@ -103,6 +120,42 @@ export interface paths {
         get: operations["queue"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/queues/{name}/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Settles a queue's ready messages: what consumers hold stays theirs.
+         *     Destructive: the body names the queue again. */
+        post: operations["purge_queue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/queues/{name}/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Moves the ready messages of a dead-letter queue back to the queues they
+         *     came from, each once. */
+        post: operations["requeue"];
         delete?: never;
         options?: never;
         head?: never;
@@ -405,6 +458,20 @@ export interface components {
             /** @description Principal name the cluster authorises. */
             principal: string;
         };
+        /** @description Request to pin a partition's leader to one of its replicas, or to unpin
+         *     it (ADR 0065). */
+        MoveLeader: {
+            /** @description The node to lead it, as the console names nodes; `None` unpins it so
+             *     that leaders spread by themselves again. */
+            node?: string | null;
+            /**
+             * Format: int32
+             * @description The partition; 0 for a queue.
+             */
+            partition: number;
+            /** @description The stream or queue. */
+            resource: string;
+        };
         /** @description A broker node. */
         Node: {
             /**
@@ -610,6 +677,12 @@ export interface components {
              * @description Messages ready.
              */
             ready: number;
+        };
+        /** @description Request to purge a queue's ready messages (ADR 0064). Destructive, so
+         *     the queue's name must be typed again. */
+        PurgeQueue: {
+            /** @description The queue's name, typed by the user. */
+            confirm: string;
         };
         /** @description A queue consumer. */
         QueueConsumer: {
@@ -1092,6 +1165,56 @@ export interface operations {
             };
         };
     };
+    move_leader: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveLeader"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     metrics: {
         parameters: {
             query: {
@@ -1287,6 +1410,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QueueDetail"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    purge_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+                /** @description Queue name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PurgeQueue"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    requeue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+                /** @description Dead-letter queue name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             404: {

@@ -546,6 +546,27 @@ pub struct CreateQueue {
     pub create_dlq: bool,
 }
 
+/// Request to purge a queue's ready messages (ADR 0064). Destructive, so
+/// the queue's name must be typed again.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct PurgeQueue {
+    /// The queue's name, typed by the user.
+    pub confirm: String,
+}
+
+/// Request to pin a partition's leader to one of its replicas, or to unpin
+/// it (ADR 0065).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct MoveLeader {
+    /// The stream or queue.
+    pub resource: String,
+    /// The partition; 0 for a queue.
+    pub partition: u32,
+    /// The node to lead it, as the console names nodes; `None` unpins it so
+    /// that leaders spread by themselves again.
+    pub node: Option<String>,
+}
+
 /// Result of a write, with the CLI command that does the same.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Done {

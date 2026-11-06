@@ -253,6 +253,22 @@ fn failed(e: ClientError) -> ApiError {
     }
 }
 
+/// An action's error as the console reports it: refusals with the broker's
+/// reason, unknown names as not found, the rest as `failed`.
+fn refused(what: &str, e: ClientError) -> ApiError {
+    match e {
+        ClientError::Broker { code: ErrorCode::INVALID_REQUEST, message } => ApiError::BadRequest(format!(
+            "The cluster refused {what}: {}",
+            message.unwrap_or_else(|| "invalid request".into())
+        )),
+        ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, message } => {
+            ApiError::NotFound(message.unwrap_or_else(|| "The cluster does not know that name.".into()))
+        }
+        ClientError::UnknownStream(name, _) => ApiError::NotFound(format!("There is no \"{name}\" on this cluster.")),
+        e => failed(e),
+    }
+}
+
 fn tenant_of(r: &ResourceMetadata) -> Option<String> {
     (!r.tenant.is_empty()).then(|| r.tenant.clone())
 }
@@ -727,13 +743,18 @@ impl Cluster for NativeCluster {
                 .collect()
         });
         let q = served.map(|(_, q)| q);
+        // The queue's own settings (ADR 0055); a cluster that does not
+        // answer leaves them unknown.
+        let configs = self.seat(who).client.describe_configs(name).await.unwrap_or_default();
+        let set = |key: &str| configs.iter().find(|c| c.key == key && !c.value.is_empty()).map(|c| c.value.clone());
+        let positive = |key: &str| set(key).and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0);
         Ok(QueueDetail {
             name: r.name.clone(),
             tenant: tenant_of(r),
             single_active: false,
-            ttl_ms: None,
-            dlq: None,
-            max_deliveries: None,
+            ttl_ms: positive("message.ttl.ms"),
+            dlq: set("dead.letter.queue"),
+            max_deliveries: positive("max.deliveries").map(|n| n as u32),
             binding: (!bindings.is_empty()).then(|| bindings.join(", ")),
             ready: q.map_or(0, |q| q.ready),
             in_flight: q.map_or(0, |q| q.in_flight),
@@ -755,13 +776,8 @@ impl Cluster for NativeCluster {
     }
 
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
-        let unsupported = [
-            (req.priority_levels != 1, "priority levels"),
-            (req.single_active, "single active consumer"),
-            (req.ttl_ms.is_some(), "message TTL"),
-            (req.dlq.is_some() || req.create_dlq, "dead-letter queues"),
-            (req.max_deliveries.is_some(), "max deliveries"),
-        ];
+        let unsupported =
+            [(req.priority_levels != 1, "priority levels"), (req.single_active, "single active consumer")];
         let missing: Vec<&str> = unsupported.iter().filter(|(on, _)| *on).map(|(_, what)| *what).collect();
         if !missing.is_empty() {
             return Err(ApiError::BadRequest(format!(
@@ -773,14 +789,49 @@ impl Cluster for NativeCluster {
         let meta = seat.client.metadata(&[]).await.map_err(failed)?;
         let replication = meta.brokers.len().clamp(1, 3) as u8;
         let tenant = req.tenant.as_deref().unwrap_or(DEFAULT_TENANT);
-        match seat.client.create_queue_in(tenant, &req.name, replication, None).await {
+        let client = &seat.client;
+        if req.create_dlq
+            && let Some(dlq) = &req.dlq
+        {
+            match client.create_queue_in_with(tenant, dlq, replication, &[], None).await {
+                Ok(_) | Err(ClientError::ResourceExists { .. }) => {}
+                Err(e) => return Err(refused("the dead-letter queue", e)),
+            }
+        }
+        let ttl = req.ttl_ms.map(|t| t.to_string());
+        let max = req.max_deliveries.map(|n| n.to_string());
+        let mut configs: Vec<(&str, &str)> = Vec::new();
+        if let Some(t) = &ttl {
+            configs.push(("message.ttl.ms", t));
+        }
+        if let Some(n) = &max {
+            configs.push(("max.deliveries", n));
+        }
+        match client.create_queue_in_with(tenant, &req.name, replication, &configs, req.dlq.as_deref()).await {
             Ok(_) => Ok(()),
             Err(ClientError::ResourceExists { name, .. }) => Err(ApiError::Conflict(format!("{name} exists already."))),
-            Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, message }) => Err(ApiError::BadRequest(
-                format!("The cluster refused the queue: {}", message.unwrap_or_else(|| "invalid request".into())),
-            )),
-            Err(e) => Err(failed(e)),
+            Err(e) => Err(refused("the queue", e)),
         }
+    }
+
+    async fn purge_queue(&self, who: &Identity, name: &str) -> ApiResult<u64> {
+        self.seat(who).client.purge(name).await.map_err(|e| refused("the purge", e))
+    }
+
+    async fn requeue(&self, who: &Identity, name: &str) -> ApiResult<u64> {
+        self.seat(who).client.requeue(name).await.map_err(|e| refused("the requeue", e))
+    }
+
+    async fn move_leader(&self, who: &Identity, req: &MoveLeader) -> ApiResult<()> {
+        let node = match &req.node {
+            None => None,
+            Some(n) => Some(
+                n.strip_prefix("node-")
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .ok_or_else(|| ApiError::BadRequest(format!("There is no node \"{n}\" in {}.", self.id)))?,
+            ),
+        };
+        self.seat(who).client.move_leader(&req.resource, req.partition, node).await.map_err(|e| refused("the move", e))
     }
 
     async fn read(

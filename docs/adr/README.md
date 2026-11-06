@@ -70,5 +70,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0063 | [Conditional delete](0063-conditional-delete.md) | Accepted |
 | 0064 | [Purge and requeue](0064-purge-and-requeue.md) | Accepted |
 | 0065 | [Pinned leaders](0065-pinned-leaders.md) | Accepted |
+| 0066 | [Console actions: purge, requeue, move leader](0066-console-actions.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

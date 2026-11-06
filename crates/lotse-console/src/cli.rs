@@ -76,6 +76,24 @@ pub fn create_queue(req: &CreateQueue) -> String {
     cmd
 }
 
+/// `lotse-cli queue purge …`.
+pub fn purge_queue(name: &str) -> String {
+    format!("lotse-cli queue purge {name}")
+}
+
+/// `lotse-cli queue requeue …`.
+pub fn requeue(name: &str) -> String {
+    format!("lotse-cli queue requeue {name}")
+}
+
+/// `lotse-cli leader move …`, or `unpin`.
+pub fn move_leader(req: &crate::model::MoveLeader) -> String {
+    match &req.node {
+        Some(node) => format!("lotse-cli leader move {} --partition {} --node {node}", req.resource, req.partition),
+        None => format!("lotse-cli leader unpin {} --partition {}", req.resource, req.partition),
+    }
+}
+
 /// `lotse-cli read …` for a browser read.
 pub fn read(stream: &str, partition: u32, offset: u64, count: u32, isolation: Isolation) -> String {
     let iso = match isolation {

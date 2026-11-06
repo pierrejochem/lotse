@@ -100,9 +100,22 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         configs: &[(&str, &str)],
         dead_letter: Option<&str>,
     ) -> Result<u64, ClientError> {
+        self.create_queue_in_with(&self.cfg.tenant, name, replication, configs, dead_letter).await
+    }
+
+    /// [`Client::create_queue_with`] in `tenant` instead of the configured
+    /// one.
+    pub async fn create_queue_in_with(
+        &self,
+        tenant: &str,
+        name: &str,
+        replication: u8,
+        configs: &[(&str, &str)],
+        dead_letter: Option<&str>,
+    ) -> Result<u64, ClientError> {
         let req = Request::CreateQueue(CreateQueueRequest {
             name: name.into(),
-            tenant: self.cfg.tenant.clone(),
+            tenant: tenant.into(),
             priority_levels: 1,
             single_active: false,
             dlq: dead_letter.map(str::to_string),

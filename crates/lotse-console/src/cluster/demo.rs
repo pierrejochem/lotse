@@ -8,7 +8,7 @@
 //! minutes, so live updates have something to show. Queues created through
 //! the API are kept in memory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -42,6 +42,12 @@ pub struct DemoCluster {
 struct State {
     created: BTreeMap<String, (CreateQueue, String)>,
     paused: bool,
+    /// Queues purged since the console started: no ready messages.
+    purged: BTreeSet<String>,
+    /// Dead-letter queues requeued: their dead letters are gone.
+    requeued: BTreeSet<String>,
+    /// Partitions pinned to a node, by resource and partition.
+    pins: BTreeMap<(String, u32), String>,
 }
 
 impl DemoCluster {
@@ -61,6 +67,43 @@ impl DemoCluster {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// What purges did to a queue, and requeues to its dead letters.
+    fn overlay_queue(&self, d: &mut QueueDetail) {
+        let st = self.lock();
+        if st.purged.contains(&d.name) {
+            d.ready = 0;
+            for l in &mut d.levels {
+                l.ready = 0;
+                l.oldest_ms = None;
+            }
+        }
+        if d.dlq.as_ref().is_some_and(|q| st.requeued.contains(q)) {
+            d.dead_letters.clear();
+        }
+        for l in &mut d.levels {
+            if let Some(n) = st.pins.get(&(d.name.clone(), u32::from(l.level))) {
+                l.leader = n.clone();
+            }
+        }
+    }
+
+    fn overlay_queues(&self, rows: &mut [QueueRow]) {
+        let st = self.lock();
+        for r in rows.iter_mut().filter(|r| st.purged.contains(&r.name)) {
+            r.ready = 0;
+        }
+    }
+
+    /// Where pins put a stream's leaders.
+    fn overlay_stream(&self, d: &mut StreamDetail) {
+        let st = self.lock();
+        for p in &mut d.partitions {
+            if let Some(n) = st.pins.get(&(d.name.clone(), p.id)) {
+                p.leader = n.clone();
+            }
+        }
     }
 
     fn in_rate(&self) -> f64 {
@@ -401,6 +444,7 @@ impl Cluster for DemoCluster {
     }
 
     async fn stream(&self, who: &Identity, name: &str) -> ApiResult<StreamDetail> {
+        let mut out: StreamDetail = async {
         let row = self
             .streams(who)
             .await?
@@ -527,161 +571,175 @@ impl Cluster for DemoCluster {
             groups,
             assignment,
         })
+        }
+        .await?;
+        self.overlay_stream(&mut out);
+        Ok(out)
     }
 
     async fn queues(&self, _who: &Identity) -> ApiResult<Vec<QueueRow>> {
-        let row = |name: &str, tenant: &str, ready, dlq, attention: Option<Chip>| QueueRow {
-            name: name.into(),
-            tenant: Some(tenant.into()),
-            ready,
-            dead_lettered: dlq,
-            attention,
-        };
-        let mut rows = vec![
-            row(
-                "email.send",
-                "notify",
-                18_304 + (self.secs() * 6.0) as u64,
-                Some(0),
-                Some(chip(Tone::Critical, "No consumers")),
-            ),
-            row("payments.capture", "commerce", 1_942, Some(211), Some(chip(Tone::Warn, "DLQ growing"))),
-            row("webhooks.out", "platform", 6_120, Some(43), Some(chip(Tone::Warn, "Oldest 12 min"))),
-            row("refunds", "commerce", 12, Some(64), Some(chip(Tone::Info, "DLQ not empty"))),
-            row("invoices.render", "finance", 3, Some(0), None),
-            row("sms.send", "notify", 0, Some(0), None),
-        ];
-        rows.extend(self.created_rows());
-        Ok(rows)
+        let mut out: Vec<QueueRow> = async {
+            let row = |name: &str, tenant: &str, ready, dlq, attention: Option<Chip>| QueueRow {
+                name: name.into(),
+                tenant: Some(tenant.into()),
+                ready,
+                dead_lettered: dlq,
+                attention,
+            };
+            let mut rows = vec![
+                row(
+                    "email.send",
+                    "notify",
+                    18_304 + (self.secs() * 6.0) as u64,
+                    Some(0),
+                    Some(chip(Tone::Critical, "No consumers")),
+                ),
+                row("payments.capture", "commerce", 1_942, Some(211), Some(chip(Tone::Warn, "DLQ growing"))),
+                row("webhooks.out", "platform", 6_120, Some(43), Some(chip(Tone::Warn, "Oldest 12 min"))),
+                row("refunds", "commerce", 12, Some(64), Some(chip(Tone::Info, "DLQ not empty"))),
+                row("invoices.render", "finance", 3, Some(0), None),
+                row("sms.send", "notify", 0, Some(0), None),
+            ];
+            rows.extend(self.created_rows());
+            Ok(rows)
+        }
+        .await?;
+        self.overlay_queues(&mut out);
+        Ok(out)
     }
 
     async fn queue(&self, who: &Identity, name: &str) -> ApiResult<QueueDetail> {
-        if let Some((q, by)) = self.lock().created.get(name) {
-            return Ok(QueueDetail {
-                name: q.name.clone(),
-                tenant: q.tenant.clone(),
-                single_active: q.single_active,
-                ttl_ms: q.ttl_ms,
-                dlq: q.dlq.clone(),
-                max_deliveries: q.max_deliveries,
-                binding: None,
-                ready: 0,
-                in_flight: 0,
-                in_open_txns: 0,
-                publish_per_sec: Some(0.0),
-                ack_per_sec: Some(0.0),
-                dead_lettered: Some(0),
-                levels: (0..q.priority_levels)
-                    .rev()
-                    .map(|l| PriorityLevel {
-                        level: l,
-                        leader: ["broker-1", "broker-2"][usize::from(l % 2)].into(),
-                        ready: 0,
-                        oldest_ms: Some(0),
-                    })
-                    .collect(),
-                consumers: vec![],
-                dead_letters: vec![],
-                handover: vec![HandoverEvent { at: rfc3339(now_ms()), text: format!("Created by {by}.") }],
-            });
-        }
-        let row = self
-            .queues(who)
-            .await?
-            .into_iter()
-            .find(|r| r.name == name)
-            .ok_or_else(|| ApiError::NotFound(format!("There is no queue \"{name}\" in {}.", self.id)))?;
-        if name != "payments.capture" {
-            return Ok(QueueDetail {
+        let mut out: QueueDetail = async {
+            if let Some((q, by)) = self.lock().created.get(name) {
+                return Ok(QueueDetail {
+                    name: q.name.clone(),
+                    tenant: q.tenant.clone(),
+                    single_active: q.single_active,
+                    ttl_ms: q.ttl_ms,
+                    dlq: q.dlq.clone(),
+                    max_deliveries: q.max_deliveries,
+                    binding: None,
+                    ready: 0,
+                    in_flight: 0,
+                    in_open_txns: 0,
+                    publish_per_sec: Some(0.0),
+                    ack_per_sec: Some(0.0),
+                    dead_lettered: Some(0),
+                    levels: (0..q.priority_levels)
+                        .rev()
+                        .map(|l| PriorityLevel {
+                            level: l,
+                            leader: ["broker-1", "broker-2"][usize::from(l % 2)].into(),
+                            ready: 0,
+                            oldest_ms: Some(0),
+                        })
+                        .collect(),
+                    consumers: vec![],
+                    dead_letters: vec![],
+                    handover: vec![HandoverEvent { at: rfc3339(now_ms()), text: format!("Created by {by}.") }],
+                });
+            }
+            let row = self
+                .queues(who)
+                .await?
+                .into_iter()
+                .find(|r| r.name == name)
+                .ok_or_else(|| ApiError::NotFound(format!("There is no queue \"{name}\" in {}.", self.id)))?;
+            if name != "payments.capture" {
+                return Ok(QueueDetail {
+                    name: row.name,
+                    tenant: row.tenant,
+                    single_active: false,
+                    ttl_ms: None,
+                    dlq: (row.dead_lettered > Some(0)).then(|| format!("{name}.dlq")),
+                    max_deliveries: (row.dead_lettered > Some(0)).then_some(5),
+                    binding: None,
+                    ready: row.ready,
+                    in_flight: 0,
+                    in_open_txns: 0,
+                    publish_per_sec: Some(12.0),
+                    ack_per_sec: Some(12.0),
+                    dead_lettered: row.dead_lettered,
+                    levels: vec![PriorityLevel {
+                        level: 0,
+                        leader: "broker-1".into(),
+                        ready: row.ready,
+                        oldest_ms: Some(45_000),
+                    }],
+                    consumers: vec![],
+                    dead_letters: vec![],
+                    handover: vec![],
+                });
+            }
+            let now = now_ms();
+            let consumer = |tag: &str, conn: &str, active: bool| QueueConsumer {
+                tag: tag.into(),
+                principal: Some("CN=capture-svc".into()),
+                connection: conn.into(),
+                in_flight: if active { 118 } else { 0 },
+                credit_messages: 128,
+                in_flight_bytes: if active { Some((3.1 * MIB) as u64) } else { Some(0) },
+                credit_bytes: Some(4 << 20),
+                acks_per_sec: if active { Some(805.0 * wave(self.secs(), 19.0, 0.05)) } else { Some(0.0) },
+                state: if active { chip(Tone::Ok, "Active") } else { chip(Tone::Info, "Standby") },
+            };
+            let dead = |offset, key: &str, reason: &str, deliveries, secs_ago: u64| DeadLetter {
+                offset,
+                key: Some(key.into()),
+                reason: reason.into(),
+                deliveries,
+                at: rfc3339(now - secs_ago * 1000),
+            };
+            Ok(QueueDetail {
                 name: row.name,
                 tenant: row.tenant,
-                single_active: false,
-                ttl_ms: None,
-                dlq: (row.dead_lettered > Some(0)).then(|| format!("{name}.dlq")),
-                max_deliveries: (row.dead_lettered > Some(0)).then_some(5),
-                binding: None,
+                single_active: true,
+                ttl_ms: Some(86_400_000),
+                dlq: Some("payments.capture.dlq".into()),
+                max_deliveries: Some(5),
+                binding: Some("payments · payment.*.capture".into()),
                 ready: row.ready,
-                in_flight: 0,
-                in_open_txns: 0,
-                publish_per_sec: Some(12.0),
-                ack_per_sec: Some(12.0),
+                in_flight: 118,
+                in_open_txns: 6,
+                publish_per_sec: Some(820.0 * wave(self.secs(), 17.0, 0.05)),
+                ack_per_sec: Some(805.0 * wave(self.secs(), 19.0, 0.05)),
                 dead_lettered: row.dead_lettered,
-                levels: vec![PriorityLevel {
-                    level: 0,
-                    leader: "broker-1".into(),
-                    ready: row.ready,
-                    oldest_ms: Some(45_000),
-                }],
-                consumers: vec![],
-                dead_letters: vec![],
-                handover: vec![],
-            });
+                levels: vec![
+                    PriorityLevel { level: 2, leader: "broker-1".into(), ready: 12, oldest_ms: Some(400) },
+                    PriorityLevel { level: 1, leader: "broker-2".into(), ready: 1_880, oldest_ms: Some(130_000) },
+                    PriorityLevel { level: 0, leader: "broker-1".into(), ready: 50, oldest_ms: Some(581_000) },
+                ],
+                consumers: vec![
+                    consumer("capture-worker-1", "10.4.6.21 → broker-2", true),
+                    consumer("capture-worker-2", "10.4.6.22 → broker-2", false),
+                    consumer("capture-worker-4", "10.4.7.30 → broker-1", false),
+                ],
+                dead_letters: vec![
+                    dead(4_812_330, "pay_8Hq2LmT", "Rejected without requeue (Nack requeue=false)", 1, 108),
+                    dead(4_812_118, "pay_3vR9xKa", "Max deliveries reached (5)", 5, 183),
+                    dead(4_811_904, "pay_Q0d1sWe", "Max deliveries reached (5)", 5, 267),
+                    dead(4_809_215, "pay_kP7yNb2", "TTL expired (24 h)", 0, 832),
+                    dead(4_808_977, "pay_Zt4uHc9", "Max deliveries reached (5)", 5, 914),
+                ],
+                handover: vec![
+                    HandoverEvent {
+                        at: rfc3339(now - 5_576_000),
+                        text: "capture-worker-3 missed its credit deadline (30 s) and was dropped.".into(),
+                    },
+                    HandoverEvent {
+                        at: rfc3339(now - 5_576_000),
+                        text: "Its 2 open ack transactions were aborted; 14 messages became deliverable again.".into(),
+                    },
+                    HandoverEvent {
+                        at: rfc3339(now - 5_575_000),
+                        text: "capture-worker-1 became the active consumer and received them first.".into(),
+                    },
+                ],
+            })
         }
-        let now = now_ms();
-        let consumer = |tag: &str, conn: &str, active: bool| QueueConsumer {
-            tag: tag.into(),
-            principal: Some("CN=capture-svc".into()),
-            connection: conn.into(),
-            in_flight: if active { 118 } else { 0 },
-            credit_messages: 128,
-            in_flight_bytes: if active { Some((3.1 * MIB) as u64) } else { Some(0) },
-            credit_bytes: Some(4 << 20),
-            acks_per_sec: if active { Some(805.0 * wave(self.secs(), 19.0, 0.05)) } else { Some(0.0) },
-            state: if active { chip(Tone::Ok, "Active") } else { chip(Tone::Info, "Standby") },
-        };
-        let dead = |offset, key: &str, reason: &str, deliveries, secs_ago: u64| DeadLetter {
-            offset,
-            key: Some(key.into()),
-            reason: reason.into(),
-            deliveries,
-            at: rfc3339(now - secs_ago * 1000),
-        };
-        Ok(QueueDetail {
-            name: row.name,
-            tenant: row.tenant,
-            single_active: true,
-            ttl_ms: Some(86_400_000),
-            dlq: Some("payments.capture.dlq".into()),
-            max_deliveries: Some(5),
-            binding: Some("payments · payment.*.capture".into()),
-            ready: row.ready,
-            in_flight: 118,
-            in_open_txns: 6,
-            publish_per_sec: Some(820.0 * wave(self.secs(), 17.0, 0.05)),
-            ack_per_sec: Some(805.0 * wave(self.secs(), 19.0, 0.05)),
-            dead_lettered: row.dead_lettered,
-            levels: vec![
-                PriorityLevel { level: 2, leader: "broker-1".into(), ready: 12, oldest_ms: Some(400) },
-                PriorityLevel { level: 1, leader: "broker-2".into(), ready: 1_880, oldest_ms: Some(130_000) },
-                PriorityLevel { level: 0, leader: "broker-1".into(), ready: 50, oldest_ms: Some(581_000) },
-            ],
-            consumers: vec![
-                consumer("capture-worker-1", "10.4.6.21 → broker-2", true),
-                consumer("capture-worker-2", "10.4.6.22 → broker-2", false),
-                consumer("capture-worker-4", "10.4.7.30 → broker-1", false),
-            ],
-            dead_letters: vec![
-                dead(4_812_330, "pay_8Hq2LmT", "Rejected without requeue (Nack requeue=false)", 1, 108),
-                dead(4_812_118, "pay_3vR9xKa", "Max deliveries reached (5)", 5, 183),
-                dead(4_811_904, "pay_Q0d1sWe", "Max deliveries reached (5)", 5, 267),
-                dead(4_809_215, "pay_kP7yNb2", "TTL expired (24 h)", 0, 832),
-                dead(4_808_977, "pay_Zt4uHc9", "Max deliveries reached (5)", 5, 914),
-            ],
-            handover: vec![
-                HandoverEvent {
-                    at: rfc3339(now - 5_576_000),
-                    text: "capture-worker-3 missed its credit deadline (30 s) and was dropped.".into(),
-                },
-                HandoverEvent {
-                    at: rfc3339(now - 5_576_000),
-                    text: "Its 2 open ack transactions were aborted; 14 messages became deliverable again.".into(),
-                },
-                HandoverEvent {
-                    at: rfc3339(now - 5_575_000),
-                    text: "capture-worker-1 became the active consumer and received them first.".into(),
-                },
-            ],
-        })
+        .await?;
+        self.overlay_queue(&mut out);
+        Ok(out)
     }
 
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
@@ -798,6 +856,66 @@ impl Cluster for DemoCluster {
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         self.lock().paused = true;
         Ok(())
+    }
+
+    async fn purge_queue(&self, who: &Identity, name: &str) -> ApiResult<u64> {
+        let d = self.queue(who, name).await?;
+        self.lock().purged.insert(name.to_string());
+        Ok(d.ready)
+    }
+
+    async fn requeue(&self, who: &Identity, name: &str) -> ApiResult<u64> {
+        let mut moved = 0;
+        let mut is_dlq = false;
+        for row in self.queues(who).await? {
+            let d = self.queue(who, &row.name).await?;
+            if d.dlq.as_deref() == Some(name) {
+                is_dlq = true;
+                moved += d.dead_letters.len() as u64;
+            }
+        }
+        if !is_dlq {
+            self.queue(who, name).await?;
+            return Ok(0);
+        }
+        self.lock().requeued.insert(name.to_string());
+        Ok(moved)
+    }
+
+    async fn move_leader(&self, who: &Identity, req: &MoveLeader) -> ApiResult<()> {
+        let replicas: Vec<String> = match self.stream(who, &req.resource).await {
+            Ok(s) => {
+                let p = s.partitions.iter().find(|p| p.id == req.partition).ok_or_else(|| {
+                    ApiError::NotFound(format!("{} has no partition {}.", req.resource, req.partition))
+                })?;
+                p.replicas.iter().map(|r| r.node.clone()).collect()
+            }
+            Err(ApiError::NotFound(_)) => {
+                let q = self.queue(who, &req.resource).await?;
+                if !q.levels.iter().any(|l| u32::from(l.level) == req.partition) {
+                    return Err(ApiError::NotFound(format!("{} has no level {}.", req.resource, req.partition)));
+                }
+                ["broker-1", "broker-2", "broker-3"].map(String::from).to_vec()
+            }
+            Err(e) => return Err(e),
+        };
+        let key = (req.resource.clone(), req.partition);
+        match &req.node {
+            Some(n) if !replicas.contains(n) => Err(ApiError::BadRequest(format!(
+                "{n} holds no replica of partition {} of {}; choose one of {}.",
+                req.partition,
+                req.resource,
+                replicas.join(", ")
+            ))),
+            Some(n) => {
+                self.lock().pins.insert(key, n.clone());
+                Ok(())
+            }
+            None => {
+                self.lock().pins.remove(&key);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -928,6 +1046,34 @@ mod tests {
 
     fn me() -> Identity {
         Identity::anonymous("tester")
+    }
+
+    #[tokio::test]
+    async fn purge_requeue_and_pinned_leaders_show() {
+        let c = DemoCluster::new("demo");
+        let before = c.queue(&me(), "payments.capture").await.unwrap();
+        assert!(before.ready > 0 && !before.dead_letters.is_empty());
+        assert_eq!(c.purge_queue(&me(), "payments.capture").await.unwrap(), before.ready);
+        assert_eq!(c.queue(&me(), "payments.capture").await.unwrap().ready, 0);
+        let row = c.queues(&me()).await.unwrap().into_iter().find(|r| r.name == "payments.capture").unwrap();
+        assert_eq!(row.ready, 0, "the list agrees");
+        assert!(matches!(c.purge_queue(&me(), "nothing").await, Err(ApiError::NotFound(_))));
+
+        let moved = c.requeue(&me(), "payments.capture.dlq").await.unwrap();
+        assert_eq!(moved, before.dead_letters.len() as u64);
+        assert!(c.queue(&me(), "payments.capture").await.unwrap().dead_letters.is_empty());
+
+        let s = c.streams(&me()).await.unwrap().remove(0);
+        let detail = c.stream(&me(), &s.name).await.unwrap();
+        let p = &detail.partitions[0];
+        let to = p.replicas.iter().map(|r| r.node.clone()).find(|n| *n != p.leader).unwrap();
+        let pin = MoveLeader { resource: s.name.clone(), partition: p.id, node: Some(to.clone()) };
+        c.move_leader(&me(), &pin).await.unwrap();
+        assert_eq!(c.stream(&me(), &s.name).await.unwrap().partitions[0].leader, to);
+        let bad = MoveLeader { node: Some("broker-9".into()), ..pin.clone() };
+        assert!(matches!(c.move_leader(&me(), &bad).await, Err(ApiError::BadRequest(_))));
+        c.move_leader(&me(), &MoveLeader { node: None, ..pin }).await.unwrap();
+        assert_eq!(c.stream(&me(), &s.name).await.unwrap().partitions[0].leader, p.leader, "unpinned");
     }
 
     #[test]

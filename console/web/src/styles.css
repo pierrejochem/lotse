@@ -201,6 +201,7 @@ tr.clickable.selected:hover { background: var(--signal-soft); }
 .btn.primary:hover { background: var(--signal-hover); color: var(--on-signal); }
 .btn.dark { border-color: transparent; background: var(--elbe); color: var(--on-elbe); }
 .btn.small { height: 32px; padding: 0 10px; font-size: 13px; }
+.btn.danger { border-color: var(--crit-border); background: var(--crit-bg); color: var(--crit-text); }
 .btn.icon { width: 40px; padding: 0; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .field { display: flex; flex-direction: column; gap: 6px; }

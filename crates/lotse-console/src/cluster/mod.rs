@@ -16,8 +16,8 @@ use crate::auth::Identity;
 use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
-    ClusterRef, CreateQueue, Isolation, NodesView, Overview, QueueDetail, QueueRow, RecordView, StreamDetail,
-    StreamRow, TenantsView,
+    ClusterRef, CreateQueue, Isolation, MoveLeader, NodesView, Overview, QueueDetail, QueueRow, RecordView,
+    StreamDetail, StreamRow, TenantsView,
 };
 
 /// One managed cluster.
@@ -49,6 +49,16 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Creates a queue. The request is already validated.
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()>;
+
+    /// Settles the queue's ready messages; returns how many (ADR 0064).
+    async fn purge_queue(&self, who: &Identity, name: &str) -> ApiResult<u64>;
+
+    /// Moves the ready messages of the dead-letter queue `name` back to the
+    /// queues they came from; returns how many (ADR 0064).
+    async fn requeue(&self, who: &Identity, name: &str) -> ApiResult<u64>;
+
+    /// Pins a partition's leader, or unpins it (ADR 0065).
+    async fn move_leader(&self, who: &Identity, req: &MoveLeader) -> ApiResult<()>;
 
     /// Reads records without a consumer group.
     async fn read(
