@@ -415,3 +415,18 @@ fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_
     s.apply(12, &payload(&alter(work, 0))).unwrap();
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
+
+#[test]
+fn revoked_sessions_only_move_forward_and_survive_a_snapshot() {
+    use lotse_auth::roles::Subject;
+    let mut s = MetadataState::default();
+    let alice = Subject::User("alice".into());
+    let ops = Subject::Group("ops".into());
+    s.apply(1, &payload(&Change::RevokeSessions { subject: alice.clone(), before_ms: 5_000 })).unwrap();
+    s.apply(2, &payload(&Change::RevokeSessions { subject: alice.clone(), before_ms: 3_000 })).unwrap();
+    s.apply(3, &payload(&Change::RevokeSessions { subject: ops.clone(), before_ms: 7_000 })).unwrap();
+    assert_eq!(s.revocations.get(&alice), Some(&5_000), "an earlier time does not undo a revocation");
+    assert_eq!(s.revocations.get(&ops), Some(&7_000));
+    assert!(s.pins.is_empty() && s.incarnations.is_empty(), "the sections before it are written empty");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}

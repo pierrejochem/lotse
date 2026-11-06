@@ -92,6 +92,9 @@ pub(crate) enum Change {
     /// An operator pins a group's preferred leader to a node, or unpins it
     /// with `None` (ADR 0065).
     PinLeader { group: GroupId, node: Option<NodeId> },
+    /// Sessions of a user or group authenticated before `before_ms`, and
+    /// its tokens issued before it, no longer count (ADR 0070).
+    RevokeSessions { subject: Subject, before_ms: u64 },
 }
 
 /// A node added at runtime: where nodes and clients reach it.
@@ -337,6 +340,10 @@ pub(crate) struct MetadataState {
     /// and group ids are keyed by it, so a tenant created again under a
     /// name starts without the ids of the one deleted before.
     pub(crate) incarnations: BTreeMap<String, u64>,
+    /// Revoked sessions (ADR 0070): for a user or group, the time in ms
+    /// since the Unix epoch before which its sessions and tokens no longer
+    /// count. Only ever raised.
+    pub(crate) revocations: BTreeMap<Subject, u64>,
     /// Nodes added at runtime; those from the configuration are not here.
     pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
     /// Nodes being drained.
@@ -642,6 +649,11 @@ impl MetadataState {
                     self.pins.remove(&group);
                 }
             },
+            Change::RevokeSessions { subject, before_ms } => {
+                // A later revocation with an earlier time does not undo one.
+                let at = self.revocations.entry(subject).or_insert(0);
+                *at = (*at).max(before_ms);
+            }
         }
         Ok(())
     }
@@ -743,31 +755,47 @@ impl MetadataState {
             b.put_u64_le(*g);
             b.put_u64_le(*at);
         }
-        // Written only when there are some, so a snapshot without pins reads
-        // on a node from before them (ADR 0065).
+        // Sections added since are optional and written only up to the
+        // last that holds something, so a snapshot without them reads on a
+        // node from before them: pins (ADR 0065), compaction settings (ADR
+        // 0067), tenants' incarnations (ADR 0069), revoked sessions (ADR
+        // 0070). A later section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
-        if !self.pins.is_empty() || !compacting.is_empty() || !self.incarnations.is_empty() {
+        let sections = if !self.revocations.is_empty() {
+            4
+        } else if !self.incarnations.is_empty() {
+            3
+        } else if !compacting.is_empty() {
+            2
+        } else {
+            usize::from(!self.pins.is_empty())
+        };
+        if sections >= 1 {
             b.put_u32_le(self.pins.len() as u32);
             for (g, n) in &self.pins {
                 b.put_u64_le(*g);
                 b.put_u64_le(*n);
             }
         }
-        // Likewise the settings that came with compaction (ADR 0067) and
-        // tenants' incarnations (ADR 0069); a later section needs the ones
-        // before it, empty or not.
-        if !compacting.is_empty() || !self.incarnations.is_empty() {
+        if sections >= 2 {
             b.put_u32_le(compacting.len() as u32);
             for s in compacting {
                 b.put_u64_le(s.resource_id);
                 put_compaction(&mut b, &s.settings);
             }
         }
-        if !self.incarnations.is_empty() {
+        if sections >= 3 {
             b.put_u32_le(self.incarnations.len() as u32);
             for (t, i) in &self.incarnations {
                 put_str(&mut b, t);
                 b.put_u64_le(*i);
+            }
+        }
+        if sections >= 4 {
+            b.put_u32_le(self.revocations.len() as u32);
+            for (subject, before) in &self.revocations {
+                put_subject(&mut b, subject);
+                b.put_u64_le(*before);
             }
         }
         b.freeze()
@@ -882,6 +910,13 @@ impl MetadataState {
                 let t = get_str(b)?;
                 need(b, 8)?;
                 s.incarnations.insert(t, b.get_u64_le());
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let subject = get_subject(b)?;
+                need(b, 8)?;
+                s.revocations.insert(subject, b.get_u64_le());
             }
         }
         if b.has_remaining() {
@@ -1004,6 +1039,11 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u64_le(*group);
             b.put_u8(u8::from(node.is_some()));
             b.put_u64_le(node.unwrap_or(0));
+        }
+        Change::RevokeSessions { subject, before_ms } => {
+            b.put_u8(18);
+            put_subject(&mut b, subject);
+            b.put_u64_le(*before_ms);
         }
         Change::SetUser { user, credential } => {
             b.put_u8(7);
@@ -1163,6 +1203,11 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let node = b.get_u64_le();
             Change::PinLeader { group, node: pinned.then_some(node) }
         }
+        18 => {
+            let subject = get_subject(b)?;
+            need(b, 8)?;
+            Change::RevokeSessions { subject, before_ms: b.get_u64_le() }
+        }
         _ => return Err("unknown metadata change".into()),
     };
     if b.has_remaining() {
@@ -1291,6 +1336,24 @@ fn get_compaction(b: &mut &[u8], s: &mut StreamSettings) -> Result<(), String> {
     s.cleanup = if cleanup == i64::MIN { None } else { Some(Cleanup::from_code(cleanup)?) };
     s.delete_retention_ms = Some(b.get_i64_le()).filter(|v| *v != i64::MIN);
     Ok(())
+}
+
+fn put_subject(b: &mut BytesMut, subject: &Subject) {
+    let (kind, name) = match subject {
+        Subject::User(u) => (0, u),
+        Subject::Group(g) => (1, g),
+    };
+    b.put_u8(kind);
+    put_str(b, name);
+}
+
+fn get_subject(b: &mut &[u8]) -> Result<Subject, String> {
+    need(b, 1)?;
+    match b.get_u8() {
+        0 => Ok(Subject::User(get_str(b)?)),
+        1 => Ok(Subject::Group(get_str(b)?)),
+        _ => Err("unknown subject kind".into()),
+    }
 }
 
 fn put_nodes(b: &mut BytesMut, nodes: &[NodeId]) {

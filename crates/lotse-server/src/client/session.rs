@@ -36,6 +36,11 @@ pub(super) struct Session<R> {
     until: Option<Instant>,
     /// The name a SASL login established; authenticating again must keep it.
     sasl_name: Option<String>,
+    /// When the session's credential dates from, ms since the Unix epoch:
+    /// a token's `iat` (0 without one), the time of a SCRAM login, or when
+    /// the connection was made. A revocation after it ends the session
+    /// (ADR 0070).
+    since_ms: u64,
     sasl: Sasl,
 }
 
@@ -48,14 +53,14 @@ pub(super) struct Step {
 
 impl<R: Clock + Http + Rng + Clone> Session<R> {
     /// A session for a connection whose other end proved `identity`.
-    pub(super) fn new(auth: Arc<Auth<R>>, identity: Option<PeerIdentity>) -> Session<R> {
+    pub(super) fn new(auth: Arc<Auth<R>>, identity: Option<PeerIdentity>, now_ms: u64) -> Session<R> {
         let principal = match identity {
             Some(PeerIdentity::Node(id)) => Some(Principal::Node(id)),
             Some(PeerIdentity::Principal(name)) if auth.cfg.mtls => Some(Principal::User { name, groups: Vec::new() }),
             _ if !auth.cfg.required => Some(Principal::Anonymous),
             _ => None,
         };
-        Session { auth, principal, until: None, sasl_name: None, sasl: Sasl::Idle }
+        Session { auth, principal, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
     }
 
     /// Who the connection acts as at `now`; `None` before authenticating or
@@ -65,6 +70,17 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             return None;
         }
         self.principal.as_ref()
+    }
+
+    /// Whether a revocation ended this session (ADR 0070): the connection
+    /// closes, and the client authenticates afresh on a new one.
+    pub(super) fn revoked(&self) -> bool {
+        self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
+    }
+
+    /// Set when revocations change, so a waiting connection checks again.
+    pub(super) fn revocations_changed(&self) -> crate::signal::Signal {
+        self.auth.revocations_changed()
     }
 
     pub(super) fn handshake(&mut self, req: &SaslHandshakeRequest) -> SaslHandshakeResponse {
@@ -101,7 +117,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
                 }
             }
             Sasl::Scram(mut server) => match server.last(&req.auth_bytes) {
-                Ok((name, last)) => self.established(rt, name, Vec::new(), None, last.into()),
+                Ok((name, last)) => self.established(rt, name, Vec::new(), None, unix_ms(rt), last.into()),
                 Err(_) => failed("authentication failed"),
             },
             Sasl::Chosen(_) => {
@@ -112,7 +128,10 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
                 match self.auth.verify_token(&token).await {
                     Ok(v) => {
                         let left = Duration::from_secs(v.expires_at).saturating_sub(rt.unix_time());
-                        self.established(rt, v.principal, v.groups, Some(left), Bytes::new())
+                        // Without `iat` a token counts as issued at time 0:
+                        // any revocation of its principal covers it.
+                        let issued = v.issued_at.unwrap_or(0).saturating_mul(1000);
+                        self.established(rt, v.principal, v.groups, Some(left), issued, Bytes::new())
                     }
                     Err(e) => failed(&e.to_string()),
                 }
@@ -122,7 +141,15 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
 
     /// A SASL login succeeded for `name`: the session runs until
     /// `max_session`, or until `left` if that is sooner.
-    fn established(&mut self, rt: &R, name: String, groups: Vec<String>, left: Option<Duration>, bytes: Bytes) -> Step {
+    fn established(
+        &mut self,
+        rt: &R,
+        name: String,
+        groups: Vec<String>,
+        left: Option<Duration>,
+        since_ms: u64,
+        bytes: Bytes,
+    ) -> Step {
         // Authenticating again renews the session; it cannot change who
         // the connection is.
         if self.sasl_name.as_ref().is_some_and(|n| *n != name) {
@@ -132,12 +159,22 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         if lifetime.is_zero() {
             return failed("the token has expired");
         }
+        let principal = Principal::User { name: name.clone(), groups };
+        if self.auth.revoked(&principal, since_ms) {
+            return failed("the principal's sessions were revoked after this credential was issued");
+        }
         self.until = Some(rt.now() + lifetime);
-        self.sasl_name = Some(name.clone());
-        self.principal = Some(Principal::User { name, groups });
+        self.sasl_name = Some(name);
+        self.since_ms = since_ms;
+        self.principal = Some(principal);
         let ms = u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX);
         Step { response: answer(ErrorCode::NONE, None, bytes, ms), close: false }
     }
+}
+
+/// Now, in ms since the Unix epoch.
+fn unix_ms<R: Clock>(rt: &R) -> u64 {
+    u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn answer(error: ErrorCode, why: Option<&str>, auth_bytes: Bytes, ms: u64) -> SaslAuthenticateResponse {

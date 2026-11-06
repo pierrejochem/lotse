@@ -383,6 +383,18 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::MoveLeader(req)).await
     }
 
+    /// Revokes the sessions of a user (`group` false) or of every member of
+    /// an IdP group (ADR 0070): each node ends their sessions that
+    /// authenticated before now, and refuses their tokens issued before now.
+    /// A SCRAM user who still has the password can sign in again; change
+    /// or delete the password to keep them out. Needs the cluster-admin
+    /// role.
+    pub async fn revoke_sessions(&self, subject: &str, group: bool) -> Result<(), ClientError> {
+        let subject_kind = if group { lotse_proto::subject_kind::GROUP } else { lotse_proto::subject_kind::USER };
+        let req = lotse_proto::RevokeSessionsRequest { subject_kind, subject: subject.into(), before_ms: 0 };
+        self.admin_change(Request::RevokeSessions(req)).await
+    }
+
     /// The cluster's nodes, as the metadata group knows them.
     pub async fn describe_nodes(&self) -> Result<Vec<NodeEntry>, ClientError> {
         let req = Request::DescribeNodes(DescribeNodesRequest);

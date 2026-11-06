@@ -35,8 +35,8 @@ use lotse_proto::{
     CreateQueueRequest, CreateResponse, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest,
     DeleteResourceRequest, DeleteTenantRequest, DescribeConfigsRequest, DescribeConfigsResponse,
     DescribeRoleBindingsResponse, DescribeTenantsResponse, DescribeUsersResponse, ErrorCode, LeaderHint,
-    OutcomeResponse, ResourceConfigs, Response, RoleBindingData, TenantEntry, UserEntry, WhoAmIResponse, config_source,
-    principal_kind, subject_kind,
+    OutcomeResponse, ResourceConfigs, Response, RevokeSessionsRequest, RoleBindingData, TenantEntry, UserEntry,
+    WhoAmIResponse, config_source, principal_kind, subject_kind,
 };
 use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
@@ -782,6 +782,36 @@ impl Clients {
             return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
         }
         let change = Change::DeleteTenant { name: req.name };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `RevokeSessions` (ADR 0070): from when the change applies, every node
+    /// ends the sessions of the user or group that authenticated before
+    /// `before_ms` and refuses its tokens issued before it.
+    pub(super) fn revoke_sessions<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: RevokeSessionsRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let subject = match req.subject_kind {
+            _ if req.subject.is_empty() => None,
+            subject_kind::USER => Some(Subject::User(req.subject)),
+            subject_kind::GROUP => Some(Subject::Group(req.subject)),
+            _ => None,
+        };
+        let Some(subject) = subject else {
+            let why = "name a user or a group";
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(why), None));
+        };
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let before_ms = if req.before_ms == 0 { view.unix_ms } else { req.before_ms };
+        let change = Change::RevokeSessions { subject, before_ms };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

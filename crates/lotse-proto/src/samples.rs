@@ -282,6 +282,16 @@ pub fn requests() -> Vec<Request> {
         Request::Requeue(QueueActionRequest { queue_id: 1_099_511_627_778, up_to: 5_000 }),
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 3 }),
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 0 }),
+        Request::RevokeSessions(RevokeSessionsRequest {
+            subject_kind: subject_kind::USER,
+            subject: "alice".into(),
+            before_ms: 1_700_000_000_000,
+        }),
+        Request::RevokeSessions(RevokeSessionsRequest {
+            subject_kind: subject_kind::GROUP,
+            subject: "ops".into(),
+            before_ms: 0,
+        }),
     ]
 }
 

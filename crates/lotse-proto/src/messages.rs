@@ -3081,6 +3081,34 @@ impl MoveLeaderRequest {
     }
 }
 
+/// Revokes a user's or an IdP group's sessions (cluster admin, ADR 0070):
+/// every node ends the sessions that authenticated before `before_ms` and
+/// refuses tokens issued before it. Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeSessionsRequest {
+    /// [`subject_kind`]: a user or a group.
+    pub subject_kind: u8,
+    /// The user or group.
+    pub subject: String,
+    /// Milliseconds since the Unix epoch; 0 for now, by the metadata
+    /// leader's clock.
+    pub before_ms: u64,
+}
+
+impl RevokeSessionsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u8(self.subject_kind);
+        w.string(&self.subject);
+        w.u64(self.before_ms);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RevokeSessionsRequest { subject_kind: r.u8()?, subject: r.string()?, before_ms: r.u64()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

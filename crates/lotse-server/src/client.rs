@@ -139,12 +139,24 @@ pub(crate) async fn serve<R: Runtime>(
     stop: Signal,
     auth: Arc<Auth<R>>,
 ) {
-    let mut session = Session::new(auth, conn.peer_identity());
+    let now_ms = u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX);
+    let mut session = Session::new(auth, conn.peer_identity(), now_ms);
     let conn = Arc::new(conn);
     let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
     let closed = Signal::default();
     let writer = rt.spawn(write_to(conn.clone(), outbox.clone(), net.clone(), stop.clone(), closed.clone()));
-    while let Some(Ok(Some(frame))) = race(conn.recv(), &[&stop]).await {
+    loop {
+        // A revoked session ends the connection, also while it waits
+        // (ADR 0070); the client then authenticates afresh.
+        let changed = session.revocations_changed();
+        if session.revoked() {
+            break;
+        }
+        let frame = match race(conn.recv(), &[&stop, &changed]).await {
+            Some(Ok(Some(frame))) => frame,
+            None if !stop.is_set() => continue,
+            _ => break,
+        };
         NetStats::add(&net.client_in, frame.len());
         match lotse_proto::decode_request(frame) {
             Ok((header, Request::SaslHandshake(req))) => {
@@ -432,6 +444,7 @@ impl Clients {
             Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
+            Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),

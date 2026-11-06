@@ -486,3 +486,57 @@ async fn conn_closed(rt: &SimRuntime, conn: &lotse_sim::SimConn) -> bool {
     })
     .await
 }
+
+#[test]
+fn revoked_sessions_end_and_old_tokens_are_refused() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            admin.set_user_password("alice", "alice-pw").await.unwrap();
+            rt.sleep(TICK * 50).await;
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+
+            // A SCRAM session, waiting for nothing, ends when its user is
+            // revoked; another user's goes on.
+            let alice = raw(&rt, "r1").await;
+            login(&rt, &alice, "alice", "alice-pw").await.unwrap();
+            assert!(matches!(call(&rt, &alice, 1, &meta).await, Response::Metadata(_)));
+            let other = raw(&rt, "r2").await;
+            login(&rt, &other, "admin", "admin-pw").await.unwrap();
+            rt.sleep(TICK * 10).await;
+            admin.revoke_sessions("alice", false).await.unwrap();
+            assert!(conn_closed(&rt, &alice).await, "the waiting connection ends");
+            assert!(matches!(call(&rt, &other, 2, &meta).await, Response::Metadata(_)), "admin's goes on");
+            // With the password she signs in again: a new session.
+            rt.sleep(TICK * 10).await;
+            let again = raw(&rt, "r3").await;
+            login(&rt, &again, "alice", "alice-pw").await.expect("a session after the revocation");
+            assert!(matches!(call(&rt, &again, 3, &meta).await, Response::Metadata(_)));
+
+            // A group's revocation covers its members' tokens issued before.
+            let idp = issuer("k1");
+            let now = rt.unix_time().as_secs();
+            let signed = |iat: u64| {
+                idp.sign(&serde_json::json!({
+                    "iss": ISSUER, "aud": AUDIENCE, "sub": "bob", "groups": ["ops"], "exp": now + 60, "iat": iat,
+                }))
+            };
+            let old = signed(now - 30);
+            let bob = client(&rt, "c2", bearer(old.clone()));
+            bob.produce("s", 0, batch("before")).await.expect("bob's token works");
+            admin.revoke_sessions("ops", true).await.unwrap();
+            rt.sleep(TICK * 50).await;
+            assert!(denied(bob.produce("s", 0, batch("after")).await), "the old token is refused");
+            let mut no_iat = serde_json::json!({"iss": ISSUER, "aud": AUDIENCE, "sub": "bob", "groups": ["ops"]});
+            no_iat["exp"] = (now + 60).into();
+            let carol = client(&rt, "c3", bearer(idp.sign(&no_iat)));
+            assert!(denied(carol.produce("s", 0, batch("x")).await), "a token without iat counts as old");
+            rt.sleep(Duration::from_secs(2)).await;
+            let fresh = signed(rt.unix_time().as_secs());
+            let bob = client(&rt, "c4", bearer(fresh));
+            bob.produce("s", 0, batch("fresh")).await.expect("a token issued after the revocation");
+            stop(nodes).await;
+        });
+    });
+}

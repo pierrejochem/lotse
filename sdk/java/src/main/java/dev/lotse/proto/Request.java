@@ -966,6 +966,33 @@ public sealed interface Request {
     }
 
     /**
+     * Revokes a user's or an IdP group's sessions (cluster admin, ADR 0070): every node ends the sessions that
+     * authenticated before {@code beforeMs} and refuses tokens issued before it. Answered with
+     * {@link Response.Admin}.
+     *
+     * @param subjectKind 0 for a user, 1 for a group
+     * @param subject the user or group
+     * @param beforeMs milliseconds since the Unix epoch, a {@code u64}; 0 for now, by the metadata leader's clock
+     */
+    record RevokeSessions(int subjectKind, String subject, long beforeMs) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.REVOKE_SESSIONS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u8(subjectKind).string(subject).u64(beforeMs).noTags();
+        }
+
+        static RevokeSessions read(Reader r) {
+            RevokeSessions x = new RevokeSessions(r.u8(), r.string(), r.u64());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code PurgeQueue} (47) or {@code Requeue} (48): an action on a queue's ready messages, served by its leader
      * (ADR 0064). Each request acts on a bounded number of messages; send it again with the answer's {@code upTo}
      * while the answer says {@code more}.

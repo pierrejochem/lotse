@@ -142,6 +142,8 @@ pub struct Verified {
     pub groups: Vec<String>,
     /// `exp`, seconds since the Unix epoch.
     pub expires_at: u64,
+    /// `iat`, seconds since the Unix epoch, if the token says.
+    pub issued_at: Option<u64>,
 }
 
 /// The key id a token names, so a broker can fetch the key set again
@@ -199,5 +201,9 @@ pub fn validate(token: &str, jwks: &Jwks, settings: &OidcSettings, now_secs: u64
         Some(serde_json::Value::String(g)) => vec![g.clone()],
         _ => Vec::new(),
     };
-    Ok(Verified { principal, groups, expires_at: exp })
+    let issued_at = match claims.get("iat") {
+        Some(v) => Some(v.as_u64().ok_or_else(|| TokenError::Invalid("iat is not a number".into()))?),
+        None => None,
+    };
+    Ok(Verified { principal, groups, expires_at: exp, issued_at })
 }

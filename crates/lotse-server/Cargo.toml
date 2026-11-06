@@ -14,6 +14,7 @@ lotse-log.workspace = true
 lotse-raft.workspace = true
 lotse-proto.workspace = true
 lotse-client.workspace = true
+serde_json.workspace = true
 lotse-queue.workspace = true
 lotse-route.workspace = true
 lotse-auth.workspace = true
@@ -25,6 +26,7 @@ thiserror.workspace = true
 lotse-sim.workspace = true
 lotse-auth = { workspace = true, features = ["testing"] }
 lotse-client.workspace = true
+serde_json.workspace = true
 lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 

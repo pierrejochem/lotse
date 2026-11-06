@@ -51,7 +51,7 @@ The tenant of a transactional or group id is tag 1 of a request's trailing block
 
 | Where the block is | Messages |
 | --- | --- |
-| Hint **is** the trailing block | `InitProducer`, `Subscribe`, `QueueAction` (answer to `PurgeQueue`, `Requeue`), `Outcome` (answer to `Ack`, `Nack`, `Unsubscribe`, `Bind`, `Unbind`), `Create` (`CreateStream`, `CreateQueue`, `DeclareExchange`), `Admin` (`DeleteResource`, `AlterConfigs`, `AlterUser`, `CreateTenant`, `DeleteTenant`, `AlterRoleBindings`, `AddNode`, `RemoveNode`) |
+| Hint **is** the trailing block | `InitProducer`, `Subscribe`, `QueueAction` (answer to `PurgeQueue`, `Requeue`), `Outcome` (answer to `Ack`, `Nack`, `Unsubscribe`, `Bind`, `Unbind`), `Create` (`CreateStream`, `CreateQueue`, `DeclareExchange`), `Admin` (`DeleteResource`, `AlterConfigs`, `AlterUser`, `CreateTenant`, `DeleteTenant`, `AlterRoleBindings`, `AddNode`, `RemoveNode`, `MoveLeader`, `RevokeSessions`) |
 | Hint in the **middle**, no trailing block | `DescribeConfigs`, `DescribeUsers`, `DescribeTenants`, `DescribeRoleBindings`, `DescribeNodes` (after the error code, before the array) |
 | Hint is the **element's** block, one per partition | `Produce` and `Fetch` partitions (the resource around them still ends in an empty block) |
 | Hint is the last field of a push | `Deliver` |

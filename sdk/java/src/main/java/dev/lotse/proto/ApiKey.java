@@ -104,6 +104,8 @@ public record ApiKey(int id) {
     public static final ApiKey REQUEUE = new ApiKey(48);
     /** Pins a partition's leader to one of its voters, or unpins it (cluster admin, ADR 0065). */
     public static final ApiKey MOVE_LEADER = new ApiKey(49);
+    /** Ends a user's or group's sessions and refuses their tokens issued before a time (cluster admin, ADR 0070). */
+    public static final ApiKey REVOKE_SESSIONS = new ApiKey(50);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
     public static final ApiKey WRITE_TXN_MARKERS = new ApiKey(1000);
 
@@ -129,7 +131,7 @@ public record ApiKey(int id) {
             range(SASL_AUTHENTICATE), range(ALTER_USER), range(DESCRIBE_USERS), range(CREATE_TENANT),
             range(DELETE_TENANT), range(DESCRIBE_TENANTS), range(ALTER_ROLE_BINDINGS),
             range(DESCRIBE_ROLE_BINDINGS), range(WHO_AM_I), range(ADD_NODE), range(REMOVE_NODE),
-            range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER));
+            range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER), range(REVOKE_SESSIONS));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

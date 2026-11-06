@@ -12,9 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lotse_auth::oauth::{self, Jwks, OidcSettings, TokenError, Verified};
+use lotse_auth::roles::Subject;
 use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
 use lotse_rt::{Clock, Http, Instant};
+
+use crate::signal::Signal;
 
 /// How long a session lasts at most before the client must authenticate
 /// again, by default.
@@ -157,13 +160,22 @@ pub(crate) struct Auth<R> {
     pub(crate) cfg: AuthConfig,
     /// Runtime SCRAM users, as the metadata group last applied them.
     users: Mutex<BTreeMap<String, ScramCredential>>,
+    /// Revoked sessions as the metadata group last applied them (ADR
+    /// 0070), and the signal set when they change, which connections wait
+    /// on.
+    revocations: Mutex<(BTreeMap<Subject, u64>, Signal)>,
     oidc: Option<Oidc<R>>,
 }
 
 impl<R: Clock + Http + Clone> Auth<R> {
     pub(crate) fn new(rt: R, cfg: AuthConfig) -> Arc<Auth<R>> {
         let oidc = cfg.oidc.clone().map(|c| Oidc { rt, cfg: c, keys: Mutex::new(Keys::default()) });
-        Arc::new(Auth { cfg, users: Mutex::new(BTreeMap::new()), oidc })
+        Arc::new(Auth {
+            cfg,
+            users: Mutex::new(BTreeMap::new()),
+            revocations: Mutex::new((BTreeMap::new(), Signal::default())),
+            oidc,
+        })
     }
 
     /// Publishes the runtime users the metadata group applied.
@@ -172,6 +184,31 @@ impl<R: Clock + Http + Clone> Auth<R> {
         if *u != *users {
             u.clone_from(users);
         }
+    }
+
+    /// Publishes the revoked sessions the metadata group applied, and wakes
+    /// every connection to check its own if they changed.
+    pub(crate) fn set_revocations(&self, revocations: &BTreeMap<Subject, u64>) {
+        let mut r = self.revocations.lock().expect("revocations lock");
+        if r.0 != *revocations {
+            r.0.clone_from(revocations);
+            std::mem::take(&mut r.1).set();
+        }
+    }
+
+    /// Set once the revoked sessions change after this call.
+    pub(crate) fn revocations_changed(&self) -> Signal {
+        self.revocations.lock().expect("revocations lock").1.clone()
+    }
+
+    /// Whether a session of `principal` whose credential dates from
+    /// `since_ms` (ms since the Unix epoch) is revoked: its user or one of
+    /// its groups was revoked at a later time.
+    pub(crate) fn revoked(&self, principal: &Principal, since_ms: u64) -> bool {
+        let Principal::User { name, groups } = principal else { return false };
+        let r = self.revocations.lock().expect("revocations lock");
+        let later = |s: Subject| r.0.get(&s).is_some_and(|&before| since_ms < before);
+        later(Subject::User(name.clone())) || groups.iter().any(|g| later(Subject::Group(g.clone())))
     }
 
     /// The credential of `user`: configured first, then runtime.
