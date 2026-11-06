@@ -166,6 +166,14 @@ pub struct ClientConfig {
     /// Transactional id, for [`Client::begin_transaction`]. One client
     /// instance per id: a new instance fences the old one.
     pub transactional_id: Option<String>,
+    /// A stable name for this idempotent producer (ADR 0071). With one, the
+    /// producer id comes from the coordinator under the name and every
+    /// start raises its epoch, so a client that restarts fences its
+    /// earlier instance: that instance's retries are refused instead of
+    /// written after the new one's batches. Names share one namespace with
+    /// transactional ids and need the producer role for them; one client
+    /// instance per name. Without one, each client gets a fresh producer id.
+    pub producer_name: Option<String>,
     /// How long a transaction may stay open before the coordinator aborts it.
     pub txn_timeout: Duration,
     /// How long exchange bindings learnt from metadata are used before they
@@ -191,6 +199,7 @@ impl ClientConfig {
             produce_timeout: Duration::from_secs(5),
             idempotent: true,
             transactional_id: None,
+            producer_name: None,
             txn_timeout: Duration::from_secs(60),
             metadata_max_age: Duration::from_secs(30),
             credentials: None,
@@ -582,6 +591,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             }
             // Written or not, nobody can tell: later batches would wait behind a
             // gap that may never fill. Start over with a new producer id.
+            // A named producer that is fenced has a newer instance: it keeps
+            // its fenced id rather than start over, which would fence that
+            // one in turn (ADR 0071).
+            Err(ClientError::Broker { code: ErrorCode::PRODUCER_FENCED, .. }) if self.cfg.producer_name.is_some() => {}
             Err(ClientError::Unknown(_))
             | Err(ClientError::Broker {
                 code: ErrorCode::OUT_OF_ORDER_SEQUENCE | ErrorCode::PRODUCER_FENCED, ..
@@ -602,7 +615,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         if let Some(s) = self.session.lock().expect("session lock").as_ref() {
             return Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)));
         }
-        let (producer_id, epoch) = self.retrying(|| self.init_producer_once(None)).await?;
+        let name = self.cfg.producer_name.as_deref();
+        let (producer_id, epoch) = self.retrying(|| self.init_producer_once(name)).await?;
         let mut session = self.session.lock().expect("session lock");
         // Another partition's produce may have started a session meanwhile.
         let s = session.get_or_insert(Session { producer_id, epoch, next: BTreeMap::new() });

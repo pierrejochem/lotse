@@ -27,6 +27,7 @@ public final class ClientConfig {
     private final Duration produceTimeout;
     private final boolean idempotent;
     private final Duration txnTimeout;
+    private final String producerName;
     private final Duration metadataMaxAge;
     private final String tenant;
     private final Credentials credentials;
@@ -41,6 +42,7 @@ public final class ClientConfig {
         this.produceTimeout = b.produceTimeout;
         this.idempotent = b.idempotent;
         this.txnTimeout = b.txnTimeout;
+        this.producerName = b.producerName;
         this.metadataMaxAge = b.metadataMaxAge;
         this.tenant = b.tenant;
         this.credentials = b.credentials;
@@ -97,6 +99,11 @@ public final class ClientConfig {
         return txnTimeout;
     }
 
+    /** The idempotent producer's stable name, or {@code null} (ADR 0071). */
+    public String producerName() {
+        return producerName;
+    }
+
     /**
      * How long exchange bindings learnt from metadata are used before they are asked for again. Routes of streams
      * do not expire by age: they are used until a request fails, as in the Rust client.
@@ -137,6 +144,7 @@ public final class ClientConfig {
         private Duration produceTimeout = Duration.ofSeconds(5);
         private boolean idempotent = true;
         private Duration txnTimeout = Duration.ofSeconds(60);
+        private String producerName;
         private Duration metadataMaxAge = Duration.ofSeconds(30);
         private String tenant = DEFAULT_TENANT;
         private Credentials credentials;
@@ -188,6 +196,19 @@ public final class ClientConfig {
         /** How long a transaction may stay open. Default 60 s. */
         public Builder txnTimeout(Duration d) {
             this.txnTimeout = positive(d);
+            return this;
+        }
+
+        /**
+         * A stable name for the idempotent producer (ADR 0071): the producer id comes from the coordinator under the
+         * name, and every start raises its epoch, so a restarted client fences its earlier instance. Names share one
+         * namespace with transactional ids; one client instance per name. Default none: a fresh id per client.
+         */
+        public Builder producerName(String name) {
+            if (name != null && (name.isEmpty() || name.indexOf('\0') >= 0)) {
+                throw new IllegalArgumentException("a producer name is not empty and has no NUL");
+            }
+            this.producerName = name;
             return this;
         }
 

@@ -525,10 +525,16 @@ public final class LotseClient implements AutoCloseable {
                     // Written or not, nobody can tell: later batches would wait behind a gap that may never fill.
                     // Start over with a new producer id. Anything else was definitely not written, and the
                     // sequence is free for the next batch.
-                    boolean startOver = e instanceof ClientException.Unknown
-                            || (e instanceof ClientException.Broker b
-                                    && (b.code().equals(ErrorCode.OUT_OF_ORDER_SEQUENCE)
-                                            || b.code().equals(ErrorCode.PRODUCER_FENCED)));
+                    // A named producer that is fenced has a newer instance: it keeps its fenced id rather
+                    // than start over, which would fence that one in turn (ADR 0071).
+                    boolean fencedByName = cfg.producerName() != null
+                            && e instanceof ClientException.Broker f
+                            && f.code().equals(ErrorCode.PRODUCER_FENCED);
+                    boolean startOver = !fencedByName
+                            && (e instanceof ClientException.Unknown
+                                    || (e instanceof ClientException.Broker b
+                                            && (b.code().equals(ErrorCode.OUT_OF_ORDER_SEQUENCE)
+                                                    || b.code().equals(ErrorCode.PRODUCER_FENCED))));
                     if (startOver && session != null && session.producerId == stamp.producerId()) {
                         session = null;
                     }
@@ -553,7 +559,7 @@ public final class LotseClient implements AutoCloseable {
                 return stampOf(session, key);
             }
         }
-        ProducerIds ids = retrying(() -> initProducerOnce(null));
+        ProducerIds ids = retrying(() -> initProducerOnce(cfg.producerName()));
         synchronized (sessionLock) {
             // Another partition's produce may have started a session meanwhile.
             if (session == null) {

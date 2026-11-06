@@ -540,3 +540,44 @@ fn revoked_sessions_end_and_old_tokens_are_refused() {
         });
     });
 }
+
+/// An idempotent producer with a name (ADR 0071): a new instance fences
+/// the old one, and the old one stays fenced instead of fencing back.
+#[test]
+fn a_named_producer_fences_its_earlier_instance() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            admin.set_user_password("alice", "alice-pw").await.unwrap();
+            rt.sleep(TICK * 50).await;
+            let named = |host: &str| {
+                Client::new(
+                    rt.node(host),
+                    ClientConfig {
+                        retry_for: Duration::from_secs(10),
+                        credentials: scram("alice", "alice-pw"),
+                        producer_name: Some("orders-writer".into()),
+                        ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+                    },
+                )
+            };
+            let fenced = |r: Result<u64, ClientError>| {
+                matches!(r, Err(ClientError::Broker { code: ErrorCode::PRODUCER_FENCED, .. }))
+            };
+            let first = named("p1");
+            first.produce("s", 0, batch("a")).await.expect("the first instance writes");
+            let second = named("p2");
+            second.produce("s", 0, batch("b")).await.expect("a restart under the name writes");
+            assert!(fenced(first.produce("s", 0, batch("c")).await), "the earlier instance is fenced");
+            assert!(fenced(first.produce("s", 0, batch("d")).await), "and stays fenced");
+            second.produce("s", 0, batch("e")).await.expect("the newer instance was not fenced back");
+            // Without a name, producers do not fence each other.
+            let (x, y) = (client(&rt, "p3", scram("alice", "alice-pw")), client(&rt, "p4", scram("alice", "alice-pw")));
+            x.produce("s", 0, batch("x")).await.unwrap();
+            y.produce("s", 0, batch("y")).await.unwrap();
+            x.produce("s", 0, batch("x2")).await.expect("plain idempotent producers each have their own id");
+            stop(nodes).await;
+        });
+    });
+}

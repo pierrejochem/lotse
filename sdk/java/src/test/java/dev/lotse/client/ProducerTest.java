@@ -177,6 +177,26 @@ class ProducerTest {
     }
 
     @Test
+    void aNamedProducerAsksUnderItsNameAndStaysFencedOnceANewerInstanceTookOver() {
+        AtomicInteger phase = new AtomicInteger();
+        serve(n -> phase.get() == 0 ? ok() : Fx.produced(STREAM_ID, 0, ErrorCode.PRODUCER_FENCED, 0, null));
+        try (LotseClient lotse = new LotseClient(
+                Fx.config(node).producerName("orders-writer").retryFor(Duration.ofMillis(400)).build())) {
+            lotse.produce("s", 0, messages(1));
+            assertEquals("orders-writer", node.requests(Request.InitProducer.class).get(0).txnId(), "asked by name");
+            assertEquals("orders-writer", node.requests(Request.FindCoordinator.class).get(0).key());
+            phase.set(1);
+            for (int i = 0; i < 2; i++) {
+                ClientException.Broker e =
+                        assertThrows(ClientException.Broker.class, () -> lotse.produce("s", 0, messages(1)));
+                assertEquals(ErrorCode.PRODUCER_FENCED, e.code());
+            }
+            assertEquals(1, node.count(Request.InitProducer.class), "no new epoch that would fence the newer one");
+        }
+        assertThrows(IllegalArgumentException.class, () -> Fx.config(node).producerName("a\0b"));
+    }
+
+    @Test
     void aDefiniteFailureKeepsTheSessionAndTheSequence() {
         AtomicInteger phase = new AtomicInteger();
         serve(n -> phase.get() == 0 ? Fx.produced(STREAM_ID, 0, ErrorCode.QUOTA_EXCEEDED, 0, null) : ok());
