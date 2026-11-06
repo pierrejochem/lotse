@@ -12,6 +12,39 @@ use crate::{ApiKey, ApiVersionRange, DecodeError, ErrorCode};
 /// Tag of [`LeaderHint`] in a partition response.
 const TAG_LEADER_HINT: u64 = 0;
 
+/// Tag of the tenant in a request that names a transactional or group id
+/// (ADR 0062). Absent means [`DEFAULT_TENANT`].
+const TAG_TENANT: u64 = 1;
+
+/// The tenant that always exists, and the one a request means when it names
+/// none.
+pub const DEFAULT_TENANT: &str = "default";
+
+/// Writes the tags of a request in `tenant`: none for the default tenant, so
+/// such requests are as they were before tenants scoped ids.
+fn put_tenant(w: &mut Writer, tenant: &str) {
+    if tenant == DEFAULT_TENANT {
+        w.no_tags();
+    } else {
+        let mut v = Writer::new();
+        v.string(tenant);
+        w.tags(&[(TAG_TENANT, v.finish())]);
+    }
+}
+
+fn get_tenant(r: &mut Reader) -> Result<String, DecodeError> {
+    let mut tenant = DEFAULT_TENANT.to_string();
+    for (tag, value) in r.tags()? {
+        if tag == TAG_TENANT {
+            let mut v = Reader::new(value);
+            tenant = v.string()?;
+            v.finish()?;
+        }
+        // Unknown tags come from newer versions: skipped.
+    }
+    Ok(tenant)
+}
+
 /// Where a partition's leader is, sent with [`ErrorCode::NOT_LEADER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaderHint {
@@ -305,6 +338,9 @@ pub struct ProduceResource {
 pub struct ProduceRequest {
     /// Transaction, if the batches belong to one.
     pub txn_id: Option<String>,
+    /// The tenant the transactional id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// How long to wait for the quorum.
     pub timeout_ms: u32,
     /// The batches.
@@ -324,7 +360,7 @@ impl ProduceRequest {
             });
             w.no_tags();
         });
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let (txn_id, timeout_ms) = (r.opt_string()?, r.u32()?);
@@ -338,8 +374,8 @@ impl ProduceRequest {
             r.tags()?;
             Ok(ProduceResource { resource_id, partitions })
         })?;
-        r.tags()?;
-        Ok(ProduceRequest { txn_id, timeout_ms, resources })
+        let tenant = get_tenant(r)?;
+        Ok(ProduceRequest { txn_id, tenant, timeout_ms, resources })
     }
 }
 
@@ -671,6 +707,9 @@ impl FindCoordinatorResponse {
 pub struct InitProducerRequest {
     /// Transactional id; `None` for an idempotent producer.
     pub txn_id: Option<String>,
+    /// The tenant the transactional id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Transaction timeout.
     pub txn_timeout_ms: u32,
 }
@@ -679,12 +718,12 @@ impl InitProducerRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.opt_string(self.txn_id.as_deref());
         w.u32(self.txn_timeout_ms);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = InitProducerRequest { txn_id: r.opt_string()?, txn_timeout_ms: r.u32()? };
-        r.tags()?;
-        Ok(req)
+        let (txn_id, txn_timeout_ms) = (r.opt_string()?, r.u32()?);
+        let tenant = get_tenant(r)?;
+        Ok(InitProducerRequest { txn_id, tenant, txn_timeout_ms })
     }
 }
 
@@ -791,6 +830,9 @@ fn get_txn_results(r: &mut Reader) -> Result<Vec<TxnResourceResult>, DecodeError
 pub struct AddPartitionsToTxnRequest {
     /// Transactional id.
     pub txn_id: String,
+    /// The tenant the transactional id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Producer id from `InitProducer`.
     pub producer_id: u64,
     /// Its epoch.
@@ -805,16 +847,17 @@ impl AddPartitionsToTxnRequest {
         w.u64(self.producer_id);
         w.u16(self.producer_epoch);
         put_txn_resources(w, &self.resources);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = AddPartitionsToTxnRequest {
+        let mut req = AddPartitionsToTxnRequest {
+            tenant: String::new(),
             txn_id: r.string()?,
             producer_id: r.u64()?,
             producer_epoch: r.u16()?,
             resources: get_txn_resources(r)?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -843,6 +886,9 @@ impl AddPartitionsToTxnResponse {
 pub struct EndTxnRequest {
     /// Transactional id.
     pub txn_id: String,
+    /// The tenant the transactional id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Producer id.
     pub producer_id: u64,
     /// Its epoch.
@@ -857,16 +903,17 @@ impl EndTxnRequest {
         w.u64(self.producer_id);
         w.u16(self.producer_epoch);
         w.u8(u8::from(self.commit));
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = EndTxnRequest {
+        let mut req = EndTxnRequest {
+            tenant: String::new(),
             txn_id: r.string()?,
             producer_id: r.u64()?,
             producer_epoch: r.u16()?,
             commit: r.u8()? != 0,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -1238,6 +1285,9 @@ fn get_opt_resources(r: &mut Reader) -> Result<Option<Vec<TxnResource>>, DecodeE
 pub struct GroupHeartbeatRequest {
     /// The group.
     pub group_id: String,
+    /// The tenant the group id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Empty to join; the coordinator names the member.
     pub member_id: String,
     /// 0 to join, -1 to leave, otherwise the member's current epoch.
@@ -1261,10 +1311,11 @@ impl GroupHeartbeatRequest {
             w.array(s, |w, id| w.u64(*id));
         }
         put_opt_resources(w, self.owned.as_deref());
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = GroupHeartbeatRequest {
+        let mut req = GroupHeartbeatRequest {
+            tenant: String::new(),
             group_id: r.string()?,
             member_id: r.string()?,
             member_epoch: r.i32()?,
@@ -1272,7 +1323,7 @@ impl GroupHeartbeatRequest {
             subscribed: if r.u8()? != 0 { Some(r.array(8, Reader::u64)?) } else { None },
             owned: get_opt_resources(r)?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -1377,6 +1428,9 @@ fn get_commits(r: &mut Reader) -> Result<Vec<OffsetCommitResource>, DecodeError>
 pub struct CommitOffsetsRequest {
     /// The group.
     pub group_id: String,
+    /// The tenant the group id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// The member committing.
     pub member_id: String,
     /// Its epoch.
@@ -1391,16 +1445,17 @@ impl CommitOffsetsRequest {
         w.string(&self.member_id);
         w.i32(self.member_epoch);
         put_commits(w, &self.resources);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = CommitOffsetsRequest {
+        let mut req = CommitOffsetsRequest {
+            tenant: String::new(),
             group_id: r.string()?,
             member_id: r.string()?,
             member_epoch: r.i32()?,
             resources: get_commits(r)?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -1429,6 +1484,9 @@ impl CommitOffsetsResponse {
 pub struct OffsetFetchRequest {
     /// The group.
     pub group_id: String,
+    /// The tenant the group id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Refuse with `UNSTABLE_OFFSET_COMMIT` while a transaction holds an
     /// uncommitted offset for a partition.
     pub require_stable: bool,
@@ -1441,15 +1499,16 @@ impl OffsetFetchRequest {
         w.string(&self.group_id);
         w.u8(u8::from(self.require_stable));
         put_txn_resources(w, &self.resources);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = OffsetFetchRequest {
+        let mut req = OffsetFetchRequest {
+            tenant: String::new(),
             group_id: r.string()?,
             require_stable: r.u8()? != 0,
             resources: get_txn_resources(r)?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -1532,6 +1591,9 @@ impl OffsetFetchResponse {
 pub struct AddOffsetsToTxnRequest {
     /// Transactional id.
     pub txn_id: String,
+    /// The tenant the transactional id and the group id live in (ADR
+    /// 0062); sent as a tag, absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// Producer id from `InitProducer`.
     pub producer_id: u64,
     /// Its epoch.
@@ -1556,10 +1618,11 @@ impl AddOffsetsToTxnRequest {
         w.string(&self.member_id);
         w.i32(self.member_epoch);
         put_commits(w, &self.resources);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = AddOffsetsToTxnRequest {
+        let mut req = AddOffsetsToTxnRequest {
+            tenant: String::new(),
             txn_id: r.string()?,
             producer_id: r.u64()?,
             producer_epoch: r.u16()?,
@@ -1568,7 +1631,7 @@ impl AddOffsetsToTxnRequest {
             member_epoch: r.i32()?,
             resources: get_commits(r)?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }
@@ -2095,6 +2158,8 @@ pub struct ConsumerMetrics {
 pub struct GroupMetrics {
     /// Group id.
     pub group_id: String,
+    /// The tenant the group id lives in (ADR 0062).
+    pub tenant: String,
     /// Assignment epoch.
     pub epoch: i32,
     /// Members and what they own.
@@ -2196,6 +2261,7 @@ impl DescribeMetricsResponse {
         });
         w.array(&self.groups, |w, g| {
             w.string(&g.group_id);
+            w.string(&g.tenant);
             w.i32(g.epoch);
             w.array(&g.members, |w, m| {
                 w.string(&m.member_id);
@@ -2279,16 +2345,16 @@ impl DescribeMetricsResponse {
             let [resource_id, ready, in_flight, in_open_txns, delivered, acked] = v;
             Ok(QueueMetrics { resource_id, ready, in_flight, in_open_txns, delivered, acked, consumers })
         })?;
-        // an empty id, the epoch, two empty arrays.
-        let groups = r.array(2 + 4 + 1 + 1, |r| {
-            let (group_id, epoch) = (r.string()?, r.i32()?);
+        // an empty id and tenant, the epoch, two empty arrays.
+        let groups = r.array(2 + 2 + 4 + 1 + 1, |r| {
+            let (group_id, tenant, epoch) = (r.string()?, r.string()?, r.i32()?);
             // an empty id and an empty array.
             let members =
                 r.array(2 + 1, |r| Ok(GroupMemberMetrics { member_id: r.string()?, owned: get_txn_resources(r)? }))?;
             let offsets = r.array(8 + 4 + 8, |r| {
                 Ok(CommittedOffset { resource_id: r.u64()?, partition: r.u32()?, offset: r.u64()? })
             })?;
-            Ok(GroupMetrics { group_id, epoch, members, offsets })
+            Ok(GroupMetrics { group_id, tenant, epoch, members, offsets })
         })?;
         r.tags()?;
         Ok(DescribeMetricsResponse {
@@ -2990,6 +3056,9 @@ impl DeadLetterRequest {
 pub struct VerifyTxnRequest {
     /// The transactional id the produce came with.
     pub txn_id: String,
+    /// The tenant the transactional id lives in (ADR 0062); sent as a tag,
+    /// absent for [`DEFAULT_TENANT`].
+    pub tenant: String,
     /// The batch's producer id.
     pub producer_id: u64,
     /// The batch's producer epoch.
@@ -3007,17 +3076,18 @@ impl VerifyTxnRequest {
         w.u16(self.producer_epoch);
         w.u64(self.resource_id);
         w.u32(self.partition);
-        w.no_tags();
+        put_tenant(w, &self.tenant);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = VerifyTxnRequest {
+        let mut req = VerifyTxnRequest {
+            tenant: String::new(),
             txn_id: r.string()?,
             producer_id: r.u64()?,
             producer_epoch: r.u16()?,
             resource_id: r.u64()?,
             partition: r.u32()?,
         };
-        r.tags()?;
+        req.tenant = get_tenant(r)?;
         Ok(req)
     }
 }

@@ -164,6 +164,42 @@ public final class Messages {
         return hint;
     }
 
+    // ---- tenant of an id: a block of tagged fields ----
+
+    /** The tenant that always exists, and the one a request means when it names none. */
+    public static final String DEFAULT_TENANT = "default";
+
+    /** Tag of the tenant in a request that names a transactional or group id (ADR 0062). */
+    static final long TAG_TENANT = 1;
+
+    static String tenantOrDefault(String tenant) {
+        return tenant == null ? DEFAULT_TENANT : tenant;
+    }
+
+    /** Writes a request's tags: none in the default tenant, otherwise tag 1 holding the tenant. */
+    static void putTenant(Writer w, String tenant) {
+        if (DEFAULT_TENANT.equals(tenant)) {
+            w.noTags();
+            return;
+        }
+        Writer v = new Writer();
+        v.string(tenant);
+        w.tags(List.of(new Tag(TAG_TENANT, ByteString.copyOf(v.toByteArray()))));
+    }
+
+    /** Reads a request's tags and picks the tenant out of them; other tags are skipped. */
+    static String getTenant(Reader r) {
+        String tenant = DEFAULT_TENANT;
+        for (Tag t : r.tags()) {
+            if (t.tag() == TAG_TENANT) {
+                Reader vr = new Reader(t.value().toByteArray());
+                tenant = vr.string();
+                vr.finish();
+            }
+        }
+        return tenant;
+    }
+
     // ---- small shared structures ----
 
     /**
@@ -838,11 +874,13 @@ public final class Messages {
      * A consumer group, from the coordinator's leader.
      *
      * @param groupId the group
+     * @param tenant the tenant its id lives in (ADR 0062)
      * @param epoch assignment epoch, an {@code i32}
      * @param members members and what they own
      * @param offsets committed offsets
      */
-    public record GroupMetrics(String groupId, int epoch, List<GroupMemberMetrics> members, List<CommittedOffset> offsets) {
+    public record GroupMetrics(
+            String groupId, String tenant, int epoch, List<GroupMemberMetrics> members, List<CommittedOffset> offsets) {
         /** Creates the structure. */
         public GroupMetrics {
             members = List.copyOf(members);

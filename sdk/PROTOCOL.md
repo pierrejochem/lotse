@@ -47,6 +47,8 @@ Push:     correlation_id u32 (0) | flags u16 (PUSH) | tagged_fields | api_key u1
 
 Most structures end with a block of tagged fields, written empty (`00`) and skipped by readers (unknown tags come from newer versions and are dropped, not preserved). That is not uniform, and a generic "every struct ends in tags" decoder is wrong. The leader hint is tag 0 of the block it sits in: `leader u32 | term u64`, present only after `NOT_LEADER`.
 
+The tenant of a transactional or group id is tag 1 of a request's trailing block: one `string` (ADR 0062). It is written only for a tenant other than `default`; a reader that finds none takes `default`. The requests that carry it are `Produce` (it applies to its transactional id), `InitProducer`, `AddPartitionsToTxn`, `EndTxn`, `GroupHeartbeat`, `CommitOffsets`, `OffsetFetch` and `AddOffsetsToTxn`. A client sends the tenant of its configuration. `DescribeMetrics` gives each group's tenant as a plain `string` after its id.
+
 | Where the block is | Messages |
 | --- | --- |
 | Hint **is** the trailing block | `InitProducer`, `Subscribe`, `Outcome` (answer to `Ack`, `Nack`, `Unsubscribe`, `Bind`, `Unbind`), `Create` (`CreateStream`, `CreateQueue`, `DeclareExchange`), `Admin` (`DeleteResource`, `AlterConfigs`, `AlterUser`, `CreateTenant`, `DeleteTenant`, `AlterRoleBindings`, `AddNode`, `RemoveNode`) |

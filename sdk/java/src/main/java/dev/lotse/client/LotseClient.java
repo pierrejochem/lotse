@@ -573,7 +573,8 @@ public final class LotseClient implements AutoCloseable {
         Request.Produce req = new Request.Produce(
                 txnId,
                 Math.min(cfg.produceTimeout().toMillis(), U32_MAX),
-                List.of(new ProduceResource(routed.route().resourceId(), List.of(new ProducePartition(partition, batch)))));
+                List.of(new ProduceResource(routed.route().resourceId(), List.of(new ProducePartition(partition, batch)))),
+                cfg.tenant());
         Response resp;
         try {
             resp = call(routed.address(), req);
@@ -671,7 +672,7 @@ public final class LotseClient implements AutoCloseable {
     }
 
     private ProducerIds initProducerOnce(String txn) {
-        Request init = new Request.InitProducer(txn, Math.min(cfg.txnTimeout().toMillis(), U32_MAX));
+        Request init = new Request.InitProducer(txn, Math.min(cfg.txnTimeout().toMillis(), U32_MAX), cfg.tenant());
         Response resp = callCoordinator(txn == null ? "" : txn, init);
         if (!(resp instanceof Response.InitProducer r)) {
             throw Attempt.retry("unexpected response " + resp);

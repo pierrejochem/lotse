@@ -107,6 +107,7 @@ fn produce_request(value: &str) -> Request {
     let mut b = BatchBuilder::new(BatchOptions::default());
     b.push(0, None, Some(value.as_bytes()), &[]);
     Request::Produce(ProduceRequest {
+        tenant: lotse_proto::DEFAULT_TENANT.into(),
         txn_id: None,
         timeout_ms: 60_000,
         resources: vec![ProduceResource {
@@ -419,11 +420,15 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered");
             lotse_proto::decode_response(frame, api_key).unwrap().1
         };
-        let init =
-            Request::InitProducer(lotse_proto::InitProducerRequest { txn_id: Some("t".into()), txn_timeout_ms: 100 });
+        let init = Request::InitProducer(lotse_proto::InitProducerRequest {
+            tenant: lotse_proto::DEFAULT_TENANT.into(),
+            txn_id: Some("t".into()),
+            txn_timeout_ms: 100,
+        });
         let Response::InitProducer(p) = ask(&mut clients, &mut groups, now, init).await else { panic!() };
         assert_eq!(p.error, ErrorCode::NONE);
         let add = Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+            tenant: lotse_proto::DEFAULT_TENANT.into(),
             txn_id: "t".into(),
             producer_id: p.producer_id,
             producer_epoch: p.producer_epoch,
@@ -453,6 +458,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
         let end = Request::EndTxn(lotse_proto::EndTxnRequest {
+            tenant: lotse_proto::DEFAULT_TENANT.into(),
             txn_id: "t".into(),
             producer_id: p.producer_id,
             producer_epoch: p.producer_epoch,
@@ -698,6 +704,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
         let heartbeat =
             async |clients: &mut Clients, groups: &mut Groups, ms, member: &str, epoch, owned: Option<Vec<u32>>| {
                 let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    tenant: lotse_proto::DEFAULT_TENANT.into(),
                     group_id: "g".into(),
                     member_id: member.into(),
                     member_epoch: epoch,
@@ -790,6 +797,7 @@ fn offsets_for_a_released_partition_are_refused() {
         let heartbeat =
             async |clients: &mut Clients, groups: &mut Groups, ms, member: &str, epoch, owned: Option<Vec<u32>>| {
                 let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    tenant: lotse_proto::DEFAULT_TENANT.into(),
                     group_id: "g".into(),
                     member_id: member.into(),
                     member_epoch: epoch,
@@ -830,6 +838,7 @@ fn offsets_for_a_released_partition_are_refused() {
         let released = 1 - kept[0];
         let commit = |member: &str, partitions: Vec<u32>| {
             Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
                 group_id: "g".into(),
                 member_id: member.into(),
                 member_epoch: a2.member_epoch,
@@ -1294,6 +1303,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             outbox: outbox.clone(),
             header: RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id, flags: 0 },
             request: Request::Produce(ProduceRequest {
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
                 txn_id: Some("app".into()),
                 timeout_ms: 60_000,
                 resources: vec![ProduceResource {
@@ -1353,6 +1363,7 @@ fn the_coordinator_confirms_only_an_open_transaction_with_the_partition() {
         offsets: BTreeMap::new(),
     };
     let ask = |producer_id, producer_epoch, partition| lotse_proto::VerifyTxnRequest {
+        tenant: lotse_proto::DEFAULT_TENANT.into(),
         txn_id: "app".into(),
         producer_id,
         producer_epoch,

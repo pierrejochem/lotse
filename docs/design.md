@@ -260,6 +260,8 @@ Sechs Rollen: cluster-admin (alles, auch Benutzer, Mandanten und Bindungen), clu
 
 Jeder Node prüft jede Anfrage gegen die Bindungen, die er angewendet hat, bevor er sie bedient. Fehlt die Rolle, lehnt er sie als Ganzes mit `UNAUTHORIZED` und einer Begründung ab; was ein Principal nicht sehen darf, ist ihm unbekannt (`Metadata`, `DescribeTenants`, `DescribeMetrics`). Ein Node darf als Client nur Metadaten lesen und Transaktionsmarker schreiben, und nur Nodes dürfen Marker schreiben. Ob ein Mandant existiert, prüft der Metadaten-Leader beim Vorschlagen; das Anwenden verweigert nur Anlagen in einem inzwischen gelöschten Mandanten und hängt so nie von der Konfiguration eines Nodes ab (ADR 0039).
 
+Auch transaktionale IDs und Consumer-Gruppen-IDs gehören zu einem Mandanten (ADR 0062). Jede Anfrage, die eine solche ID nennt, nennt auch ihren Mandanten, als Tag 1 im abschließenden Block getaggter Felder; fehlt er, ist `default` gemeint. Eine transaktionale ID braucht die Rolle producer, eine Gruppen-ID die Rolle consumer im genannten Mandanten, mit dem Präfix der Bindung gegen die ID geprüft, und der Mandant muss existieren. Nach der Prüfung ersetzt der Node jede ID durch den Schlüssel des Koordinators: in `default` die ID selbst, sonst Mandant, NUL und ID; IDs mit NUL werden abgelehnt. Dieselbe ID in zwei Mandanten sind so zwei IDs, die sich nicht gegenseitig fencen.
+
 ### API-Keys (erster Schnitt)
 
 | Bereich | API-Keys |

@@ -254,6 +254,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         }
         let req = Request::GroupHeartbeat(GroupHeartbeatRequest {
             group_id: self.group.clone(),
+            tenant: self.client.cfg.tenant.clone(),
             member_id: self.member_id.clone(),
             member_epoch: if joining { 0 } else { self.epoch },
             rebalance_timeout_ms: u32::try_from(self.cfg.rebalance_timeout.as_millis()).unwrap_or(u32::MAX),
@@ -337,6 +338,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         }
         let req = Request::OffsetFetch(OffsetFetchRequest {
             group_id: self.group.clone(),
+            tenant: self.client.cfg.tenant.clone(),
             require_stable: true,
             resources: by
                 .into_iter()
@@ -384,6 +386,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         let c = self.client;
         let req = Request::CommitOffsets(CommitOffsetsRequest {
             group_id: self.group.clone(),
+            tenant: self.client.cfg.tenant.clone(),
             member_id: self.member_id.clone(),
             member_epoch: self.epoch,
             resources: group_resources(positions, |s| c.stream_id(s)),
@@ -422,6 +425,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         }
         let req = Request::GroupHeartbeat(GroupHeartbeatRequest {
             group_id: self.group.clone(),
+            tenant: self.client.cfg.tenant.clone(),
             member_id: self.member_id.clone(),
             member_epoch: -1,
             rebalance_timeout_ms: 0,
@@ -449,6 +453,7 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         let positions = consumer.positions();
         let req = Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
             txn_id: self.txn_id.clone(),
+            tenant: c.cfg.tenant.clone(),
             producer_id: self.producer_id,
             producer_epoch: self.epoch,
             group_id: consumer.group.clone(),

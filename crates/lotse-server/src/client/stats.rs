@@ -21,7 +21,7 @@ use lotse_proto::{
 use lotse_raft::{NodeId, Role};
 use lotse_rt::{HostStats, Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, queues};
+use super::{Clients, ClusterView, Outbox, ids, queues};
 use crate::auth::Principal;
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
@@ -223,7 +223,14 @@ impl Clients {
                     .filter(|((g, _, _), _)| g == group_id)
                     .map(|((_, r, p), c)| CommittedOffset { resource_id: *r, partition: *p, offset: c.offset })
                     .collect();
-                resp.groups.push(GroupMetrics { group_id: group_id.clone(), epoch: g.epoch, members, offsets });
+                let (tenant, group_id) = ids::split(group_id);
+                resp.groups.push(GroupMetrics {
+                    group_id: group_id.to_string(),
+                    tenant: tenant.to_string(),
+                    epoch: g.epoch,
+                    members,
+                    offsets,
+                });
             }
         }
         // Only what `who` may see: resources by their tenant and role, and
@@ -238,6 +245,10 @@ impl Clients {
         resp.partitions.retain(|p| visible(p.resource_id));
         resp.queues.retain(|q| visible(q.resource_id));
         resp.groups.retain(|g| {
+            // The group itself, by its tenant and id (ADR 0062).
+            if !view.access.may(who, Operation::Describe, &g.tenant, &g.group_id) {
+                return false;
+            }
             let owned = g.members.iter().flat_map(|m| m.owned.iter().map(|t| t.resource_id));
             let mut touched = owned.chain(g.offsets.iter().map(|o| o.resource_id)).peekable();
             if touched.peek().is_none() {

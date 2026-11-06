@@ -8,7 +8,8 @@
 //! unknown to it (metadata, tenants, metrics); groups at the identity
 //! provider carry roles; a binding taken back stops working; tenants
 //! holding resources cannot be deleted; only nodes write transaction
-//! markers, and nodes do nothing else; refusals come at once, with a reason.
+//! markers, and nodes do nothing else; refusals come at once, with a reason;
+//! transactional and group ids live in their tenant (ADR 0062).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -243,6 +244,7 @@ fn every_request_needs_its_role() {
             let viewer = Some(PeerIdentity::Principal("v".into()));
             let requests = [
                 Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+                    tenant: "shop".into(),
                     txn_id: "t".into(),
                     producer_id: 1,
                     producer_epoch: 0,
@@ -256,17 +258,20 @@ fn every_request_needs_its_role() {
                     delay_ms: 0,
                 }),
                 Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
+                    tenant: "shop".into(),
                     group_id: "g".into(),
                     member_id: "m".into(),
                     member_epoch: 1,
                     resources: commit(),
                 }),
                 Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+                    tenant: "shop".into(),
                     group_id: "g".into(),
                     require_stable: false,
                     resources: part(),
                 }),
                 Request::AddOffsetsToTxn(lotse_proto::AddOffsetsToTxnRequest {
+                    tenant: "shop".into(),
                     txn_id: "t".into(),
                     producer_id: 1,
                     producer_epoch: 0,
@@ -508,6 +513,7 @@ fn only_nodes_write_markers_and_nodes_do_nothing_else() {
             // But a node cannot produce or administer.
             let produce = Request::Produce(lotse_proto::ProduceRequest {
                 txn_id: None,
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
                 timeout_ms: 1000,
                 resources: vec![lotse_proto::ProduceResource {
                     resource_id: 7,
@@ -517,6 +523,148 @@ fn only_nodes_write_markers_and_nodes_do_nothing_else() {
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &produce).await, Response::Refused { .. }));
             let tenant = Request::CreateTenant(lotse_proto::CreateTenantRequest { name: "n".into() });
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &tenant).await, Response::Refused { .. }));
+            for n in nodes {
+                n.handle().stop();
+                n.join().await.unwrap();
+            }
+        });
+    });
+}
+
+/// A client of `user` in `tenant` with the transactional id `txn`.
+fn transactional(rt: &SimRuntime, user: &str, tenant: &str, txn: &str) -> Client<SimRuntime> {
+    Client::new(
+        rt.node(&format!("c-{user}-{tenant}-{txn}")),
+        ClientConfig {
+            retry_for: Duration::from_secs(10),
+            credentials: Some(Credentials::Scram { user: user.into(), password: format!("{user}-pw") }),
+            tenant: tenant.into(),
+            transactional_id: Some(txn.into()),
+            ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+        },
+    )
+}
+
+/// Polls `member` until it owns something.
+async fn joined(member: &mut lotse_client::GroupConsumer<'_, SimRuntime>) {
+    for _ in 0..100 {
+        member.poll(TICK * 5).await.expect("a member of its group");
+        if !member.assignment().is_empty() {
+            return;
+        }
+    }
+    panic!("never assigned anything");
+}
+
+#[test]
+fn transactional_and_group_ids_live_in_their_tenant() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "shop");
+            root.create_tenant("shop").await.unwrap();
+            root.create_tenant("mall").await.unwrap();
+            let add = vec![
+                binding(subject_kind::USER, "p", role::PRODUCER, "shop", "orders-"),
+                binding(subject_kind::USER, "ta", role::PRODUCER, "mall", ""),
+                binding(subject_kind::USER, "c", role::CONSUMER, "shop", "orders-"),
+                binding(subject_kind::USER, "v", role::CONSUMER, "mall", ""),
+                binding(subject_kind::USER, "mon", role::CONSUMER, "shop", ""),
+            ];
+            root.alter_role_bindings(add, Vec::new()).await.unwrap();
+            root.create_stream("orders-eu", 1, 3).await.unwrap();
+            as_user(&rt, "root", "mall").create_stream("orders-mall", 1, 3).await.unwrap();
+            settle(&rt).await;
+
+            // A transactional id matches the producer's prefix, in its tenant.
+            assert!(refused(transactional(&rt, "p", "shop", "pay-tx").begin_transaction().await.map(|_| ())));
+            assert!(refused(transactional(&rt, "p", "mall", "orders-tx").begin_transaction().await.map(|_| ())));
+            assert!(
+                refused(
+                    transactional(&rt, "p", lotse_server::DEFAULT_TENANT, "orders-tx")
+                        .begin_transaction()
+                        .await
+                        .map(|_| ())
+                ),
+                "nor the default tenant, where it has no role"
+            );
+            assert!(
+                refused(transactional(&rt, "root", "nowhere", "orders-tx").begin_transaction().await.map(|_| ())),
+                "not even a cluster admin uses ids in a tenant that does not exist"
+            );
+
+            // The same id in two tenants is two ids: the second does not
+            // fence the first.
+            let shop = transactional(&rt, "p", "shop", "orders-tx");
+            let mut t1 = shop.begin_transaction().await.expect("its prefix, its tenant");
+            t1.produce("orders-eu", 0, batch("s1")).await.unwrap();
+            let mall = transactional(&rt, "ta", "mall", "orders-tx");
+            let mut t2 = mall.begin_transaction().await.expect("the same id in another tenant");
+            t2.produce("orders-mall", 0, batch("m1")).await.unwrap();
+            t2.commit().await.expect("mall's transaction");
+            t1.commit().await.expect("shop's transaction was not fenced by mall's");
+            // Within one tenant a second instance still fences the first.
+            let mut t3 = shop.begin_transaction().await.unwrap();
+            t3.produce("orders-eu", 0, batch("s2")).await.unwrap();
+            let again = transactional(&rt, "p", "shop", "orders-tx");
+            again.begin_transaction().await.unwrap().abort().await.unwrap();
+            assert!(t3.commit().await.is_err(), "fenced by the newer instance in its own tenant");
+
+            // A group id matches the consumer's prefix, in its tenant.
+            let c = as_user(&rt, "c", "shop");
+            let cfg = lotse_client::GroupConfig::default;
+            let polled = match c.join_group("pay-g", &["orders-eu"], cfg()).await {
+                Ok(mut m) => m.poll(TICK * 10).await.map(|_| ()),
+                Err(e) => Err(e),
+            };
+            assert!(refused(polled), "not its prefix");
+            // The same group id in two tenants: two groups of one member each.
+            let mut in_shop = c.join_group("orders-g", &["orders-eu"], cfg()).await.unwrap();
+            let d = as_user(&rt, "v", "mall");
+            let mut in_mall = d.join_group("orders-g", &["orders-mall"], cfg()).await.unwrap();
+            joined(&mut in_shop).await;
+            joined(&mut in_mall).await;
+            in_shop.commit().await.expect("shop's group commits");
+            in_mall.commit().await.expect("mall's group commits");
+            // A group on a stream `c` may read, but with an id outside its
+            // prefix: `c` does not see it.
+            let mon = as_user(&rt, "mon", "shop");
+            let mut audit = mon.join_group("audit-g", &["orders-eu"], cfg()).await.unwrap();
+            joined(&mut audit).await;
+            audit.commit().await.unwrap();
+            let groups = |all: Vec<(u32, Result<lotse_proto::DescribeMetricsResponse, ClientError>)>| {
+                let mut out: Vec<(String, String, usize)> = all
+                    .into_iter()
+                    .flat_map(|(_, m)| m.unwrap().groups)
+                    .map(|g| (g.tenant, g.group_id, g.members.len()))
+                    .collect();
+                out.sort();
+                out
+            };
+            assert_eq!(
+                groups(root.node_metrics().await.unwrap()),
+                vec![
+                    ("mall".into(), "orders-g".into(), 1),
+                    ("shop".into(), "audit-g".into(), 1),
+                    ("shop".into(), "orders-g".into(), 1)
+                ],
+                "two groups, each with its own member"
+            );
+            assert_eq!(
+                groups(c.node_metrics().await.unwrap()),
+                vec![("shop".into(), "orders-g".into(), 1)],
+                "each tenant's consumer sees its own group only"
+            );
+
+            // An id that could pass for another tenant's is refused.
+            let forged = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+                tenant: lotse_server::DEFAULT_TENANT.into(),
+                group_id: "mall\0orders-g".into(),
+                require_stable: false,
+                resources: Vec::new(),
+            });
+            let answer = raw_call(&rt, Some(PeerIdentity::Principal("root".into())), &forged).await;
+            assert!(matches!(answer, Response::Refused { code: ErrorCode::INVALID_REQUEST, .. }), "{answer:?}");
             for n in nodes {
                 n.handle().stop();
                 n.join().await.unwrap();

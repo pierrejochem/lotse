@@ -95,11 +95,18 @@ public sealed interface Request {
      * @param txnId the transaction, if the batches belong to one, otherwise {@code null}
      * @param timeoutMs how long to wait for the quorum, a {@code u32}
      * @param resources the batches
+     * @param tenant the tenant the transactional id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record Produce(String txnId, long timeoutMs, List<ProduceResource> resources) implements Request {
+    record Produce(String txnId, long timeoutMs, List<ProduceResource> resources, String tenant) implements Request {
         /** Creates the request. */
         public Produce {
+            tenant = Messages.tenantOrDefault(tenant);
             resources = List.copyOf(resources);
+        }
+
+        /** The request in the default tenant. */
+        public Produce(String txnId, long timeoutMs, List<ProduceResource> resources) {
+            this(txnId, timeoutMs, resources, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -119,7 +126,7 @@ public sealed interface Request {
                 });
                 w1.noTags();
             });
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static Produce read(Reader r) {
@@ -135,8 +142,7 @@ public sealed interface Request {
                 r1.tags();
                 return new ProduceResource(id, partitions);
             });
-            r.tags();
-            return new Produce(txnId, timeoutMs, resources);
+            return new Produce(txnId, timeoutMs, resources, Messages.getTenant(r));
         }
     }
 
@@ -252,8 +258,19 @@ public sealed interface Request {
      *
      * @param txnId the transactional id; {@code null} for an idempotent producer
      * @param txnTimeoutMs transaction timeout, a {@code u32}
+     * @param tenant the tenant the transactional id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record InitProducer(String txnId, long txnTimeoutMs) implements Request {
+    record InitProducer(String txnId, long txnTimeoutMs, String tenant) implements Request {
+        /** Creates the request. */
+        public InitProducer {
+            tenant = Messages.tenantOrDefault(tenant);
+        }
+
+        /** The request in the default tenant. */
+        public InitProducer(String txnId, long txnTimeoutMs) {
+            this(txnId, txnTimeoutMs, Messages.DEFAULT_TENANT);
+        }
+
         @Override
         public ApiKey apiKey() {
             return ApiKey.INIT_PRODUCER;
@@ -261,12 +278,12 @@ public sealed interface Request {
 
         @Override
         public void write(Writer w) {
-            w.optString(txnId).u32(txnTimeoutMs).noTags();
+            w.optString(txnId).u32(txnTimeoutMs);
+            Messages.putTenant(w, tenant);
         }
 
         static InitProducer read(Reader r) {
-            InitProducer x = new InitProducer(r.optString(), r.u32());
-            r.tags();
+            InitProducer x = new InitProducer(r.optString(), r.u32(), Messages.getTenant(r));
             return x;
         }
     }
@@ -278,12 +295,20 @@ public sealed interface Request {
      * @param producerId producer id from {@code InitProducer}, a {@code u64}
      * @param producerEpoch its epoch, a {@code u16}
      * @param resources the partitions
+     * @param tenant the tenant the transactional id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record AddPartitionsToTxn(String txnId, long producerId, int producerEpoch, List<TxnResource> resources)
+    record AddPartitionsToTxn(
+            String txnId, long producerId, int producerEpoch, List<TxnResource> resources, String tenant)
             implements Request {
         /** Creates the request. */
         public AddPartitionsToTxn {
+            tenant = Messages.tenantOrDefault(tenant);
             resources = List.copyOf(resources);
+        }
+
+        /** The request in the default tenant. */
+        public AddPartitionsToTxn(String txnId, long producerId, int producerEpoch, List<TxnResource> resources) {
+            this(txnId, producerId, producerEpoch, resources, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -295,13 +320,13 @@ public sealed interface Request {
         public void write(Writer w) {
             w.string(txnId).u64(producerId).u16(producerEpoch);
             Messages.putTxnResources(w, resources);
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static AddPartitionsToTxn read(Reader r) {
             AddPartitionsToTxn x =
-                    new AddPartitionsToTxn(r.string(), r.u64(), r.u16(), Messages.getTxnResources(r));
-            r.tags();
+                    new AddPartitionsToTxn(
+                            r.string(), r.u64(), r.u16(), Messages.getTxnResources(r), Messages.getTenant(r));
             return x;
         }
     }
@@ -313,8 +338,19 @@ public sealed interface Request {
      * @param producerId producer id, a {@code u64}
      * @param producerEpoch its epoch, a {@code u16}
      * @param commit commit ({@code true}) or abort
+     * @param tenant the tenant the transactional id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record EndTxn(String txnId, long producerId, int producerEpoch, boolean commit) implements Request {
+    record EndTxn(String txnId, long producerId, int producerEpoch, boolean commit, String tenant) implements Request {
+        /** Creates the request. */
+        public EndTxn {
+            tenant = Messages.tenantOrDefault(tenant);
+        }
+
+        /** The request in the default tenant. */
+        public EndTxn(String txnId, long producerId, int producerEpoch, boolean commit) {
+            this(txnId, producerId, producerEpoch, commit, Messages.DEFAULT_TENANT);
+        }
+
         @Override
         public ApiKey apiKey() {
             return ApiKey.END_TXN;
@@ -322,12 +358,12 @@ public sealed interface Request {
 
         @Override
         public void write(Writer w) {
-            w.string(txnId).u64(producerId).u16(producerEpoch).bool(commit).noTags();
+            w.string(txnId).u64(producerId).u16(producerEpoch).bool(commit);
+            Messages.putTenant(w, tenant);
         }
 
         static EndTxn read(Reader r) {
-            EndTxn x = new EndTxn(r.string(), r.u64(), r.u16(), r.bool());
-            r.tags();
+            EndTxn x = new EndTxn(r.string(), r.u64(), r.u16(), r.bool(), Messages.getTenant(r));
             return x;
         }
     }
@@ -482,6 +518,7 @@ public sealed interface Request {
      * @param rebalanceTimeoutMs how long the member may take to release a revoked partition, a {@code u32}
      * @param subscribed the streams it reads (each a {@code u64}); only when joining or when they change, otherwise {@code null}
      * @param owned the partitions it still owns; only when that changes, otherwise {@code null}
+     * @param tenant the tenant the group id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
     record GroupHeartbeat(
             String groupId,
@@ -489,12 +526,25 @@ public sealed interface Request {
             int memberEpoch,
             long rebalanceTimeoutMs,
             List<Long> subscribed,
-            List<TxnResource> owned)
+            List<TxnResource> owned,
+            String tenant)
             implements Request {
         /** Creates the request. */
         public GroupHeartbeat {
+            tenant = Messages.tenantOrDefault(tenant);
             subscribed = Messages.copy(subscribed);
             owned = Messages.copy(owned);
+        }
+
+        /** The request in the default tenant. */
+        public GroupHeartbeat(
+                String groupId,
+                String memberId,
+                int memberEpoch,
+                long rebalanceTimeoutMs,
+                List<Long> subscribed,
+                List<TxnResource> owned) {
+            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -510,7 +560,7 @@ public sealed interface Request {
                 w.array(subscribed, Writer::u64);
             }
             Messages.putOptResources(w, owned);
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static GroupHeartbeat read(Reader r) {
@@ -519,8 +569,9 @@ public sealed interface Request {
             int epoch = r.i32();
             long timeout = r.u32();
             List<Long> subscribed = r.bool() ? r.array(8, Reader::u64) : null;
-            GroupHeartbeat x = new GroupHeartbeat(groupId, memberId, epoch, timeout, subscribed, Messages.getOptResources(r));
-            r.tags();
+            List<TxnResource> owned = Messages.getOptResources(r);
+            GroupHeartbeat x =
+                    new GroupHeartbeat(groupId, memberId, epoch, timeout, subscribed, owned, Messages.getTenant(r));
             return x;
         }
     }
@@ -532,12 +583,20 @@ public sealed interface Request {
      * @param memberId the member committing
      * @param memberEpoch its epoch
      * @param resources the offsets
+     * @param tenant the tenant the group id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record CommitOffsets(String groupId, String memberId, int memberEpoch, List<OffsetCommitResource> resources)
+    record CommitOffsets(
+            String groupId, String memberId, int memberEpoch, List<OffsetCommitResource> resources, String tenant)
             implements Request {
         /** Creates the request. */
         public CommitOffsets {
+            tenant = Messages.tenantOrDefault(tenant);
             resources = List.copyOf(resources);
+        }
+
+        /** The request in the default tenant. */
+        public CommitOffsets(String groupId, String memberId, int memberEpoch, List<OffsetCommitResource> resources) {
+            this(groupId, memberId, memberEpoch, resources, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -549,12 +608,12 @@ public sealed interface Request {
         public void write(Writer w) {
             w.string(groupId).string(memberId).i32(memberEpoch);
             Messages.putCommits(w, resources);
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static CommitOffsets read(Reader r) {
-            CommitOffsets x = new CommitOffsets(r.string(), r.string(), r.i32(), Messages.getCommits(r));
-            r.tags();
+            CommitOffsets x =
+                    new CommitOffsets(r.string(), r.string(), r.i32(), Messages.getCommits(r), Messages.getTenant(r));
             return x;
         }
     }
@@ -565,11 +624,19 @@ public sealed interface Request {
      * @param groupId the group
      * @param requireStable refuse with {@code UNSTABLE_OFFSET_COMMIT} while a transaction holds an uncommitted offset for a partition
      * @param resources the partitions
+     * @param tenant the tenant the group id lives in (ADR 0062); written as a tag, left out for {@code default}
      */
-    record OffsetFetch(String groupId, boolean requireStable, List<TxnResource> resources) implements Request {
+    record OffsetFetch(String groupId, boolean requireStable, List<TxnResource> resources, String tenant)
+            implements Request {
         /** Creates the request. */
         public OffsetFetch {
+            tenant = Messages.tenantOrDefault(tenant);
             resources = List.copyOf(resources);
+        }
+
+        /** The request in the default tenant. */
+        public OffsetFetch(String groupId, boolean requireStable, List<TxnResource> resources) {
+            this(groupId, requireStable, resources, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -581,12 +648,11 @@ public sealed interface Request {
         public void write(Writer w) {
             w.string(groupId).bool(requireStable);
             Messages.putTxnResources(w, resources);
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static OffsetFetch read(Reader r) {
-            OffsetFetch x = new OffsetFetch(r.string(), r.bool(), Messages.getTxnResources(r));
-            r.tags();
+            OffsetFetch x = new OffsetFetch(r.string(), r.bool(), Messages.getTxnResources(r), Messages.getTenant(r));
             return x;
         }
     }
@@ -602,6 +668,8 @@ public sealed interface Request {
      * @param memberId the member whose partitions these are; a member that no longer owns them is fenced
      * @param memberEpoch its epoch
      * @param resources the offsets
+     * @param tenant the tenant the transactional id and the group id live in (ADR 0062); written as a tag, left out
+     *     for {@code default}
      */
     record AddOffsetsToTxn(
             String txnId,
@@ -610,11 +678,25 @@ public sealed interface Request {
             String groupId,
             String memberId,
             int memberEpoch,
-            List<OffsetCommitResource> resources)
+            List<OffsetCommitResource> resources,
+            String tenant)
             implements Request {
         /** Creates the request. */
         public AddOffsetsToTxn {
+            tenant = Messages.tenantOrDefault(tenant);
             resources = List.copyOf(resources);
+        }
+
+        /** The request in the default tenant. */
+        public AddOffsetsToTxn(
+                String txnId,
+                long producerId,
+                int producerEpoch,
+                String groupId,
+                String memberId,
+                int memberEpoch,
+                List<OffsetCommitResource> resources) {
+            this(txnId, producerId, producerEpoch, groupId, memberId, memberEpoch, resources, Messages.DEFAULT_TENANT);
         }
 
         @Override
@@ -626,13 +708,19 @@ public sealed interface Request {
         public void write(Writer w) {
             w.string(txnId).u64(producerId).u16(producerEpoch).string(groupId).string(memberId).i32(memberEpoch);
             Messages.putCommits(w, resources);
-            w.noTags();
+            Messages.putTenant(w, tenant);
         }
 
         static AddOffsetsToTxn read(Reader r) {
             AddOffsetsToTxn x = new AddOffsetsToTxn(
-                    r.string(), r.u64(), r.u16(), r.string(), r.string(), r.i32(), Messages.getCommits(r));
-            r.tags();
+                    r.string(),
+                    r.u64(),
+                    r.u16(),
+                    r.string(),
+                    r.string(),
+                    r.i32(),
+                    Messages.getCommits(r),
+                    Messages.getTenant(r));
             return x;
         }
     }

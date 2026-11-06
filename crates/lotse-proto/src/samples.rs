@@ -16,6 +16,7 @@ pub fn requests() -> Vec<Request> {
         Request::Metadata(MetadataRequest { names: vec![] }),
         Request::Metadata(MetadataRequest { names: vec!["orders".into(), "päckchen".into()] }),
         Request::Produce(ProduceRequest {
+            tenant: DEFAULT_TENANT.into(),
             txn_id: None,
             timeout_ms: 5_000,
             resources: vec![ProduceResource {
@@ -26,17 +27,37 @@ pub fn requests() -> Vec<Request> {
                 ],
             }],
         }),
-        Request::Produce(ProduceRequest { txn_id: Some("txn-1".into()), timeout_ms: 0, resources: vec![] }),
+        Request::Produce(ProduceRequest {
+            tenant: DEFAULT_TENANT.into(),
+            txn_id: Some("txn-1".into()),
+            timeout_ms: 0,
+            resources: vec![],
+        }),
         Request::FindCoordinator(FindCoordinatorRequest { key_type: coordinator::PRODUCER, key: String::new() }),
-        Request::InitProducer(InitProducerRequest { txn_id: None, txn_timeout_ms: 60_000 }),
-        Request::InitProducer(InitProducerRequest { txn_id: Some("payments".into()), txn_timeout_ms: 0 }),
+        Request::InitProducer(InitProducerRequest {
+            tenant: DEFAULT_TENANT.into(),
+            txn_id: None,
+            txn_timeout_ms: 60_000,
+        }),
+        Request::InitProducer(InitProducerRequest {
+            tenant: DEFAULT_TENANT.into(),
+            txn_id: Some("payments".into()),
+            txn_timeout_ms: 0,
+        }),
         Request::AddPartitionsToTxn(AddPartitionsToTxnRequest {
+            tenant: DEFAULT_TENANT.into(),
             txn_id: "payments".into(),
             producer_id: 17,
             producer_epoch: 2,
             resources: vec![TxnResource { resource_id: 7, partitions: vec![0, 1] }],
         }),
-        Request::EndTxn(EndTxnRequest { txn_id: "payments".into(), producer_id: 17, producer_epoch: 2, commit: true }),
+        Request::EndTxn(EndTxnRequest {
+            tenant: DEFAULT_TENANT.into(),
+            txn_id: "payments".into(),
+            producer_id: 17,
+            producer_epoch: 2,
+            commit: true,
+        }),
         Request::Subscribe(SubscribeRequest {
             queue_id: 9,
             consumer_tag: "worker-1".into(),
@@ -93,6 +114,7 @@ pub fn requests() -> Vec<Request> {
             delete: vec![String::new(), "x".into()],
         }),
         Request::GroupHeartbeat(GroupHeartbeatRequest {
+            tenant: DEFAULT_TENANT.into(),
             group_id: "billing".into(),
             member_id: String::new(),
             member_epoch: 0,
@@ -101,6 +123,7 @@ pub fn requests() -> Vec<Request> {
             owned: None,
         }),
         Request::GroupHeartbeat(GroupHeartbeatRequest {
+            tenant: DEFAULT_TENANT.into(),
             group_id: "billing".into(),
             member_id: "m1.2".into(),
             member_epoch: -1,
@@ -109,6 +132,7 @@ pub fn requests() -> Vec<Request> {
             owned: Some(vec![TxnResource { resource_id: 7, partitions: vec![0, 2] }]),
         }),
         Request::CommitOffsets(CommitOffsetsRequest {
+            tenant: DEFAULT_TENANT.into(),
             group_id: "billing".into(),
             member_id: "m1.2".into(),
             member_epoch: 4,
@@ -121,11 +145,13 @@ pub fn requests() -> Vec<Request> {
             }],
         }),
         Request::OffsetFetch(OffsetFetchRequest {
+            tenant: DEFAULT_TENANT.into(),
             group_id: "billing".into(),
             require_stable: true,
             resources: vec![TxnResource { resource_id: 7, partitions: vec![0] }],
         }),
         Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
+            tenant: DEFAULT_TENANT.into(),
             txn_id: "t".into(),
             producer_id: 9,
             producer_epoch: 2,
@@ -146,6 +172,7 @@ pub fn requests() -> Vec<Request> {
         Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
         Request::DeadLetter(DeadLetterRequest { queue_id: 1_099_511_627_777, batches: vec![Bytes::from_static(b"x")] }),
         Request::VerifyTxn(VerifyTxnRequest {
+            tenant: DEFAULT_TENANT.into(),
             txn_id: "orders-app".into(),
             producer_id: 4_000,
             producer_epoch: 3,
@@ -217,6 +244,38 @@ pub fn requests() -> Vec<Request> {
                     ListOffsetsPartition { partition: 2, timestamp: 1_700_000_000_000 },
                 ],
             }],
+        }),
+        // Ids in a tenant other than the default one carry it as a tag
+        // (ADR 0062).
+        Request::InitProducer(InitProducerRequest {
+            txn_id: Some("payments".into()),
+            tenant: "acme".into(),
+            txn_timeout_ms: 60_000,
+        }),
+        Request::Produce(ProduceRequest {
+            txn_id: Some("payments".into()),
+            tenant: "acme".into(),
+            timeout_ms: 5_000,
+            resources: vec![],
+        }),
+        Request::GroupHeartbeat(GroupHeartbeatRequest {
+            tenant: "acme".into(),
+            group_id: "billing".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            rebalance_timeout_ms: 30_000,
+            subscribed: Some(vec![7]),
+            owned: None,
+        }),
+        Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
+            tenant: "acme".into(),
+            txn_id: "payments".into(),
+            producer_id: 17,
+            producer_epoch: 2,
+            group_id: "billing".into(),
+            member_id: "m-1".into(),
+            member_epoch: 3,
+            resources: vec![],
         }),
     ]
 }
@@ -748,6 +807,7 @@ pub fn metrics() -> DescribeMetricsResponse {
             }],
         }],
         groups: vec![GroupMetrics {
+            tenant: DEFAULT_TENANT.into(),
             group_id: "billing".into(),
             epoch: 5,
             members: vec![GroupMemberMetrics {

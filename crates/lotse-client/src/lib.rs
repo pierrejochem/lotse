@@ -174,7 +174,9 @@ pub struct ClientConfig {
     /// How to authenticate each connection; `None` sends no credentials
     /// (the runtime's client certificate, if any, still counts).
     pub credentials: Option<Credentials>,
-    /// The tenant resources created by this client go to.
+    /// The tenant resources created by this client go to, and the one its
+    /// transactional id and consumer group ids live in (ADR 0062): the same
+    /// id in another tenant is another id.
     pub tenant: String,
 }
 
@@ -658,6 +660,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     async fn init_producer_once(&self, txn: Option<&str>) -> Result<(u64, u16), Attempt> {
         let init = Request::InitProducer(InitProducerRequest {
             txn_id: txn.map(str::to_string),
+            tenant: self.cfg.tenant.clone(),
             txn_timeout_ms: u32::try_from(self.cfg.txn_timeout.as_millis()).unwrap_or(u32::MAX),
         });
         match self.call_coordinator(txn.unwrap_or(""), &init).await? {
@@ -715,6 +718,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let (route, addr) = self.route(stream, partition).await?;
         let req = Request::Produce(ProduceRequest {
             txn_id,
+            tenant: self.cfg.tenant.clone(),
             timeout_ms: u32::try_from(self.cfg.produce_timeout.as_millis()).unwrap_or(u32::MAX),
             resources: vec![ProduceResource {
                 resource_id: route.resource_id,
@@ -1492,6 +1496,7 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         let (route, _) = c.route(stream, partition).await?;
         let req = Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
             txn_id: self.txn_id.clone(),
+            tenant: c.cfg.tenant.clone(),
             producer_id: self.producer_id,
             producer_epoch: self.epoch,
             resources: vec![lotse_proto::TxnResource { resource_id: route.resource_id, partitions: vec![partition] }],
@@ -1533,6 +1538,7 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         }
         let req = Request::EndTxn(lotse_proto::EndTxnRequest {
             txn_id: self.txn_id.clone(),
+            tenant: c.cfg.tenant.clone(),
             producer_id: self.producer_id,
             producer_epoch: self.epoch,
             commit,

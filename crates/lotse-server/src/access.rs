@@ -14,7 +14,7 @@ use crate::metadata::MetadataState;
 
 /// The tenant configured resources belong to unless the configuration
 /// names another; it always exists.
-pub const DEFAULT_TENANT: &str = "default";
+pub use lotse_proto::DEFAULT_TENANT;
 
 /// What the access checks consult.
 #[derive(Debug, Clone, Default)]
@@ -159,27 +159,55 @@ impl Access {
             Ok(())
         };
         let admin = || if self.cluster_admin(p) { Ok(()) } else { Err(format!("{p} is not a cluster admin")) };
+        // A transactional id is the producer's and a group id the
+        // consumer's, in the tenant the request names, with the binding's
+        // prefix matched against the id (ADR 0062).
+        let txn = |tenant: &str, id: &str| self.id(p, Write, tenant, id, "the transactional id");
+        let group = |tenant: &str, id: &str| self.id(p, Read, tenant, id, "the group id");
         match req {
-            Request::Produce(r) => on(Write, &mut r.resources.iter().map(|x| x.resource_id)),
+            Request::Produce(r) => {
+                if let Some(id) = &r.txn_id {
+                    txn(&r.tenant, id)?;
+                }
+                on(Write, &mut r.resources.iter().map(|x| x.resource_id))
+            }
             Request::Fetch(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
             Request::ListOffsets(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
-            Request::AddPartitionsToTxn(r) => on(Write, &mut r.resources.iter().map(|x| x.resource_id)),
-            // A producer id or the end of one's own transaction grants
-            // nothing by itself: writing needs the role per resource.
-            Request::InitProducer(_) | Request::EndTxn(_) => Ok(()),
+            Request::AddPartitionsToTxn(r) => {
+                txn(&r.tenant, &r.txn_id)?;
+                on(Write, &mut r.resources.iter().map(|x| x.resource_id))
+            }
+            // A plain producer id grants nothing by itself: writing needs
+            // the role per resource.
+            Request::InitProducer(r) => match &r.txn_id {
+                Some(id) => txn(&r.tenant, id),
+                None => Ok(()),
+            },
+            Request::EndTxn(r) => txn(&r.tenant, &r.txn_id),
             Request::Subscribe(r) => on(Read, &mut std::iter::once(r.queue_id)),
             Request::Ack(r) => on(Read, &mut std::iter::once(r.queue_id)),
             Request::Nack(r) => on(Read, &mut std::iter::once(r.queue_id)),
             // Only ever about the connection's own subscriptions.
             Request::Credit(_) | Request::Unsubscribe(_) => Ok(()),
             Request::GroupHeartbeat(r) => {
+                group(&r.tenant, &r.group_id)?;
                 let subscribed = r.subscribed.iter().flatten().copied();
                 let owned = r.owned.iter().flatten().map(|t| t.resource_id);
                 on(Read, &mut subscribed.chain(owned))
             }
-            Request::CommitOffsets(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
-            Request::AddOffsetsToTxn(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
-            Request::OffsetFetch(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
+            Request::CommitOffsets(r) => {
+                group(&r.tenant, &r.group_id)?;
+                on(Read, &mut r.resources.iter().map(|x| x.resource_id))
+            }
+            Request::AddOffsetsToTxn(r) => {
+                txn(&r.tenant, &r.txn_id)?;
+                group(&r.tenant, &r.group_id)?;
+                on(Read, &mut r.resources.iter().map(|x| x.resource_id))
+            }
+            Request::OffsetFetch(r) => {
+                group(&r.tenant, &r.group_id)?;
+                on(Read, &mut r.resources.iter().map(|x| x.resource_id))
+            }
             Request::CreateStream(r) => self.create(p, &r.tenant, &r.name),
             Request::CreateQueue(r) => self.create(p, &r.tenant, &r.name),
             Request::DeclareExchange(r) => self.create(p, &r.tenant, &r.name),
@@ -214,6 +242,15 @@ impl Access {
             | Request::SaslHandshake(_)
             | Request::SaslAuthenticate(_) => Ok(()),
         }
+    }
+
+    /// Whether `p` may do `op` with the transactional or group `id` in
+    /// `tenant`, which must exist.
+    fn id(&self, p: &Principal, op: Operation, tenant: &str, id: &str, what: &str) -> Result<(), String> {
+        if !self.tenants.contains_key(tenant) || !self.may(p, op, tenant, id) {
+            return Err(format!("{p} has no role that allows using {what} {id} in tenant {tenant}"));
+        }
+        Ok(())
     }
 
     fn create(&self, p: &Principal, tenant: &str, name: &str) -> Result<(), String> {

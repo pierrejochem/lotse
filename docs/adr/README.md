@@ -66,5 +66,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0059 | [ListOffsets](0059-list-offsets.md) | Accepted |
 | 0060 | [Certificate renewal and revocation](0060-certificate-renewal-and-revocation.md) | Accepted |
 | 0061 | [Optional codecs in the Java SDK](0061-optional-codecs-in-the-java-sdk.md) | Accepted |
+| 0062 | [Transactional and group ids live in a tenant](0062-transactional-and-group-ids-live-in-a-tenant.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

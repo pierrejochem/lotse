@@ -105,7 +105,10 @@ public final class ClientConfig {
         return metadataMaxAge;
     }
 
-    /** The tenant resources created by this client go to. */
+    /**
+     * The tenant resources created by this client go to, and the one its transactional and group ids live in (ADR
+     * 0062).
+     */
     public String tenant() {
         return tenant;
     }
@@ -194,7 +197,10 @@ public final class ClientConfig {
             return this;
         }
 
-        /** The tenant resources created by this client go to. Default {@code default}. */
+        /**
+         * The tenant resources created by this client go to, and its transactional and group ids live in. Default
+         * {@code default}.
+         */
         public Builder tenant(String tenant) {
             this.tenant = Objects.requireNonNull(tenant);
             return this;

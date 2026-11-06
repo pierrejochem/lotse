@@ -64,6 +64,7 @@ use crate::wire::GroupId;
 mod admin;
 mod coord;
 mod groups;
+mod ids;
 mod nodes;
 mod offsets;
 pub(crate) use nodes::{managed_groups, moving};
@@ -363,10 +364,15 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, request, principal } = req;
+        let ClientRequest { outbox, header, mut request, principal } = req;
         let id = header.correlation_id;
         if let Err(why) = view.access.check(&principal, &request) {
             outbox.push(id, &Response::Refused { code: ErrorCode::UNAUTHORIZED, message: why });
+            return Ok(());
+        }
+        // From here on, ids are the coordinator's keys (ADR 0062).
+        if let Err(why) = ids::scope(&mut request) {
+            outbox.push(id, &Response::Refused { code: ErrorCode::INVALID_REQUEST, message: why });
             return Ok(());
         }
         match request {
@@ -475,7 +481,9 @@ impl Clients {
                                 self.verify.ask(
                                     key,
                                     VerifyTxnRequest {
-                                        txn_id: txn_id.clone(),
+                                        // The coordinator scopes it again.
+                                        tenant: ids::split(txn_id).0.to_string(),
+                                        txn_id: ids::split(txn_id).1.to_string(),
                                         producer_id,
                                         producer_epoch: epoch,
                                         resource_id: res.resource_id,

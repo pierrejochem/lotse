@@ -507,7 +507,7 @@ public sealed interface Response {
                         .u32(c.credit()));
             });
             w.array(groups, (w1, g) -> {
-                w1.string(g.groupId()).i32(g.epoch());
+                w1.string(g.groupId()).string(g.tenant()).i32(g.epoch());
                 w1.array(g.members(), (w2, m) -> {
                     w2.string(m.memberId());
                     Messages.putTxnResources(w2, m.owned());
@@ -572,16 +572,17 @@ public sealed interface Response {
                         r1.array(4 + 2 + 4 + 4, r2 -> new ConsumerMetrics(r2.u32(), r2.string(), r2.u32(), r2.u32()));
                 return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers);
             });
-            // an empty id, the epoch, two empty arrays
-            List<GroupMetrics> groups = r.array(2 + 4 + 1 + 1, r1 -> {
+            // an empty id and tenant, the epoch, two empty arrays
+            List<GroupMetrics> groups = r.array(2 + 2 + 4 + 1 + 1, r1 -> {
                 String groupId = r1.string();
+                String tenant = r1.string();
                 int epoch = r1.i32();
                 // an empty id and an empty array
                 List<GroupMemberMetrics> members =
                         r1.array(2 + 1, r2 -> new GroupMemberMetrics(r2.string(), Messages.getTxnResources(r2)));
                 List<CommittedOffset> offsets =
                         r1.array(8 + 4 + 8, r2 -> new CommittedOffset(r2.u64(), r2.u32(), r2.u64()));
-                return new GroupMetrics(groupId, epoch, members, offsets);
+                return new GroupMetrics(groupId, tenant, epoch, members, offsets);
             });
             r.tags();
             return new DescribeMetrics(
