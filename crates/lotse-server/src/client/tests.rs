@@ -711,6 +711,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
                     rebalance_timeout_ms: 100,
                     subscribed: (epoch == 0).then(|| vec![7]),
                     owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                    instance_id: None,
                 });
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
@@ -804,6 +805,7 @@ fn offsets_for_a_released_partition_are_refused() {
                     rebalance_timeout_ms: 100,
                     subscribed: (epoch == 0).then(|| vec![7]),
                     owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                    instance_id: None,
                 });
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
@@ -1657,5 +1659,110 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
         assert_ne!(t2.producer_id, t.producer_id, "not the old incarnation's producer");
         assert_eq!(t2.producer_epoch, 0);
         assert!(keys(&groups).contains(&crate::client::ids::key("acme", 41, "t")));
+    });
+}
+
+/// Static membership (ADR 0072): a member with an instance id that leaves
+/// keeps its place, the next instance with that id takes it over with its
+/// partitions and no rebalance, the earlier instance is fenced, and the
+/// session timeout still removes a place nobody comes back to.
+#[test]
+fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
+    Sim::new(8).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "c", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![2, 3] }];
+        let addrs = BTreeMap::new();
+        let start = rt.now();
+        let view_at = |ms: u64| ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: Some(G),
+            node: NodeView::default(),
+            now: start + Duration::from_millis(ms),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let heartbeat =
+            async |clients: &mut Clients, groups: &mut Groups, ms, member: &str, epoch, instance: Option<&str>| {
+                let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    tenant: lotse_proto::DEFAULT_TENANT.into(),
+                    group_id: "g".into(),
+                    member_id: member.into(),
+                    member_epoch: epoch,
+                    rebalance_timeout_ms: 100,
+                    subscribed: (epoch == 0).then(|| vec![7]),
+                    owned: None,
+                    instance_id: instance.map(String::from),
+                });
+                let header =
+                    RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
+                let view = view_at(ms);
+                let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+                clients.handle(req, &view, groups).await.unwrap();
+                for _ in 0..3 {
+                    groups.get_mut(&G).unwrap().process().await.unwrap();
+                    clients.after_round(&view, groups).await.unwrap();
+                }
+                match &drain(&outbox, ApiKey::GROUP_HEARTBEAT).0[..] {
+                    [Response::GroupHeartbeat(h)] => h.clone(),
+                    other => panic!("expected one heartbeat answer, got {other:?}"),
+                }
+            };
+        let group = |groups: &Groups| groups[&G].coordinator().groups().groups.get("g").cloned().unwrap_or_default();
+        let a = heartbeat(&mut clients, &mut groups, 0, "", 0, Some("w1")).await;
+        assert_eq!(a.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2));
+        let epoch = group(&groups).epoch;
+
+        // It leaves: its place stays.
+        let left = heartbeat(&mut clients, &mut groups, 10, &a.member_id, -1, Some("w1")).await;
+        assert_eq!((left.error, left.member_epoch), (ErrorCode::NONE, -1));
+        assert!(group(&groups).members.contains_key(&a.member_id), "a static member keeps its place");
+
+        // It comes back under the same instance id: its partitions at once,
+        // nothing rebalanced.
+        let back = heartbeat(&mut clients, &mut groups, 20, "", 0, Some("w1")).await;
+        assert_eq!(back.error, ErrorCode::NONE);
+        assert_ne!(back.member_id, a.member_id, "a new member id fences the old one");
+        assert_eq!(back.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2), "its partitions at once");
+        let g = group(&groups);
+        assert_eq!(g.epoch, epoch, "no rebalance");
+        assert_eq!(g.members.keys().cloned().collect::<Vec<_>>(), vec![back.member_id.clone()]);
+        assert_eq!(g.members[&back.member_id].instance_id.as_deref(), Some("w1"));
+        // Survives a snapshot.
+        let mut restored = crate::coordinator::CoordinatorState::default();
+        restored.restore(&groups[&G].coordinator().encode()).unwrap();
+        assert_eq!(restored.groups().groups.get("g"), Some(&g));
+
+        // The earlier instance is fenced and may not join back in.
+        let old = heartbeat(&mut clients, &mut groups, 30, &a.member_id, a.member_epoch, Some("w1")).await;
+        assert_eq!(old.error, ErrorCode::FENCED_INSTANCE_ID);
+
+        // A member without an instance id that leaves is gone at once.
+        let plain = heartbeat(&mut clients, &mut groups, 40, "", 0, None).await;
+        heartbeat(&mut clients, &mut groups, 50, &plain.member_id, -1, None).await;
+        assert!(!group(&groups).members.contains_key(&plain.member_id));
+
+        // Nobody comes back: the session timeout removes the place.
+        let view = view_at(1_200);
+        for _ in 0..3 {
+            clients.after_round(&view, &mut groups).await.unwrap();
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+        }
+        assert!(group(&groups).members.is_empty(), "{:?}", group(&groups));
     });
 }

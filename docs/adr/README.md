@@ -76,5 +76,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0069 | [Tenant incarnations](0069-tenant-incarnations.md) | Accepted |
 | 0070 | [Revoking sessions by principal](0070-revoking-sessions-by-principal.md) | Accepted |
 | 0071 | [Named idempotent producers](0071-named-idempotent-producers.md) | Accepted |
+| 0072 | [Static group membership](0072-static-group-membership.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

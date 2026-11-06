@@ -37,6 +37,8 @@ pub(crate) struct MemberMeta {
     /// Taken from it; it may still be reading them until it reports them
     /// released.
     pub(crate) revoking: BTreeSet<Tp>,
+    /// The member's stable instance id, if it has one (ADR 0072).
+    pub(crate) instance_id: Option<String>,
 }
 
 impl MemberMeta {
@@ -158,6 +160,8 @@ pub(crate) struct GroupsState {
 }
 
 const VERSION: u8 = 1;
+/// A group record whose members' instance ids follow the group (ADR 0072).
+const VERSION_INSTANCES: u8 = 2;
 
 fn put_str(b: &mut BytesMut, s: &str) {
     b.put_u16_le(s.len() as u16);
@@ -227,7 +231,8 @@ pub(crate) fn get_group(b: &mut &[u8]) -> Result<(String, GroupMeta), String> {
         need(b, s.saturating_mul(8))?;
         let subscribed = (0..s).map(|_| b.get_u64_le()).collect();
         let (target, assigned, revoking) = (get_tps(b)?, get_tps(b)?, get_tps(b)?);
-        members.insert(mid, MemberMeta { epoch, subscribed, rebalance_timeout_ms, target, assigned, revoking });
+        let m = MemberMeta { epoch, subscribed, rebalance_timeout_ms, target, assigned, revoking, instance_id: None };
+        members.insert(mid, m);
     }
     Ok((id, GroupMeta { epoch, members }))
 }
@@ -251,11 +256,41 @@ pub(crate) fn get_offset(b: &mut &[u8]) -> Result<(Tp, Committed), String> {
     Ok((tp, Committed { offset, leader_term, metadata }))
 }
 
-/// The record that sets group `id` to `g`.
+/// The members of `g` with an instance id, and the ids.
+fn instances(g: &GroupMeta) -> Vec<(&String, &String)> {
+    g.members.iter().filter_map(|(mid, m)| m.instance_id.as_ref().map(|i| (mid, i))).collect()
+}
+
+/// Writes the instance ids of `g`'s members: a count, then member and id.
+fn put_instances(b: &mut BytesMut, g: &GroupMeta) {
+    let list = instances(g);
+    b.put_u32_le(list.len() as u32);
+    for (mid, i) in list {
+        put_str(b, mid);
+        put_str(b, i);
+    }
+}
+
+/// Reads what [`put_instances`] wrote into `g`.
+fn get_instances(b: &mut &[u8], g: &mut GroupMeta) -> Result<(), String> {
+    need(b, 4)?;
+    for _ in 0..b.get_u32_le() {
+        let (mid, i) = (get_str(b)?, get_str(b)?);
+        g.members.get_mut(&mid).ok_or("an instance id of an unknown member")?.instance_id = Some(i);
+    }
+    Ok(())
+}
+
+/// The record that sets group `id` to `g`. Without instance ids it is
+/// written as before them, so nodes from before ADR 0072 read it.
 pub(crate) fn group_record(id: &str, g: &GroupMeta) -> Bytes {
     let mut b = BytesMut::new();
-    b.put_u8(VERSION);
+    let with_instances = !instances(g).is_empty();
+    b.put_u8(if with_instances { VERSION_INSTANCES } else { VERSION });
     put_group(&mut b, id, g);
+    if with_instances {
+        put_instances(&mut b, g);
+    }
     lotse_record::internal_control_batch(lotse_record::InternalControl::GroupState, &b).expect("one record")
 }
 
@@ -274,10 +309,14 @@ pub(crate) fn offsets_record(id: &str, offsets: &[(Tp, Committed)]) -> Bytes {
 impl GroupsState {
     /// Applies a `GroupState` record.
     pub(crate) fn apply_group(&mut self, mut b: &[u8]) -> Result<(), String> {
-        if b.remaining() < 1 || b.get_u8() != VERSION {
+        let version = if b.has_remaining() { b.get_u8() } else { 0 };
+        if version != VERSION && version != VERSION_INSTANCES {
             return Err("group record has an unknown version".into());
         }
-        let (id, g) = get_group(&mut b)?;
+        let (id, mut g) = get_group(&mut b)?;
+        if version == VERSION_INSTANCES {
+            get_instances(&mut b, &mut g)?;
+        }
         if g.members.is_empty() {
             self.groups.remove(&id);
         } else {
@@ -296,6 +335,31 @@ impl GroupsState {
         for _ in 0..b.get_u32_le() {
             let ((r, p), c) = get_offset(&mut b)?;
             self.offsets.insert((id.clone(), r, p), c);
+        }
+        Ok(())
+    }
+
+    /// The members' instance ids (ADR 0072), for the end of a snapshot:
+    /// nothing at all if no member has one.
+    pub(crate) fn encode_instances(&self, b: &mut BytesMut) {
+        let with: Vec<(&String, &GroupMeta)> = self.groups.iter().filter(|(_, g)| !instances(g).is_empty()).collect();
+        if with.is_empty() {
+            return;
+        }
+        b.put_u32_le(with.len() as u32);
+        for (id, g) in with {
+            put_str(b, id);
+            put_instances(b, g);
+        }
+    }
+
+    /// Reads what [`GroupsState::encode_instances`] wrote.
+    pub(crate) fn decode_instances(&mut self, b: &mut &[u8]) -> Result<(), String> {
+        need(b, 4)?;
+        for _ in 0..b.get_u32_le() {
+            let id = get_str(b)?;
+            let g = self.groups.get_mut(&id).ok_or("instance ids of an unknown group")?;
+            get_instances(b, g)?;
         }
         Ok(())
     }

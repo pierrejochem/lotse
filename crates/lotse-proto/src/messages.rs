@@ -15,6 +15,8 @@ const TAG_LEADER_HINT: u64 = 0;
 /// Tag of the tenant in a request that names a transactional or group id
 /// (ADR 0062). Absent means [`DEFAULT_TENANT`].
 const TAG_TENANT: u64 = 1;
+/// A consumer group member's stable instance id (ADR 0072).
+const TAG_INSTANCE: u64 = 2;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -1298,6 +1300,10 @@ pub struct GroupHeartbeatRequest {
     pub subscribed: Option<Vec<u64>>,
     /// The partitions it still owns; only when that changes.
     pub owned: Option<Vec<TxnResource>>,
+    /// A stable id for this member across restarts (ADR 0072), sent when
+    /// joining; tag 2. A member that joins with the instance id of one
+    /// already in the group takes over its place and partitions.
+    pub instance_id: Option<String>,
 }
 
 impl GroupHeartbeatRequest {
@@ -1311,7 +1317,22 @@ impl GroupHeartbeatRequest {
             w.array(s, |w, id| w.u64(*id));
         }
         put_opt_resources(w, self.owned.as_deref());
-        put_tenant(w, &self.tenant);
+        let mut tags = Vec::new();
+        if self.tenant != DEFAULT_TENANT {
+            let mut v = Writer::new();
+            v.string(&self.tenant);
+            tags.push((TAG_TENANT, v.finish()));
+        }
+        if let Some(i) = &self.instance_id {
+            let mut v = Writer::new();
+            v.string(i);
+            tags.push((TAG_INSTANCE, v.finish()));
+        }
+        if tags.is_empty() {
+            w.no_tags();
+        } else {
+            w.tags(&tags);
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let mut req = GroupHeartbeatRequest {
@@ -1322,8 +1343,19 @@ impl GroupHeartbeatRequest {
             rebalance_timeout_ms: r.u32()?,
             subscribed: if r.u8()? != 0 { Some(r.array(8, Reader::u64)?) } else { None },
             owned: get_opt_resources(r)?,
+            instance_id: None,
         };
-        req.tenant = get_tenant(r)?;
+        req.tenant = DEFAULT_TENANT.to_string();
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_TENANT => req.tenant = v.string()?,
+                TAG_INSTANCE => req.instance_id = Some(v.string()?),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
         Ok(req)
     }
 }

@@ -581,3 +581,54 @@ fn a_named_producer_fences_its_earlier_instance() {
         });
     });
 }
+
+/// Static membership through the client (ADR 0072): a second instance
+/// with the same instance id takes the partitions, and the first stops
+/// with `FENCED_INSTANCE_ID` rather than take them back.
+#[test]
+fn a_member_instance_takes_over_and_the_old_one_stays_out() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            admin.set_user_password("alice", "alice-pw").await.unwrap();
+            rt.sleep(TICK * 50).await;
+            let cfg = || lotse_client::GroupConfig { instance_id: Some("worker-1".into()), ..Default::default() };
+            let (c1, c2) =
+                (client(&rt, "m1", scram("alice", "alice-pw")), client(&rt, "m2", scram("alice", "alice-pw")));
+            let mut first = c1.join_group("g", &["s"], cfg()).await.unwrap();
+            for _ in 0..50 {
+                first.poll(TICK * 5).await.unwrap();
+                if !first.assignment().is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(first.assignment().len(), 1, "the one partition");
+            let mut second = c2.join_group("g", &["s"], cfg()).await.unwrap();
+            for _ in 0..50 {
+                second.poll(TICK * 5).await.unwrap();
+                if !second.assignment().is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(second.assignment().len(), 1, "taken over at once");
+            let fenced = |r: Result<Vec<lotse_client::GroupRecord>, ClientError>| {
+                matches!(r, Err(ClientError::Broker { code: ErrorCode::FENCED_INSTANCE_ID, .. }))
+            };
+            let mut seen = false;
+            for _ in 0..100 {
+                if fenced(first.poll(TICK * 5).await) {
+                    seen = true;
+                    break;
+                }
+            }
+            assert!(seen, "the first instance learns it was replaced");
+            assert!(fenced(first.poll(TICK * 5).await), "and stays out");
+            for _ in 0..50 {
+                second.poll(TICK * 5).await.expect("the newer instance goes on");
+            }
+            assert_eq!(second.assignment().len(), 1, "nobody took it back");
+            stop(nodes).await;
+        });
+    });
+}

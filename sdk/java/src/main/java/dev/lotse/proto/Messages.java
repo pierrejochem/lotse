@@ -172,6 +172,16 @@ public final class Messages {
     /** Tag of the tenant in a request that names a transactional or group id (ADR 0062). */
     static final long TAG_TENANT = 1;
 
+    /** Tag of a group member's instance id (ADR 0072). */
+    static final long TAG_INSTANCE = 2;
+
+    /** A tag holding one string. */
+    static Tag stringTag(long tag, String value) {
+        Writer v = new Writer();
+        v.string(value);
+        return new Tag(tag, ByteString.copyOf(v.toByteArray()));
+    }
+
     static String tenantOrDefault(String tenant) {
         return tenant == null ? DEFAULT_TENANT : tenant;
     }

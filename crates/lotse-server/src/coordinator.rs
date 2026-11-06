@@ -286,6 +286,9 @@ impl CoordinatorState {
             put_meta(&mut b, id, m);
         }
         self.groups.encode(&mut b);
+        // Optional, at the end: a snapshot without instance ids reads as
+        // before them (ADR 0072).
+        self.groups.encode_instances(&mut b);
         b.freeze()
     }
 
@@ -299,7 +302,10 @@ impl CoordinatorState {
             let (id, m) = get_meta(&mut b)?;
             txns.insert(id, m);
         }
-        let groups = GroupsState::decode(&mut b)?;
+        let mut groups = GroupsState::decode(&mut b)?;
+        if b.has_remaining() {
+            groups.decode_instances(&mut b)?;
+        }
         if b.has_remaining() {
             return Err("coordinator state has trailing bytes".into());
         }

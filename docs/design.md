@@ -379,6 +379,7 @@ GroupHeartbeat <- group_id string, member_id string,      // leer beim Beitritt
                   rebalance_timeout_ms u32,
                   subscribed array<u64>?,                 // nur bei Änderung
                   owned: array{resource_id u64, partitions array<u32>}?  // nur bei Änderung
+                  [Tag 2: instance_id string]             // feste Instanz-ID (ADR 0072)
                -> throttle_ms u32, error u16, member_id string, member_epoch i32,
                   heartbeat_interval_ms u32,
                   assignment: array{resource_id u64, partitions array<u32>}?
@@ -394,6 +395,7 @@ CommitOffsets  <- group_id string, member_id string, member_epoch i32,
                              offset u64, leader_term u64, metadata string?}}
                -> resources: array{resource_id u64, partitions: array{partition u32, error u16}}
 ```
+Statische Mitgliedschaft (ADR 0072): Ein Mitglied mit Instanz-ID behält beim Verlassen seinen Platz und seine Partitionen bis zum Session-Timeout. Tritt eine Instanz mit derselben ID bei, übernimmt sie den Platz mit Ziel, Zuweisung und Abonnement unter einer neuen Member-ID und einer um eins höheren Epoch, ohne dass für die anderen umverteilt wird. Die frühere Instanz bekommt `FENCED_INSTANCE_ID` und tritt nicht wieder bei. Ihre Commits werden abgelehnt, weil ihre Member-ID weg ist; bis zu ihrem nächsten Heartbeat kann sie ihre Partitionen aber noch lesen.
 
 Der Koordinator ist der Leader der `__groups`-Partition, auf die die Gruppe gehasht wird (`FindCoordinator`). Im ersten Schritt (ADR 0033) ist das die Koordinator-Gruppe, die auch Transaktionen koordiniert. Die Mitgliedschaft wird persistiert: Jede Änderung einer Gruppe ist ein `GroupState`-Record mit der ganzen Gruppe (Epoch, je Member Subscription, Member-Epoch, Ziel-, zugewiesene und abzugebende Partitionen), committete Offsets sind `GroupOffsets`-Records; beides liegt im Snapshot der Koordinator-Gruppe. Ein Member gibt Partitionen erst frei, wenn seine Antwort sie nicht mehr enthält; der Koordinator vergibt sie erst neu, wenn der alte Besitzer sie im nächsten Heartbeat nicht mehr als `owned` meldet oder entfernt ist. So hat eine Partition nie zwei Besitzer. Entfernt wird ein Member, wenn eine Session lang kein Heartbeat kam, oder wenn es eine entzogene Partition nicht im Rebalance-Timeout abgibt, aber nie früher als eine Session nach dem Entzug; der Client gibt alles ab, sobald eine Session lang kein Heartbeat gelungen ist, gerechnet ab dem Senden des letzten erfolgreichen. Neue Fehlercodes: 15 `FENCED_MEMBER_EPOCH` (neu beitreten), 16 `UNKNOWN_MEMBER_ID` (neu beitreten), 17 `FRAME_TOO_LARGE` (Verbindung wird geschlossen), 24 `UNSTABLE_OFFSET_COMMIT` und 25 `CONCURRENT_GROUP_CHANGE` (beide wiederholbar).
 

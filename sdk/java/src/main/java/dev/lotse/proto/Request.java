@@ -527,13 +527,26 @@ public sealed interface Request {
             long rebalanceTimeoutMs,
             List<Long> subscribed,
             List<TxnResource> owned,
-            String tenant)
+            String tenant,
+            String instanceId)
             implements Request {
         /** Creates the request. */
         public GroupHeartbeat {
             tenant = Messages.tenantOrDefault(tenant);
             subscribed = Messages.copy(subscribed);
             owned = Messages.copy(owned);
+        }
+
+        /** The request without an instance id. */
+        public GroupHeartbeat(
+                String groupId,
+                String memberId,
+                int memberEpoch,
+                long rebalanceTimeoutMs,
+                List<Long> subscribed,
+                List<TxnResource> owned,
+                String tenant) {
+            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, tenant, null);
         }
 
         /** The request in the default tenant. */
@@ -544,7 +557,7 @@ public sealed interface Request {
                 long rebalanceTimeoutMs,
                 List<Long> subscribed,
                 List<TxnResource> owned) {
-            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, Messages.DEFAULT_TENANT);
+            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, Messages.DEFAULT_TENANT, null);
         }
 
         @Override
@@ -560,7 +573,18 @@ public sealed interface Request {
                 w.array(subscribed, Writer::u64);
             }
             Messages.putOptResources(w, owned);
-            Messages.putTenant(w, tenant);
+            List<Tag> tags = new java.util.ArrayList<>();
+            if (!Messages.DEFAULT_TENANT.equals(tenant)) {
+                tags.add(Messages.stringTag(Messages.TAG_TENANT, tenant));
+            }
+            if (instanceId != null) {
+                tags.add(Messages.stringTag(Messages.TAG_INSTANCE, instanceId));
+            }
+            if (tags.isEmpty()) {
+                w.noTags();
+            } else {
+                w.tags(tags);
+            }
         }
 
         static GroupHeartbeat read(Reader r) {
@@ -570,9 +594,21 @@ public sealed interface Request {
             long timeout = r.u32();
             List<Long> subscribed = r.bool() ? r.array(8, Reader::u64) : null;
             List<TxnResource> owned = Messages.getOptResources(r);
-            GroupHeartbeat x =
-                    new GroupHeartbeat(groupId, memberId, epoch, timeout, subscribed, owned, Messages.getTenant(r));
-            return x;
+            String tenant = Messages.DEFAULT_TENANT;
+            String instanceId = null;
+            for (Tag t : r.tags()) {
+                if (t.tag() == Messages.TAG_TENANT || t.tag() == Messages.TAG_INSTANCE) {
+                    Reader vr = new Reader(t.value().toByteArray());
+                    String v = vr.string();
+                    vr.finish();
+                    if (t.tag() == Messages.TAG_TENANT) {
+                        tenant = v;
+                    } else {
+                        instanceId = v;
+                    }
+                }
+            }
+            return new GroupHeartbeat(groupId, memberId, epoch, timeout, subscribed, owned, tenant, instanceId);
         }
     }
 

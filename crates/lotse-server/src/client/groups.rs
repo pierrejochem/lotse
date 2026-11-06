@@ -169,6 +169,15 @@ impl Clients {
         let known: BTreeSet<u64> = view.streams.iter().map(|s| s.resource_id).collect();
         let subscribed = req.subscribed.as_ref().map(|s| s.iter().copied().filter(|r| known.contains(r)).collect());
         let mut changed = false;
+        // The member that holds this request's instance id now (ADR 0072).
+        let holder = req.instance_id.as_ref().and_then(|i| {
+            g.members.iter().find(|(_, m)| m.instance_id.as_ref() == Some(i)).map(|(mid, _)| mid.clone())
+        });
+        if req.member_epoch != 0 && holder.as_ref().is_some_and(|h| *h != req.member_id) {
+            // A newer instance took this one's place: it must not join again,
+            // which would take the place back.
+            return outbox.push(id, &refuse(ErrorCode::FENCED_INSTANCE_ID));
+        }
         let member_id = match req.member_epoch {
             0 => {
                 if self.group_timers.term != term {
@@ -177,19 +186,52 @@ impl Clients {
                 }
                 self.group_timers.next += 1;
                 let mid = format!("{term}-{}", self.group_timers.next);
-                // Epoch 1 even with nothing to read yet: 0 means joining, so
-                // a member left at 0 would join again with every heartbeat.
-                let m = MemberMeta {
-                    subscribed: subscribed.clone().unwrap_or_default(),
-                    rebalance_timeout_ms: req.rebalance_timeout_ms,
-                    epoch: 1,
-                    ..MemberMeta::default()
-                };
-                g.members.insert(mid.clone(), m);
-                g.epoch += 1;
-                g.retarget(partitions_of(view));
+                match holder {
+                    // A restarted instance takes over its place: its
+                    // partitions, under a new member id that fences the old
+                    // one, with nothing moved for the others.
+                    Some(old) => {
+                        let mut m = g.members.remove(&old).expect("found above");
+                        self.group_timers.forget(&req.group_id, &old);
+                        m.epoch = m.epoch.saturating_add(1);
+                        m.rebalance_timeout_ms = req.rebalance_timeout_ms;
+                        let resubscribed = subscribed.clone().filter(|s| *s != m.subscribed);
+                        if let Some(s) = resubscribed.clone() {
+                            m.subscribed = s;
+                        }
+                        g.members.insert(mid.clone(), m);
+                        // Its target came along; only a new subscription
+                        // moves anything.
+                        if resubscribed.is_some() {
+                            g.epoch += 1;
+                            g.retarget(partitions_of(view));
+                        }
+                    }
+                    None => {
+                        // Epoch 1 even with nothing to read yet: 0 means
+                        // joining, so a member left at 0 would join again
+                        // with every heartbeat.
+                        let m = MemberMeta {
+                            subscribed: subscribed.clone().unwrap_or_default(),
+                            rebalance_timeout_ms: req.rebalance_timeout_ms,
+                            epoch: 1,
+                            instance_id: req.instance_id.clone(),
+                            ..MemberMeta::default()
+                        };
+                        g.members.insert(mid.clone(), m);
+                        g.epoch += 1;
+                        g.retarget(partitions_of(view));
+                    }
+                }
                 changed = true;
                 mid
+            }
+            -1 if g.members.get(&req.member_id).is_some_and(|m| m.instance_id.is_some()) => {
+                // A member with an instance id that leaves keeps its place
+                // and partitions until its session times out, so that it can
+                // come back without a rebalance (ADR 0072).
+                let resp = GroupHeartbeatResponse { member_epoch: -1, ..refuse_resp(&req, interval) };
+                return outbox.push(id, &Response::GroupHeartbeat(resp));
             }
             -1 => {
                 if g.members.remove(&req.member_id).is_none() {

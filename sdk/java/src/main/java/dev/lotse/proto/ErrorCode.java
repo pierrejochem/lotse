@@ -69,6 +69,8 @@ public record ErrorCode(int code) {
     public static final ErrorCode UNSUPPORTED_SASL_MECHANISM = new ErrorCode(28);
     /** A delete asked for only if the resource is empty, and it is not (ADR 0063). */
     public static final ErrorCode RESOURCE_NOT_EMPTY = new ErrorCode(29);
+    /** Another member joined the group with this member's instance id and took its place (ADR 0072). */
+    public static final ErrorCode FENCED_INSTANCE_ID = new ErrorCode(30);
 
     private static final List<String> NAMES = List.of(
             "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -78,7 +80,7 @@ public record ErrorCode(int code) {
             "COORDINATOR_NOT_AVAILABLE", "CONCURRENT_TRANSACTIONS", "COORDINATOR_FENCED", "INVALID_REQUEST",
             "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
             "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
-            "RESOURCE_NOT_EMPTY");
+            "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID");
 
     /** Creates a code. */
     public ErrorCode {

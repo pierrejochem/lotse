@@ -121,6 +121,7 @@ pub fn requests() -> Vec<Request> {
             rebalance_timeout_ms: 30_000,
             subscribed: Some(vec![7, 8]),
             owned: None,
+            instance_id: None,
         }),
         Request::GroupHeartbeat(GroupHeartbeatRequest {
             tenant: DEFAULT_TENANT.into(),
@@ -130,6 +131,7 @@ pub fn requests() -> Vec<Request> {
             rebalance_timeout_ms: 30_000,
             subscribed: None,
             owned: Some(vec![TxnResource { resource_id: 7, partitions: vec![0, 2] }]),
+            instance_id: None,
         }),
         Request::CommitOffsets(CommitOffsetsRequest {
             tenant: DEFAULT_TENANT.into(),
@@ -267,6 +269,27 @@ pub fn requests() -> Vec<Request> {
             rebalance_timeout_ms: 30_000,
             subscribed: Some(vec![7]),
             owned: None,
+            instance_id: None,
+        }),
+        Request::GroupHeartbeat(GroupHeartbeatRequest {
+            tenant: "acme".into(),
+            group_id: "billing".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            rebalance_timeout_ms: 30_000,
+            subscribed: Some(vec![7]),
+            owned: None,
+            instance_id: Some("billing-worker-3".into()),
+        }),
+        Request::GroupHeartbeat(GroupHeartbeatRequest {
+            tenant: DEFAULT_TENANT.into(),
+            group_id: "billing".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            rebalance_timeout_ms: 30_000,
+            subscribed: Some(vec![7]),
+            owned: None,
+            instance_id: Some("billing-worker-4".into()),
         }),
         Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
             tenant: "acme".into(),

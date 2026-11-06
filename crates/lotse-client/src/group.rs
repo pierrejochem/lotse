@@ -42,6 +42,12 @@ pub struct GroupConfig {
     /// Where to start reading a partition the group has committed no
     /// offset for (ADR 0059): the log start by default, the end, or a time.
     pub start_from: OffsetAt,
+    /// A stable id for this member across restarts (ADR 0072). A member
+    /// that comes back with it within the session timeout takes over its
+    /// partitions without a rebalance; a second instance with the same id
+    /// takes over too, and the first then gets `FENCED_INSTANCE_ID` and
+    /// stops. Leaving keeps the partitions for the session timeout.
+    pub instance_id: Option<String>,
 }
 
 impl Default for GroupConfig {
@@ -51,7 +57,15 @@ impl Default for GroupConfig {
             rebalance_timeout: Duration::from_secs(60),
             auto_commit: true,
             start_from: OffsetAt::Earliest,
+            instance_id: None,
         }
+    }
+}
+
+fn fenced_instance() -> ClientError {
+    ClientError::Broker {
+        code: ErrorCode::FENCED_INSTANCE_ID,
+        message: Some("another member joined with this instance id".into()),
     }
 }
 
@@ -85,6 +99,9 @@ pub struct GroupConsumer<'a, R: Net + Clock + Spawn + Rng> {
     next_heartbeat: Instant,
     /// Read the partitions round robin.
     turn: usize,
+    /// A newer instance with the same instance id took this member's place
+    /// (ADR 0072): it stays out.
+    fenced: bool,
 }
 
 impl<R: Net + Clock + Spawn + Rng> std::fmt::Debug for GroupConsumer<'_, R> {
@@ -120,6 +137,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             last_ok: None,
             next_heartbeat: self.rt.now(),
             turn: 0,
+            fenced: false,
         })
     }
 
@@ -176,6 +194,9 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
     /// Heartbeats when due, then reads what one owned partition has (waiting
     /// up to `wait`). Returns the records, in offset order.
     pub async fn poll(&mut self, wait: Duration) -> Result<Vec<GroupRecord>, ClientError> {
+        if self.fenced {
+            return Err(fenced_instance());
+        }
         let now = self.client.rt.now();
         if self.last_ok.is_some_and(|t| now - t >= self.cfg.session_timeout) {
             // The coordinator may have given everything away by now.
@@ -262,6 +283,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             owned: Some(
                 owned.into_iter().map(|(resource_id, partitions)| TxnResource { resource_id, partitions }).collect(),
             ),
+            instance_id: self.cfg.instance_id.clone(),
         });
         let retry_soon = sent + c.cfg.backoff;
         let resp = match c.call_coordinator(&self.group, &req).await {
@@ -279,6 +301,13 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
                 self.lost();
                 self.next_heartbeat = retry_soon;
                 return Ok(());
+            }
+            // A newer instance with this instance id took the place: stop,
+            // rather than join again and take it back.
+            ErrorCode::FENCED_INSTANCE_ID => {
+                self.lost();
+                self.fenced = true;
+                return Err(fenced_instance());
             }
             code => {
                 if code.retriable() {
@@ -431,6 +460,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             rebalance_timeout_ms: 0,
             subscribed: None,
             owned: None,
+            instance_id: self.cfg.instance_id.clone(),
         });
         let _ = self.client.call_coordinator(&self.group, &req).await;
         self.owned.clear();

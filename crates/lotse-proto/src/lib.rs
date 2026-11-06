@@ -304,10 +304,13 @@ impl ErrorCode {
     /// A delete asked for only if the resource is empty, and it is not: a
     /// queue with unsettled messages, a stream with records (ADR 0063).
     pub const RESOURCE_NOT_EMPTY: ErrorCode = ErrorCode(29);
+    /// Another member joined the group with this member's instance id and
+    /// took its place (ADR 0072): this one must not join again.
+    pub const FENCED_INSTANCE_ID: ErrorCode = ErrorCode(30);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 30] = [
+        const NAMES: [&str; 31] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -338,6 +341,7 @@ impl ErrorCode {
             "AUTHENTICATION_FAILED",
             "UNSUPPORTED_SASL_MECHANISM",
             "RESOURCE_NOT_EMPTY",
+            "FENCED_INSTANCE_ID",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
