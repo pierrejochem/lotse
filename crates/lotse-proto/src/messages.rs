@@ -1846,7 +1846,9 @@ impl BindRequest {
 pub struct DeleteResourceRequest {
     /// The resource.
     pub resource_id: u64,
-    /// Only if it holds no messages (not supported so far).
+    /// Only if it holds nothing: no unsettled message in a queue, no record
+    /// in any partition of a stream (ADR 0063). A resource that is not
+    /// empty is answered [`ErrorCode::RESOURCE_NOT_EMPTY`].
     pub if_empty: bool,
 }
 
@@ -3050,6 +3052,32 @@ impl DeadLetterRequest {
 /// A partition's leader asks the transaction coordinator, before it takes a
 /// producer's first transactional batch of an epoch, whether that
 /// transaction is open and holds the partition (internal, from a node).
+/// Whether a partition holds anything (internal, [`ApiKey::CHECK_EMPTY`],
+/// ADR 0063): sent by the metadata leader to the partition's leader before a
+/// conditional delete. Answered with [`OutcomeResponse`]: `NONE` if it holds
+/// nothing, [`ErrorCode::RESOURCE_NOT_EMPTY`] if it does, `NOT_LEADER` with a
+/// hint elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckEmptyRequest {
+    /// The stream or queue.
+    pub resource_id: u64,
+    /// The partition (0 for a queue).
+    pub partition: u32,
+}
+
+impl CheckEmptyRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        w.u32(self.partition);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CheckEmptyRequest { resource_id: r.u64()?, partition: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// Answered with [`OutcomeResponse`]: `NONE` if so, `INVALID_TXN_STATE` if
 /// not, `PRODUCER_FENCED` for an older epoch (ADR 0057).
 #[derive(Debug, Clone, PartialEq, Eq)]

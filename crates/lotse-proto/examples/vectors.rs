@@ -241,7 +241,11 @@ fn main() {
         .filter(|(_, req)| {
             !matches!(
                 req.api_key(),
-                ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER | ApiKey::WRITE_TXN_MARKERS | ApiKey::VERIFY_TXN
+                ApiKey::SETTLE_VOTERS
+                    | ApiKey::DEAD_LETTER
+                    | ApiKey::WRITE_TXN_MARKERS
+                    | ApiKey::VERIFY_TXN
+                    | ApiKey::CHECK_EMPTY
             )
         })
         .map(|(line, _)| line)
@@ -258,7 +262,11 @@ fn main() {
         .filter(|(_, (key, _))| {
             !matches!(
                 *key,
-                ApiKey::WRITE_TXN_MARKERS | ApiKey::SETTLE_VOTERS | ApiKey::DEAD_LETTER | ApiKey::VERIFY_TXN
+                ApiKey::WRITE_TXN_MARKERS
+                    | ApiKey::SETTLE_VOTERS
+                    | ApiKey::DEAD_LETTER
+                    | ApiKey::VERIFY_TXN
+                    | ApiKey::CHECK_EMPTY
             )
         })
         .map(|(i, (key, resp))| {

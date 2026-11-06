@@ -67,6 +67,8 @@ public record ErrorCode(int code) {
     public static final ErrorCode AUTHENTICATION_FAILED = new ErrorCode(27);
     /** The SASL mechanism is not enabled on this node; the answer lists the ones that are. */
     public static final ErrorCode UNSUPPORTED_SASL_MECHANISM = new ErrorCode(28);
+    /** A delete asked for only if the resource is empty, and it is not (ADR 0063). */
+    public static final ErrorCode RESOURCE_NOT_EMPTY = new ErrorCode(29);
 
     private static final List<String> NAMES = List.of(
             "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -75,7 +77,8 @@ public record ErrorCode(int code) {
             "UNSUPPORTED_VERSION", "FENCED_MEMBER_EPOCH", "UNKNOWN_MEMBER_ID", "FRAME_TOO_LARGE",
             "COORDINATOR_NOT_AVAILABLE", "CONCURRENT_TRANSACTIONS", "COORDINATOR_FENCED", "INVALID_REQUEST",
             "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
-            "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM");
+            "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
+            "RESOURCE_NOT_EMPTY");
 
     /** Creates a code. */
     public ErrorCode {

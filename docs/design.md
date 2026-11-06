@@ -488,7 +488,9 @@ DescribeMetrics <- (leer)                                   // an jeden Node ein
                    groups: array{group_id, epoch, members: array{member_id, owned}, offsets}
 ```
 
-Antworten mit `NOT_LEADER` tragen als Tag 0 den Leader der Metadaten-Gruppe. Umgesetzt sind `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind` und `Unbind` (ADR 0034) sowie `DeleteResource`, `DescribeConfigs` und `AlterConfigs` (ADR 0035); Prioritäten, Single Active Consumer, Dead-Letter-Queues, Stream-Settings und `if_empty` lehnt der Leader mit `INVALID_REQUEST` ab, ebenso jede Änderung außer `ack.timeout.ms` einer Queue.
+Antworten mit `NOT_LEADER` tragen als Tag 0 den Leader der Metadaten-Gruppe. Umgesetzt sind `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind` und `Unbind` (ADR 0034) sowie `DeleteResource`, `DescribeConfigs` und `AlterConfigs` (ADR 0035); Prioritäten und Single Active Consumer lehnt der Leader mit `INVALID_REQUEST` ab, ebenso jede Änderung außer den Einstellungen einer Queue (`ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, `dead.letter.queue`) und der Retention eines Streams.
+
+Mit `if_empty` löscht der Metadaten-Leader nur, was nichts mehr enthält (ADR 0063): Er fragt zuerst den Leader jeder Partition (intern `CheckEmpty`), ob sie leer ist, und löscht erst, wenn alle es sind; sonst antwortet er `RESOURCE_NOT_EMPTY`. Leer ist eine Queue ohne unerledigte und ohne der DLQ geschuldete Nachricht, eine Stream-Partition ohne Daten-Record. Prüfung und Löschen sind zwei Schritte: Was dazwischen produziert wird, geht mit der Ressource. Das ist ein Schutz vor Versehen, keine Sperre.
 
 ### Fehlercodes
 

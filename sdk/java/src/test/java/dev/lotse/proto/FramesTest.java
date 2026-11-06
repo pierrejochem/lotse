@@ -47,7 +47,8 @@ class FramesTest {
 
     @Test
     void theNodeInternalKeysAreOnlyConstants() {
-        for (ApiKey key : List.of(ApiKey.SETTLE_VOTERS, ApiKey.DEAD_LETTER, ApiKey.VERIFY_TXN, ApiKey.WRITE_TXN_MARKERS)) {
+        for (ApiKey key : List.of(
+                ApiKey.SETTLE_VOTERS, ApiKey.DEAD_LETTER, ApiKey.VERIFY_TXN, ApiKey.CHECK_EMPTY, ApiKey.WRITE_TXN_MARKERS)) {
             assertFalse(key.isImplemented(0));
             byte[] frame = Frames.encodeRequest(1, new Request.ApiVersions());
             frame[0] = (byte) key.id();
@@ -57,6 +58,7 @@ class FramesTest {
         assertEquals(43, ApiKey.SETTLE_VOTERS.id());
         assertEquals(44, ApiKey.DEAD_LETTER.id());
         assertEquals(45, ApiKey.VERIFY_TXN.id());
+        assertEquals(46, ApiKey.CHECK_EMPTY.id());
         assertEquals(1000, ApiKey.WRITE_TXN_MARKERS.id());
     }
 

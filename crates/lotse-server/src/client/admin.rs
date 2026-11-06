@@ -544,10 +544,6 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        if req.if_empty {
-            let why = "if_empty is not supported yet";
-            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(why), None));
-        }
         let replica = match Self::metadata_leader(view, groups) {
             Ok(r) => r,
             Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
@@ -558,6 +554,19 @@ impl Clients {
         if let Some(user) = replica.metadata().is_dead_letter_of_any(req.resource_id) {
             let why = format!("queue {user:?} dead-letters into it; change that setting first");
             return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
+        if req.if_empty {
+            // Asked of the partitions' leaders first; an exchange holds no
+            // messages (ADR 0063).
+            let meta = replica.metadata();
+            let partitions = match (meta.streams.get(&req.resource_id), meta.queues.contains_key(&req.resource_id)) {
+                (Some(s), _) => Some((0..s.partitions.len() as u32).collect()),
+                (None, true) => Some(vec![0]),
+                (None, false) => None,
+            };
+            if let Some(partitions) = partitions {
+                return self.delete_if_empty(outbox, id, req.resource_id, partitions);
+            }
         }
         let change = Change::Delete { resource_id: req.resource_id };
         self.propose_admin(

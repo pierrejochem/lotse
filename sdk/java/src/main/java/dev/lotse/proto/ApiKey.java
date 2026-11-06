@@ -96,6 +96,8 @@ public record ApiKey(int id) {
     public static final ApiKey DEAD_LETTER = new ApiKey(44);
     /** Node to node, not for clients: a partition leader asks the coordinator whether a transaction is open. */
     public static final ApiKey VERIFY_TXN = new ApiKey(45);
+    /** Node to node, not for clients: the metadata leader asks a partition leader whether it holds anything. */
+    public static final ApiKey CHECK_EMPTY = new ApiKey(46);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
     public static final ApiKey WRITE_TXN_MARKERS = new ApiKey(1000);
 

@@ -179,6 +179,7 @@ pub fn requests() -> Vec<Request> {
             resource_id: 1_099_511_627_776,
             partition: 2,
         }),
+        Request::CheckEmpty(CheckEmptyRequest { resource_id: 1_099_511_627_776, partition: 3 }),
         Request::WriteTxnMarkers(WriteTxnMarkersRequest {
             markers: vec![TxnMarker {
                 producer_id: 17,

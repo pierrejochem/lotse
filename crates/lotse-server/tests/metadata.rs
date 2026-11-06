@@ -751,3 +751,52 @@ fn group_of(resource_id: u64, p: usize) -> u64 {
 fn resources_created_changed_and_deleted_at_runtime_agree_everywhere() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
 }
+
+/// Whether `r` failed because the resource holds something.
+fn not_empty<T: std::fmt::Debug>(r: Result<T, ClientError>) -> bool {
+    matches!(r, Err(ClientError::Broker { code: ErrorCode::RESOURCE_NOT_EMPTY, .. }))
+}
+
+#[test]
+fn a_conditional_delete_takes_only_what_holds_nothing() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("empty", 3, 3).await.unwrap();
+            admin.create_stream("full", 3, 3).await.unwrap();
+            admin.create_queue("q", 3, None).await.unwrap();
+            admin.declare_exchange("x", ExchangeKind::Fanout).await.unwrap();
+
+            // Nothing written: gone.
+            admin.delete_if_empty("empty").await.expect("an empty stream");
+            assert!(matches!(admin.produce("empty", 0, message("late")).await, Err(e) if coming_and_going(&e)));
+            admin.delete_if_empty("x").await.expect("an exchange holds no messages");
+
+            // One record in the last partition is enough to keep a stream.
+            admin.produce("full", 2, message("kept")).await.unwrap();
+            assert!(not_empty(admin.delete_if_empty("full").await), "a record in partition 2");
+            admin.produce("full", 0, message("still there")).await.expect("not deleted");
+
+            // A queue holds a message until it is settled.
+            admin.produce("q", 0, message("job")).await.unwrap();
+            assert!(not_empty(admin.delete_if_empty("q").await), "an unsettled message");
+            {
+                let mut c = admin.subscribe("q", 10).await.unwrap();
+                let m = c.next(Duration::from_secs(5)).await.unwrap().expect("the message");
+                assert!(not_empty(admin.delete_if_empty("q").await), "a delivered message is not settled yet");
+                c.ack(&m).await.unwrap();
+            }
+            admin.delete_if_empty("q").await.expect("everything acked");
+
+            // Unconditional deletes are as they were.
+            admin.delete("full").await.expect("deleted anyway");
+            for (_, n) in std::mem::take(&mut w.running) {
+                let (node, handle) = n.unwrap();
+                handle.stop();
+                node.join().await.unwrap();
+            }
+        });
+    });
+}

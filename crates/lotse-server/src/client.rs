@@ -63,6 +63,7 @@ use crate::wire::GroupId;
 
 mod admin;
 mod coord;
+mod empty;
 mod groups;
 mod ids;
 mod nodes;
@@ -76,6 +77,7 @@ mod verify;
 
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
+pub(crate) use empty::{EmptyAnswer, EmptyJob};
 pub use queues::QueueConfig;
 pub(crate) use retire::ForwardJob;
 use session::Session;
@@ -348,6 +350,8 @@ pub(crate) struct Clients {
     forward_jobs: Vec<retire::ForwardJob>,
     /// Transactions this node asks the coordinator about (ADR 0057).
     verify: verify::Verifying,
+    /// Conditional deletes waiting for their partitions (ADR 0063).
+    emptiness: empty::Emptiness,
     /// The group coordinator's clocks.
     group_timers: groups::GroupTimers,
     /// Admin records in flight.
@@ -430,6 +434,7 @@ impl Clients {
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,
+            Request::CheckEmpty(req) => self.check_empty(&outbox, id, req, view, groups).await?,
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };

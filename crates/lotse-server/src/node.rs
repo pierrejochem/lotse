@@ -334,6 +334,11 @@ enum Command {
         key: crate::client::VerifyKey,
         error: lotse_proto::ErrorCode,
     },
+    /// The partitions of a conditional delete were asked (ADR 0063).
+    EmptyChecked {
+        key: u64,
+        answer: crate::client::EmptyAnswer,
+    },
     /// A queue leader's dead letters were forwarded, or could not be.
     Forwarded {
         group: GroupId,
@@ -693,6 +698,39 @@ async fn verify_txn<R: Runtime>(
     shared.work.set();
 }
 
+/// Asks each partition of a conditional delete whether it is empty, and
+/// hands the answer to the main loop (ADR 0063). The first partition that
+/// is not ends the asking; a failure to ask refuses the delete, which the
+/// admin may send again: nothing was deleted.
+async fn check_empty<R: Runtime>(
+    client: Arc<lotse_client::Client<R>>,
+    job: crate::client::EmptyJob,
+    shared: Arc<Shared>,
+) {
+    let stop = [&shared.stop];
+    let mut answer = Ok(None);
+    for &p in &job.partitions {
+        let Some(result) = race(client.check_empty(job.resource_id, p), &stop).await else { return };
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                answer = Ok(Some(p));
+                break;
+            }
+            Err(lotse_client::ClientError::Broker { code, .. }) if !code.retriable() => {
+                answer = Err(code);
+                break;
+            }
+            Err(_) => {
+                answer = Err(lotse_proto::ErrorCode::REQUEST_TIMED_OUT);
+                break;
+            }
+        }
+    }
+    shared.commands.lock().expect("commands lock").push_back(Command::EmptyChecked { key: job.key, answer });
+    shared.work.set();
+}
+
 /// What the main loop works with besides its groups.
 struct Around<'a, R> {
     links: &'a mut Links,
@@ -842,6 +880,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.verified(key, error, &view, groups);
                     continue;
                 }
+                Command::EmptyChecked { key, answer } => {
+                    clients.empty_checked(key, answer, &view, groups);
+                    continue;
+                }
             };
             let res = match groups.get_mut(&group) {
                 Some(g) => g.propose(batch).map(|p| (p.first, p.last)).map_err(|e: ProposeError| e.to_string()),
@@ -877,6 +919,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         for job in clients.take_verify_jobs() {
             jobs.spawn(rt, verify_txn(marker_client.clone(), job, shared.clone()));
+        }
+        for job in clients.take_empty_jobs() {
+            jobs.spawn(rt, check_empty(marker_client.clone(), job, shared.clone()));
         }
         // After the round's answers: a request waiting on an entry learns
         // its fate before retention may compact it, which would leave the

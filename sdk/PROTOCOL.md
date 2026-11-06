@@ -69,7 +69,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 
 ## Error codes
 
-Codes 0 to 28, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
+Codes 0 to 29, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
 
 ## The record batch
 

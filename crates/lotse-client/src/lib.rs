@@ -837,6 +837,36 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// Internal, used by the metadata leader before a conditional delete
+    /// (ADR 0063): whether a partition of a stream or queue holds anything,
+    /// asked of its leader.
+    pub async fn check_empty(&self, resource_id: u64, partition: u32) -> Result<bool, ClientError> {
+        let name = self.name_of(resource_id).await?;
+        self.retrying(|| self.check_empty_once(&name, resource_id, partition)).await
+    }
+
+    async fn check_empty_once(&self, name: &str, resource_id: u64, partition: u32) -> Result<bool, Attempt> {
+        let (_, addr) = self.route(name, partition).await?;
+        let req = Request::CheckEmpty(lotse_proto::CheckEmptyRequest { resource_id, partition });
+        let r = match self.call(&addr, &req).await {
+            Ok(Response::Outcome(r)) => r,
+            Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) => {
+                self.forget(name, partition);
+                return Err(e.into());
+            }
+        };
+        match r.error {
+            ErrorCode::NONE => Ok(true),
+            ErrorCode::RESOURCE_NOT_EMPTY => Ok(false),
+            code if code.retriable() => {
+                self.redirect(name, partition, r.leader_hint);
+                Err(Attempt::Retry(code.to_string()))
+            }
+            code => Err(Attempt::Fail(ClientError::Broker { code, message: None })),
+        }
+    }
+
     /// Internal, used by a node's transaction coordinator: writes a marker
     /// into one partition, retrying until its leader answers. Returns
     /// [`ErrorCode::NONE`] once the marker is written (or not needed), or
@@ -847,19 +877,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         partition: u32,
         marker: lotse_proto::TxnMarker,
     ) -> Result<ErrorCode, ClientError> {
-        let known = self.names.lock().expect("names lock").get(&resource_id).cloned();
-        let name = match known {
-            Some(n) => n,
-            None => {
-                self.metadata(&[]).await?;
-                self.names
-                    .lock()
-                    .expect("names lock")
-                    .get(&resource_id)
-                    .cloned()
-                    .ok_or_else(|| ClientError::UnknownStream(format!("#{resource_id}"), partition))?
-            }
-        };
+        let name = self.name_of(resource_id).await?;
         let marker = lotse_proto::TxnMarker {
             resources: vec![lotse_proto::TxnResource { resource_id, partitions: vec![partition] }],
             ..marker

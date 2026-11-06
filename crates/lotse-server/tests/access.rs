@@ -510,6 +510,13 @@ fn only_nodes_write_markers_and_nodes_do_nothing_else() {
             ));
             // A node: let through (nothing to write here).
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &marker).await, Response::WriteTxnMarkers(_)));
+            // Asking whether a partition is empty (ADR 0063) is for nodes too.
+            let check = Request::CheckEmpty(lotse_proto::CheckEmptyRequest { resource_id: 7, partition: 0 });
+            assert!(matches!(
+                raw_call(&rt, Some(PeerIdentity::Principal("root".into())), &check).await,
+                Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }
+            ));
+            assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &check).await, Response::Outcome(_)));
             // But a node cannot produce or administer.
             let produce = Request::Produce(lotse_proto::ProduceRequest {
                 txn_id: None,

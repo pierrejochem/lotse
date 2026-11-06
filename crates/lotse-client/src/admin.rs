@@ -150,8 +150,22 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// configuration cannot be deleted. Done once the resource is gone,
     /// even if someone else deleted it first.
     pub async fn delete(&self, name: &str) -> Result<u64, ClientError> {
+        self.delete_with(name, false).await
+    }
+
+    /// [`Client::delete`], but only if the stream or queue holds nothing
+    /// (ADR 0063): no unsettled message in a queue, no record in a stream.
+    /// Otherwise it fails with [`ErrorCode::RESOURCE_NOT_EMPTY`] and
+    /// nothing is deleted. An exchange holds no messages and is deleted.
+    /// The check guards against mistakes, not against a producer: a
+    /// message produced while the delete is under way goes with it.
+    pub async fn delete_if_empty(&self, name: &str) -> Result<u64, ClientError> {
+        self.delete_with(name, true).await
+    }
+
+    async fn delete_with(&self, name: &str, if_empty: bool) -> Result<u64, ClientError> {
         let resource_id = self.resource_id(name).await?;
-        let req = Request::DeleteResource(DeleteResourceRequest { resource_id, if_empty: false });
+        let req = Request::DeleteResource(DeleteResourceRequest { resource_id, if_empty });
         self.retrying(|| async {
             match self.call_admin(&req).await? {
                 Response::Admin(a) => match self.admin_answer(a.error, a.leader_hint) {
