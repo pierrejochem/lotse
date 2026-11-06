@@ -133,6 +133,12 @@ impl ApiKey {
     /// The metadata leader asks a partition's leader whether the partition
     /// holds anything, before a conditional delete (internal, node to node).
     pub const CHECK_EMPTY: ApiKey = ApiKey(46);
+    /// Settles a queue's ready messages, on the queue's leader (tenant
+    /// admin, ADR 0064).
+    pub const PURGE_QUEUE: ApiKey = ApiKey(47);
+    /// Moves a dead-letter queue's ready messages back to the queues they
+    /// came from, on its leader (tenant admin, ADR 0064).
+    pub const REQUEUE: ApiKey = ApiKey(48);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -155,7 +161,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 45] = [
+    pub const SUPPORTED: [ApiVersionRange; 47] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -201,6 +207,8 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::DEAD_LETTER, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::VERIFY_TXN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::CHECK_EMPTY, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::PURGE_QUEUE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::REQUEUE, min: 0, max: 0 },
     ];
 }
 
@@ -466,6 +474,10 @@ pub enum Request {
     VerifyTxn(VerifyTxnRequest),
     /// [`ApiKey::CHECK_EMPTY`].
     CheckEmpty(CheckEmptyRequest),
+    /// [`ApiKey::PURGE_QUEUE`].
+    PurgeQueue(QueueActionRequest),
+    /// [`ApiKey::REQUEUE`].
+    Requeue(QueueActionRequest),
 }
 
 impl Request {
@@ -517,6 +529,8 @@ impl Request {
             Request::DeadLetter(_) => ApiKey::DEAD_LETTER,
             Request::VerifyTxn(_) => ApiKey::VERIFY_TXN,
             Request::CheckEmpty(_) => ApiKey::CHECK_EMPTY,
+            Request::PurgeQueue(_) => ApiKey::PURGE_QUEUE,
+            Request::Requeue(_) => ApiKey::REQUEUE,
         }
     }
 }
@@ -543,6 +557,8 @@ pub enum Response {
     /// To [`Request::Ack`], [`Request::Nack`] and [`Request::Unsubscribe`]:
     /// only an outcome.
     Outcome(OutcomeResponse),
+    /// The answer to `PurgeQueue` and `Requeue`.
+    QueueAction(QueueActionResponse),
     /// To [`Request::GroupHeartbeat`].
     GroupHeartbeat(GroupHeartbeatResponse),
     /// To [`Request::CommitOffsets`] and [`Request::AddOffsetsToTxn`].
@@ -646,6 +662,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::DeadLetter(r) => r.put(&mut w),
         Request::VerifyTxn(r) => r.put(&mut w),
         Request::CheckEmpty(r) => r.put(&mut w),
+        Request::PurgeQueue(r) | Request::Requeue(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -711,6 +728,8 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::DEAD_LETTER => Request::DeadLetter(DeadLetterRequest::get(&mut r)?),
         ApiKey::VERIFY_TXN => Request::VerifyTxn(VerifyTxnRequest::get(&mut r)?),
         ApiKey::CHECK_EMPTY => Request::CheckEmpty(CheckEmptyRequest::get(&mut r)?),
+        ApiKey::PURGE_QUEUE => Request::PurgeQueue(QueueActionRequest::get(&mut r)?),
+        ApiKey::REQUEUE => Request::Requeue(QueueActionRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -733,6 +752,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::WriteTxnMarkers(r) => r.put(&mut w),
         Response::Subscribe(r) => r.put(&mut w),
         Response::Outcome(r) => r.put(&mut w),
+        Response::QueueAction(r) => r.put(&mut w),
         Response::GroupHeartbeat(r) => r.put(&mut w),
         Response::CommitOffsets(r) => r.put(&mut w),
         Response::OffsetFetch(r) => r.put(&mut w),
@@ -838,6 +858,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::DEAD_LETTER
         | ApiKey::VERIFY_TXN
         | ApiKey::CHECK_EMPTY => Response::Outcome(OutcomeResponse::get(&mut r)?),
+        ApiKey::PURGE_QUEUE | ApiKey::REQUEUE => Response::QueueAction(QueueActionResponse::get(&mut r)?),
         ApiKey::CREATE_STREAM | ApiKey::CREATE_QUEUE | ApiKey::DECLARE_EXCHANGE => {
             Response::Create(CreateResponse::get(&mut r)?)
         }

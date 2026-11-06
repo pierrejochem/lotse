@@ -198,6 +198,12 @@ fn every_request_needs_its_role() {
             };
             sub.ack(&m).await.expect("and acknowledges");
             drop(sub);
+            // Purging and requeuing are the tenant admin's (ADR 0064).
+            let r = c.purge("orders-q").await;
+            let shown = format!("{r:?}");
+            assert!(refused(r), "a consumer does not purge: {shown}");
+            assert!(refused(c.requeue("orders-q").await), "nor requeue");
+            assert_eq!(ta.purge("orders-q").await.expect("the tenant admin purges"), 0);
             let v = as_user(&rt, "v", "shop");
             let mut seen: Vec<String> = v.metadata(&[]).await.unwrap().resources.into_iter().map(|r| r.name).collect();
             seen.sort();

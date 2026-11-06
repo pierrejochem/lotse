@@ -132,6 +132,8 @@ public final class Frames {
             case 40 -> request = Request.AddNode.read(r);
             case 41 -> request = Request.RemoveNode.read(r);
             case 42 -> request = Request.DescribeNodes.read(r);
+            case 47 -> request = Request.QueueAction.read(r, false);
+            case 48 -> request = Request.QueueAction.read(r, true);
             default -> throw new IllegalStateException("checked against the implemented keys");
         }
         r.finish();
@@ -209,6 +211,7 @@ public final class Frames {
             case 3 -> response = Response.Produce.read(r);
             case 4 -> response = Response.Fetch.read(r);
             case 5 -> response = Response.ListOffsets.read(r);
+            case 47, 48 -> response = Response.QueueAction.read(r);
             default -> throw DecodeException.malformed("unknown API key");
         }
         r.finish();

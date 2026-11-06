@@ -84,7 +84,7 @@ pub(super) struct Retiring {
 }
 
 impl Retiring {
-    fn new(term: u64) -> Self {
+    pub(super) fn new(term: u64) -> Self {
         Retiring {
             term,
             claiming: BTreeSet::new(),
@@ -103,6 +103,12 @@ impl Retiring {
     /// Messages a leader has decided to retire and must not deliver.
     pub(super) fn claiming(&self) -> &BTreeSet<u64> {
         &self.claiming
+    }
+
+    /// Marks messages as decided on, so they are not delivered until the
+    /// write that settles them is (a purge, a requeue).
+    pub(super) fn hold(&mut self, offsets: &[u64]) {
+        self.claiming.extend(offsets.iter().copied());
     }
 
     /// The leader saw an expired message on its way out: look for more soon.
@@ -136,7 +142,7 @@ pub(crate) struct ForwardJob {
 }
 
 /// Merges sorted offsets into ranges.
-fn ranges(offsets: &[u64]) -> Vec<(u64, u64)> {
+pub(super) fn ranges(offsets: &[u64]) -> Vec<(u64, u64)> {
     let mut out: Vec<(u64, u64)> = Vec::new();
     for &o in offsets {
         match out.last_mut() {

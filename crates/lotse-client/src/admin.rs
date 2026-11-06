@@ -163,6 +163,57 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.delete_with(name, true).await
     }
 
+    /// Settles every message of `queue` that is ready now: not held by a
+    /// consumer, not in an open transaction (ADR 0064). Messages produced
+    /// while it runs are left alone. Returns how many were purged. Needs the
+    /// tenant-admin role.
+    pub async fn purge(&self, queue: &str) -> Result<u64, ClientError> {
+        self.queue_action(queue, true).await
+    }
+
+    /// Moves every ready message of the dead-letter queue `queue` back to
+    /// the queue its dead-letter headers name, once each across failovers
+    /// (ADR 0064). Messages without such headers, or whose queue is gone,
+    /// stay. Returns how many were moved. Needs the tenant-admin role.
+    pub async fn requeue(&self, queue: &str) -> Result<u64, ClientError> {
+        self.queue_action(queue, false).await
+    }
+
+    async fn queue_action(&self, queue: &str, purge: bool) -> Result<u64, ClientError> {
+        let mut total = 0;
+        let mut up_to = 0;
+        loop {
+            let (count, bound, more) = self.retrying(|| self.queue_action_once(queue, purge, up_to)).await?;
+            total += count;
+            up_to = bound;
+            if !more {
+                return Ok(total);
+            }
+        }
+    }
+
+    async fn queue_action_once(&self, queue: &str, purge: bool, up_to: u64) -> Result<(u64, u64, bool), Attempt> {
+        let (route, addr) = self.route(queue, 0).await?;
+        let req = lotse_proto::QueueActionRequest { queue_id: route.resource_id, up_to };
+        let req = if purge { Request::PurgeQueue(req) } else { Request::Requeue(req) };
+        match self.call(&addr, &req).await {
+            Ok(Response::QueueAction(r)) => match r.error {
+                ErrorCode::NONE => Ok((r.count, r.up_to, r.more)),
+                code if code.retriable() => {
+                    self.redirect(queue, 0, r.leader_hint);
+                    // Acting again is harmless: what was done is settled.
+                    Err(Attempt::RetryMaybeDone(code.to_string()))
+                }
+                code => Err(Attempt::Fail(ClientError::Broker { code, message: r.error_msg })),
+            },
+            Ok(other) => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) => {
+                self.forget(queue, 0);
+                Err(e.into())
+            }
+        }
+    }
+
     async fn delete_with(&self, name: &str, if_empty: bool) -> Result<u64, ClientError> {
         let resource_id = self.resource_id(name).await?;
         let req = Request::DeleteResource(DeleteResourceRequest { resource_id, if_empty });

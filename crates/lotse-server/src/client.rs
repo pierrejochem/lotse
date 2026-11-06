@@ -61,6 +61,7 @@ use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, Stat
 use crate::signal::{Signal, race};
 use crate::wire::GroupId;
 
+mod actions;
 mod admin;
 mod coord;
 mod empty;
@@ -435,6 +436,8 @@ impl Clients {
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,
             Request::CheckEmpty(req) => self.check_empty(&outbox, id, req, view, groups).await?,
+            Request::PurgeQueue(req) => self.queue_action(outbox, id, req, actions::Kind::Purge, view, groups).await?,
+            Request::Requeue(req) => self.queue_action(outbox, id, req, actions::Kind::Requeue, view, groups).await?,
             Request::Fetch(f) => {
                 let deadline = view.now + Duration::from_millis(u64::from(f.max_wait_ms));
                 let pending = PendingFetch { outbox, correlation_id: id, deadline, request: f };

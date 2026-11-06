@@ -218,6 +218,8 @@ impl Access {
             Request::DeclareExchange(r) => self.create(p, &r.tenant, &r.name),
             Request::Bind(r) | Request::Unbind(r) => on(Admin, &mut [r.exchange_id, r.queue_id].into_iter()),
             Request::DeleteResource(r) => on(Admin, &mut std::iter::once(r.resource_id)),
+            // Destructive or moving: the tenant's admins (ADR 0064).
+            Request::PurgeQueue(r) | Request::Requeue(r) => on(Admin, &mut std::iter::once(r.queue_id)),
             Request::AlterConfigs(r) => on(Admin, &mut std::iter::once(r.resource_id)),
             Request::DescribeConfigs(r) => on(Describe, &mut r.resource_ids.iter().copied()),
             Request::DescribeMetrics(_) | Request::DescribeTenants(_) => Ok(()),

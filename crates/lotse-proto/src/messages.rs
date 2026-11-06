@@ -3052,6 +3052,71 @@ impl DeadLetterRequest {
 /// A partition's leader asks the transaction coordinator, before it takes a
 /// producer's first transactional batch of an epoch, whether that
 /// transaction is open and holds the partition (internal, from a node).
+/// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
+/// messages, served by the queue's leader. Each request acts on at most a
+/// few thousand messages below `up_to`; the answer says whether more are
+/// left, and the client sends the same request with the answer's `up_to`
+/// until none are, so that messages produced meanwhile are left alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueActionRequest {
+    /// The queue; for `Requeue`, a dead-letter queue.
+    pub queue_id: u64,
+    /// Act only below this offset; 0: below the queue's end as the leader
+    /// sees it now.
+    pub up_to: u64,
+}
+
+impl QueueActionRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.queue_id);
+        w.u64(self.up_to);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = QueueActionRequest { queue_id: r.u64()?, up_to: r.u64()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// The answer to a [`QueueActionRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueActionResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Why, for a refusal.
+    pub error_msg: Option<String>,
+    /// Messages purged or requeued by this request, once written.
+    pub count: u64,
+    /// The bound it acted below; send it again to go on.
+    pub up_to: u64,
+    /// Whether ready messages below `up_to` are left for another request.
+    pub more: bool,
+    /// The queue's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+}
+
+impl QueueActionResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.opt_string(self.error_msg.as_deref());
+        w.u64(self.count);
+        w.u64(self.up_to);
+        w.u8(u8::from(self.more));
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(QueueActionResponse {
+            error: ErrorCode(r.u16()?),
+            error_msg: r.opt_string()?,
+            count: r.u64()?,
+            up_to: r.u64()?,
+            more: r.u8()? != 0,
+            leader_hint: get_hint(r)?,
+        })
+    }
+}
+
 /// Whether a partition holds anything (internal, [`ApiKey::CHECK_EMPTY`],
 /// ADR 0063): sent by the metadata leader to the partition's leader before a
 /// conditional delete. Answered with [`OutcomeResponse`]: `NONE` if it holds

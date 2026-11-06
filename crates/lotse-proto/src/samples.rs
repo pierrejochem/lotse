@@ -278,6 +278,8 @@ pub fn requests() -> Vec<Request> {
             member_epoch: 3,
             resources: vec![],
         }),
+        Request::PurgeQueue(QueueActionRequest { queue_id: 1_099_511_627_777, up_to: 0 }),
+        Request::Requeue(QueueActionRequest { queue_id: 1_099_511_627_778, up_to: 5_000 }),
     ]
 }
 
@@ -750,6 +752,28 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         },
                     ],
                 }],
+            }),
+        ),
+        (
+            ApiKey::PURGE_QUEUE,
+            Response::QueueAction(QueueActionResponse {
+                error: ErrorCode::NONE,
+                error_msg: None,
+                count: 4_096,
+                up_to: 9_000,
+                more: true,
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::REQUEUE,
+            Response::QueueAction(QueueActionResponse {
+                error: ErrorCode::NOT_LEADER,
+                error_msg: Some("not the queue's leader".into()),
+                count: 0,
+                up_to: 0,
+                more: false,
+                leader_hint: Some(LeaderHint { leader: 2, term: 4 }),
             }),
         ),
     ]

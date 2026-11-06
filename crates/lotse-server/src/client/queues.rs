@@ -108,6 +108,32 @@ pub(super) struct QueueWrite {
     /// Messages it claims for retiring, and those it notes as forwarded:
     /// no longer in flight once it is decided.
     marks: retire::Marks,
+    /// For a purge or requeue: what to answer once it is decided.
+    action: Option<Action>,
+}
+
+/// What a purge or requeue answers once its batch is decided (ADR 0064).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Action {
+    pub(super) count: u64,
+    pub(super) up_to: u64,
+    pub(super) more: bool,
+}
+
+/// Answers a purge or requeue.
+pub(super) fn answer_action(outbox: &Outbox, id: u32, error: ErrorCode, action: Action, hint: Option<LeaderHint>) {
+    let ok = error == ErrorCode::NONE;
+    outbox.push(
+        id,
+        &Response::QueueAction(lotse_proto::QueueActionResponse {
+            error,
+            error_msg: None,
+            count: if ok { action.count } else { 0 },
+            up_to: action.up_to,
+            more: ok && action.more,
+            leader_hint: hint,
+        }),
+    );
 }
 
 /// An ack or queue-state batch, and what follows once it is applied.
@@ -118,11 +144,21 @@ pub(super) struct QueueBatch {
     /// Messages it acknowledges, for metrics.
     pub(super) acked: u64,
     pub(super) marks: retire::Marks,
+    /// For a purge or requeue, how to answer.
+    pub(super) action: Option<Action>,
 }
 
 impl QueueBatch {
     pub(super) fn new(batch: bytes::Bytes) -> Self {
-        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default() }
+        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default(), action: None }
+    }
+}
+
+/// Answers a queue write: an outcome, or for a purge or requeue the count.
+fn reply_to(outbox: &Outbox, id: u32, error: ErrorCode, hint: Option<LeaderHint>, action: Option<Action>) {
+    match action {
+        Some(a) => answer_action(outbox, id, error, a, hint),
+        None => answer(outbox, id, error, hint),
     }
 }
 
@@ -246,7 +282,7 @@ impl Clients {
     }
 
     /// The leader replica of a queue, or the answer refusing the request.
-    fn queue_leader<'a, R: Runtime, S: StateMachine>(
+    pub(super) fn queue_leader<'a, R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
         queue_id: u64,
@@ -333,19 +369,29 @@ impl Clients {
         reply: Option<(Arc<Outbox>, u32)>,
         group: GroupId,
         replica: &mut Replica<R, S>,
-        QueueBatch { batch, release, acked, marks }: QueueBatch,
+        QueueBatch { batch, release, acked, marks, action }: QueueBatch,
         now: Instant,
     ) {
         match replica.propose_internal(batch) {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let deadline = now + WRITE_TIMEOUT;
-                self.queue_writes.push(QueueWrite { reply, deadline, group, last, term, release, acked, marks });
+                self.queue_writes.push(QueueWrite {
+                    reply,
+                    deadline,
+                    group,
+                    last,
+                    term,
+                    release,
+                    acked,
+                    marks,
+                    action,
+                });
             }
             Ok(_) => unreachable!("a queue batch is never a duplicate"),
             Err(_) => {
                 // Not the leader any more: the dispatcher goes with the term.
                 if let Some((outbox, id)) = reply {
-                    answer(&outbox, id, ErrorCode::NOT_LEADER, hint(replica.raft_ref()));
+                    reply_to(&outbox, id, ErrorCode::NOT_LEADER, hint(replica.raft_ref()), action);
                 }
             }
         }
@@ -357,7 +403,7 @@ impl Clients {
         for mut w in writes {
             let Some(replica) = groups.get(&w.group) else {
                 if let Some((outbox, id)) = w.reply.take() {
-                    answer(&outbox, id, ErrorCode::UNKNOWN_RESOURCE, None);
+                    reply_to(&outbox, id, ErrorCode::UNKNOWN_RESOURCE, None, w.action);
                 }
                 continue;
             };
@@ -373,7 +419,7 @@ impl Clients {
                     }
                     if let Some((outbox, id)) = w.reply.take() {
                         let h = if error == ErrorCode::NOT_LEADER { hint(replica.raft_ref()) } else { None };
-                        answer(&outbox, id, error, h);
+                        reply_to(&outbox, id, error, h, w.action);
                     }
                     // Released only into the term that took them back.
                     if let Some(s) = self.queues.get_mut(&w.group).filter(|s| s.term == w.term) {
@@ -387,7 +433,7 @@ impl Clients {
                     if now >= w.deadline
                         && let Some((outbox, id)) = w.reply.take()
                     {
-                        answer(&outbox, id, ErrorCode::REQUEST_TIMED_OUT, None);
+                        reply_to(&outbox, id, ErrorCode::REQUEST_TIMED_OUT, None, w.action);
                     }
                     self.queue_writes.push(w);
                 }

@@ -396,6 +396,30 @@ public sealed interface Response {
     }
 
     /**
+     * The answer to {@code PurgeQueue} and {@code Requeue} (ADR 0064).
+     *
+     * @param error the outcome
+     * @param errorMsg why, for a refusal, or {@code null}
+     * @param count messages purged or requeued by this request, a {@code u64}
+     * @param upTo the bound it acted below, a {@code u64}; send it again to go on
+     * @param more whether ready messages below {@code upTo} are left
+     * @param leaderHint the queue's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     */
+    record QueueAction(ErrorCode error, String errorMsg, long count, long upTo, boolean more, LeaderHint leaderHint)
+            implements Response {
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code()).optString(errorMsg).u64(count).u64(upTo).bool(more);
+            Messages.putHint(w, leaderHint);
+        }
+
+        static QueueAction read(Reader r) {
+            return new QueueAction(
+                    new ErrorCode(r.u16()), r.optString(), r.u64(), r.u64(), r.bool(), Messages.getHint(r));
+        }
+    }
+
+    /**
      * The settings asked for. The leader hint sits <em>before</em> the resources and there is no trailing block
      * of tagged fields.
      *

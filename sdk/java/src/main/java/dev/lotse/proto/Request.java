@@ -919,7 +919,7 @@ public sealed interface Request {
      * Deletes a stream, queue or exchange created at runtime (admin).
      *
      * @param resourceId the resource, a {@code u64}
-     * @param ifEmpty only if it holds no messages (not supported so far)
+     * @param ifEmpty only if it holds nothing: no unsettled message in a queue, no record in a stream (ADR 0063)
      */
     record DeleteResource(long resourceId, boolean ifEmpty) implements Request {
         @Override
@@ -934,6 +934,34 @@ public sealed interface Request {
 
         static DeleteResource read(Reader r) {
             DeleteResource x = new DeleteResource(r.u64(), r.bool());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
+     * {@code PurgeQueue} (47) or {@code Requeue} (48): an action on a queue's ready messages, served by its leader
+     * (ADR 0064). Each request acts on a bounded number of messages; send it again with the answer's {@code upTo}
+     * while the answer says {@code more}.
+     *
+     * @param requeue {@code true} for {@code Requeue}, which moves a dead-letter queue's messages back to their
+     *     source; not on the wire, it picks the key
+     * @param queueId the queue, a {@code u64}
+     * @param upTo act only below this offset, a {@code u64}; 0 for the queue's end now
+     */
+    record QueueAction(boolean requeue, long queueId, long upTo) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return requeue ? ApiKey.REQUEUE : ApiKey.PURGE_QUEUE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u64(queueId).u64(upTo).noTags();
+        }
+
+        static QueueAction read(Reader r, boolean requeue) {
+            QueueAction x = new QueueAction(requeue, r.u64(), r.u64());
             r.tags();
             return x;
         }

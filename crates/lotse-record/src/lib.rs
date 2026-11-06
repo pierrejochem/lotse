@@ -917,6 +917,9 @@ pub mod dead_letter {
         MaxDeliveries,
         /// It waited longer than the queue's message TTL.
         Expired,
+        /// An operator moved it from a dead-letter queue back to the queue
+        /// it came from (ADR 0064).
+        Requeued,
     }
 
     impl Reason {
@@ -925,6 +928,7 @@ pub mod dead_letter {
             match self {
                 Reason::MaxDeliveries => 0,
                 Reason::Expired => 1,
+                Reason::Requeued => 2,
             }
         }
 
@@ -933,6 +937,7 @@ pub mod dead_letter {
             match code {
                 0 => Some(Reason::MaxDeliveries),
                 1 => Some(Reason::Expired),
+                2 => Some(Reason::Requeued),
                 _ => None,
             }
         }
@@ -942,6 +947,7 @@ pub mod dead_letter {
             match self {
                 Reason::MaxDeliveries => "max-deliveries",
                 Reason::Expired => "expired",
+                Reason::Requeued => "requeued",
             }
         }
     }

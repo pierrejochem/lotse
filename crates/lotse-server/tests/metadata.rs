@@ -800,3 +800,138 @@ fn a_conditional_delete_takes_only_what_holds_nothing() {
         });
     });
 }
+
+fn text(m: &lotse_client::Message) -> String {
+    String::from_utf8(m.record.value.clone().unwrap().to_vec()).unwrap()
+}
+
+fn header_of(m: &lotse_client::Message, name: &[u8]) -> Option<String> {
+    let h = m.record.headers.iter().rev().find(|h| h.key[..] == *name)?;
+    Some(String::from_utf8(h.value.clone()?.to_vec()).unwrap())
+}
+
+/// The ready messages of `queue` as its leader reports them.
+async fn ready(admin: &Client<SimRuntime>, queue_id: u64) -> u64 {
+    let all = admin.node_metrics().await.unwrap();
+    all.into_iter()
+        .filter_map(|(_, m)| m.ok())
+        .flat_map(|m| m.queues)
+        .filter(|q| q.resource_id == queue_id)
+        .map(|q| q.ready)
+        .sum()
+}
+
+#[test]
+fn purge_takes_only_ready_messages_and_requeue_moves_dead_letters_back_once() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            let dlq = admin.create_queue("dlq", 3, None).await.unwrap();
+            let work = admin.create_queue_with("work", 3, &[("max.deliveries", "1")], Some("dlq")).await.unwrap();
+
+            // Five messages fail once each and go to the dead-letter queue.
+            for i in 0..5 {
+                admin.produce("work", 0, message(&format!("m{i}"))).await.unwrap();
+            }
+            {
+                let mut c = admin.subscribe("work", 10).await.unwrap();
+                let mut seen = 0;
+                while seen < 5 {
+                    let m = c.next(Duration::from_secs(5)).await.unwrap().expect("a delivery");
+                    c.nack(&m, true).await.unwrap();
+                    seen += 1;
+                }
+                c.close().await;
+            }
+            let mut waited = 0;
+            while ready(&admin, dlq).await < 5 {
+                rt.sleep(TICK * 10).await;
+                waited += 1;
+                assert!(waited < 500, "the dead letters arrive");
+            }
+
+            // Requeue: all five back in `work`, once each.
+            assert_eq!(admin.requeue("dlq").await.unwrap(), 5);
+            assert_eq!(admin.requeue("dlq").await.unwrap(), 0, "nothing left to move");
+            let mut back = BTreeSet::new();
+            {
+                let mut c = admin.subscribe("work", 10).await.unwrap();
+                while let Some(m) = c.next(Duration::from_secs(2)).await.unwrap() {
+                    assert_eq!(header_of(&m, b"x-lotse-dead-letter-reason").as_deref(), Some("requeued"));
+                    assert_eq!(header_of(&m, b"x-lotse-dead-letter-queue").as_deref(), Some("dlq"));
+                    assert!(back.insert(text(&m)), "{} came back twice", text(&m));
+                    c.ack(&m).await.unwrap();
+                }
+                c.close().await;
+            }
+            assert_eq!(back, (0..5).map(|i| format!("m{i}")).collect::<BTreeSet<_>>());
+            assert_eq!(ready(&admin, dlq).await, 0);
+            // A message that came to the dead-letter queue some other way
+            // names no origin, and one whose queue was deleted has nowhere to
+            // go: both stay.
+            admin.produce("dlq", 0, message("plain")).await.unwrap();
+            admin.create_queue_with("gone", 3, &[("max.deliveries", "1")], Some("dlq")).await.unwrap();
+            admin.produce("gone", 0, message("orphan")).await.unwrap();
+            {
+                let mut c = admin.subscribe("gone", 1).await.unwrap();
+                let m = c.next(Duration::from_secs(5)).await.unwrap().expect("a delivery");
+                c.nack(&m, true).await.unwrap();
+                c.close().await;
+            }
+            let mut waited = 0;
+            while ready(&admin, dlq).await < 2 {
+                rt.sleep(TICK * 10).await;
+                waited += 1;
+                assert!(waited < 500, "the orphan arrives");
+            }
+            admin.delete("gone").await.unwrap();
+            // Once the dead-letter queue's leader knows of the delete; before,
+            // a requeued message goes with the deleted queue (ADR 0064).
+            rt.sleep(Duration::from_secs(1)).await;
+            assert_eq!(admin.requeue("dlq").await.unwrap(), 0);
+            assert_eq!(ready(&admin, dlq).await, 2);
+
+            // Purge: what consumers hold stays theirs.
+            for i in 0..7 {
+                admin.produce("work", 0, message(&format!("p{i}"))).await.unwrap();
+            }
+            let mut c = admin.subscribe("work", 2).await.unwrap();
+            let first = c.next(Duration::from_secs(5)).await.unwrap().expect("one");
+            let purged = admin.purge("work").await.unwrap();
+            assert_eq!(ready(&admin, work).await, 0);
+            let in_flight: u64 = admin
+                .node_metrics()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|(_, m)| m.ok())
+                .flat_map(|m| m.queues)
+                .filter(|q| q.resource_id == work)
+                .map(|q| q.in_flight)
+                .sum();
+            assert!(in_flight >= 1, "the one handed out at least");
+            assert_eq!(purged + in_flight, 7, "everything not with the consumer is purged");
+            // The consumer keeps what it holds, and gets nothing else.
+            c.ack(&first).await.expect("a held message is still the consumer's to ack");
+            let mut kept = 1;
+            while let Some(m) = c.next(Duration::from_secs(1)).await.unwrap() {
+                c.ack(&m).await.unwrap();
+                kept += 1;
+            }
+            assert_eq!(kept, in_flight, "exactly what it held");
+            admin.produce("work", 0, message("after")).await.unwrap();
+            let m = c.next(Duration::from_secs(5)).await.unwrap().expect("what comes after a purge stays");
+            assert_eq!(text(&m), "after");
+            c.ack(&m).await.unwrap();
+            c.close().await;
+
+            for (_, n) in std::mem::take(&mut w.running) {
+                let (node, handle) = n.unwrap();
+                handle.stop();
+                node.join().await.unwrap();
+            }
+        });
+    });
+}

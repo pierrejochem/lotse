@@ -68,5 +68,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0061 | [Optional codecs in the Java SDK](0061-optional-codecs-in-the-java-sdk.md) | Accepted |
 | 0062 | [Transactional and group ids live in a tenant](0062-transactional-and-group-ids-live-in-a-tenant.md) | Accepted |
 | 0063 | [Conditional delete](0063-conditional-delete.md) | Accepted |
+| 0064 | [Purge and requeue](0064-purge-and-requeue.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
