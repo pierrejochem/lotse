@@ -261,17 +261,53 @@ fn nothing_rebalances_while_a_node_drains_or_when_nearly_even() {
 #[test]
 fn preferred_leaders_spread_over_the_voters() {
     let managed: Vec<(GroupId, Vec<NodeId>)> = (0..9).map(|g| (g, vec![1, 2, 3])).collect();
-    let preferred = preferred_leaders(&managed);
+    let preferred = preferred_leaders(&managed, &BTreeMap::new());
     let mut count: BTreeMap<NodeId, usize> = BTreeMap::new();
     for n in preferred.values() {
         *count.entry(*n).or_default() += 1;
     }
     assert_eq!(count, BTreeMap::from([(1, 3), (2, 3), (3, 3)]));
-    assert_eq!(preferred_leaders(&managed), preferred, "every node computes the same");
+    assert_eq!(preferred_leaders(&managed, &BTreeMap::new()), preferred, "every node computes the same");
     // Always one of the group's voters.
     let mixed = vec![(1, vec![4, 5, 6]), (2, vec![1, 5, 6])];
-    let p = preferred_leaders(&mixed);
+    let p = preferred_leaders(&mixed, &BTreeMap::new());
     assert!(mixed.iter().all(|(g, v)| v.contains(&p[g])));
+}
+
+#[test]
+fn a_pinned_group_prefers_its_pin_while_it_is_a_voter() {
+    let managed: Vec<(GroupId, Vec<NodeId>)> = (0..6).map(|g| (g, vec![1, 2, 3])).collect();
+    let free = preferred_leaders(&managed, &BTreeMap::new());
+    assert_eq!(free[&0], 1);
+    // Group 0 pinned to node 3: it prefers node 3, and the rest still spread
+    // evenly around it.
+    let pinned = preferred_leaders(&managed, &BTreeMap::from([(0, 3)]));
+    assert_eq!(pinned[&0], 3);
+    let mut count: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for n in pinned.values() {
+        *count.entry(*n).or_default() += 1;
+    }
+    assert_eq!(count, BTreeMap::from([(1, 2), (2, 2), (3, 2)]));
+    // A pin to a node that is not a voter counts for nothing.
+    assert_eq!(preferred_leaders(&managed, &BTreeMap::from([(0, 9)])), free);
+}
+
+#[test]
+fn pins_are_kept_in_the_state_and_go_with_their_group_and_node() {
+    let mut st = MetadataState::default();
+    let pin = |g, n| crate::metadata::Change::PinLeader { group: g, node: n };
+    st.apply(1, &record_payload(&pin(7, Some(2)))).unwrap();
+    st.apply(2, &record_payload(&pin(8, Some(3)))).unwrap();
+    assert_eq!(st.pins, BTreeMap::from([(7, 2), (8, 3)]));
+    let back = MetadataState::decode(&st.encode()).unwrap();
+    assert_eq!(back.pins, st.pins, "snapshots keep pins");
+    st.apply(3, &record_payload(&pin(7, None))).unwrap();
+    assert_eq!(st.pins, BTreeMap::from([(8, 3)]), "unpinned");
+    st.apply(4, &record_payload(&crate::metadata::Change::ForgetNode { id: 3 })).unwrap();
+    assert!(st.pins.is_empty(), "a node that left takes its pins");
+    // A snapshot without pins is as it was before pins.
+    let empty = MetadataState::default().encode();
+    assert_eq!(MetadataState::decode(&empty).unwrap(), MetadataState::default());
 }
 
 #[test]

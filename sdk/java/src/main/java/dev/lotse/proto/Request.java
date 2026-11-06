@@ -940,6 +940,32 @@ public sealed interface Request {
     }
 
     /**
+     * Pins the leader of a partition of a stream or queue created at runtime to one of its voters, or unpins it
+     * (cluster admin, ADR 0065). Answered with {@link Response.Admin}.
+     *
+     * @param resourceId the stream or queue, a {@code u64}
+     * @param partition the partition, a {@code u32} (0 for a queue)
+     * @param nodeId the node to lead it, a {@code u64}; 0 unpins it
+     */
+    record MoveLeader(long resourceId, long partition, long nodeId) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.MOVE_LEADER;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u64(resourceId).u32(partition).u64(nodeId).noTags();
+        }
+
+        static MoveLeader read(Reader r) {
+            MoveLeader x = new MoveLeader(r.u64(), r.u32(), r.u64());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code PurgeQueue} (47) or {@code Requeue} (48): an action on a queue's ready messages, served by its leader
      * (ADR 0064). Each request acts on a bounded number of messages; send it again with the answer's {@code upTo}
      * while the answer says {@code more}.

@@ -230,7 +230,8 @@ impl Access {
             | Request::AlterRoleBindings(_)
             | Request::DescribeRoleBindings(_)
             | Request::AddNode(_)
-            | Request::RemoveNode(_) => admin(),
+            | Request::RemoveNode(_)
+            | Request::MoveLeader(_) => admin(),
             Request::DescribeNodes(_) => {
                 if self.sees_cluster(p) {
                     Ok(())

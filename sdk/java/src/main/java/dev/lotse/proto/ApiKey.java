@@ -102,6 +102,8 @@ public record ApiKey(int id) {
     public static final ApiKey PURGE_QUEUE = new ApiKey(47);
     /** Moves a dead-letter queue's ready messages back to where they came from (tenant admin, ADR 0064). */
     public static final ApiKey REQUEUE = new ApiKey(48);
+    /** Pins a partition's leader to one of its voters, or unpins it (cluster admin, ADR 0065). */
+    public static final ApiKey MOVE_LEADER = new ApiKey(49);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
     public static final ApiKey WRITE_TXN_MARKERS = new ApiKey(1000);
 
@@ -127,7 +129,7 @@ public record ApiKey(int id) {
             range(SASL_AUTHENTICATE), range(ALTER_USER), range(DESCRIBE_USERS), range(CREATE_TENANT),
             range(DELETE_TENANT), range(DESCRIBE_TENANTS), range(ALTER_ROLE_BINDINGS),
             range(DESCRIBE_ROLE_BINDINGS), range(WHO_AM_I), range(ADD_NODE), range(REMOVE_NODE),
-            range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE));
+            range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

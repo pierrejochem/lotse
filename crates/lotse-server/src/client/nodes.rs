@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use lotse_proto::{
-    AddNodeRequest, DescribeNodesResponse, ErrorCode, NodeEntry, RemoveNodeRequest, Response, SettleVotersRequest,
-    node_state,
+    AddNodeRequest, DescribeNodesResponse, ErrorCode, MoveLeaderRequest, NodeEntry, RemoveNodeRequest, Response,
+    SettleVotersRequest, node_state,
 };
 use lotse_raft::NodeId;
 use lotse_rt::Runtime;
@@ -123,6 +123,45 @@ impl Clients {
             return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
         }
         let change = Change::DrainNode { id: req.node_id };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `MoveLeader` (ADR 0065): pins a partition's preferred leader to one
+    /// of its voters, or unpins it. The group's leader hands over in its next
+    /// membership pass, as it does for any preferred voter.
+    pub(super) fn move_leader<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: MoveLeaderRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let state = replica.metadata();
+        let group = match (state.streams.get(&req.resource_id), state.queues.get(&req.resource_id)) {
+            (Some(s), _) => s.partitions.get(req.partition as usize).map(|(g, _)| *g),
+            (None, Some(q)) => (req.partition == 0).then_some(q.group),
+            (None, None) => {
+                let why = "only partitions of streams and queues created at runtime have movable leaders";
+                return outbox.push(id, &admin_response(ErrorCode::UNKNOWN_RESOURCE, Some(why), None));
+            }
+        };
+        let Some(group) = group else {
+            return outbox.push(id, &admin_response(ErrorCode::UNKNOWN_RESOURCE, Some("no such partition"), None));
+        };
+        let node = (req.node_id != 0).then_some(req.node_id);
+        if let Some(n) = node {
+            let voters = state.voters_of(group).unwrap_or_default();
+            if !voters.contains(&n) {
+                let why = format!("node {n} is not a voter of that partition (voters: {voters:?})");
+                return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+            }
+        }
+        let change = Change::PinLeader { group, node };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

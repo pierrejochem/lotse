@@ -204,6 +204,8 @@ fn every_request_needs_its_role() {
             assert!(refused(r), "a consumer does not purge: {shown}");
             assert!(refused(c.requeue("orders-q").await), "nor requeue");
             assert_eq!(ta.purge("orders-q").await.expect("the tenant admin purges"), 0);
+            // Moving leaders is the cluster's admins' (ADR 0065).
+            assert!(refused(ta.move_leader("orders-eu", 0, Some(1)).await), "not a tenant admin's");
             let v = as_user(&rt, "v", "shop");
             let mut seen: Vec<String> = v.metadata(&[]).await.unwrap().resources.into_iter().map(|r| r.name).collect();
             seen.sort();

@@ -280,6 +280,8 @@ pub fn requests() -> Vec<Request> {
         }),
         Request::PurgeQueue(QueueActionRequest { queue_id: 1_099_511_627_777, up_to: 0 }),
         Request::Requeue(QueueActionRequest { queue_id: 1_099_511_627_778, up_to: 5_000 }),
+        Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 3 }),
+        Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 0 }),
     ]
 }
 

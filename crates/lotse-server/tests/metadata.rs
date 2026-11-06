@@ -935,3 +935,75 @@ fn purge_takes_only_ready_messages_and_requeue_moves_dead_letters_back_once() {
         });
     });
 }
+
+/// The leader `admin` sees for partition 0 of `name`, and its voters.
+async fn leader_of(admin: &Client<SimRuntime>, name: &str) -> (u32, Vec<u32>) {
+    // A node that is down or catching up may not answer, or not know yet.
+    let Ok(m) = admin.metadata(&[name]).await else { return (0, Vec::new()) };
+    match m.resources.iter().find(|r| r.name == name).and_then(|r| r.partitions.first()) {
+        Some(p) => (p.leader, p.voters.clone()),
+        None => (0, Vec::new()),
+    }
+}
+
+/// Waits until partition 0 of `name` is led by `node`, for up to a minute.
+async fn led_by(rt: &SimRuntime, admin: &Client<SimRuntime>, name: &str, node: u32) -> bool {
+    for _ in 0..600 {
+        if leader_of(admin, name).await.0 == node {
+            return true;
+        }
+        rt.sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+#[test]
+fn a_pinned_leader_stays_where_it_is_put() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("s", 1, 3).await.unwrap();
+            admin.produce("s", 0, message("x")).await.unwrap();
+            // Wherever the automatic spreading puts it, settled.
+            rt.sleep(Duration::from_secs(30)).await;
+            let (mut before, mut voters) = leader_of(&admin, "s").await;
+            while before == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (before, voters) = leader_of(&admin, "s").await;
+            }
+            assert_eq!(voters.len(), 3);
+            let to = *voters.iter().find(|v| **v != before).unwrap();
+
+            admin.move_leader("s", 0, Some(u64::from(to))).await.unwrap();
+            assert!(led_by(&rt, &admin, "s", to).await, "the leader moves to node {to}");
+            rt.sleep(Duration::from_secs(60)).await;
+            assert_eq!(leader_of(&admin, "s").await.0, to, "and stays: the spreading leaves a pin alone");
+
+            // The pin outlives a failover: back on node `to` once it is up.
+            w.crash(u64::from(to), false).await;
+            rt.sleep(Duration::from_secs(5)).await;
+            assert_ne!(leader_of(&admin, "s").await.0, to);
+            w.start(u64::from(to)).await;
+            assert!(led_by(&rt, &admin, "s", to).await, "back where it is pinned");
+
+            // Only a voter, only a cluster's partition.
+            let not_voter = admin.move_leader("s", 0, Some(9)).await;
+            assert!(
+                matches!(not_voter, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. })),
+                "{not_voter:?}"
+            );
+            let no_partition = admin.move_leader("s", 4, Some(u64::from(to))).await;
+            assert!(matches!(no_partition, Err(ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, .. })));
+            admin.move_leader("s", 0, None).await.expect("unpinned");
+
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}

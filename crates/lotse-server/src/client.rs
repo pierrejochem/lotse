@@ -429,6 +429,7 @@ impl Clients {
             Request::DescribeRoleBindings(_) => self.describe_role_bindings(&outbox, id, view),
             Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
+            Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),

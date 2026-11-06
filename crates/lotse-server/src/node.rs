@@ -207,8 +207,10 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     let state = &known.state;
     let core = core_groups(cfg);
     let everyone: BTreeSet<NodeId> = known.nodes.keys().copied().collect();
-    let preferred =
-        crate::membership::preferred_leaders(&crate::client::managed_groups(state, &core, configured_voters));
+    let preferred = crate::membership::preferred_leaders(
+        &crate::client::managed_groups(state, &core, configured_voters),
+        &state.pins,
+    );
     for (&g, replica) in groups.iter_mut() {
         let raft = replica.raft();
         if raft.role() != Role::Leader {

@@ -3052,6 +3052,35 @@ impl DeadLetterRequest {
 /// A partition's leader asks the transaction coordinator, before it takes a
 /// producer's first transactional batch of an epoch, whether that
 /// transaction is open and holds the partition (internal, from a node).
+/// Pins the leader of a partition of a stream or queue created at runtime to
+/// one of its voters, or unpins it (cluster admin, ADR 0065). The pin is
+/// stored in the metadata group: the group's leader hands over to the node
+/// and the automatic spreading of leaders (ADR 0050) leaves it there while
+/// the node is a voter. Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveLeaderRequest {
+    /// The stream or queue.
+    pub resource_id: u64,
+    /// The partition (0 for a queue).
+    pub partition: u32,
+    /// The node to lead it; 0 unpins it, so leaders spread by themselves.
+    pub node_id: u64,
+}
+
+impl MoveLeaderRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        w.u32(self.partition);
+        w.u64(self.node_id);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = MoveLeaderRequest { resource_id: r.u64()?, partition: r.u32()?, node_id: r.u64()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

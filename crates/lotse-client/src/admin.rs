@@ -357,6 +357,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::RemoveNode(RemoveNodeRequest { node_id })).await
     }
 
+    /// Pins the leader of `partition` of the stream or queue `name` to node
+    /// `node`, one of its voters, or unpins it with `None` so that leaders
+    /// spread by themselves again (ADR 0065). The group's leader hands over
+    /// shortly after; the pin stays until it is removed or the node leaves.
+    /// Needs the cluster-admin role.
+    pub async fn move_leader(&self, name: &str, partition: u32, node: Option<u64>) -> Result<(), ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = lotse_proto::MoveLeaderRequest { resource_id, partition, node_id: node.unwrap_or(0) };
+        self.admin_change(Request::MoveLeader(req)).await
+    }
+
     /// The cluster's nodes, as the metadata group knows them.
     pub async fn describe_nodes(&self) -> Result<Vec<NodeEntry>, ClientError> {
         let req = Request::DescribeNodes(DescribeNodesRequest);

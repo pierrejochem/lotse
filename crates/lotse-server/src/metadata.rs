@@ -86,6 +86,9 @@ pub(crate) enum Change {
     /// A group's leader reports that the group has these voters (and no
     /// one else) in its Raft membership.
     Settled { group: GroupId, voters: Vec<NodeId> },
+    /// An operator pins a group's preferred leader to a node, or unpins it
+    /// with `None` (ADR 0065).
+    PinLeader { group: GroupId, node: Option<NodeId> },
 }
 
 /// A node added at runtime: where nodes and clients reach it.
@@ -261,6 +264,9 @@ pub(crate) struct MetadataState {
     /// leader whose view of the metadata group lags never undoes a newer
     /// change (ADR 0048).
     pub(crate) target_at: BTreeMap<GroupId, u64>,
+    /// Groups whose preferred leader an operator chose (ADR 0065); it
+    /// counts only while the node is one of the group's voters.
+    pub(crate) pins: BTreeMap<GroupId, NodeId>,
 }
 
 const VERSION: u8 = 4;
@@ -420,11 +426,15 @@ impl MetadataState {
                     return Ok(());
                 }
                 let groups = if let Some(s) = self.streams.remove(&resource_id) {
+                    for (g, _) in &s.partitions {
+                        self.pins.remove(g);
+                    }
                     s.partitions.len() as u32
-                } else if self.queues.remove(&resource_id).is_some() {
+                } else if let Some(q) = self.queues.remove(&resource_id) {
                     for list in self.bindings.values_mut() {
                         list.retain(|b| b.queue_id != resource_id);
                     }
+                    self.pins.remove(&q.group);
                     1
                 } else if self.exchanges.remove(&resource_id).is_some() {
                     0
@@ -497,6 +507,7 @@ impl MetadataState {
                 self.nodes.remove(&id);
                 self.draining.remove(&id);
                 self.gone.insert(id);
+                self.pins.retain(|_, n| *n != id);
             }
             Change::SetVoters { group, mut voters } => {
                 voters.sort_unstable();
@@ -520,6 +531,14 @@ impl MetadataState {
                 voters.sort_unstable();
                 self.settled.insert(group, voters);
             }
+            Change::PinLeader { group, node } => match node {
+                Some(n) => {
+                    self.pins.insert(group, n);
+                }
+                None => {
+                    self.pins.remove(&group);
+                }
+            },
         }
         Ok(())
     }
@@ -621,6 +640,15 @@ impl MetadataState {
             b.put_u64_le(*g);
             b.put_u64_le(*at);
         }
+        // Written only when there are some, so a snapshot without pins reads
+        // on a node from before them (ADR 0065).
+        if !self.pins.is_empty() {
+            b.put_u32_le(self.pins.len() as u32);
+            for (g, n) in &self.pins {
+                b.put_u64_le(*g);
+                b.put_u64_le(*n);
+            }
+        }
         b.freeze()
     }
 
@@ -712,6 +740,13 @@ impl MetadataState {
             need(b, 16)?;
             let g = b.get_u64_le();
             s.target_at.insert(g, b.get_u64_le());
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 16)?;
+                let g = b.get_u64_le();
+                s.pins.insert(g, b.get_u64_le());
+            }
         }
         if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
@@ -819,6 +854,12 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(16);
             b.put_u64_le(*group);
             put_nodes(&mut b, voters);
+        }
+        Change::PinLeader { group, node } => {
+            b.put_u8(17);
+            b.put_u64_le(*group);
+            b.put_u8(u8::from(node.is_some()));
+            b.put_u64_le(node.unwrap_or(0));
         }
         Change::SetUser { user, credential } => {
             b.put_u8(7);
@@ -935,6 +976,13 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let group = b.get_u64_le();
             let voters = get_nodes(b)?;
             if tag == 15 { Change::SetVoters { group, voters } } else { Change::Settled { group, voters } }
+        }
+        17 => {
+            need(b, 17)?;
+            let group = b.get_u64_le();
+            let pinned = b.get_u8() != 0;
+            let node = b.get_u64_le();
+            Change::PinLeader { group, node: pinned.then_some(node) }
         }
         _ => return Err("unknown metadata change".into()),
     };

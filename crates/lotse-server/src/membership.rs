@@ -132,12 +132,26 @@ pub(crate) fn uneven(hi: usize, lo: usize) -> bool {
 /// that every node is preferred for as few groups as can be, the lowest id
 /// among equals. Every node computes the same from the same metadata state,
 /// so no node needs to know who leads what elsewhere.
-pub(crate) fn preferred_leaders(managed: &[(GroupId, Vec<NodeId>)]) -> BTreeMap<GroupId, NodeId> {
+///
+/// A group an operator pinned to one of its voters prefers that voter
+/// (ADR 0065); pinned groups count first, so the others spread around them.
+/// A pin to a node that is not a voter of the group counts for nothing.
+pub(crate) fn preferred_leaders(
+    managed: &[(GroupId, Vec<NodeId>)],
+    pins: &BTreeMap<GroupId, NodeId>,
+) -> BTreeMap<GroupId, NodeId> {
     let mut sorted: Vec<&(GroupId, Vec<NodeId>)> = managed.iter().collect();
     sorted.sort_by_key(|(g, _)| *g);
     let mut count: BTreeMap<NodeId, usize> = BTreeMap::new();
     let mut out = BTreeMap::new();
-    for (g, voters) in sorted {
+    for (g, voters) in &sorted {
+        if let Some(&n) = pins.get(g).filter(|n| voters.contains(n)) {
+            *count.entry(n).or_default() += 1;
+            out.insert(*g, n);
+        }
+    }
+    let pinned: BTreeSet<GroupId> = out.keys().copied().collect();
+    for (g, voters) in sorted.into_iter().filter(|(g, _)| !pinned.contains(g)) {
         let Some(&n) = voters.iter().min_by_key(|n| (count.get(n).copied().unwrap_or(0), **n)) else { continue };
         *count.entry(n).or_default() += 1;
         out.insert(*g, n);
