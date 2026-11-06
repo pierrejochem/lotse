@@ -282,3 +282,31 @@ fn a_key_that_is_not_the_certificates_is_refused() {
     let (a, b) = (ca.node(1, &["127.0.0.1"]), ca.node(1, &["127.0.0.1"]));
     assert!(TlsConfig::from_pem(ca.ca_pem().as_bytes(), Some((a.cert_pem.as_bytes(), b.key_pem.as_bytes()))).is_err());
 }
+
+#[tokio::test]
+async fn a_connection_ends_when_the_other_ends_certificate_expires() {
+    let ca = DevCa::new();
+    let n1 = ca.node(1, &["127.0.0.1"]);
+    // Valid for a few seconds more; certificates count whole seconds.
+    #[allow(clippy::disallowed_methods)] // a real certificate, on the real clock
+    let until = std::time::SystemTime::now() + Duration::from_secs(3);
+    let (brief, lasting) = (ca.principal_until("brief", until), ca.principal("lasting"));
+    let server = rt().with_tls(tls_with_crl(&ca, &n1, &[]));
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let addr = l.local_addr();
+    let a = client(&ca, &brief).connect(&addr, Link::Client).await.unwrap();
+    let sa = accepted(&l).await.unwrap();
+    let b = client(&ca, &lasting).connect(&addr, Link::Client).await.unwrap();
+    let sb = accepted(&l).await.unwrap();
+    assert!(talks(&a, &sa).await, "valid now, it talks");
+
+    // A recv already waiting ends at the expiry, not later.
+    let ended = tokio::time::timeout(Duration::from_secs(8), sa.recv()).await.expect("ends at the expiry");
+    let e = ended.expect_err("the connection ends");
+    assert!(e.to_string().contains("expired"), "{e}");
+    assert!(sa.send(Bytes::from_static(b"x")).await.is_err(), "and every call after");
+    assert!(talks(&b, &sb).await && talks(&sb, &b).await, "a valid certificate's connection goes on");
+    if let Ok(conn) = client(&ca, &brief).connect(&addr, Link::Client).await {
+        assert!(refused(&conn).await, "an expired certificate cannot come back");
+    }
+}

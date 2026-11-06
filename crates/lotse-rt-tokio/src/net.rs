@@ -40,8 +40,23 @@ pub(crate) struct Shared {
 #[derive(Debug)]
 struct Watch {
     cert: Vec<u8>,
+    /// When the certificate stops being valid: the connection ends then
+    /// (ADR 0068). `None` if its end does not fit a clock.
+    expires: Option<tokio::time::Instant>,
     closed: AtomicBool,
     wake: Notify,
+}
+
+/// The moment `cert` (DER) expires, on Tokio's clock.
+fn expiry(cert: &[u8]) -> Option<tokio::time::Instant> {
+    let (_, c) = x509_parser::parse_x509_certificate(cert).ok()?;
+    let not_after = u64::try_from(c.validity().not_after.timestamp()).ok()?;
+    // This crate is the one that reads the real clock (rule 1).
+    #[allow(clippy::disallowed_methods)]
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // A second past the last second it is valid in.
+    let left = Duration::from_secs(not_after.saturating_sub(now) + 1);
+    tokio::time::Instant::now().checked_add(left)
 }
 
 impl Shared {
@@ -54,10 +69,15 @@ impl Shared {
     }
 
     /// Remembers a connection whose other end showed `cert`, so that a later
-    /// revocation can end it.
+    /// revocation, or the certificate's expiry, can end it.
     fn watch(&self, cert: Option<&rustls::pki_types::CertificateDer<'_>>) -> Option<Arc<Watch>> {
         let cert = cert?;
-        let w = Arc::new(Watch { cert: cert.to_vec(), closed: AtomicBool::new(false), wake: Notify::new() });
+        let w = Arc::new(Watch {
+            cert: cert.to_vec(),
+            expires: expiry(cert),
+            closed: AtomicBool::new(false),
+            wake: Notify::new(),
+        });
         let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
         conns.retain(|c| c.strong_count() > 0);
         conns.push(Arc::downgrade(&w));
@@ -153,20 +173,32 @@ impl TokioConn {
         TokioConn { rd: tokio::sync::Mutex::new(Box::new(rd)), wr: tokio::sync::Mutex::new(Box::new(wr)), peer, watch }
     }
 
-    /// Runs `io` unless or until the connection is revoked; a revoked
+    /// Runs `io` unless or until the connection ends: its other end's
+    /// certificate is revoked (ADR 0060) or expires (ADR 0068). An ended
     /// connection fails every call from then on.
     async fn unless_revoked<T>(&self, io: impl Future<Output = io::Result<T>>) -> io::Result<T> {
         let Some(w) = &self.watch else { return io.await };
         let revoked = || io::Error::new(ErrorKind::ConnectionAborted, "the other end's certificate was revoked");
+        let expired = || io::Error::new(ErrorKind::ConnectionAborted, "the other end's certificate expired");
         let woken = w.wake.notified();
         // Checked after `notified` exists, so a revocation in between is not
         // missed.
         if w.closed.load(Ordering::SeqCst) {
             return Err(revoked());
         }
+        let Some(at) = w.expires else {
+            return tokio::select! {
+                r = io => r,
+                () = woken => Err(revoked()),
+            };
+        };
+        if at <= tokio::time::Instant::now() {
+            return Err(expired());
+        }
         tokio::select! {
             r = io => r,
             () = woken => Err(revoked()),
+            () = tokio::time::sleep_until(at) => Err(expired()),
         }
     }
 }

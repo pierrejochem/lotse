@@ -103,7 +103,8 @@ impl TokioRuntime {
     /// Replaces the TLS material of this runtime and all its clones (ADR
     /// 0060): every handshake from now on uses `tls`, and every open
     /// connection whose other end showed a certificate `tls` revokes is
-    /// ended. Returns how many were. Does nothing to a runtime without TLS.
+    /// ended. (A connection also ends by itself when that certificate
+    /// expires, ADR 0068.) Returns how many were. Does nothing to a runtime without TLS.
     pub fn reload_tls(&self, tls: TlsConfig) -> usize {
         match &self.security {
             net::Security::Tls(shared) => shared.reload(tls),

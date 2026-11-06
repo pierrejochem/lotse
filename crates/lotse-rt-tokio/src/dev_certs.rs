@@ -61,6 +61,12 @@ impl DevCa {
         self.issue(principal, Vec::new(), false)
     }
 
+    /// A client certificate for `principal` that stops being valid at
+    /// `not_after`, for tests of expiry.
+    pub fn principal_until(&self, principal: &str, not_after: std::time::SystemTime) -> Issued {
+        self.issue_until(principal, Vec::new(), false, Some(not_after.into()))
+    }
+
     /// A certificate with any subject alternative names, for tests of what
     /// a node must refuse.
     pub fn custom(&self, common_name: &str, uris: &[&str], hosts: &[&str]) -> Issued {
@@ -115,7 +121,21 @@ impl DevCa {
     }
 
     fn issue(&self, common_name: &str, sans: Vec<SanType>, server: bool) -> Issued {
+        self.issue_until(common_name, sans, server, None)
+    }
+
+    fn issue_until(
+        &self,
+        common_name: &str,
+        sans: Vec<SanType>,
+        server: bool,
+        not_after: Option<time::OffsetDateTime>,
+    ) -> Issued {
         let mut params = CertificateParams::default();
+        if let Some(t) = not_after {
+            params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
+            params.not_after = t;
+        }
         params.distinguished_name.push(DnType::CommonName, common_name);
         params.subject_alt_names = sans;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];

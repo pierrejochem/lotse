@@ -21,7 +21,7 @@ A node read its CA, certificate and key once at start, and nothing was checked a
 - Copying the list and the certificates to the nodes is the operator's job, as before. A node that has not received the new list still lets the revoked certificate in.
 - A revoked node certificate cuts that node off: every other node refuses its links, both ways.
 - The list's next-update time (ten years ahead) is not enforced, so an old list never stops a node. A list that is replaced only sometimes still works.
-- An open connection whose certificate expires stays open until it closes; only new handshakes check validity. Clients that sign in with SCRAM or a token and show no certificate are not affected by the list; their sessions end as ADR 0038 says.
+- An open connection whose certificate expires stays open until it closes; only new handshakes check validity. (Superseded in part by [ADR 0068](0068-connections-end-when-their-certificate-expires.md): such a connection now ends at the expiry.) Clients that sign in with SCRAM or a token and show no certificate are not affected by the list; their sessions end as ADR 0038 says.
 - A CA rotation needs a bundle with both CAs for a while, which the CA file can already hold.
 - Tests:
   - On real sockets: a revoked client and a revoked server are refused in the handshake. A reload, also through a clone of the runtime, ends exactly the revoked connections, including a receive already waiting, and the revoked certificate cannot come back. A reload reaches the next handshake. A list that does not parse and a key that is not its certificate's are refused.
