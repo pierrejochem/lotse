@@ -210,6 +210,12 @@ impl TxnState {
         self.open.values().map(|o| o.first - 1).fold(applied, u64::min)
     }
 
+    /// Whether transactional data of `producer_id` at `offset` belongs to
+    /// an aborted transaction.
+    pub(crate) fn aborted_at(&self, producer_id: u64, offset: u64) -> bool {
+        self.aborted.iter().any(|a| a.producer_id == producer_id && a.first - 1 <= offset && offset < a.last - 1)
+    }
+
     /// Aborted transactions with data in the offsets `from..to`, as
     /// `(producer, first offset)`.
     pub(crate) fn aborted_between(&self, from: u64, to: u64) -> Vec<(u64, u64)> {

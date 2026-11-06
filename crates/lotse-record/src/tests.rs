@@ -61,6 +61,31 @@ fn truncated_batches_are_reported_as_truncated() {
 }
 
 #[test]
+fn a_batch_that_is_not_compacted_keeps_the_strict_rules() {
+    // The same bytes as a compacted batch with a record gone, but without the
+    // compacted bit: refused, as a producer may not send gaps.
+    let bytes = build(BatchOptions::default(), &[(1, Some(b"k".to_vec()), None, vec![]), (2, None, None, vec![])]);
+    let (batch, _) = Batch::parse(&bytes).unwrap();
+    let c = compact(&batch, |r| r.offset == 1).unwrap().unwrap();
+    let mut plain = BytesMut::from(&c[..]);
+    let bits = get_u16(&plain, 25) & !(1 << 8);
+    put_u16(&mut plain, 25, bits);
+    let crc = crc32c::crc32c(&plain[CRC_START..]);
+    put_u32(&mut plain, 21, crc);
+    assert!(matches!(Batch::parse(&plain.freeze()), Err(Error::Malformed(_))));
+    // A control batch is never compacted.
+    let marker = control_batch(7, 1, ControlType::Commit, 3, 0).unwrap();
+    let (m, _) = Batch::parse(&marker).unwrap();
+    assert!(compact(&m, |_| false).unwrap().is_none());
+    let mut forged = BytesMut::from(&marker[..]);
+    let bits = get_u16(&forged, 25) | (1 << 8);
+    put_u16(&mut forged, 25, bits);
+    let crc = crc32c::crc32c(&forged[CRC_START..]);
+    put_u32(&mut forged, 21, crc);
+    assert!(matches!(Batch::parse(&forged.freeze()), Err(Error::Malformed(_))));
+}
+
+#[test]
 fn empty_batches_cannot_be_built() {
     assert!(BatchBuilder::new(BatchOptions::default()).finish().is_err());
 }
@@ -231,6 +256,38 @@ proptest! {
                 prop_assert_eq!(h.value.as_deref(), hv.as_deref());
             }
         }
+    }
+
+    #[test]
+    fn compaction_keeps_offsets_header_and_what_it_keeps(
+        mut attrs in attributes(),
+        records in proptest::collection::vec(record(), 1..20),
+        keep in proptest::collection::vec(any::<bool>(), 20),
+        base_offset in 0u64..u64::MAX / 2, term: u64,
+    ) {
+        attrs.control = false;
+        let options = BatchOptions { attributes: attrs, producer_id: 9, producer_epoch: 2, base_sequence: 40 };
+        let mut owned = BytesMut::from(&build(options, &records)[..]);
+        stamp(&mut owned, base_offset, term).unwrap();
+        let (batch, _) = Batch::parse(&owned.freeze()).unwrap();
+        let all = batch.records().unwrap();
+        let wanted = |r: &Record| keep[(r.offset - base_offset) as usize];
+        let Some(bytes) = compact(&batch, wanted).unwrap() else {
+            prop_assert!(all.iter().all(wanted), "unchanged only when everything is kept");
+            return Ok(());
+        };
+        let (c, rest) = Batch::parse(&bytes).unwrap();
+        prop_assert!(rest.is_empty() && c.is_compacted());
+        prop_assert_eq!(c.attributes(), attrs);
+        prop_assert_eq!((c.base_offset(), c.next_offset(), c.term()), (batch.base_offset(), batch.next_offset(), term));
+        prop_assert_eq!((c.producer_id(), c.producer_epoch(), c.base_sequence()), (9, 2, 40));
+        prop_assert_eq!((c.base_timestamp(), c.max_timestamp()), (batch.base_timestamp(), batch.max_timestamp()));
+        prop_assert_eq!(c.span(), batch.span());
+        let kept: Vec<Record> = all.iter().filter(|r| wanted(r)).cloned().collect();
+        prop_assert_eq!(c.records().unwrap(), kept);
+        prop_assert_eq!(c.is_empty(), !all.iter().any(wanted));
+        // Compacting again with the same choice changes nothing.
+        prop_assert!(compact(&c, wanted).unwrap().is_none());
     }
 
     #[test]

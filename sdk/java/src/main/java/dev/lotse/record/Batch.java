@@ -67,7 +67,8 @@ public final class Batch {
      * Splits the first batch off {@code buf}, checking in this order: that the length prefix is there, the size
      * limit, that the batch is at least a header and fully present, the magic byte, the checksum, the attributes,
      * a non-empty record count, {@code last_offset_delta == record_count - 1}, {@code max_ts >= base_ts} and that
-     * a control batch holds one record.
+     * a control batch holds one record. A compacted batch instead holds at most as many records as offsets it
+     * spans, and is never a control batch.
      *
      * @throws RecordFormatException if any check fails
      */
@@ -106,11 +107,21 @@ public final class Batch {
         Attributes attributes = Attributes.fromBits(getU16(a, o + 25));
         Batch batch = new Batch(bytes, attributes);
         long count = batch.recordCount();
-        if (count == 0) {
-            throw RecordFormatException.malformed("empty batch");
-        }
-        if (batch.lastOffsetDelta() != count - 1) {
-            throw RecordFormatException.malformed("last_offset_delta does not match record_count");
+        if (batch.isCompacted()) {
+            // Compaction keeps a batch's offsets and drops records from it, down to none (ADR 0067).
+            if (attributes.control()) {
+                throw RecordFormatException.malformed("a control batch is never compacted");
+            }
+            if (count > batch.span()) {
+                throw RecordFormatException.malformed("more records than offsets");
+            }
+        } else {
+            if (count == 0) {
+                throw RecordFormatException.malformed("empty batch");
+            }
+            if (batch.lastOffsetDelta() != count - 1) {
+                throw RecordFormatException.malformed("last_offset_delta does not match record_count");
+            }
         }
         if (batch.maxTimestamp() < batch.baseTimestamp()) {
             throw RecordFormatException.malformed("max_ts before base_ts");
@@ -168,6 +179,19 @@ public final class Batch {
         return attributes;
     }
 
+    /**
+     * Whether compaction rewrote this batch (attribute bit 8, ADR 0067): its records are a subset of the offsets
+     * it spans, in order, and it may hold none.
+     */
+    public boolean isCompacted() {
+        return (getU16(bytes.array(), bytes.offset() + 25) & (1 << 8)) != 0;
+    }
+
+    /** How many offsets the batch spans: {@code last_offset_delta + 1}; the record count unless compacted. */
+    public long span() {
+        return lastOffsetDelta() + 1;
+    }
+
     /** The {@code last_offset_delta} header field, a {@code u32}. */
     public long lastOffsetDelta() {
         return getU32(bytes.array(), bytes.offset() + 27);
@@ -204,8 +228,9 @@ public final class Batch {
     }
 
     /**
-     * Decodes the records, checking that offset deltas run 0, 1, 2 and so on, that nothing is left over in a
-     * record or after the last one, and that lengths and counts are not negative.
+     * Decodes the records, checking that offset deltas run 0, 1, 2 and so on (in a compacted batch: rise and stay
+     * inside the batch), that nothing is left over in a record or after the last one, and that lengths and counts
+     * are not negative.
      *
      * <p>A compressed block is decompressed first, each time this is called.
      *
@@ -216,6 +241,11 @@ public final class Batch {
         byte[] a;
         int pos;
         int end;
+        boolean compacted = isCompacted();
+        if (compacted && recordCount() == 0) {
+            // Compaction writes an emptied batch's block plain, as nothing.
+            return new ArrayList<>();
+        }
         if (attributes.compression() == Compression.NONE) {
             a = bytes.array();
             pos = bytes.offset() + HEADER_LEN;
@@ -230,6 +260,7 @@ public final class Batch {
         long baseTs = baseTimestamp();
         long count = recordCount();
         List<BatchRecord> out = new ArrayList<>((int) Math.min(count, 1024));
+        long lastDelta = -1;
         for (long expectedDelta = 0; expectedDelta < count; expectedDelta++) {
             Varint.Decoded len = Varint.getI64(a, pos, end);
             pos += len.length();
@@ -244,7 +275,13 @@ public final class Batch {
             c.byteValue(); // attributes, reserved
             long tsDelta = c.i64();
             int offsetDelta = c.i32();
-            if (offsetDelta != (int) expectedDelta) {
+            if (compacted) {
+                // Gaps where records went, but in order and inside the batch.
+                if (offsetDelta <= lastDelta || offsetDelta > lastOffsetDelta()) {
+                    throw RecordFormatException.malformed("record offset deltas out of order");
+                }
+                lastDelta = offsetDelta;
+            } else if (offsetDelta != (int) expectedDelta) {
                 throw RecordFormatException.malformed("record offset deltas are not consecutive");
             }
             ByteString key = c.nullable();

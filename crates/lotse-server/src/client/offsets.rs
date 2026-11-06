@@ -104,7 +104,7 @@ pub(crate) async fn by_time<D: Disk>(log: &Log<D>, at: i64, end: u64) -> Result<
                 if readable && first >= start && batch.max_timestamp() >= at {
                     return Ok(Some((first, batch.max_timestamp())));
                 }
-                offset = first + u64::from(batch.record_count());
+                offset = batch.next_offset();
                 bytes = rest;
             }
         }

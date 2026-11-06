@@ -130,7 +130,7 @@ fn producer_of(batch: &Batch) -> Option<(u64, u16, Option<Seqs>)> {
         return batch.attributes().transactional.then_some((id, batch.producer_epoch(), None));
     }
     let base = batch.base_sequence();
-    Some((id, batch.producer_epoch(), Some((base, last_seq(base, batch.record_count())))))
+    Some((id, batch.producer_epoch(), Some((base, last_seq(base, batch.span())))))
 }
 
 impl ProducerState {

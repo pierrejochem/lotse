@@ -188,3 +188,72 @@ fn trimming_deletes_whole_segments_below_an_offset() {
         assert!(!log.read(end, 100).await.unwrap().is_empty());
     });
 }
+
+#[test]
+fn a_sealed_segment_is_rewritten_whole_and_keeps_its_batches() {
+    Sim::new(11).run(|rt| async move {
+        let mut log = Log::open(rt.clone(), "p0", SMALL).await.unwrap();
+        for i in 0..10u64 {
+            log.append(batch(i * 2, &[b"aaaaaaaaaaaaaaaaaaaa", b"bbbbbbbbbbbbbbbbbbbb"])).await.unwrap();
+        }
+        log.sync().await.unwrap();
+        let first = log.segments().next().unwrap();
+        let active = log.segments().last().unwrap().base_offset;
+        assert_ne!(first.base_offset, active);
+
+        let old = batches_in(&log, first).await;
+        let keep_first = |b: &Bytes| {
+            let (b, _) = Batch::parse(b).unwrap();
+            let mut n = 0;
+            lotse_record::compact(&b, |_| {
+                n += 1;
+                n == 1
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let new: Vec<Bytes> = old.iter().map(keep_first).collect();
+
+        // Anything but the same batches with fewer records is refused.
+        assert!(matches!(log.rewrite_segment(first.base_offset, &new[1..]).await, Err(Error::Rewrite(_))));
+        let mut moved = new.clone();
+        moved[0] = batch(first.base_offset, &[b"x"]);
+        assert!(matches!(log.rewrite_segment(first.base_offset, &moved).await, Err(Error::Rewrite(_))));
+        assert!(matches!(log.rewrite_segment(active, &[]).await, Err(Error::Rewrite(_))));
+
+        log.rewrite_segment(first.base_offset, &new).await.unwrap();
+        let after = log.segments().next().unwrap();
+        assert_eq!((after.base_offset, after.next_offset), (first.base_offset, first.next_offset));
+        assert!(after.bytes < first.bytes, "{after:?} {first:?}");
+        assert_eq!(batches_in(&log, after).await, new);
+        // The second record of the first batch is gone; reading it finds
+        // the batch that spans it.
+        let (b, _) = Batch::parse(&log.read(first.base_offset + 1, 1).await.unwrap()).unwrap();
+        assert_eq!((b.base_offset(), b.record_count(), b.span()), (first.base_offset, 1, 2));
+        log.append(batch(log.next_offset(), &[b"y"])).await.unwrap();
+        log.sync().await.unwrap();
+        drop(log);
+
+        // A rewrite cut short by a crash leaves a file that open removes.
+        rt.crash();
+        let stray = cleaned_path(Path::new("p0"), active);
+        let f = rt.open(&stray, OpenMode::CreateNew).await.unwrap();
+        f.append(Bytes::from_static(b"half")).await.unwrap();
+        f.sync().await.unwrap();
+        drop(f);
+        let log = Log::open(rt.clone(), "p0", SMALL).await.unwrap();
+        assert!(!rt.list(Path::new("p0")).await.unwrap().contains(&stray));
+        assert_eq!(batches_in(&log, log.segments().next().unwrap()).await, new);
+    });
+}
+
+async fn batches_in<D: Disk>(log: &Log<D>, seg: SegmentInfo) -> Vec<Bytes> {
+    let mut out = Vec::new();
+    let mut at = seg.base_offset;
+    while at < seg.next_offset {
+        let (b, _) = Batch::parse(&log.read(at, 1).await.unwrap()).unwrap();
+        at = b.next_offset();
+        out.push(b.as_bytes().clone());
+    }
+    out
+}

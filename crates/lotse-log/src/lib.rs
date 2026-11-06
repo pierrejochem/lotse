@@ -5,7 +5,8 @@
 //!
 //! Layout: one directory per partition, segment files named after their
 //! first offset (`00000000000000000000.log`). Only the last segment is ever
-//! written; once rolled, a segment is synced and immutable.
+//! appended to; once rolled, a segment is synced and changes only as a
+//! whole, when compaction rewrites it.
 //!
 //! Durability contract:
 //! - [`Log::append`] makes a batch readable at once;
@@ -20,6 +21,9 @@
 //! below an offset are deleted, and the log starts at that offset. Which
 //! offset is the replica's to decide (ADR 0046); [`Log::segments`] tells it
 //! each segment's size and newest timestamp.
+//!
+//! Compaction replaces a sealed segment with [`Log::rewrite_segment`]: the
+//! same batches with the same offsets and terms, some records left out.
 //!
 //! Not yet here: persisted `.index`/`.timeindex`/`.txnindex` files (the
 //! sparse index is rebuilt by scanning on open).
@@ -62,6 +66,9 @@ pub enum Error {
         /// Next offset to be written.
         end: u64,
     },
+    /// A segment rewrite would change more than which records it holds.
+    #[error("refused segment rewrite: {0}")]
+    Rewrite(String),
     /// Truncation must happen at a batch boundary.
     #[error("offset {0} is inside a batch")]
     NotBatchBoundary(u64),
@@ -175,7 +182,12 @@ impl<D: Disk> Log<D> {
     pub async fn open(disk: D, dir: impl Into<PathBuf>, config: LogConfig) -> Result<Self, Error> {
         let dir = dir.into();
         disk.create_dir_all(&dir).await?;
-        let mut bases: Vec<u64> = disk.list(&dir).await?.iter().filter_map(|p| parse_segment_name(p)).collect();
+        let files = disk.list(&dir).await?;
+        // A rewrite that did not finish: the old segment is still whole.
+        for p in files.iter().filter(|p| p.extension().is_some_and(|e| e == "cleaned")) {
+            disk.remove(p).await?;
+        }
+        let mut bases: Vec<u64> = files.iter().filter_map(|p| parse_segment_name(p)).collect();
         bases.sort_unstable();
 
         let mut log = Log { disk, dir, config, segments: BTreeMap::new(), start_offset: 0, next_offset: 0 };
@@ -471,6 +483,62 @@ impl<D: Disk> Log<D> {
         Ok(())
     }
 
+    /// Replaces the sealed segment that starts at `base` with `batches`,
+    /// which must stand for the same batches one for one: the same first
+    /// and last offset and the same term each, records left out at most
+    /// (compaction, ADR 0067). The active segment is never rewritten. The
+    /// new segment is written beside the old one, synced and renamed over
+    /// it, so a crash leaves one or the other whole; [`Log::open`] removes
+    /// a half-written one. Durable on return.
+    pub async fn rewrite_segment(&mut self, base: u64, batches: &[Bytes]) -> Result<(), Error> {
+        let Some(old) = self.segments.get(&base) else {
+            return Err(Error::OffsetOutOfRange { offset: base, start: self.start_offset, end: self.next_offset });
+        };
+        if base == self.active_base() {
+            return Err(Error::Rewrite(format!("segment {base} is the active segment")));
+        }
+        // What the old segment holds, batch by batch.
+        let mut shape = Vec::new();
+        let mut pos = 0;
+        while pos < old.size {
+            let b = self.batch_in(old, pos).await?;
+            shape.push((b.base_offset(), b.last_offset(), b.term()));
+            pos += b.len() as u64;
+        }
+        if shape.len() != batches.len() {
+            return Err(Error::Rewrite(format!("{} batches for a segment of {}", batches.len(), shape.len())));
+        }
+        for (bytes, &(first, last, term)) in batches.iter().zip(&shape) {
+            let (b, rest) = Batch::parse(bytes)?;
+            if !rest.is_empty() {
+                return Err(Error::InvalidBatch(lotse_record::Error::Malformed("trailing bytes after the batch")));
+            }
+            if (b.base_offset(), b.last_offset(), b.term()) != (first, last, term) {
+                return Err(Error::Rewrite(format!(
+                    "batch {}..={} of term {} where {first}..={last} of term {term} was",
+                    b.base_offset(),
+                    b.last_offset(),
+                    b.term()
+                )));
+            }
+        }
+        let path = segment_path(&self.dir, base);
+        let cleaned = cleaned_path(&self.dir, base);
+        if self.disk.list(&self.dir).await?.contains(&cleaned) {
+            self.disk.remove(&cleaned).await?;
+        }
+        let file = self.disk.open(&cleaned, OpenMode::CreateNew).await?;
+        for bytes in batches {
+            file.append(bytes.clone()).await?;
+        }
+        file.sync().await?;
+        drop(file);
+        self.disk.rename(&cleaned, &path).await?;
+        let seg = self.recover_segment(base, false).await?;
+        self.segments.insert(base, seg);
+        Ok(())
+    }
+
     fn active_base(&self) -> u64 {
         *self.segments.keys().next_back().expect("a log always has a segment")
     }
@@ -567,6 +635,11 @@ impl From<ReadError> for Error {
 /// Path of the segment that starts at `base`.
 pub fn segment_path(dir: &Path, base: u64) -> PathBuf {
     dir.join(format!("{base:020}.log"))
+}
+
+/// Where a rewritten segment is written before it replaces the old one.
+fn cleaned_path(dir: &Path, base: u64) -> PathBuf {
+    dir.join(format!("{base:020}.log.cleaned"))
 }
 
 fn parse_segment_name(path: &Path) -> Option<u64> {

@@ -38,8 +38,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     }
 
     /// [`Client::create_stream`] with settings of its own, such as
-    /// `retention.ms` and `retention.bytes` (`-1`: no limit); a setting it
-    /// does not name takes the node's default.
+    /// `retention.ms` and `retention.bytes` (`-1`: no limit), or
+    /// `cleanup.policy` (`delete`, `compact`, `compact,delete`) and
+    /// `delete.retention.ms` for compaction; a setting it does not name
+    /// takes the node's default.
     pub async fn create_stream_with(
         &self,
         name: &str,

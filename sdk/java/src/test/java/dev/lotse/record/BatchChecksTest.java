@@ -108,7 +108,7 @@ class BatchChecksTest {
         Batch.putU16(b, 25, 7 << 5); // kind 7
         assertEquals(Kind.MALFORMED, parseFails(sum(b)));
         b = sample();
-        Batch.putU16(b, 25, 1 << 8); // a reserved bit
+        Batch.putU16(b, 25, 1 << 9); // a reserved bit (bit 8 marks a compacted batch)
         assertEquals(Kind.MALFORMED, parseFails(sum(b)));
         b = sample();
         Batch.putU16(b, 25, 1 << 15);

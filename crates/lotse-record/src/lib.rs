@@ -206,7 +206,9 @@ impl Attributes {
             5 => BatchKind::Retire,
             _ => return Err(Error::Malformed("unknown batch kind")),
         };
-        if bits >> 8 != 0 {
+        // Bit 8 marks a compacted batch (ADR 0067); [`Batch::is_compacted`]
+        // reads it.
+        if bits >> 9 != 0 {
             return Err(Error::Malformed("reserved attribute bits set"));
         }
         Ok(Attributes { compression, transactional: bits & (1 << 3) != 0, control: bits & (1 << 4) != 0, kind })
@@ -363,6 +365,52 @@ impl BatchBuilder {
     }
 }
 
+/// Compaction of one data batch (ADR 0067): the records `keep` accepts, at
+/// their own offsets and timestamps, in a batch that spans the same offsets
+/// and keeps the header (term, producer, sequence, timestamps, codec), with
+/// the compacted bit set. `None` if every record is kept: the batch stays as
+/// it was. A control batch is never compacted.
+pub fn compact(batch: &Batch, mut keep: impl FnMut(&Record) -> bool) -> Result<Option<Bytes>, Error> {
+    if batch.attributes().control {
+        return Ok(None);
+    }
+    let records = batch.records()?;
+    let kept: Vec<&Record> = records.iter().filter(|r| keep(r)).collect();
+    if kept.len() == records.len() {
+        return Ok(None);
+    }
+    let base_offset = batch.base_offset();
+    let base_ts = batch.base_timestamp();
+    let mut body = Vec::new();
+    for r in &kept {
+        let mut rec =
+            Vec::with_capacity(16 + r.key.as_ref().map_or(0, |k| k.len()) + r.value.as_ref().map_or(0, |v| v.len()));
+        rec.push(0);
+        varint::put_i64(&mut rec, r.timestamp.wrapping_sub(base_ts));
+        varint::put_i64(&mut rec, (r.offset - base_offset) as i64);
+        put_nullable(&mut rec, r.key.as_deref());
+        put_nullable(&mut rec, r.value.as_deref());
+        varint::put_i64(&mut rec, r.headers.len() as i64);
+        for h in &r.headers {
+            put_nullable(&mut rec, Some(&h.key));
+            put_nullable(&mut rec, h.value.as_deref());
+        }
+        varint::put_i64(&mut body, rec.len() as i64);
+        body.extend_from_slice(&rec);
+    }
+    let codec = batch.attributes().compression;
+    let body = if codec == Compression::None || body.is_empty() { body } else { codec.compress(&body)? };
+    let total = HEADER_LEN + body.len();
+    let mut buf = BytesMut::from(&batch.as_bytes()[..HEADER_LEN]);
+    buf.extend_from_slice(&body);
+    put_u32(&mut buf, 8, (total - LEN_PREFIX) as u32);
+    put_u16(&mut buf, 25, batch.attributes().to_bits() | (1 << 8));
+    put_u32(&mut buf, 61, kept.len() as u32);
+    let crc = crc32c::crc32c(&buf[CRC_START..]);
+    put_u32(&mut buf, 21, crc);
+    Ok(Some(buf.freeze()))
+}
+
 /// Sets `base_offset` and `term` of an encoded batch in place. Both are
 /// outside the checksummed range.
 pub fn stamp(batch: &mut [u8], base_offset: u64, term: u64) -> Result<(), Error> {
@@ -448,11 +496,22 @@ impl Batch {
         let attributes = Attributes::from_bits(get_u16(&bytes, 25))?;
         let batch = Batch { bytes, attributes };
         let count = batch.record_count();
-        if count == 0 {
-            return Err(Error::Malformed("empty batch"));
-        }
-        if batch.last_offset_delta() != count - 1 {
-            return Err(Error::Malformed("last_offset_delta does not match record_count"));
+        if batch.is_compacted() {
+            // Compaction keeps a batch's offsets and drops records from it,
+            // down to none (ADR 0067).
+            if attributes.control {
+                return Err(Error::Malformed("a control batch is never compacted"));
+            }
+            if count > batch.span() {
+                return Err(Error::Malformed("more records than offsets"));
+            }
+        } else {
+            if count == 0 {
+                return Err(Error::Malformed("empty batch"));
+            }
+            if batch.last_offset_delta() != count - 1 {
+                return Err(Error::Malformed("last_offset_delta does not match record_count"));
+            }
         }
         if batch.max_timestamp() < batch.base_timestamp() {
             return Err(Error::Malformed("max_ts before base_ts"));
@@ -473,9 +532,22 @@ impl Batch {
         self.bytes.len()
     }
 
-    /// Always `false`: a valid batch holds at least one record.
+    /// Whether no record is left: only a compacted batch can be empty.
     pub fn is_empty(&self) -> bool {
-        false
+        self.record_count() == 0
+    }
+
+    /// Whether compaction rewrote this batch (attribute bit 8, ADR 0067):
+    /// its records are a subset of the offsets it spans, in order, and it
+    /// may hold none.
+    pub fn is_compacted(&self) -> bool {
+        get_u16(&self.bytes, 25) & (1 << 8) != 0
+    }
+
+    /// How many offsets the batch spans: `last_offset_delta + 1`. Equal to
+    /// the record count unless the batch is compacted.
+    pub fn span(&self) -> u32 {
+        self.last_offset_delta() + 1
     }
 
     /// Offset of the first record.
@@ -530,6 +602,10 @@ impl Batch {
     /// The record block, decompressed if the batch is compressed. Keys,
     /// values and headers of [`Batch::records`] point into it.
     pub fn record_block(&self) -> Result<Bytes, Error> {
+        if self.is_compacted() && self.record_count() == 0 {
+            // Compaction writes an emptied batch's block plain, as nothing.
+            return Ok(Bytes::new());
+        }
         match self.attributes.compression {
             Compression::None => Ok(self.bytes.slice(HEADER_LEN..)),
             codec => codec.decompress(&self.bytes[HEADER_LEN..]),
@@ -543,6 +619,8 @@ impl Batch {
         let base_ts = self.base_timestamp();
         let mut rest = &block[..];
         let mut out = Vec::with_capacity(self.record_count() as usize);
+        let compacted = self.is_compacted();
+        let mut last_delta: i32 = -1;
         for expected_delta in 0..self.record_count() {
             let (len, n) = varint::get_i64(rest)?;
             rest = &rest[n..];
@@ -556,7 +634,13 @@ impl Batch {
             let _attributes = r.byte()?;
             let ts_delta = r.i64()?;
             let offset_delta = r.i32()?;
-            if offset_delta != expected_delta as i32 {
+            if compacted {
+                // Gaps where records went, but in order and inside the batch.
+                if offset_delta <= last_delta || offset_delta as i64 > i64::from(self.last_offset_delta()) {
+                    return Err(Error::Malformed("record offset deltas out of order"));
+                }
+                last_delta = offset_delta;
+            } else if offset_delta != expected_delta as i32 {
                 return Err(Error::Malformed("record offset deltas are not consecutive"));
             }
             let key = r.nullable()?;

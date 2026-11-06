@@ -1226,6 +1226,9 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 alter(vec![("retention.bytes", "100")], vec!["retention.bytes"]),
                 alter(vec![("retention.bytes", "4096")], vec![]),
                 alter(vec![], vec!["retention.ms"]),
+                alter(vec![("cleanup.policy", "shred")], vec![]),
+                alter(vec![("delete.retention.ms", "-5")], vec![]),
+                alter(vec![("cleanup.policy", "delete, compact"), ("delete.retention.ms", "0")], vec![]),
                 Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: vec![c.resource_id] }),
             ],
         )
@@ -1236,18 +1239,35 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             Response::Admin(twice),
             Response::Admin(bytes),
             Response::Admin(reset),
+            Response::Admin(unknown_policy),
+            Response::Admin(negative_tombstones),
+            Response::Admin(compact),
             Response::DescribeConfigs(described),
         ] = &answers[..]
         else {
             panic!("{answers:?}")
         };
         assert_eq!(
-            (other_key.error, negative.error, twice.error),
-            (ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST)
+            (other_key.error, negative.error, twice.error, unknown_policy.error, negative_tombstones.error),
+            (
+                ErrorCode::INVALID_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                ErrorCode::INVALID_REQUEST
+            )
         );
-        assert_eq!((bytes.error, reset.error), (ErrorCode::NONE, ErrorCode::NONE));
+        assert_eq!((bytes.error, reset.error, compact.error), (ErrorCode::NONE, ErrorCode::NONE, ErrorCode::NONE));
         let settings = groups[&G].metadata().streams[&c.resource_id].settings;
-        assert_eq!(settings, crate::metadata::StreamSettings { retention_ms: None, retention_bytes: Some(4096) });
+        assert_eq!(
+            settings,
+            crate::metadata::StreamSettings {
+                retention_bytes: Some(4096),
+                cleanup: Some(crate::metadata::Cleanup::CompactDelete),
+                delete_retention_ms: Some(0),
+                ..Default::default()
+            }
+        );
         // The describe was answered before the changes applied; ask again.
         let _ = described;
         let answers = ask(
@@ -1264,7 +1284,9 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             got,
             [
                 ("retention.ms", "-1", lotse_proto::config_source::DEFAULT),
-                ("retention.bytes", "4096", lotse_proto::config_source::DYNAMIC)
+                ("retention.bytes", "4096", lotse_proto::config_source::DYNAMIC),
+                ("cleanup.policy", "compact,delete", lotse_proto::config_source::DYNAMIC),
+                ("delete.retention.ms", "0", lotse_proto::config_source::DYNAMIC)
             ]
         );
     });

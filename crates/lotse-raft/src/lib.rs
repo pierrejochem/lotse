@@ -675,8 +675,10 @@ impl RaftGroup {
     pub fn log(&self) -> &TermRuns {
         &self.log
     }
-    /// On a leader: the highest index each member is known to hold, this
-    /// node included; `None` elsewhere. For metrics only.
+    /// On a leader: the highest index each member, learners included, is
+    /// known to hold, this node included; `None` elsewhere. A lower bound:
+    /// a member may hold more. Metrics use it, and compaction drops
+    /// tombstones only below its smallest value (ADR 0067).
     pub fn matched(&self) -> Option<BTreeMap<NodeId, u64>> {
         let State::Leader { progress } = &self.state else { return None };
         let mut m: BTreeMap<NodeId, u64> = progress.iter().map(|(id, p)| (*id, p.matched)).collect();

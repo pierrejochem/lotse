@@ -244,7 +244,7 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
 #[test]
 fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
     let mut s = MetadataState::default();
-    let settings = StreamSettings { retention_ms: Some(60_000), retention_bytes: None };
+    let settings = StreamSettings { retention_ms: Some(60_000), retention_bytes: None, ..StreamSettings::default() };
     let create = Change::CreateStream { name: "o".into(), tenant: "t".into(), partitions: vec![vec![1]], settings };
     s.apply(4, &payload(&create)).unwrap();
     let id = resource_id(4);
@@ -254,22 +254,74 @@ fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
     let bytes = StreamChange { retention_bytes: Some(Some(1 << 20)), ..StreamChange::default() };
     let ms = StreamChange { retention_ms: Some(None), ..StreamChange::default() };
     s.apply(5, &payload(&Change::AlterStream { resource_id: id, change: bytes })).unwrap();
-    let want = StreamSettings { retention_ms: Some(60_000), retention_bytes: Some(1 << 20) };
+    let want =
+        StreamSettings { retention_ms: Some(60_000), retention_bytes: Some(1 << 20), ..StreamSettings::default() };
     assert_eq!(s.streams[&id].settings, want, "a change of the size leaves the age as it was");
     s.apply(6, &payload(&Change::AlterStream { resource_id: id, change: ms })).unwrap();
-    let want = StreamSettings { retention_ms: None, retention_bytes: Some(1 << 20) };
+    let want = StreamSettings { retention_ms: None, retention_bytes: Some(1 << 20), ..StreamSettings::default() };
     assert_eq!(s.streams[&id].settings, want);
     let unlimited = StreamChange { retention_ms: Some(Some(-1)), ..StreamChange::default() };
     s.apply(7, &payload(&Change::AlterStream { resource_id: id, change: unlimited })).unwrap();
-    let want = StreamSettings { retention_ms: Some(-1), retention_bytes: Some(1 << 20) };
+    let want = StreamSettings { retention_ms: Some(-1), retention_bytes: Some(1 << 20), ..StreamSettings::default() };
     assert_eq!(s.streams[&id].settings, want);
     let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: None };
-    assert_eq!(want.retention(defaults), crate::Retention::Stream { ms: None, bytes: Some(1 << 20) });
+    assert_eq!(want.retention(defaults), crate::Retention::Stream { ms: None, bytes: Some(1 << 20), compact: None });
     assert_eq!(
         StreamSettings::default().retention(defaults),
-        crate::Retention::Stream { ms: Some(1_000), bytes: None }
+        crate::Retention::Stream { ms: Some(1_000), bytes: None, compact: None }
     );
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
+fn compaction_settings_change_and_survive_a_snapshot_and_old_records_still_read() {
+    use crate::metadata::Cleanup;
+    let mut s = MetadataState::default();
+    let settings = StreamSettings { cleanup: Some(Cleanup::Compact), ..StreamSettings::default() };
+    let create = Change::CreateStream { name: "c".into(), tenant: "t".into(), partitions: vec![vec![1]], settings };
+    s.apply(4, &payload(&create)).unwrap();
+    let id = resource_id(4);
+    assert_eq!(s.streams[&id].settings, settings);
+    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: Some(10) };
+    assert_eq!(
+        settings.retention(defaults),
+        crate::Retention::Stream { ms: None, bytes: None, compact: Some(86_400_000) },
+        "compact alone deletes nothing by age or size; tombstones stay a day"
+    );
+    let both = StreamChange {
+        cleanup: Some(Some(Cleanup::CompactDelete)),
+        delete_retention_ms: Some(Some(-1)),
+        ..StreamChange::default()
+    };
+    s.apply(5, &payload(&Change::AlterStream { resource_id: id, change: both })).unwrap();
+    assert_eq!(
+        s.streams[&id].settings.retention(defaults),
+        crate::Retention::Stream { ms: Some(1_000), bytes: Some(10), compact: Some(u64::MAX) }
+    );
+    // A snapshot without pins carries the settings too.
+    assert!(s.pins.is_empty());
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    let back = StreamChange { cleanup: Some(None), ..StreamChange::default() };
+    s.apply(6, &payload(&Change::AlterStream { resource_id: id, change: back })).unwrap();
+    assert_eq!(s.streams[&id].settings.cleanup, None);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // Records and snapshots from before compaction read as they did: no
+    // compaction settings in them.
+    let plain = Change::CreateStream {
+        name: "p".into(),
+        tenant: "t".into(),
+        partitions: vec![vec![1]],
+        settings: StreamSettings { retention_ms: Some(5), ..StreamSettings::default() },
+    };
+    let bytes = payload(&plain);
+    let mut t = MetadataState::default();
+    t.apply(7, &bytes).unwrap();
+    let encoded = t.encode();
+    assert_eq!(MetadataState::decode(&encoded).unwrap(), t);
+    let mut old = MetadataState::default();
+    old.apply(7, &bytes).unwrap();
+    assert_eq!(old.encode(), encoded, "nothing new is written when nothing new is set");
 }
 
 #[test]

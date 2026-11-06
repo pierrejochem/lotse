@@ -106,7 +106,69 @@ pub(crate) struct StreamSettings {
     pub(crate) retention_ms: Option<i64>,
     /// `retention.bytes`, per partition.
     pub(crate) retention_bytes: Option<i64>,
+    /// `cleanup.policy`; `None` is [`Cleanup::Delete`] (ADR 0067).
+    pub(crate) cleanup: Option<Cleanup>,
+    /// `delete.retention.ms`: how long compaction keeps tombstones; `None`
+    /// is [`DEFAULT_DELETE_RETENTION_MS`], -1 forever.
+    pub(crate) delete_retention_ms: Option<i64>,
 }
+
+/// What a stream does with old data (ADR 0067).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cleanup {
+    /// Deletes by age and size.
+    Delete,
+    /// Keeps the newest record of each key, and deletes nothing by age or
+    /// size.
+    Compact,
+    /// Both.
+    CompactDelete,
+}
+
+impl Cleanup {
+    /// The setting's value.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Cleanup::Delete => "delete",
+            Cleanup::Compact => "compact",
+            Cleanup::CompactDelete => "compact,delete",
+        }
+    }
+
+    /// The policy a setting's value names; the order of a pair does not
+    /// matter.
+    pub(crate) fn parse(v: &str) -> Option<Cleanup> {
+        let mut parts: Vec<&str> = v.split(',').map(str::trim).collect();
+        parts.sort_unstable();
+        match parts[..] {
+            ["delete"] => Some(Cleanup::Delete),
+            ["compact"] => Some(Cleanup::Compact),
+            ["compact", "delete"] => Some(Cleanup::CompactDelete),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> i64 {
+        match self {
+            Cleanup::Delete => 0,
+            Cleanup::Compact => 1,
+            Cleanup::CompactDelete => 2,
+        }
+    }
+
+    fn from_code(c: i64) -> Result<Cleanup, String> {
+        match c {
+            0 => Ok(Cleanup::Delete),
+            1 => Ok(Cleanup::Compact),
+            2 => Ok(Cleanup::CompactDelete),
+            _ => Err(format!("unknown cleanup policy {c}")),
+        }
+    }
+}
+
+/// How long compaction keeps a tombstone unless a stream says otherwise:
+/// a day, as in Kafka.
+pub(crate) const DEFAULT_DELETE_RETENTION_MS: i64 = 86_400_000;
 
 /// What an `AlterStream` does to each setting: `None` leaves it,
 /// `Some(None)` returns it to the default, `Some(Some(v))` sets it.
@@ -116,6 +178,10 @@ pub(crate) struct StreamChange {
     pub(crate) retention_ms: Option<Option<i64>>,
     /// `retention.bytes`.
     pub(crate) retention_bytes: Option<Option<i64>>,
+    /// `cleanup.policy`.
+    pub(crate) cleanup: Option<Option<Cleanup>>,
+    /// `delete.retention.ms`.
+    pub(crate) delete_retention_ms: Option<Option<i64>>,
 }
 
 impl StreamChange {
@@ -132,6 +198,18 @@ impl StreamChange {
         if let Some(v) = self.retention_bytes {
             s.retention_bytes = v;
         }
+        if let Some(v) = self.cleanup {
+            s.cleanup = v;
+        }
+        if let Some(v) = self.delete_retention_ms {
+            s.delete_retention_ms = v;
+        }
+    }
+
+    /// Whether it touches a setting that came with compaction; records
+    /// without one stay readable by nodes from before it.
+    fn has_compaction(&self) -> bool {
+        self.cleanup.is_some() || self.delete_retention_ms.is_some()
     }
 }
 
@@ -143,10 +221,22 @@ impl StreamSettings {
             Some(v) if v < 0 => None,
             Some(v) => Some(v as u64),
         };
+        let cleanup = self.cleanup.unwrap_or(Cleanup::Delete);
+        let deletes = cleanup != Cleanup::Compact;
+        let compact = (cleanup != Cleanup::Delete).then(|| {
+            let ms = self.delete_retention_ms.unwrap_or(DEFAULT_DELETE_RETENTION_MS);
+            u64::try_from(ms).unwrap_or(u64::MAX)
+        });
         crate::Retention::Stream {
-            ms: pick(self.retention_ms, defaults.ms),
-            bytes: pick(self.retention_bytes, defaults.bytes),
+            ms: pick(self.retention_ms, defaults.ms).filter(|_| deletes),
+            bytes: pick(self.retention_bytes, defaults.bytes).filter(|_| deletes),
+            compact,
         }
+    }
+
+    /// Whether a setting that came with compaction is set.
+    fn has_compaction(&self) -> bool {
+        self.cleanup.is_some() || self.delete_retention_ms.is_some()
     }
 }
 
@@ -642,11 +732,20 @@ impl MetadataState {
         }
         // Written only when there are some, so a snapshot without pins reads
         // on a node from before them (ADR 0065).
-        if !self.pins.is_empty() {
+        let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
+        if !self.pins.is_empty() || !compacting.is_empty() {
             b.put_u32_le(self.pins.len() as u32);
             for (g, n) in &self.pins {
                 b.put_u64_le(*g);
                 b.put_u64_le(*n);
+            }
+        }
+        // Likewise the settings that came with compaction (ADR 0067).
+        if !compacting.is_empty() {
+            b.put_u32_le(compacting.len() as u32);
+            for s in compacting {
+                b.put_u64_le(s.resource_id);
+                put_compaction(&mut b, &s.settings);
             }
         }
         b.freeze()
@@ -749,6 +848,14 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let id = b.get_u64_le();
+                let stream = s.streams.get_mut(&id).ok_or("compaction settings of an unknown stream")?;
+                get_compaction(b, &mut stream.settings)?;
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -780,6 +887,9 @@ fn change_bytes(change: &Change) -> Bytes {
                 put_nodes(&mut b, voters);
             }
             put_settings(&mut b, settings);
+            if settings.has_compaction() {
+                put_compaction(&mut b, settings);
+            }
         }
         Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits } => {
             b.put_u8(1);
@@ -820,7 +930,12 @@ fn change_bytes(change: &Change) -> Bytes {
         Change::AlterStream { resource_id, change } => {
             b.put_u8(11);
             b.put_u64_le(*resource_id);
-            for v in [change.retention_ms, change.retention_bytes] {
+            let mut slots = vec![change.retention_ms, change.retention_bytes];
+            if change.has_compaction() {
+                slots.push(change.cleanup.map(|c| c.map(Cleanup::code)));
+                slots.push(change.delete_retention_ms);
+            }
+            for v in slots {
                 match v {
                     None => b.put_u8(0),
                     Some(None) => b.put_u8(1),
@@ -893,7 +1008,11 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         0 => {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
-            Change::CreateStream { name, tenant, partitions, settings: get_settings(b)? }
+            let mut settings = get_settings(b)?;
+            if b.has_remaining() {
+                get_compaction(b, &mut settings)?;
+            }
+            Change::CreateStream { name, tenant, partitions, settings }
         }
         1 => {
             let (name, tenant, voters) = (get_str(b)?, get_str(b)?, get_nodes(b)?);
@@ -946,7 +1065,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         11 => {
             need(b, 8)?;
             let resource_id = b.get_u64_le();
-            let mut get = || -> Result<Option<Option<i64>>, String> {
+            fn get(b: &mut &[u8]) -> Result<Option<Option<i64>>, String> {
                 need(b, 1)?;
                 match b.get_u8() {
                     0 => Ok(None),
@@ -957,8 +1076,20 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
                     }
                     _ => Err("unknown stream setting change".into()),
                 }
+            }
+            let (retention_ms, retention_bytes) = (get(b)?, get(b)?);
+            // Written only by nodes that know compaction.
+            let (cleanup, delete_retention_ms) = if b.has_remaining() {
+                let cleanup = match get(b)? {
+                    Some(Some(c)) => Some(Some(Cleanup::from_code(c)?)),
+                    Some(None) => Some(None),
+                    None => None,
+                };
+                (cleanup, get(b)?)
+            } else {
+                (None, None)
             };
-            let change = StreamChange { retention_ms: get()?, retention_bytes: get()? };
+            let change = StreamChange { retention_ms, retention_bytes, cleanup, delete_retention_ms };
             Change::AlterStream { resource_id, change }
         }
         12 => {
@@ -1097,7 +1228,21 @@ fn put_settings(b: &mut BytesMut, s: &StreamSettings) {
 fn get_settings(b: &mut &[u8]) -> Result<StreamSettings, String> {
     need(b, 16)?;
     let mut get = || Some(b.get_i64_le()).filter(|v| *v != i64::MIN);
-    Ok(StreamSettings { retention_ms: get(), retention_bytes: get() })
+    Ok(StreamSettings { retention_ms: get(), retention_bytes: get(), ..StreamSettings::default() })
+}
+
+/// The settings that came with compaction: unset is `i64::MIN`.
+fn put_compaction(b: &mut BytesMut, s: &StreamSettings) {
+    b.put_i64_le(s.cleanup.map_or(i64::MIN, Cleanup::code));
+    b.put_i64_le(s.delete_retention_ms.unwrap_or(i64::MIN));
+}
+
+fn get_compaction(b: &mut &[u8], s: &mut StreamSettings) -> Result<(), String> {
+    need(b, 16)?;
+    let cleanup = b.get_i64_le();
+    s.cleanup = if cleanup == i64::MIN { None } else { Some(Cleanup::from_code(cleanup)?) };
+    s.delete_retention_ms = Some(b.get_i64_le()).filter(|v| *v != i64::MIN);
+    Ok(())
 }
 
 fn put_nodes(b: &mut BytesMut, nodes: &[NodeId]) {

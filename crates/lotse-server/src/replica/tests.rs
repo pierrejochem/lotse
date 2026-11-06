@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use lotse_record::{BatchBuilder, BatchOptions};
@@ -11,8 +12,10 @@ struct Recorder(Vec<Bytes>);
 
 impl StateMachine for Recorder {
     fn apply(&mut self, batch: &Batch) {
-        let value = batch.records().unwrap()[0].value.clone().unwrap();
-        self.0.push(value);
+        // A compacted batch applied again may hold nothing.
+        if let Some(r) = batch.records().unwrap().first() {
+            self.0.push(r.value.clone().unwrap_or_default());
+        }
     }
     fn snapshot(&self) -> Bytes {
         let mut b = BytesMut::new();
@@ -288,7 +291,7 @@ async fn kept(r: &Replica<SimRuntime, Recorder>) -> Vec<String> {
 #[test]
 fn a_stream_keeps_its_newest_bytes_and_starts_at_a_snapshot() {
     Sim::new(21).run(|rt| async move {
-        let retention = Retention::Stream { ms: None, bytes: Some(800) };
+        let retention = Retention::Stream { ms: None, bytes: Some(800), compact: None };
         let mut r = open_kept(&rt, "s", retention, false).await;
         elect(&mut r).await;
         let values: Vec<String> = (0..40).map(|i| format!("value-{i:02}")).collect();
@@ -329,7 +332,7 @@ fn a_stream_keeps_its_newest_bytes_and_starts_at_a_snapshot() {
 #[test]
 fn a_stream_drops_records_older_than_its_retention() {
     Sim::new(22).run(|rt| async move {
-        let retention = Retention::Stream { ms: Some(60_000), bytes: None };
+        let retention = Retention::Stream { ms: Some(60_000), bytes: None, compact: None };
         let mut r = open_kept(&rt, "t", retention, false).await;
         elect(&mut r).await;
         let now: i64 = 10_000_000;
@@ -350,7 +353,7 @@ fn a_stream_drops_records_older_than_its_retention() {
 #[test]
 fn retention_stops_at_an_open_transaction() {
     Sim::new(23).run(|rt| async move {
-        let retention = Retention::Stream { ms: None, bytes: Some(0) };
+        let retention = Retention::Stream { ms: None, bytes: Some(0), compact: None };
         let mut r = open_kept(&rt, "x", retention, false).await;
         elect(&mut r).await;
         commit(&mut r, batch(1, "before")).await;
@@ -443,7 +446,7 @@ async fn rounds(rs: &mut [Replica<SimRuntime, Recorder>], up: &[bool], n: usize)
 #[test]
 fn a_follower_behind_the_start_gets_the_snapshot_and_the_rest() {
     Sim::new(26).run(|rt| async move {
-        let retention = Retention::Stream { ms: None, bytes: Some(800) };
+        let retention = Retention::Stream { ms: None, bytes: Some(800), compact: None };
         let mut rs = Vec::new();
         for id in 1..=3u64 {
             let options = ReplicaOptions { retention, ..ReplicaOptions::default() };
@@ -471,5 +474,300 @@ fn a_follower_behind_the_start_gets_the_snapshot_and_the_rest() {
         assert_eq!(back.log().next_offset(), rs[l].log().next_offset());
         assert_eq!(kept(back).await, kept(&rs[l]).await, "the same data from the start on");
         assert_eq!(applied(back), applied(&rs[l]), "and the same state");
+    });
+}
+
+fn keyed(key: &str, value: Option<&str>, timestamp: i64) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(timestamp, Some(key.as_bytes()), value.map(str::as_bytes), &[]);
+    b.finish().unwrap()
+}
+
+/// Every data record the log holds, as `(offset, key, value)`.
+async fn records_of(r: &Replica<SimRuntime, Recorder>) -> Vec<(u64, Option<String>, Option<String>)> {
+    let text = |b: Option<Bytes>| b.map(|b| String::from_utf8(b.to_vec()).unwrap());
+    let mut out = Vec::new();
+    let mut at = r.log().start_offset();
+    while at < r.log().next_offset() {
+        for b in batches(r.log().read(at, 1 << 20).await.unwrap()).unwrap() {
+            if !b.attributes().control && b.attributes().kind == lotse_record::BatchKind::Data {
+                for rec in b.records().unwrap() {
+                    out.push((rec.offset, text(rec.key), text(rec.value)));
+                }
+            }
+            at = b.next_offset();
+        }
+    }
+    out
+}
+
+/// Each batch's offsets and term.
+async fn shape(r: &Replica<SimRuntime, Recorder>) -> Vec<(u64, u64, u64)> {
+    let mut out = Vec::new();
+    let mut at = r.log().start_offset();
+    while at < r.log().next_offset() {
+        for b in batches(r.log().read(at, 1 << 20).await.unwrap()).unwrap() {
+            out.push((b.base_offset(), b.last_offset(), b.term()));
+            at = b.next_offset();
+        }
+    }
+    out
+}
+
+#[test]
+fn compaction_keeps_the_newest_record_of_each_key_and_every_batch() {
+    Sim::new(24).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: Some(60_000) };
+        let mut r = open_kept(&rt, "c", retention, false).await;
+        elect(&mut r).await;
+        let now: i64 = 10_000_000;
+        // An old tombstone for k0 early on, overwritten values, keyless
+        // records, and a transaction that aborts.
+        commit(&mut r, keyed("k0", Some("first"), now)).await;
+        commit(&mut r, keyed("k0", None, now - 120_000)).await;
+        let mut txn = BytesMut::from(&keyed("only-aborted", Some("aborted"), now)[..]);
+        lotse_record::set_producer(&mut txn, 9, 0, 0).unwrap();
+        lotse_record::set_transactional(&mut txn, true).unwrap();
+        commit(&mut r, txn.freeze()).await;
+        // A marker carries the next epoch (ADR 0029).
+        match r.propose_marker(9, 1, false, 0).unwrap() {
+            MarkerOutcome::Proposed { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        for i in 0..40 {
+            commit(&mut r, keyed(&format!("k{}", 1 + i % 3), Some(&format!("v{i:02}")), now)).await;
+            if i % 10 == 0 {
+                commit(&mut r, batch_at(&format!("plain-{i}"), now)).await;
+            }
+        }
+        let before = records_of(&r).await;
+        let shape_before = shape(&r).await;
+        assert!(r.log().segment_count() > 4);
+
+        for _ in 0..200 {
+            r.retain(now as u64).await.unwrap();
+        }
+        let after = records_of(&r).await;
+        assert_eq!(shape(&r).await, shape_before, "every batch stays, with its offsets and term");
+        assert_eq!(r.log().start_offset(), 0, "compaction deletes nothing by age or size");
+
+        // The oracle: for each key the newest committed value, every keyless
+        // record, and nothing of the aborted transaction.
+        let sealed_end = {
+            let segs: Vec<_> = r.log().segments().collect();
+            segs[segs.len() - 2].next_offset
+        };
+        // Compaction knows only what is sealed: a record goes when a newer
+        // one of its key is sealed too.
+        let mut newest: BTreeMap<String, u64> = BTreeMap::new();
+        for (o, k, v) in before.iter().filter(|(o, ..)| *o < sealed_end) {
+            if v.as_deref() != Some("aborted")
+                && let Some(k) = k
+            {
+                newest.insert(k.clone(), *o);
+            }
+        }
+        for (o, k, v) in &before {
+            let stays = after.iter().any(|(a, ..)| a == o);
+            let expect = *o >= sealed_end
+                || match (k, v.as_deref()) {
+                    (_, Some("aborted")) => false,
+                    (None, _) => true,
+                    (Some(k), _) if newest[k] != *o => false,
+                    (Some(_), None) => false, // the old tombstone, once swept twice
+                    (Some(_), Some(_)) => true,
+                };
+            assert_eq!(stays, expect, "record {o} {k:?}={v:?} (sealed below {sealed_end}): {after:?}");
+        }
+        assert!(after.len() < before.len() / 2, "{} of {}", after.len(), before.len());
+
+        // After a power loss the compacted log is applied again, and reads
+        // the same.
+        drop(r);
+        rt.crash();
+        let mut r = open_kept(&rt, "c", retention, false).await;
+        elect(&mut r).await;
+        assert_eq!(records_of(&r).await, after);
+        assert_eq!(shape(&r).await[..shape_before.len()], shape_before[..]);
+    });
+}
+
+#[test]
+fn a_follower_keeps_tombstones_and_a_young_one_stays() {
+    Sim::new(25).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: Some(60_000) };
+        let mut r = open_kept(&rt, "f", retention, false).await;
+        elect(&mut r).await;
+        let now: i64 = 10_000_000;
+        commit(&mut r, keyed("young", Some("a"), now)).await;
+        commit(&mut r, keyed("young", None, now - 1_000)).await;
+        for i in 0..30 {
+            commit(&mut r, keyed("other", Some(&format!("v{i:02}")), now)).await;
+        }
+        for _ in 0..200 {
+            r.retain(now as u64).await.unwrap();
+        }
+        let after = records_of(&r).await;
+        assert!(!after.iter().any(|(_, k, v)| k.as_deref() == Some("young") && v.is_some()), "{after:?}");
+        assert!(
+            after.iter().any(|(_, k, v)| k.as_deref() == Some("young") && v.is_none()),
+            "a tombstone younger than delete.retention.ms stays: {after:?}"
+        );
+        // An hour later it may go, but only on a leader that knows every
+        // member holds it.
+        let later = now as u64 + 3_600_000;
+        let limits = compaction::Limits { stable: r.applied, tombstones_below: 0, tombstone_ms: 60_000, now_ms: later };
+        for _ in 0..200 {
+            r.compactor.step(&mut r.log, &r.state.txns, limits).await.unwrap();
+        }
+        assert!(records_of(&r).await.iter().any(|(_, k, _)| k.as_deref() == Some("young")), "kept off a leader");
+        // The next sweep starts a minute after the last.
+        for _ in 0..200 {
+            r.retain(later + 60_000).await.unwrap();
+        }
+        assert!(!records_of(&r).await.iter().any(|(_, k, _)| k.as_deref() == Some("young")), "gone on the leader");
+    });
+}
+
+/// Three records of key `k`, idempotent from sequence `seq`.
+fn idempotent_keyed(seq: i32, value: &str) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    for i in 0..3 {
+        b.push(10_000_000, Some(b"k"), Some(format!("{value}-{i}").as_bytes()), &[]);
+    }
+    let mut raw = BytesMut::from(&b.finish().unwrap()[..]);
+    lotse_record::set_producer(&mut raw, 7, 0, seq).unwrap();
+    raw.freeze()
+}
+
+#[test]
+fn a_compacted_log_applied_again_keeps_the_producers_sequences() {
+    Sim::new(26).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: Some(60_000) };
+        let mut r = open_kept(&rt, "p", retention, false).await;
+        elect(&mut r).await;
+        for i in 0..20 {
+            commit(&mut r, idempotent_keyed(i * 3, &format!("v{i}"))).await;
+        }
+        // Others write on, so the producer's last batch is sealed and
+        // compacted too.
+        for i in 0..20 {
+            commit(&mut r, keyed("other", Some(&format!("o{i:02}")), 10_000_000)).await;
+        }
+        for _ in 0..100 {
+            r.retain(10_000_000).await.unwrap();
+        }
+        let left = records_of(&r).await.len();
+        assert!(left < 30, "compacted: {left} of 60 records left");
+        // A produced batch is never compacted already.
+        let (b, _) = Batch::parse(&idempotent_keyed(60, "x")).unwrap();
+        let forged = lotse_record::compact(&b, |rec| rec.offset == 0).unwrap().unwrap();
+        assert!(matches!(r.propose(forged), Err(ProposeError::Invalid(_))));
+        drop(r);
+        rt.crash();
+        // The producer state comes from applying the compacted batches
+        // again: each still counts the sequences it spans.
+        let mut r = open_kept(&rt, "p", retention, false).await;
+        elect(&mut r).await;
+        assert!(r.propose(idempotent_keyed(57, "v19")).unwrap().duplicate, "the last batch again is a duplicate");
+        assert!(!r.propose(idempotent_keyed(60, "v20")).unwrap().duplicate, "the next sequence is taken");
+    });
+}
+
+#[test]
+fn a_tombstone_goes_only_in_a_sweep_that_knew_it_from_the_start() {
+    Sim::new(27).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: None };
+        let mut r = open_kept(&rt, "s", retention, false).await;
+        elect(&mut r).await;
+        let now: i64 = 10_000_000;
+        commit(&mut r, keyed("K", Some("old"), now)).await;
+        // Every segment in between has something to drop, so a sweep takes
+        // a step per segment.
+        for i in 0..30 {
+            commit(&mut r, keyed("X", Some(&format!("x{i:02}")), now)).await;
+        }
+        let tombstone = commit(&mut r, keyed("K", None, 0)).await.first - 1;
+        for i in 0..10 {
+            commit(&mut r, keyed("Y", Some(&format!("y{i:02}")), now)).await;
+        }
+        let segs: Vec<lotse_log::SegmentInfo> = r.log().segments().collect();
+        let at = segs.iter().position(|s| s.base_offset <= tombstone && tombstone < s.next_offset).unwrap();
+        assert!(at >= 3 && at + 1 < segs.len(), "{segs:?}");
+        let before_it = segs[at - 1].next_offset;
+        let with_it = segs[at].next_offset;
+        let limits =
+            |stable| compaction::Limits { stable, tombstones_below: u64::MAX, tombstone_ms: 1, now_ms: now as u64 };
+
+        // A sweep starts before the tombstone is sealed; then it is.
+        r.compactor.step(&mut r.log, &r.state.txns, limits(before_it)).await.unwrap();
+        for _ in 0..100 {
+            r.compactor.step(&mut r.log, &r.state.txns, limits(with_it)).await.unwrap();
+            let k: Vec<_> = records_of(&r).await.into_iter().filter(|(_, k, _)| k.as_deref() == Some("K")).collect();
+            assert!(k.last().is_none_or(|(o, ..)| *o == tombstone), "the old value of K is the newest again: {k:?}");
+        }
+        assert!(!records_of(&r).await.iter().any(|(_, k, _)| k.as_deref() == Some("K")), "K is gone in the end");
+    });
+}
+
+#[test]
+fn a_leader_keeps_a_tombstone_a_member_lacks() {
+    Sim::new(28).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: Some(1) };
+        let mut rs = Vec::new();
+        for id in 1..=3u64 {
+            let options = ReplicaOptions { retention, ..ReplicaOptions::default() };
+            let host = rt.node(&format!("n{id}"));
+            rs.push(
+                Replica::open_with(host, "g", Config::new(id, vec![1, 2, 3]), Recorder::default(), SMALL, options)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let all = [true, true, true];
+        rounds(&mut rs, &all, 80).await;
+        let leader = |rs: &[Replica<SimRuntime, Recorder>]| {
+            (0..3).find(|&i| rs[i].raft_ref().role() == lotse_raft::Role::Leader).expect("a leader")
+        };
+        let now = 10_000_000u64;
+        let write = |key: &'static str, value: Option<&'static str>, ts: i64| keyed(key, value, ts);
+        let l = leader(&rs);
+        rs[l].propose(write("K", Some("old"), now as i64)).unwrap();
+        for i in 0..15 {
+            rs[l].propose(keyed("F", Some(&format!("f{i:02}")), now as i64)).unwrap();
+            rounds(&mut rs, &all, 3).await;
+        }
+        for r in rs.iter_mut() {
+            for _ in 0..20 {
+                r.retain(now).await.unwrap();
+            }
+        }
+        // Node 3 is away while K is deleted and the tombstone gets old.
+        let two = [true, true, false];
+        let away = 2;
+        rounds(&mut rs, &two, 80).await;
+        let l = (0..2).find(|&i| rs[i].raft_ref().role() == lotse_raft::Role::Leader).expect("1 or 2 leads");
+        rs[l].propose(write("K", None, 0)).unwrap();
+        for i in 0..15 {
+            rs[l].propose(keyed("G", Some(&format!("g{i:02}")), now as i64)).unwrap();
+            rounds(&mut rs, &two, 3).await;
+        }
+        for _ in 0..40 {
+            rs[l].retain(now + 120_000).await.unwrap();
+            rounds(&mut rs, &two, 1).await;
+        }
+        assert!(
+            records_of(&rs[l]).await.iter().any(|(_, key, v)| key.as_deref() == Some("K") && v.is_none()),
+            "the leader keeps the tombstone node 3 lacks"
+        );
+
+        // Node 3 comes back holding the old value and copies the rest.
+        rounds(&mut rs, &all, 80).await;
+        assert_eq!(rs[away].log().next_offset(), rs[l].log().next_offset());
+        let ks: Vec<_> =
+            records_of(&rs[away]).await.into_iter().filter(|(_, key, _)| key.as_deref() == Some("K")).collect();
+        assert!(ks.last().is_none_or(|(_, _, v)| v.is_none()), "node 3 sees K's old value again: {ks:?}");
     });
 }

@@ -598,7 +598,16 @@ async fn run(rt: SimRuntime) {
     for (name, (_, k, ..)) in view.iter().filter(|(_, (id, ..))| *id >= lotse_server::DYNAMIC_BASE) {
         let configs = admin.describe_configs(name).await.expect("the healed cluster describes resources");
         if *k == kind::STREAM {
-            let [ms, bytes] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+            // Nothing here compacts: the compaction settings stay at their
+            // defaults (ADR 0067).
+            let [ms, bytes, policy, tombstones] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+            assert_eq!(
+                (policy.key.as_str(), policy.value.as_str(), policy.source),
+                ("cleanup.policy", "delete", lotse_proto::config_source::DEFAULT),
+                "{name}"
+            );
+            assert_eq!(tombstones.key, "delete.retention.ms", "{name}");
+            assert_eq!(tombstones.source, lotse_proto::config_source::DEFAULT, "{name}");
             assert_eq!(
                 (ms.key.as_str(), ms.value.as_str(), ms.source),
                 ("retention.ms", "-1", lotse_proto::config_source::DEFAULT),

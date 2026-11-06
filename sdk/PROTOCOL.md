@@ -82,7 +82,7 @@ offset size field
     12    8 term               stamped by the leader
     20    1 magic              1
     21    4 crc32c             CRC32C (Castagnoli) over bytes 25 up to the end of this batch
-    25    2 attributes         compression(3) | transactional(1) | control(1) | kind(3), bit 0 first
+    25    2 attributes         compression(3) | transactional(1) | control(1) | kind(3) | compacted(1), bit 0 first
     27    4 last_offset_delta  record_count - 1
     31    8 base_ts            milliseconds since the epoch
     39    8 max_ts
@@ -107,9 +107,9 @@ length varint | attributes i8 (0) | ts_delta varint | offset_delta varint
 | header_count varint | [key_len varint, key, value_len varint, value]*
 ```
 
-`ts_delta` is relative to `base_ts` and wraps like a signed 64-bit subtraction; `offset_delta` is the record's index and must run 0, 1, 2, and so on. A header key is never null.
+`ts_delta` is relative to `base_ts` and wraps like a signed 64-bit subtraction; `offset_delta` is the record's index and must run 0, 1, 2, and so on, except in a compacted batch, where records that compaction removed leave gaps (vectors in `compacted.hex`). A header key is never null.
 
-**Checks a parser makes**, in this order: the buffer holds the 12-byte prefix; the length is at most 1 MiB (the length is a `u32`, so test it without overflow); it is at least 65; the whole batch is present; `magic` is 1; the CRC matches; the attributes are valid; `record_count` is not 0; `last_offset_delta == record_count - 1`; `max_ts >= base_ts`; a control batch holds exactly one record. Decoding the records adds: the block decompresses, to at most 16 MiB; consecutive offset deltas, no bytes left inside a record, no bytes left after the last record, lengths and counts not negative, and every length within the record.
+**Checks a parser makes**, in this order: the buffer holds the 12-byte prefix; the length is at most 1 MiB (the length is a `u32`, so test it without overflow); it is at least 65; the whole batch is present; `magic` is 1; the CRC matches; the attributes are valid; `record_count` is not 0; `last_offset_delta == record_count - 1`; `max_ts >= base_ts`; a control batch holds exactly one record. A compacted batch (bit 8, ADR 0067) replaces the two record-count checks: it holds at most `last_offset_delta + 1` records, possibly none, and is never a control batch. Decoding the records adds: the block decompresses, to at most 16 MiB; consecutive offset deltas (in a compacted batch: strictly rising and at most `last_offset_delta`; an emptied one has no block at all, whatever its codec), no bytes left inside a record, no bytes left after the last record, lengths and counts not negative, and every length within the record.
 
 **Editing in place.** A client sets producer fields (`set_producer`), the transactional bit (`set_transactional`) and, for the leader's TTL stamping, the base timestamp, on the encoded bytes and recomputes the CRC over bytes 25 to the end of that batch. `BatchBuilder` takes the first record's timestamp as `base_ts` and the largest as `max_ts`; it does not read a clock.
 

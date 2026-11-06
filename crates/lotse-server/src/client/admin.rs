@@ -45,7 +45,8 @@ use lotse_rt::{Instant, Runtime};
 use super::{Clients, ClusterView, Outbox, hint, outcome};
 use crate::auth::Principal;
 use crate::metadata::{
-    self, Change, MAX_PARTITIONS, MetadataState, QueueChange, QueueLimits, StreamChange, StreamSettings,
+    self, Change, Cleanup, DEFAULT_DELETE_RETENTION_MS, MAX_PARTITIONS, MetadataState, QueueChange, QueueLimits,
+    StreamChange, StreamSettings,
 };
 use crate::replica::{Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
@@ -178,20 +179,46 @@ const MAX_DELIVERIES_LIMIT: u32 = u16::MAX as u32;
 const RETENTION_MS: &str = "retention.ms";
 const RETENTION_BYTES: &str = "retention.bytes";
 
-/// Sets (`Some`) or resets (`None`) one of a stream's settings: a positive
-/// number, or -1 for no limit.
+const CLEANUP_POLICY: &str = "cleanup.policy";
+const DELETE_RETENTION_MS: &str = "delete.retention.ms";
+
+/// Sets (`Some`) or resets (`None`) one of a stream's settings: for the
+/// retention limits a positive number or -1 for no limit, for
+/// `cleanup.policy` `delete`, `compact` or both, for `delete.retention.ms`
+/// a number of ms from 0, or -1 for keeping tombstones.
 fn set_stream(s: &mut StreamChange, key: &str, value: Option<&String>) -> Result<(), String> {
+    if key == CLEANUP_POLICY {
+        let parsed = match value {
+            None => None,
+            Some(v) => {
+                Some(Cleanup::parse(v).ok_or_else(|| format!("{key} = {v}: delete, compact, or compact,delete"))?)
+            }
+        };
+        if s.cleanup.is_some() {
+            return Err(format!("{key} is given twice"));
+        }
+        s.cleanup = Some(parsed);
+        return Ok(());
+    }
+    let tombstones = key == DELETE_RETENTION_MS;
     let parsed = match value {
         None => None,
         Some(v) => match v.parse::<i64>() {
-            Ok(n) if n > 0 || n == -1 => Some(n),
+            Ok(n) if n > 0 || n == -1 || (tombstones && n == 0) => Some(n),
+            _ if tombstones => return Err(format!("{key} = {v}: a number of ms from 0, or -1 to keep tombstones")),
             _ => return Err(format!("{key} = {v}: a positive number, or -1 for no limit")),
         },
     };
     let slot = match key {
         RETENTION_MS => &mut s.retention_ms,
         RETENTION_BYTES => &mut s.retention_bytes,
-        _ => return Err(format!("streams have no setting {key}; {RETENTION_MS} and {RETENTION_BYTES} can change")),
+        DELETE_RETENTION_MS => &mut s.delete_retention_ms,
+        _ => {
+            return Err(format!(
+                "streams have no setting {key}; {RETENTION_MS}, {RETENTION_BYTES}, {CLEANUP_POLICY} and \
+                 {DELETE_RETENTION_MS} can change"
+            ));
+        }
     };
     if slot.is_some() {
         return Err(format!("{key} is given twice"));
@@ -1009,15 +1036,29 @@ impl Clients {
     }
 }
 
-/// A stream's retention as `DescribeConfigs` lists it: each value with
+/// A stream's settings as `DescribeConfigs` lists them: each value with
 /// where it comes from; -1 is no limit.
 fn stream_configs(s: StreamSettings, defaults: crate::RetentionConfig) -> Vec<ConfigEntry> {
-    let entry = |key: &str, own: Option<i64>, default: Option<u64>| {
+    let entry = |key: &str, own: Option<i64>, default: Option<i64>| {
         let (value, source) = match own {
             Some(v) => (v, config_source::DYNAMIC),
-            None => (default.map_or(-1, |d| d as i64), config_source::DEFAULT),
+            None => (default.unwrap_or(-1), config_source::DEFAULT),
         };
         ConfigEntry { key: key.into(), value: value.to_string(), source }
     };
-    vec![entry(RETENTION_MS, s.retention_ms, defaults.ms), entry(RETENTION_BYTES, s.retention_bytes, defaults.bytes)]
+    let limit = |d: Option<u64>| d.map(|d| d as i64);
+    let cleanup = match s.cleanup {
+        Some(c) => ConfigEntry { key: CLEANUP_POLICY.into(), value: c.name().into(), source: config_source::DYNAMIC },
+        None => ConfigEntry {
+            key: CLEANUP_POLICY.into(),
+            value: Cleanup::Delete.name().into(),
+            source: config_source::DEFAULT,
+        },
+    };
+    vec![
+        entry(RETENTION_MS, s.retention_ms, limit(defaults.ms)),
+        entry(RETENTION_BYTES, s.retention_bytes, limit(defaults.bytes)),
+        cleanup,
+        entry(DELETE_RETENTION_MS, s.delete_retention_ms, Some(DEFAULT_DELETE_RETENTION_MS)),
+    ]
 }

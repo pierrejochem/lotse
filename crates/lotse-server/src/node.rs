@@ -294,7 +294,7 @@ fn retention_of(cfg: &NodeConfig, g: GroupId, queue: bool) -> Retention {
     } else if queue {
         Retention::Queue
     } else {
-        Retention::Stream { ms: cfg.retention.ms, bytes: cfg.retention.bytes }
+        Retention::Stream { ms: cfg.retention.ms, bytes: cfg.retention.bytes, compact: None }
     }
 }
 

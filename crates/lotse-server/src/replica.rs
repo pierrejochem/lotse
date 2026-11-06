@@ -63,7 +63,9 @@ pub(crate) const FORMAT: u8 = 11;
 /// a queue's delivery state, the cluster metadata.
 pub trait StateMachine: std::marker::Send + Sync + 'static {
     /// Applies a committed data batch, in log order. Raft's own entries
-    /// (no-ops, membership changes) are not passed.
+    /// (no-ops, membership changes) are not passed. A batch applied again
+    /// after a restart may be compacted (ADR 0067): fewer records, none
+    /// at all even, under the same header.
     fn apply(&mut self, batch: &Batch);
     /// The state as of the last applied batch.
     fn snapshot(&self) -> Bytes;
@@ -162,11 +164,15 @@ pub enum Retention {
     State,
     /// A stream partition: data older than `ms` (by the records'
     /// timestamps), and the oldest beyond `bytes` of log; each optional.
+    /// With `compact`, also every record a newer one of its key replaces
+    /// (ADR 0067).
     Stream {
         /// Keep records this many ms.
         ms: Option<u64>,
         /// Keep this many bytes of log.
         bytes: Option<u64>,
+        /// Compact the log, keeping tombstones this many ms.
+        compact: Option<u64>,
     },
     /// A queue: what every consumer has settled (below the ack floor).
     Queue,
@@ -287,6 +293,7 @@ pub struct Replica<D: Disk, S> {
     /// retention may later cut (see [`Retention`]).
     boundaries: std::collections::BTreeMap<u64, (SnapshotMeta, Bytes)>,
     retention: Retention,
+    compactor: compaction::Compactor,
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
@@ -407,6 +414,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             older: OlderSnapshots::default(),
             boundaries: std::collections::BTreeMap::new(),
             retention: options.retention,
+            compactor: compaction::Compactor::default(),
             state,
             max_fill_bytes: 1 << 20,
             max_snapshot_chunk: 1 << 20,
@@ -483,6 +491,11 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         // messages without anyone having received them).
         if parsed.attributes().kind != lotse_record::BatchKind::Data {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("only data batches can be produced")));
+        }
+        // Only compaction leaves records out of a batch; a produced batch
+        // holds every offset it spans.
+        if parsed.is_compacted() {
+            return Err(ProposeError::Invalid(lotse_record::Error::Malformed("a produced batch cannot be compacted")));
         }
         if parsed.producer_id() != 0 && parsed.base_sequence() < 0 {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("idempotent batch without a sequence")));
@@ -610,6 +623,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             let old = self.snapshot.replace((snap.meta, snap.data));
             self.older.supersede(old, &self.raft);
             self.boundaries.clear();
+            self.compactor.reset();
         }
         if let Some(from) = ready.truncate_from {
             self.log.truncate_from(from - 1).await?;
@@ -711,7 +725,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             Retention::Keep => return None,
             Retention::State => applied,
             Retention::Queue => self.state.queue.as_ref()?.retention_floor(),
-            Retention::Stream { ms, bytes } => {
+            Retention::Stream { ms, bytes, .. } => {
                 let segs: Vec<lotse_log::SegmentInfo> = self.log.segments().collect();
                 let (old, _active) = segs.split_at(segs.len().saturating_sub(1));
                 let mut point = self.log.start_offset();
@@ -744,6 +758,9 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// [`Retention::State`], a snapshot taken now), and only whole segments.
     /// Returns the log's new start, if it moved.
     pub async fn retain(&mut self, now_ms: u64) -> Result<Option<u64>, Error> {
+        if let Retention::Stream { compact: Some(tombstone_ms), .. } = self.retention {
+            self.compact_log(tombstone_ms, now_ms).await?;
+        }
         let Some(point) = self.retention_point(now_ms) else { return Ok(None) };
         let current = self.raft.log().snapshot_index();
         let (meta, data) = if self.retention == Retention::State {
@@ -773,6 +790,18 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.boundaries.retain(|&i, _| i > cut);
         self.log.trim_before(cut).await?;
         Ok(Some(cut))
+    }
+
+    /// One step of compaction (ADR 0067). Returns the base of the segment
+    /// it rewrote, if any.
+    async fn compact_log(&mut self, tombstone_ms: u64, now_ms: u64) -> Result<Option<u64>, Error> {
+        let applied = self.applied;
+        let stable = self.state.txns.last_stable_offset(applied).min(applied);
+        // Below what every member holds (indices are offsets + 1).
+        let tombstones_below =
+            self.raft.matched().and_then(|m| m.values().copied().min()).map_or(0, |index| index.saturating_sub(1));
+        let limits = compaction::Limits { stable, tombstones_below, tombstone_ms, now_ms };
+        self.compactor.step(&mut self.log, &self.state.txns, limits).await
     }
 
     async fn fill(&self, s: &mut Send) -> Result<(), Error> {
@@ -871,7 +900,7 @@ pub(crate) fn to_batch(e: &Entry) -> Result<Bytes, Error> {
     let bytes = bytes.freeze();
     let (batch, _) = Batch::parse(&bytes)?;
     if batch.last_offset() + 1 != e.last {
-        return Err(Error::Corrupt(format!("entry {}..={} holds {} records", e.first, e.last, batch.record_count())));
+        return Err(Error::Corrupt(format!("entry {}..={} spans {} offsets", e.first, e.last, batch.span())));
     }
     Ok(bytes)
 }
@@ -992,6 +1021,8 @@ fn decode_snapshot(bytes: Bytes) -> Result<(SnapshotMeta, Bytes), Error> {
     }
     Ok((SnapshotMeta { index, term, membership }, b))
 }
+
+mod compaction;
 
 #[cfg(test)]
 mod tests;

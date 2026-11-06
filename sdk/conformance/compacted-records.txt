@@ -1,0 +1,6 @@
+# Records of each batch in compacted.hex, written as in batch-records.txt; an emptied batch has none.
+# label index offset timestamp key value headers
+gap 0 100 1700000000000 =6b31 =7631 68:=78,6e:-
+gap 1 102 1699999999999 = = :=
+last-only 0 5 1700000000002 =02 =0202 -
+zstd-gap 0 101 1700000000005 - - -

@@ -26,11 +26,14 @@ public record Attributes(Compression compression, boolean transactional, boolean
         return compression.code() | (transactional ? 1 << 3 : 0) | (control ? 1 << 4 : 0) | (kind.code() << 5);
     }
 
-    /** Unpacks the on-disk value, refusing unknown codecs, kinds and reserved bits. */
+    /**
+     * Unpacks the on-disk value, refusing unknown codecs, kinds and reserved bits. Bit 8 marks a compacted batch
+     * (ADR 0067); {@link Batch#isCompacted()} reads it.
+     */
     public static Attributes fromBits(int bits) {
         Compression compression = Compression.fromCode(bits & 0b111);
         BatchKind kind = BatchKind.fromCode((bits >> 5) & 0b111);
-        if (bits >> 8 != 0) {
+        if (bits >> 9 != 0) {
             throw RecordFormatException.malformed("reserved attribute bits set");
         }
         return new Attributes(compression, (bits & (1 << 3)) != 0, (bits & (1 << 4)) != 0, kind);

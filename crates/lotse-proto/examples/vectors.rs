@@ -20,6 +20,8 @@
 //! fetch-records.hex <label> <hex of several batches in a row>
 //! compressed.hex    <label> <hex of one batch with a zstd or lz4 record block>
 //! compressed-records.txt <label> <index> <offset> <timestamp> <key> <value> <headers>
+//! compacted.hex     <label> <record_count> <span> <hex of one compacted batch>
+//! compacted-records.txt <label> <index> <offset> <timestamp> <key> <value> <headers>
 //! varints.txt       <kind> <value> <hex>
 //! crc32c.txt        <label> <hex of the input> <crc as 8 hex digits>
 //! error-codes.txt   <code> <name> <retriable>
@@ -223,6 +225,23 @@ fn compressed_batches() -> Vec<(String, Bytes)> {
     out
 }
 
+/// Batches compaction rewrote (ADR 0067): records left out, offsets kept.
+fn compacted_batches() -> Vec<(String, Bytes)> {
+    let all: Vec<(String, Bytes)> = batches().into_iter().chain(compressed_batches()).collect();
+    let by = |label: &str| Batch::parse(&all.iter().find(|(l, _)| l == label).expect("a batch").1).expect("parses").0;
+    let compact = |label: &str, keep: &[u64]| {
+        let b = by(label);
+        lotse_record::compact(&b, |r| keep.contains(&r.offset)).expect("compacts").expect("something goes")
+    };
+    vec![
+        ("gap".to_string(), compact("data-stamped", &[100, 102])),
+        ("last-only".to_string(), compact("idempotent", &[5])),
+        ("emptied".to_string(), compact("transactional", &[])),
+        ("zstd-gap".to_string(), compact("zstd-stamped", &[101])),
+        ("lz4-emptied".to_string(), compact("lz4-large", &[])),
+    ]
+}
+
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("usage: vectors <output directory>"));
     std::fs::create_dir_all(&dir).expect("creating the output directory");
@@ -379,6 +398,26 @@ fn main() {
     out.write(
         "compressed-records.txt",
         "Records of each batch in compressed.hex, written as in batch-records.txt.\nlabel index offset timestamp key value headers",
+        &records,
+    );
+
+    let compacted = compacted_batches();
+    let mut lines = Vec::new();
+    let mut records = Vec::new();
+    for (label, bytes) in &compacted {
+        let (b, _) = Batch::parse(bytes).expect("a valid batch");
+        assert!(b.is_compacted());
+        lines.push(format!("{label} {} {} {}", b.record_count(), b.span(), hex(bytes)));
+        records.extend(record_lines(label, &b));
+    }
+    out.write(
+        "compacted.hex",
+        "Batches compaction rewrote (ADR 0067): attribute bit 8 set, some records left out, the header's offsets,\nterm, producer fields, timestamps and codec kept. gap, last-only and emptied come from data-stamped,\nidempotent and transactional; zstd-gap from zstd-stamped, lz4-emptied from lz4-large. An emptied batch\nholds no record block at all, whatever its codec.\nlabel record_count span hex",
+        &lines,
+    );
+    out.write(
+        "compacted-records.txt",
+        "Records of each batch in compacted.hex, written as in batch-records.txt; an emptied batch has none.\nlabel index offset timestamp key value headers",
         &records,
     );
 
