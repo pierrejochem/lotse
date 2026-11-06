@@ -772,6 +772,8 @@ pub enum InternalControl {
     GroupOffsets,
     /// A change to the cluster's resources, in the metadata group.
     Metadata,
+    /// Coordinator keys to forget: of a tenant's incarnation that is gone.
+    Forget,
 }
 
 /// Builds an internal control batch carrying `payload`.
@@ -793,6 +795,7 @@ pub fn internal_control_batch(kind: InternalControl, payload: &[u8]) -> Result<B
         InternalControl::GroupState => 6,
         InternalControl::GroupOffsets => 7,
         InternalControl::Metadata => 8,
+        InternalControl::Forget => 9,
     };
     let mut key = [0u8; 4]; // version u16 | type u16
     key[2..].copy_from_slice(&ty.to_le_bytes());
@@ -1175,6 +1178,7 @@ pub fn control(batch: &Batch) -> Result<Option<Control>, Error> {
         6 => Control::Internal(InternalControl::GroupState, value),
         7 => Control::Internal(InternalControl::GroupOffsets, value),
         8 => Control::Internal(InternalControl::Metadata, value),
+        9 => Control::Internal(InternalControl::Forget, value),
         _ => return Err(Error::Malformed("unknown control type")),
     }))
 }

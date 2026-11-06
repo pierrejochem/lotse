@@ -736,8 +736,9 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        if req.name.is_empty() || req.name.len() > MAX_TENANT_NAME {
-            let why = format!("a tenant name has 1 to {MAX_TENANT_NAME} bytes");
+        // NUL would make the coordinator's keys ambiguous (ADR 0069).
+        if req.name.is_empty() || req.name.len() > MAX_TENANT_NAME || req.name.contains('\0') {
+            let why = format!("a tenant name has 1 to {MAX_TENANT_NAME} bytes and no NUL");
             return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
         }
         let replica = match Self::metadata_leader(view, groups) {
@@ -747,7 +748,7 @@ impl Clients {
         if view.access.tenants.contains_key(&req.name) {
             return outbox.push(id, &admin_response(ErrorCode::RESOURCE_EXISTS, None, None));
         }
-        let change = Change::CreateTenant { name: req.name };
+        let change = Change::CreateTenant { name: req.name, incarnated: true };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

@@ -22,7 +22,9 @@ public enum ControlKind {
     /** Offsets committed for a consumer group. */
     GROUP_OFFSETS(7),
     /** A change to the cluster's resources, in the metadata group. */
-    METADATA(8);
+    METADATA(8),
+    /** Coordinator keys of a tenant incarnation that is gone, to forget (ADR 0069). */
+    FORGET(9);
 
     private final int code;
 

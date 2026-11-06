@@ -158,6 +158,42 @@ pub(crate) fn record(txn_id: &str, meta: &TxnMeta) -> Bytes {
     lotse_record::internal_control_batch(InternalControl::TxnState, &b).expect("one record")
 }
 
+/// The record that forgets `keys` (ADR 0069): a tenant incarnation that
+/// is gone left them.
+pub(crate) fn forget_record(keys: &[String]) -> Bytes {
+    let mut b = BytesMut::new();
+    b.put_u8(VERSION);
+    b.put_u32_le(keys.len() as u32);
+    for k in keys {
+        b.put_u16_le(k.len() as u16);
+        b.put_slice(k.as_bytes());
+    }
+    lotse_record::internal_control_batch(InternalControl::Forget, &b).expect("one record")
+}
+
+fn decode_forget(mut b: &[u8]) -> Result<Vec<String>, String> {
+    let short = || "forget record is truncated".to_string();
+    if b.remaining() < 5 || b.get_u8() != VERSION {
+        return Err("forget record has an unknown version".into());
+    }
+    let mut out = Vec::new();
+    for _ in 0..b.get_u32_le() {
+        if b.remaining() < 2 {
+            return Err(short());
+        }
+        let n = usize::from(b.get_u16_le());
+        if b.remaining() < n {
+            return Err(short());
+        }
+        out.push(String::from_utf8(b[..n].to_vec()).map_err(|_| "a key is not UTF-8".to_string())?);
+        b.advance(n);
+    }
+    if b.has_remaining() {
+        return Err("forget record has trailing bytes".into());
+    }
+    Ok(out)
+}
+
 /// See the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CoordinatorState {
@@ -199,6 +235,12 @@ impl CoordinatorState {
             Ok(Some(Control::Internal(InternalControl::GroupOffsets, payload))) => {
                 return self.groups.apply_offsets(&payload);
             }
+            Ok(Some(Control::Internal(InternalControl::Forget, payload))) => {
+                for key in decode_forget(&payload)? {
+                    self.forget(&key);
+                }
+                return Ok(());
+            }
             _ => return Ok(()),
         };
         let mut b = &payload[..];
@@ -217,6 +259,23 @@ impl CoordinatorState {
         }
         self.txns.insert(txn_id, meta);
         Ok(())
+    }
+
+    /// Drops everything under `key`: the transactional id or the group of
+    /// that key, and the group's committed offsets (ADR 0069).
+    fn forget(&mut self, key: &str) {
+        self.txns.remove(key);
+        self.groups.groups.remove(key);
+        self.groups.offsets.retain(|(g, _, _), _| g != key);
+    }
+
+    /// Every key under which this state holds something: transactional
+    /// ids, groups, and groups with committed offsets only.
+    pub(crate) fn keys(&self) -> BTreeSet<&str> {
+        let mut out: BTreeSet<&str> = self.txns.keys().map(String::as_str).collect();
+        out.extend(self.groups.groups.keys().map(String::as_str));
+        out.extend(self.groups.offsets.keys().map(|(g, _, _)| g.as_str()));
+        out
     }
 
     /// The applied state, for a snapshot.
@@ -292,6 +351,13 @@ mod tests {
             TxnMeta { phase: Phase::PrepareAbort, offsets: [(other.clone(), c.clone())].into(), ..m2.clone() };
         s.applied(23, &Batch::parse(&record("payments", &aborted)).unwrap().0).unwrap();
         assert!(!s.groups().offsets.contains_key(&other), "an abort drops them");
+        // Forgetting a key drops its transaction, group and offsets, and
+        // nothing else.
+        let mut f = s.clone();
+        f.groups.offsets.insert(("h".to_string(), 7, 0), c.clone());
+        f.applied(24, &Batch::parse(&forget_record(&["payments".into(), "g".into()])).unwrap().0).unwrap();
+        assert!(f.get("payments").is_none() && !f.groups().offsets.keys().any(|(g, ..)| g == "g"));
+        assert_eq!(f.keys(), BTreeSet::from(["h"]));
         let bytes = s.encode();
         let mut back = CoordinatorState::default();
         back.restore(&bytes).unwrap();

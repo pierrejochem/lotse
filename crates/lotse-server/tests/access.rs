@@ -687,3 +687,77 @@ fn transactional_and_group_ids_live_in_their_tenant() {
         });
     });
 }
+
+/// Each group `c` sees in the nodes' metrics: tenant, id, members.
+async fn groups_seen(c: &Client<SimRuntime>) -> Vec<(String, String, usize)> {
+    let mut out: Vec<(String, String, usize)> = c
+        .node_metrics()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, m)| m.unwrap().groups)
+        .map(|g| (g.tenant, g.group_id, g.members.len()))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_tenant_created_again_starts_without_the_old_ones_ids() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "tmp");
+            let grant = || {
+                vec![
+                    binding(subject_kind::USER, "p", role::PRODUCER, "tmp", ""),
+                    binding(subject_kind::USER, "c", role::CONSUMER, "tmp", ""),
+                ]
+            };
+            root.create_tenant("tmp").await.unwrap();
+            root.alter_role_bindings(grant(), Vec::new()).await.unwrap();
+            root.create_stream("events", 1, 3).await.unwrap();
+            settle(&rt).await;
+            let c = as_user(&rt, "c", "tmp");
+            let mut old = c.join_group("readers", &["events"], lotse_client::GroupConfig::default()).await.unwrap();
+            joined(&mut old).await;
+            old.commit().await.unwrap();
+            old.close().await;
+            let before = transactional(&rt, "p", "tmp", "tx");
+            let mut t = before.begin_transaction().await.unwrap();
+            t.produce("events", 0, batch("e1")).await.unwrap();
+            t.commit().await.unwrap();
+
+            // Deleted and created again under the same name.
+            root.delete("events").await.unwrap();
+            settle(&rt).await;
+            root.delete_tenant("tmp").await.unwrap();
+            root.create_tenant("tmp").await.unwrap();
+            root.alter_role_bindings(grant(), Vec::new()).await.unwrap();
+            root.create_stream("events", 1, 3).await.unwrap();
+            settle(&rt).await;
+
+            // The new incarnation's ids work, and the coordinator leader,
+            // which forgets the old incarnation's (ADR 0069), leaves them.
+            // A client that has not looked up the new stream yet would
+            // still name the old one's id: this one starts afresh.
+            let c = as_user(&rt, "c", "tmp");
+            let mut new = c.join_group("readers", &["events"], lotse_client::GroupConfig::default()).await.unwrap();
+            joined(&mut new).await;
+            new.commit().await.unwrap();
+            let after = transactional(&rt, "p", "tmp", "tx");
+            let mut t = after.begin_transaction().await.unwrap();
+            t.produce("events", 0, batch("e2")).await.unwrap();
+            t.commit().await.expect("a fresh transactional id in the new tenant");
+            rt.sleep(TICK * 300).await;
+            new.poll(TICK * 5).await.unwrap();
+            assert_eq!(groups_seen(&root).await, vec![("tmp".into(), "readers".into(), 1)], "the new group stays");
+            new.commit().await.expect("still its group");
+            new.close().await;
+            for n in nodes {
+                n.handle().stop();
+                n.join().await.unwrap();
+            }
+        });
+    });
+}

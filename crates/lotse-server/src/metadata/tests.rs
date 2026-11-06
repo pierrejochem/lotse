@@ -182,7 +182,9 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
 fn tenants_bindings_and_a_create_racing_a_delete() {
     use lotse_auth::roles::{Role, RoleBinding, Subject};
     let mut s = MetadataState::default();
-    s.apply(1, &payload(&Change::CreateTenant { name: "shop".into() })).unwrap();
+    // A record from before incarnations: incarnation 0.
+    s.apply(1, &payload(&Change::CreateTenant { name: "shop".into(), incarnated: false })).unwrap();
+    assert!(s.incarnations.is_empty());
     let b = |role, tenant: &str| RoleBinding {
         subject: Subject::User("u".into()),
         role,
@@ -225,8 +227,9 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
     )
     .unwrap();
     assert_eq!(s.id_of("late"), None);
-    // Created again: open again.
-    s.apply(8, &payload(&Change::CreateTenant { name: "shop".into() })).unwrap();
+    // Created again: open again, as a new incarnation (ADR 0069).
+    s.apply(8, &payload(&Change::CreateTenant { name: "shop".into(), incarnated: true })).unwrap();
+    assert_eq!(s.incarnations.get("shop"), Some(&8), "the index of its creation");
     s.apply(
         9,
         &payload(&Change::DeclareExchange { name: "x2".into(), tenant: "shop".into(), kind: ExchangeKind::Fanout }),
@@ -238,6 +241,12 @@ fn tenants_bindings_and_a_create_racing_a_delete() {
     s.apply(10, &payload(&unset)).unwrap();
     assert!(s.bindings_of_roles.is_empty());
     s.apply(11, &payload(&set)).unwrap();
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // Deleted, it keeps the incarnation it had, in snapshots too.
+    s.apply(12, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
+    s.apply(13, &payload(&Change::Delete { resource_id: resource_id(9) })).unwrap();
+    s.apply(14, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
+    assert!(s.deleted_tenants.contains("shop") && s.incarnations.get("shop") == Some(&8));
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
 

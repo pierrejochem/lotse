@@ -335,6 +335,8 @@ pub(crate) struct Clients {
     jobs: BTreeMap<String, (u64, Signal)>,
     /// When this leader first saw each transaction ongoing, for timeouts.
     ongoing_since: BTreeMap<String, Instant>,
+    /// When the coordinator leader next looks for keys to forget.
+    next_forget: Instant,
     /// Sum of the groups' commit indices when pending fetches were last
     /// tried: they are tried again only after a commit or at their deadline.
     commits_seen: u64,
@@ -376,7 +378,7 @@ impl Clients {
             return Ok(());
         }
         // From here on, ids are the coordinator's keys (ADR 0062).
-        if let Err(why) = ids::scope(&mut request) {
+        if let Err(why) = ids::scope(&mut request, view.access) {
             outbox.push(id, &Response::Refused { code: ErrorCode::INVALID_REQUEST, message: why });
             return Ok(());
         }

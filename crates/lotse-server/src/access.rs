@@ -28,6 +28,10 @@ pub(crate) struct Access {
     pub(crate) tenants: BTreeMap<String, u8>,
     /// Every resource: its name and tenant.
     pub(crate) resources: BTreeMap<u64, (String, String)>,
+    /// The incarnation of each tenant that has one other than 0 (ADR 0069).
+    pub(crate) incarnations: BTreeMap<String, u64>,
+    /// Tenants deleted at runtime, with the incarnation they had.
+    pub(crate) gone: BTreeMap<String, u64>,
 }
 
 impl Access {
@@ -69,7 +73,22 @@ impl Access {
             resources.insert(x.resource_id, (x.name.clone(), x.tenant.clone()));
         }
         let bindings = configured_bindings.iter().chain(state.bindings_of_roles.iter()).cloned().collect();
-        Access { grants: Grants { bindings }, configured: configured_bindings, tenants, resources }
+        // A configured tenant is always incarnation 0, whatever happened to
+        // a runtime tenant of that name.
+        let incarnation = |t: &String| state.incarnations.get(t).copied().unwrap_or(0);
+        let incarnations = tenants
+            .iter()
+            .filter(|(t, source)| **source == config_source::DYNAMIC && incarnation(t) != 0)
+            .map(|(t, _)| (t.clone(), incarnation(t)))
+            .collect();
+        let gone = state.deleted_tenants.iter().map(|t| (t.clone(), incarnation(t))).collect();
+        Access { grants: Grants { bindings }, configured: configured_bindings, tenants, resources, incarnations, gone }
+    }
+
+    /// The incarnation of `tenant` (ADR 0069): 0 for a configured tenant and
+    /// one created before incarnations.
+    pub(crate) fn incarnation(&self, tenant: &str) -> u64 {
+        self.incarnations.get(tenant).copied().unwrap_or(0)
     }
 
     /// Whether `p` may do `op` on the resource called `name` in `tenant`.

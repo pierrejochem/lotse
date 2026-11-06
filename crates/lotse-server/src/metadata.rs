@@ -68,7 +68,10 @@ pub(crate) enum Change {
     /// A user's SCRAM credential set, or removed with `None`.
     SetUser { user: String, credential: Option<ScramCredential> },
     /// A tenant created.
-    CreateTenant { name: String },
+    /// A tenant is created. `incarnated` (every create since ADR 0069)
+    /// gives it the record's index as its incarnation; an older record's
+    /// tenant keeps incarnation 0.
+    CreateTenant { name: String, incarnated: bool },
     /// An empty tenant deleted, with its role bindings.
     DeleteTenant { name: String },
     /// Role bindings removed, then added.
@@ -329,6 +332,11 @@ pub(crate) struct MetadataState {
     /// Tenants deleted at runtime and not created again: nothing may be
     /// created in them, even by a create proposed before the delete.
     pub(crate) deleted_tenants: BTreeSet<String>,
+    /// Each runtime tenant's incarnation, live or deleted, where it is not
+    /// 0: the index of the record that created it (ADR 0069). Transactional
+    /// and group ids are keyed by it, so a tenant created again under a
+    /// name starts without the ids of the one deleted before.
+    pub(crate) incarnations: BTreeMap<String, u64>,
     /// Nodes added at runtime; those from the configuration are not here.
     pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
     /// Nodes being drained.
@@ -563,8 +571,13 @@ impl MetadataState {
             Change::SetUser { user, credential: None } => {
                 self.users.remove(&user);
             }
-            Change::CreateTenant { name } => {
+            Change::CreateTenant { name, incarnated } => {
                 self.deleted_tenants.remove(&name);
+                if incarnated {
+                    self.incarnations.insert(name.clone(), index);
+                } else {
+                    self.incarnations.remove(&name);
+                }
                 self.tenants.insert(name);
             }
             Change::DeleteTenant { name } => {
@@ -733,19 +746,28 @@ impl MetadataState {
         // Written only when there are some, so a snapshot without pins reads
         // on a node from before them (ADR 0065).
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
-        if !self.pins.is_empty() || !compacting.is_empty() {
+        if !self.pins.is_empty() || !compacting.is_empty() || !self.incarnations.is_empty() {
             b.put_u32_le(self.pins.len() as u32);
             for (g, n) in &self.pins {
                 b.put_u64_le(*g);
                 b.put_u64_le(*n);
             }
         }
-        // Likewise the settings that came with compaction (ADR 0067).
-        if !compacting.is_empty() {
+        // Likewise the settings that came with compaction (ADR 0067) and
+        // tenants' incarnations (ADR 0069); a later section needs the ones
+        // before it, empty or not.
+        if !compacting.is_empty() || !self.incarnations.is_empty() {
             b.put_u32_le(compacting.len() as u32);
             for s in compacting {
                 b.put_u64_le(s.resource_id);
                 put_compaction(&mut b, &s.settings);
+            }
+        }
+        if !self.incarnations.is_empty() {
+            b.put_u32_le(self.incarnations.len() as u32);
+            for (t, i) in &self.incarnations {
+                put_str(&mut b, t);
+                b.put_u64_le(*i);
             }
         }
         b.freeze()
@@ -853,6 +875,13 @@ impl MetadataState {
                 let id = b.get_u64_le();
                 let stream = s.streams.get_mut(&id).ok_or("compaction settings of an unknown stream")?;
                 get_compaction(b, &mut stream.settings)?;
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let t = get_str(b)?;
+                need(b, 8)?;
+                s.incarnations.insert(t, b.get_u64_le());
             }
         }
         if b.has_remaining() {
@@ -984,8 +1013,16 @@ fn change_bytes(change: &Change) -> Bytes {
                 put_credential(&mut b, c);
             }
         }
-        Change::CreateTenant { name } | Change::DeleteTenant { name } => {
-            b.put_u8(if matches!(change, Change::CreateTenant { .. }) { 8 } else { 9 });
+        Change::CreateTenant { name, incarnated } => {
+            b.put_u8(8);
+            put_str(&mut b, name);
+            // Absent in records from before ADR 0069.
+            if *incarnated {
+                b.put_u8(1);
+            }
+        }
+        Change::DeleteTenant { name } => {
+            b.put_u8(9);
             put_str(&mut b, name);
         }
         Change::SetBindings { add, remove } => {
@@ -1059,7 +1096,18 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             };
             Change::SetUser { user, credential }
         }
-        8 => Change::CreateTenant { name: get_str(b)? },
+        8 => {
+            let name = get_str(b)?;
+            let incarnated = match b.first() {
+                None => false,
+                Some(1) => {
+                    b.advance(1);
+                    true
+                }
+                Some(_) => return Err("unknown tenant record".into()),
+            };
+            Change::CreateTenant { name, incarnated }
+        }
         9 => Change::DeleteTenant { name: get_str(b)? },
         10 => Change::SetBindings { add: get_role_bindings(b)?, remove: get_role_bindings(b)? },
         11 => {

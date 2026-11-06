@@ -1545,3 +1545,117 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
         assert_eq!(ask(UNCOMMITTED, 5_000).await, (hw, -1), "after everything: the end");
     });
 }
+
+/// A tenant created again under its name is a new incarnation (ADR 0069):
+/// its ids are new keys, and the coordinator leader forgets the old
+/// incarnation's, except a transaction still running.
+#[test]
+fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
+    Sim::new(5).run(|rt| async move {
+        let mut r = single(&rt).await;
+        lead(&mut r).await;
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let mut state = crate::metadata::MetadataState::default();
+        state.tenants.extend(["acme".to_string(), "keep".to_string()]);
+        let before = crate::access::Access::build(&crate::AuthConfig::none(), &[], &state);
+        // acme deleted and created again at index 41; keep untouched.
+        state.incarnations.insert("acme".into(), 41);
+        let after = crate::access::Access::build(&crate::AuthConfig::none(), &[], &state);
+        let mut clients = Clients::default();
+        let outbox = Arc::new(Outbox::default());
+        let mut id = 0;
+        let mut ask = async |clients: &mut Clients, groups: &mut Groups, now, access, request: Request| {
+            id += 1;
+            let view = ClusterView {
+                streams: &streams,
+                queues: &[],
+                exchanges: &[],
+                deleted: &NOTHING_DELETED,
+                group_session: Duration::from_secs(45),
+                group_heartbeat: Duration::from_secs(5),
+                admin: AdminView::default(),
+                client_addrs: &addrs,
+                coordinator: Some(G),
+                node: NodeView::default(),
+                now,
+                unix_ms: 0,
+                access,
+            };
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
+            let api_key = request.api_key();
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered");
+            lotse_proto::decode_response(frame, api_key).unwrap().1
+        };
+        let init = |tenant: &str, txn: &str| {
+            Request::InitProducer(lotse_proto::InitProducerRequest {
+                tenant: tenant.into(),
+                txn_id: Some(txn.into()),
+                txn_timeout_ms: 60_000,
+            })
+        };
+        let now = rt.now();
+        let Response::InitProducer(t) = ask(&mut clients, &mut groups, now, &before, init("acme", "t")).await else {
+            panic!()
+        };
+        let Response::InitProducer(u) = ask(&mut clients, &mut groups, now, &before, init("acme", "u")).await else {
+            panic!()
+        };
+        let add = Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+            tenant: "acme".into(),
+            txn_id: "u".into(),
+            producer_id: u.producer_id,
+            producer_epoch: u.producer_epoch,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let Response::AddPartitionsToTxn(a) = ask(&mut clients, &mut groups, now, &before, add).await else { panic!() };
+        assert_eq!(a.resources[0].partitions[0].error, ErrorCode::NONE, "u's transaction runs");
+        let Response::InitProducer(_) = ask(&mut clients, &mut groups, now, &before, init("keep", "k")).await else {
+            panic!()
+        };
+        let keys = |groups: &Groups| -> BTreeSet<String> {
+            groups[&G].coordinator().keys().into_iter().map(String::from).collect()
+        };
+        assert_eq!(keys(&groups), BTreeSet::from(["acme\0t".into(), "acme\0u".into(), "keep\0k".into()]));
+
+        // Once the node knows acme's new incarnation, the old one's idle id
+        // goes; the running transaction and the other tenant's id stay.
+        let later = now + Duration::from_secs(2);
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: Some(G),
+            node: NodeView::default(),
+            now: later,
+            unix_ms: 0,
+            access: &after,
+        };
+        for _ in 0..3 {
+            clients.after_round(&view, &mut groups).await.unwrap();
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+        }
+        assert_eq!(keys(&groups), BTreeSet::from(["acme\0u".into(), "keep\0k".into()]));
+
+        // The same id in the new incarnation is a new transactional id.
+        let Response::InitProducer(t2) = ask(&mut clients, &mut groups, later, &after, init("acme", "t")).await else {
+            panic!()
+        };
+        assert_eq!(t2.error, ErrorCode::NONE);
+        assert_ne!(t2.producer_id, t.producer_id, "not the old incarnation's producer");
+        assert_eq!(t2.producer_epoch, 0);
+        assert!(keys(&groups).contains(&crate::client::ids::key("acme", 41, "t")));
+    });
+}

@@ -24,7 +24,7 @@ use lotse_proto::{
 };
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, outcome};
+use super::{Clients, ClusterView, Outbox, hint, ids, outcome};
 use crate::coordinator::{Phase, TxnMeta};
 use crate::replica::{ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::Signal;
@@ -64,7 +64,16 @@ pub(super) enum Busy {
     Group(String),
     /// Nothing that needs serialising (committed offsets).
     Free,
+    /// Forgetting keys of tenant incarnations that are gone (ADR 0069): one
+    /// such record at a time.
+    Forget,
 }
+
+/// How often the coordinator leader looks for keys to forget.
+const FORGET_EVERY: Duration = Duration::from_secs(1);
+
+/// The most a forget record names, in bytes of keys.
+const FORGET_BYTES: usize = 256 * 1024;
 
 /// A coordinator record in flight.
 pub(super) struct PendingWrite {
@@ -493,7 +502,43 @@ impl Clients {
             self.ongoing_since.remove(&txn_id);
             self.write(replica, view.now, &txn_id, &meta, None, Then::Nothing);
         }
+        if view.now >= self.next_forget && !self.busy.contains(&Busy::Forget) {
+            self.next_forget = view.now + FORGET_EVERY;
+            let keys = self.forgettable(view, replica.coordinator());
+            if !keys.is_empty() {
+                let record = crate::coordinator::forget_record(&keys);
+                self.propose_record(replica, view.now, record, Busy::Forget, None, Then::Nothing);
+            }
+        }
         jobs
+    }
+
+    /// Keys of tenant incarnations that are gone (ADR 0069), as many as one
+    /// record takes. A transaction that is still running is left to end
+    /// first, by its client or its timeout: its partitions wait for its
+    /// markers. A key with a record in flight waits too.
+    fn forgettable(&self, view: &ClusterView<'_>, state: &crate::coordinator::CoordinatorState) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        for key in state.keys() {
+            if !ids::doomed(key, view.access) {
+                continue;
+            }
+            let running = state
+                .get(key)
+                .is_some_and(|m| matches!(m.phase, Phase::Ongoing | Phase::PrepareCommit | Phase::PrepareAbort));
+            let busy =
+                self.busy.contains(&Busy::Txn(key.to_string())) || self.busy.contains(&Busy::Group(key.to_string()));
+            if running || busy {
+                continue;
+            }
+            bytes += key.len() + 2;
+            if bytes > FORGET_BYTES && !out.is_empty() {
+                break;
+            }
+            out.push(key.to_string());
+        }
+        out
     }
 
     /// Every marker of `txn_id`'s decision in `term` is written: complete it.
