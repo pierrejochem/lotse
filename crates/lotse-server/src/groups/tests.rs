@@ -152,3 +152,48 @@ fn records_and_state_round_trip() {
     s.apply_group(&payload).unwrap();
     assert!(!s.groups.contains_key("billing"));
 }
+
+#[test]
+fn instance_ids_and_patterns_round_trip_and_old_forms_stay_readable() {
+    let mut g = GroupMeta { epoch: 3, ..GroupMeta::default() };
+    g.members.insert("a".into(), member(&[7]));
+    g.members.insert("b".into(), MemberMeta { instance_id: Some("w1".into()), ..member(&[7]) });
+    g.members.insert(
+        "c".into(),
+        MemberMeta { instance_id: Some("w2".into()), pattern: Some("orders-.*".into()), ..member(&[7, 8]) },
+    );
+    g.members.insert("d".into(), MemberMeta { pattern: Some("x|y".into()), ..member(&[]) });
+    let record = group_record("g", &g);
+    let mut s = GroupsState::default();
+    let payload = match lotse_record::control(&lotse_record::Batch::parse(&record).unwrap().0) {
+        Ok(Some(lotse_record::Control::Internal(_, p))) => p,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(payload[0], VERSION_EXTRAS);
+    s.apply_group(&payload).unwrap();
+    assert_eq!(s.groups["g"], g, "a record carries both");
+    let mut b = BytesMut::new();
+    s.encode(&mut b);
+    s.encode_instances(&mut b);
+    let mut r = &b[..];
+    let mut back = GroupsState::decode(&mut r).unwrap();
+    back.decode_instances(&mut r).unwrap();
+    assert!(r.is_empty());
+    assert_eq!(back, s, "and so does a snapshot");
+
+    // Without either, the record is version 1 and the snapshot has nothing
+    // at its end: as before instance ids and patterns.
+    let mut plain = GroupMeta::default();
+    plain.members.insert("a".into(), member(&[7]));
+    let record = group_record("p", &plain);
+    let payload = match lotse_record::control(&lotse_record::Batch::parse(&record).unwrap().0) {
+        Ok(Some(lotse_record::Control::Internal(_, p))) => p,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(payload[0], VERSION);
+    let mut only = GroupsState::default();
+    only.apply_group(&payload).unwrap();
+    let mut b = BytesMut::new();
+    only.encode_instances(&mut b);
+    assert!(b.is_empty());
+}

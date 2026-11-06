@@ -761,3 +761,77 @@ fn a_tenant_created_again_starts_without_the_old_ones_ids() {
         });
     });
 }
+
+#[test]
+fn a_pattern_subscribes_to_the_streams_it_may_read_including_new_ones() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "shop");
+            root.create_tenant("shop").await.unwrap();
+            root.create_tenant("mall").await.unwrap();
+            let add = vec![
+                binding(subject_kind::USER, "c", role::CONSUMER, "shop", "orders-"),
+                binding(subject_kind::USER, "c", role::CONSUMER, "mall", "orders-"),
+            ];
+            root.alter_role_bindings(add, Vec::new()).await.unwrap();
+            root.create_stream("orders-eu", 1, 3).await.unwrap();
+            let audit = root.create_stream("audit-log", 1, 3).await.unwrap();
+            let elsewhere = as_user(&rt, "root", "mall").create_stream("orders-mall", 1, 3).await.unwrap();
+            settle(&rt).await;
+            let c = as_user(&rt, "c", "shop");
+            let mut m = c.join_group_matching("orders-g", ".*", lotse_client::GroupConfig::default()).await.unwrap();
+            let streams = |m: &lotse_client::GroupConsumer<'_, SimRuntime>| -> Vec<String> {
+                let mut s: Vec<String> = m.assignment().into_iter().map(|(s, _)| s).collect();
+                s.sort();
+                s.dedup();
+                s
+            };
+            for _ in 0..100 {
+                m.poll(TICK * 5).await.unwrap();
+                if !m.assignment().is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(streams(&m), vec!["orders-eu".to_string()], "only what its role lets it read");
+            // What the coordinator gave it, not only what the client shows:
+            // nothing it may not read, nothing of another tenant.
+            let owned: Vec<u64> = root
+                .node_metrics()
+                .await
+                .unwrap()
+                .into_iter()
+                .flat_map(|(_, r)| r.unwrap().groups)
+                .filter(|g| g.group_id == "orders-g")
+                .flat_map(|g| g.members)
+                .flat_map(|m| m.owned)
+                .map(|r| r.resource_id)
+                .collect();
+            assert!(!owned.is_empty(), "the group is there");
+            assert!(!owned.contains(&audit) && !owned.contains(&elsewhere), "{owned:?}");
+            // A stream created later joins the subscription.
+            root.create_stream("orders-us", 1, 3).await.unwrap();
+            let mut grew = false;
+            for _ in 0..200 {
+                m.poll(TICK * 5).await.unwrap();
+                if streams(&m).len() == 2 {
+                    grew = true;
+                    break;
+                }
+            }
+            assert!(grew, "the new stream is not read: {:?}", streams(&m));
+            assert_eq!(streams(&m), vec!["orders-eu".to_string(), "orders-us".to_string()]);
+            m.close().await;
+            // A pattern that does not compile is refused.
+            let mut bad = c.join_group_matching("orders-g2", "(", lotse_client::GroupConfig::default()).await.unwrap();
+            assert!(
+                matches!(bad.poll(TICK * 5).await, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. })),
+                "a broken pattern"
+            );
+            for n in nodes {
+                n.handle().stop();
+                n.join().await.unwrap();
+            }
+        });
+    });
+}

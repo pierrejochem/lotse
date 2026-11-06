@@ -17,6 +17,8 @@ const TAG_LEADER_HINT: u64 = 0;
 const TAG_TENANT: u64 = 1;
 /// A consumer group member's stable instance id (ADR 0072).
 const TAG_INSTANCE: u64 = 2;
+/// A consumer group member's subscription by pattern (ADR 0073).
+const TAG_PATTERN: u64 = 3;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -1304,6 +1306,12 @@ pub struct GroupHeartbeatRequest {
     /// joining; tag 2. A member that joins with the instance id of one
     /// already in the group takes over its place and partitions.
     pub instance_id: Option<String>,
+    /// Subscribe to every stream of the tenant whose whole name matches
+    /// this regular expression and that the member may read (ADR 0073),
+    /// instead of `subscribed`; tag 3, sent when joining. The coordinator
+    /// matches it again with every heartbeat, so streams created later
+    /// join the subscription.
+    pub subscribed_pattern: Option<String>,
 }
 
 impl GroupHeartbeatRequest {
@@ -1328,6 +1336,11 @@ impl GroupHeartbeatRequest {
             v.string(i);
             tags.push((TAG_INSTANCE, v.finish()));
         }
+        if let Some(p) = &self.subscribed_pattern {
+            let mut v = Writer::new();
+            v.string(p);
+            tags.push((TAG_PATTERN, v.finish()));
+        }
         if tags.is_empty() {
             w.no_tags();
         } else {
@@ -1344,6 +1357,7 @@ impl GroupHeartbeatRequest {
             subscribed: if r.u8()? != 0 { Some(r.array(8, Reader::u64)?) } else { None },
             owned: get_opt_resources(r)?,
             instance_id: None,
+            subscribed_pattern: None,
         };
         req.tenant = DEFAULT_TENANT.to_string();
         for (tag, value) in r.tags()? {
@@ -1351,6 +1365,7 @@ impl GroupHeartbeatRequest {
             match tag {
                 TAG_TENANT => req.tenant = v.string()?,
                 TAG_INSTANCE => req.instance_id = Some(v.string()?),
+                TAG_PATTERN => req.subscribed_pattern = Some(v.string()?),
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }

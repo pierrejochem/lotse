@@ -37,10 +37,12 @@ use lotse_rt::{Instant, Runtime};
 
 use super::coord::{Busy, Then};
 use super::{Clients, ClusterView, Outbox};
+use crate::auth::Principal;
 use crate::coordinator::{Phase, TxnMeta};
 use crate::groups::{Committed, GroupMeta, MemberMeta, Tp, group_record, offsets_record};
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
+use lotse_auth::roles::Operation;
 
 type Groups<R, S> = BTreeMap<GroupId, Replica<R, S>>;
 
@@ -54,6 +56,48 @@ pub(super) struct GroupTimers {
     /// Member ids are `<term>-<n>`: unique across leaders.
     term: u64,
     next: u64,
+    /// Subscription patterns, compiled (ADR 0073).
+    patterns: BTreeMap<String, regex::Regex>,
+}
+
+/// The longest subscription pattern, in bytes.
+const MAX_PATTERN: usize = 1024;
+
+/// The streams of `tenant` whose whole name matches `pattern` and that
+/// `who` may read (ADR 0073). `Err` for a pattern that does not compile.
+fn matching(
+    timers: &mut GroupTimers,
+    view: &ClusterView<'_>,
+    who: &Principal,
+    tenant: &str,
+    pattern: &str,
+) -> Result<BTreeSet<u64>, String> {
+    if !timers.patterns.contains_key(pattern) {
+        if pattern.len() > MAX_PATTERN {
+            return Err(format!("a subscription pattern has at most {MAX_PATTERN} bytes"));
+        }
+        let re = regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|e| format!("the subscription pattern does not compile: {e}"))?;
+        // Patterns are few; a bound keeps a stream of distinct ones from
+        // growing the cache.
+        if timers.patterns.len() >= 1024 {
+            timers.patterns.clear();
+        }
+        timers.patterns.insert(pattern.to_string(), re);
+    }
+    let re = &timers.patterns[pattern];
+    Ok(view
+        .streams
+        .iter()
+        .filter(|s| {
+            view.access.resources.get(&s.resource_id).is_some_and(|(name, t)| {
+                t == tenant && re.is_match(name) && view.access.may(who, Operation::Read, t, name)
+            })
+        })
+        .map(|s| s.resource_id)
+        .collect())
 }
 
 fn as_resources(tps: &BTreeSet<Tp>) -> Vec<TxnResource> {
@@ -137,6 +181,7 @@ impl Clients {
         outbox: Arc<Outbox>,
         id: u32,
         req: GroupHeartbeatRequest,
+        who: &Principal,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
@@ -167,7 +212,23 @@ impl Clients {
         let term = replica.raft_ref().term();
         let mut g = replica.coordinator().groups().groups.get(&req.group_id).cloned().unwrap_or_default();
         let known: BTreeSet<u64> = view.streams.iter().map(|s| s.resource_id).collect();
-        let subscribed = req.subscribed.as_ref().map(|s| s.iter().copied().filter(|r| known.contains(r)).collect());
+        let tenant = super::ids::split(&req.group_id).0.to_string();
+        // The pattern this heartbeat subscribes by: the one it sends when
+        // joining, otherwise the member's own (ADR 0073).
+        let pattern = match (&req.subscribed_pattern, req.member_epoch) {
+            (Some(p), _) => Some(p.clone()),
+            (None, 0) => None,
+            (None, _) => g.members.get(&req.member_id).and_then(|m| m.pattern.clone()),
+        };
+        let subscribed = match &pattern {
+            Some(p) => match matching(&mut self.group_timers, view, who, &tenant, p) {
+                Ok(m) => Some(m),
+                Err(why) => {
+                    return outbox.push(id, &Response::Refused { code: ErrorCode::INVALID_REQUEST, message: why });
+                }
+            },
+            None => req.subscribed.as_ref().map(|s| s.iter().copied().filter(|r| known.contains(r)).collect()),
+        };
         let mut changed = false;
         // The member that holds this request's instance id now (ADR 0072).
         let holder = req.instance_id.as_ref().and_then(|i| {
@@ -195,6 +256,9 @@ impl Clients {
                         self.group_timers.forget(&req.group_id, &old);
                         m.epoch = m.epoch.saturating_add(1);
                         m.rebalance_timeout_ms = req.rebalance_timeout_ms;
+                        if pattern.is_some() || req.subscribed.is_some() {
+                            m.pattern = pattern.clone();
+                        }
                         let resubscribed = subscribed.clone().filter(|s| *s != m.subscribed);
                         if let Some(s) = resubscribed.clone() {
                             m.subscribed = s;
@@ -216,6 +280,7 @@ impl Clients {
                             rebalance_timeout_ms: req.rebalance_timeout_ms,
                             epoch: 1,
                             instance_id: req.instance_id.clone(),
+                            pattern: pattern.clone(),
                             ..MemberMeta::default()
                         };
                         g.members.insert(mid.clone(), m);

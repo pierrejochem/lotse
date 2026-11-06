@@ -20,13 +20,13 @@ lotse-route.workspace = true
 lotse-auth.workspace = true
 bytes.workspace = true
 crc32c.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 lotse-sim.workspace = true
 lotse-auth = { workspace = true, features = ["testing"] }
 lotse-client.workspace = true
-serde_json.workspace = true
 lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 

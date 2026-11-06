@@ -39,6 +39,9 @@ pub(crate) struct MemberMeta {
     pub(crate) revoking: BTreeSet<Tp>,
     /// The member's stable instance id, if it has one (ADR 0072).
     pub(crate) instance_id: Option<String>,
+    /// The pattern it subscribes by, if it does (ADR 0073); `subscribed`
+    /// then holds the streams it matched last.
+    pub(crate) pattern: Option<String>,
 }
 
 impl MemberMeta {
@@ -162,6 +165,9 @@ pub(crate) struct GroupsState {
 const VERSION: u8 = 1;
 /// A group record whose members' instance ids follow the group (ADR 0072).
 const VERSION_INSTANCES: u8 = 2;
+/// A group record whose members' instance ids and patterns follow the
+/// group (ADR 0073).
+const VERSION_EXTRAS: u8 = 3;
 
 fn put_str(b: &mut BytesMut, s: &str) {
     b.put_u16_le(s.len() as u16);
@@ -231,7 +237,16 @@ pub(crate) fn get_group(b: &mut &[u8]) -> Result<(String, GroupMeta), String> {
         need(b, s.saturating_mul(8))?;
         let subscribed = (0..s).map(|_| b.get_u64_le()).collect();
         let (target, assigned, revoking) = (get_tps(b)?, get_tps(b)?, get_tps(b)?);
-        let m = MemberMeta { epoch, subscribed, rebalance_timeout_ms, target, assigned, revoking, instance_id: None };
+        let m = MemberMeta {
+            epoch,
+            subscribed,
+            rebalance_timeout_ms,
+            target,
+            assigned,
+            revoking,
+            instance_id: None,
+            pattern: None,
+        };
         members.insert(mid, m);
     }
     Ok((id, GroupMeta { epoch, members }))
@@ -281,15 +296,50 @@ fn get_instances(b: &mut &[u8], g: &mut GroupMeta) -> Result<(), String> {
     Ok(())
 }
 
-/// The record that sets group `id` to `g`. Without instance ids it is
-/// written as before them, so nodes from before ADR 0072 read it.
+/// The members of `g` with a pattern, and the patterns.
+fn patterns(g: &GroupMeta) -> Vec<(&String, &String)> {
+    g.members.iter().filter_map(|(mid, m)| m.pattern.as_ref().map(|p| (mid, p))).collect()
+}
+
+/// Writes the patterns of `g`'s members: a count, then member and pattern.
+fn put_patterns(b: &mut BytesMut, g: &GroupMeta) {
+    let list = patterns(g);
+    b.put_u32_le(list.len() as u32);
+    for (mid, p) in list {
+        put_str(b, mid);
+        put_str(b, p);
+    }
+}
+
+/// Reads what [`put_patterns`] wrote into `g`.
+fn get_patterns(b: &mut &[u8], g: &mut GroupMeta) -> Result<(), String> {
+    need(b, 4)?;
+    for _ in 0..b.get_u32_le() {
+        let (mid, p) = (get_str(b)?, get_str(b)?);
+        g.members.get_mut(&mid).ok_or("a pattern of an unknown member")?.pattern = Some(p);
+    }
+    Ok(())
+}
+
+/// The record that sets group `id` to `g`, written in the oldest version
+/// that holds it, so that nodes from before instance ids (ADR 0072) and
+/// patterns (ADR 0073) read what they can.
 pub(crate) fn group_record(id: &str, g: &GroupMeta) -> Bytes {
     let mut b = BytesMut::new();
-    let with_instances = !instances(g).is_empty();
-    b.put_u8(if with_instances { VERSION_INSTANCES } else { VERSION });
+    let version = if !patterns(g).is_empty() {
+        VERSION_EXTRAS
+    } else if !instances(g).is_empty() {
+        VERSION_INSTANCES
+    } else {
+        VERSION
+    };
+    b.put_u8(version);
     put_group(&mut b, id, g);
-    if with_instances {
+    if version >= VERSION_INSTANCES {
         put_instances(&mut b, g);
+    }
+    if version >= VERSION_EXTRAS {
+        put_patterns(&mut b, g);
     }
     lotse_record::internal_control_batch(lotse_record::InternalControl::GroupState, &b).expect("one record")
 }
@@ -310,12 +360,15 @@ impl GroupsState {
     /// Applies a `GroupState` record.
     pub(crate) fn apply_group(&mut self, mut b: &[u8]) -> Result<(), String> {
         let version = if b.has_remaining() { b.get_u8() } else { 0 };
-        if version != VERSION && version != VERSION_INSTANCES {
+        if !(VERSION..=VERSION_EXTRAS).contains(&version) {
             return Err("group record has an unknown version".into());
         }
         let (id, mut g) = get_group(&mut b)?;
-        if version == VERSION_INSTANCES {
+        if version >= VERSION_INSTANCES {
             get_instances(&mut b, &mut g)?;
+        }
+        if version >= VERSION_EXTRAS {
+            get_patterns(&mut b, &mut g)?;
         }
         if g.members.is_empty() {
             self.groups.remove(&id);
@@ -341,15 +394,27 @@ impl GroupsState {
 
     /// The members' instance ids (ADR 0072), for the end of a snapshot:
     /// nothing at all if no member has one.
+    /// The members' patterns too (ADR 0073), after their instance ids,
+    /// which are then written even if there are none.
     pub(crate) fn encode_instances(&self, b: &mut BytesMut) {
         let with: Vec<(&String, &GroupMeta)> = self.groups.iter().filter(|(_, g)| !instances(g).is_empty()).collect();
-        if with.is_empty() {
+        let by_pattern: Vec<(&String, &GroupMeta)> =
+            self.groups.iter().filter(|(_, g)| !patterns(g).is_empty()).collect();
+        if with.is_empty() && by_pattern.is_empty() {
             return;
         }
         b.put_u32_le(with.len() as u32);
         for (id, g) in with {
             put_str(b, id);
             put_instances(b, g);
+        }
+        if by_pattern.is_empty() {
+            return;
+        }
+        b.put_u32_le(by_pattern.len() as u32);
+        for (id, g) in by_pattern {
+            put_str(b, id);
+            put_patterns(b, g);
         }
     }
 
@@ -360,6 +425,14 @@ impl GroupsState {
             let id = get_str(b)?;
             let g = self.groups.get_mut(&id).ok_or("instance ids of an unknown group")?;
             get_instances(b, g)?;
+        }
+        if b.has_remaining() {
+            need(b, 4)?;
+            for _ in 0..b.get_u32_le() {
+                let id = get_str(b)?;
+                let g = self.groups.get_mut(&id).ok_or("patterns of an unknown group")?;
+                get_patterns(b, g)?;
+            }
         }
         Ok(())
     }

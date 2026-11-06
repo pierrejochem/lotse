@@ -712,6 +712,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
                     subscribed: (epoch == 0).then(|| vec![7]),
                     owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
                     instance_id: None,
+                    subscribed_pattern: None,
                 });
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
@@ -806,6 +807,7 @@ fn offsets_for_a_released_partition_are_refused() {
                     subscribed: (epoch == 0).then(|| vec![7]),
                     owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
                     instance_id: None,
+                    subscribed_pattern: None,
                 });
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
@@ -1708,6 +1710,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
                     subscribed: (epoch == 0).then(|| vec![7]),
                     owned: None,
                     instance_id: instance.map(String::from),
+                    subscribed_pattern: None,
                 });
                 let header =
                     RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };

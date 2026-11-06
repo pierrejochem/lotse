@@ -421,7 +421,7 @@ impl Clients {
             Request::Nack(req) => self.nack(outbox, id, req, view, groups),
             Request::Unsubscribe(req) => self.unsubscribe(outbox, id, req),
             Request::DeadLetter(req) => self.dead_letter(outbox, id, req, view, groups),
-            Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, view, groups),
+            Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, &principal, view, groups),
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
             Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
             Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),

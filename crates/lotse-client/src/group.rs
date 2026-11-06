@@ -89,6 +89,8 @@ pub struct GroupConsumer<'a, R: Net + Clock + Spawn + Rng> {
     group: String,
     cfg: GroupConfig,
     streams: Vec<String>,
+    /// Subscribed by pattern instead (ADR 0073).
+    pattern: Option<String>,
     member_id: String,
     epoch: i32,
     /// Owned partitions and the next offset to read (`None` until the
@@ -131,6 +133,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             group: group.into(),
             cfg,
             streams: streams.iter().map(|s| s.to_string()).collect(),
+            pattern: None,
             member_id: String::new(),
             epoch: 0,
             owned: BTreeMap::new(),
@@ -139,6 +142,21 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             turn: 0,
             fenced: false,
         })
+    }
+
+    /// Joins `group` to read every stream of the tenant whose whole name
+    /// matches the regular expression `pattern` and that this principal
+    /// may read (ADR 0073). The coordinator matches it with every
+    /// heartbeat, so streams created later join in.
+    pub async fn join_group_matching(
+        &self,
+        group: &str,
+        pattern: &str,
+        cfg: GroupConfig,
+    ) -> Result<GroupConsumer<'_, R>, ClientError> {
+        let mut member = self.join_group(group, &[], cfg).await?;
+        member.pattern = Some(pattern.to_string());
+        Ok(member)
     }
 
     fn stream_id(&self, stream: &str) -> Option<u64> {
@@ -279,11 +297,12 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             member_id: self.member_id.clone(),
             member_epoch: if joining { 0 } else { self.epoch },
             rebalance_timeout_ms: u32::try_from(self.cfg.rebalance_timeout.as_millis()).unwrap_or(u32::MAX),
-            subscribed: joining.then_some(ids),
+            subscribed: (joining && self.pattern.is_none()).then_some(ids),
             owned: Some(
                 owned.into_iter().map(|(resource_id, partitions)| TxnResource { resource_id, partitions }).collect(),
             ),
             instance_id: self.cfg.instance_id.clone(),
+            subscribed_pattern: if joining { self.pattern.clone() } else { None },
         });
         let retry_soon = sent + c.cfg.backoff;
         let resp = match c.call_coordinator(&self.group, &req).await {
@@ -323,6 +342,10 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
         let interval = Duration::from_millis(u64::from(resp.heartbeat_interval_ms));
         self.next_heartbeat = sent + interval.min(self.cfg.session_timeout / 3);
         let Some(assignment) = resp.assignment else { return Ok(()) };
+        // A pattern may bring streams this client has not looked up yet.
+        if assignment.iter().any(|r| c.stream_name(r.resource_id).is_none()) {
+            let _ = c.metadata(&[]).await;
+        }
         let target: BTreeSet<Part> = assignment
             .iter()
             .flat_map(|r| {
@@ -461,6 +484,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
             subscribed: None,
             owned: None,
             instance_id: self.cfg.instance_id.clone(),
+            subscribed_pattern: None,
         });
         let _ = self.client.call_coordinator(&self.group, &req).await;
         self.owned.clear();

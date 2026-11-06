@@ -175,6 +175,9 @@ public final class Messages {
     /** Tag of a group member's instance id (ADR 0072). */
     static final long TAG_INSTANCE = 2;
 
+    /** Tag of a group member's subscription pattern (ADR 0073). */
+    static final long TAG_PATTERN = 3;
+
     /** A tag holding one string. */
     static Tag stringTag(long tag, String value) {
         Writer v = new Writer();

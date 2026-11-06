@@ -519,6 +519,9 @@ public sealed interface Request {
      * @param subscribed the streams it reads (each a {@code u64}); only when joining or when they change, otherwise {@code null}
      * @param owned the partitions it still owns; only when that changes, otherwise {@code null}
      * @param tenant the tenant the group id lives in (ADR 0062); written as a tag, left out for {@code default}
+     * @param instanceId a stable id for the member across restarts (ADR 0072), tag 2; {@code null} for none
+     * @param subscribedPattern subscribe to the streams whose whole name matches this regular expression (ADR 0073),
+     *     tag 3, sent when joining; {@code null} to subscribe by {@code subscribed}
      */
     record GroupHeartbeat(
             String groupId,
@@ -528,7 +531,8 @@ public sealed interface Request {
             List<Long> subscribed,
             List<TxnResource> owned,
             String tenant,
-            String instanceId)
+            String instanceId,
+            String subscribedPattern)
             implements Request {
         /** Creates the request. */
         public GroupHeartbeat {
@@ -546,7 +550,7 @@ public sealed interface Request {
                 List<Long> subscribed,
                 List<TxnResource> owned,
                 String tenant) {
-            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, tenant, null);
+            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, tenant, null, null);
         }
 
         /** The request in the default tenant. */
@@ -557,7 +561,7 @@ public sealed interface Request {
                 long rebalanceTimeoutMs,
                 List<Long> subscribed,
                 List<TxnResource> owned) {
-            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, Messages.DEFAULT_TENANT, null);
+            this(groupId, memberId, memberEpoch, rebalanceTimeoutMs, subscribed, owned, Messages.DEFAULT_TENANT, null, null);
         }
 
         @Override
@@ -580,6 +584,9 @@ public sealed interface Request {
             if (instanceId != null) {
                 tags.add(Messages.stringTag(Messages.TAG_INSTANCE, instanceId));
             }
+            if (subscribedPattern != null) {
+                tags.add(Messages.stringTag(Messages.TAG_PATTERN, subscribedPattern));
+            }
             if (tags.isEmpty()) {
                 w.noTags();
             } else {
@@ -596,19 +603,23 @@ public sealed interface Request {
             List<TxnResource> owned = Messages.getOptResources(r);
             String tenant = Messages.DEFAULT_TENANT;
             String instanceId = null;
+            String pattern = null;
             for (Tag t : r.tags()) {
-                if (t.tag() == Messages.TAG_TENANT || t.tag() == Messages.TAG_INSTANCE) {
+                if (t.tag() == Messages.TAG_TENANT || t.tag() == Messages.TAG_INSTANCE || t.tag() == Messages.TAG_PATTERN) {
                     Reader vr = new Reader(t.value().toByteArray());
                     String v = vr.string();
                     vr.finish();
                     if (t.tag() == Messages.TAG_TENANT) {
                         tenant = v;
-                    } else {
+                    } else if (t.tag() == Messages.TAG_INSTANCE) {
                         instanceId = v;
+                    } else {
+                        pattern = v;
                     }
                 }
             }
-            return new GroupHeartbeat(groupId, memberId, epoch, timeout, subscribed, owned, tenant, instanceId);
+            return new GroupHeartbeat(
+                    groupId, memberId, epoch, timeout, subscribed, owned, tenant, instanceId, pattern);
         }
     }
 
