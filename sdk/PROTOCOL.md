@@ -298,6 +298,16 @@ A member heartbeats with `GroupHeartbeat` to the coordinator (ADR 0033). The Rus
 - **Commit** sends `CommitOffsets` with the member id and epoch; a retriable error is retried as maybe done.
 - **Leave** with epoch `-1` after committing, if auto-commit is on.
 
+## Client behaviour: admin
+
+Admin requests (creates, deletes, bindings, settings, users, tenants, roles, nodes, pins, partitions, revoking sessions) go to the metadata group's leader (ADR 0034). Until a client knows it, it asks the brokers in turn. A retriable error carries a leader hint, which becomes the address for the next attempt. A node named in a hint whose address is unknown means: ask for metadata first.
+
+- Every admin request may be retried: a lost one may have been carried out. A create retried after a lost answer may find what its first attempt made and answer `RESOURCE_EXISTS` with the resource's id; report it so, with the id, rather than as an error of the create. A delete answered `UNKNOWN_RESOURCE` is done.
+- Names are turned into ids with `Metadata` asked of every known broker, keeping the newest resource per name, so a name made a moment ago is found even on a broker that lags.
+- A bind or unbind changes routing: forget the exchange's cached bindings.
+- `PurgeQueue` and `Requeue` go to the queue's leader and work in rounds: send `up_to` 0, then the `up_to` the answer gave, until `more` is false, adding up `count`.
+- `AlterUser` carries a SCRAM-SHA-512 credential: a random 16-byte salt, at least 4096 iterations, the stored and server keys. The password never leaves the client.
+
 ## Conformance vectors
 
 `sdk/conformance/*` is written by `cargo run -p lotse-proto --features samples --example vectors` (`make sdk-vectors`). One vector per line, `#` for comments.

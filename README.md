@@ -11,7 +11,7 @@ Status: foundation. The runtime seam with its Tokio implementation, the record f
 - [Design document](docs/design.md): architecture and storage design with the reasons behind each decision (German).
 - [Architecture decisions](docs/adr/): one record per decision, with its reasons.
 - [Architecture overview](docs/architecture.png): the whole system on one page.
-- [Client SDKs](sdk/): the protocol for implementers, golden test vectors and the Java client (the protocol codec, record batch, connections, authentication, streams, queues, publishing, transactions and consumer groups so far).
+- [Client SDKs](sdk/): the protocol for implementers, golden test vectors and the Java client (the protocol codec, record batch, connections, authentication, streams, queues, publishing, transactions, consumer groups and admin; the Kotlin layer is still to come).
 - [Brand](docs/brand/): the Fairway mark, logos, colours, type and design tokens.
 - [Console](docs/console/): screenshots and mockups of the management console.
 

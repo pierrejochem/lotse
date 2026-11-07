@@ -10,7 +10,7 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 
 ## Status
 
-Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction) and consumer groups. Declaring exchanges and bindings, the rest of admin and the Kotlin layer follow.
+Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction), consumer groups and the admin calls of `lotse-client`. The Kotlin layer follows.
 
 ### Producing and reading a stream
 
@@ -41,7 +41,7 @@ try (var client = new LotseClient(config)) {
 - A message without a timestamp is stamped with the time of the call. Retention judges a stream's data by producers' timestamps, so a message stamped 0 would be deleted at the next pass.
 - `ClientException.Unknown` is the one error that needs a decision: after retrying until `retryFor` the client cannot tell whether the batch was written. It has dropped its producer id, so later produces are not blocked. Read the partition, or produce again and accept a possible duplicate. Without `idempotent(true)` an unknown outcome is never retried.
 - `ClientException.OffsetOutOfRange` carries `logStart()`: retention deleted the offset; read on from there.
-- `createStream` and `createQueue` are the only admin calls so far; the rest follow with the admin phase.
+- Admin calls are under "Administering" below.
 
 ### Consuming a queue
 
@@ -122,6 +122,23 @@ try (var client = new LotseClient(config);
 - `GroupConfig.startFrom` says where a partition without a committed offset starts: `OffsetAt.EARLIEST` (default), `LATEST` or `time(ms)`. `instanceId` keeps a member's partitions across a restart within the session timeout; a second instance with the same id fences the first, whose `poll` then throws `FENCED_INSTANCE_ID`.
 - A `GroupConsumer` is for one thread.
 
+### Administering
+
+```java
+client.declareExchange("events", Messages.ExchangeType.TOPIC);
+client.createQueue("audit");
+client.bind("events", "audit", "#");
+client.alterConfigs("audit", Map.of("max.deliveries", "5"), List.of());
+long purged = client.purge("audit");
+client.deleteIfEmpty("audit");
+```
+
+- Admin requests go to the metadata group's leader; a broker that is not the leader names it, and the client follows. Each call needs the role the broker asks for (tenant-admin for most, cluster-admin for nodes, pins and revoking sessions).
+- A create whose answer was lost is retried. If the first attempt did create the resource, the call fails with `ClientException.ResourceExists`, which carries the id to compare with what you expected. A delete is done once the resource is gone, whoever deleted it.
+- `setUserPassword` sends only a salted SCRAM credential, with a new salt each time; the password does not leave the client.
+- `purge` and `requeue` work through the queue in rounds until its leader says there is no more; messages produced meanwhile are left alone.
+- Also there: `describeConfigs`, `unbind`, `bindHeaders`, `delete`, `createPartitions`, `moveLeader`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `describeUsers`, `deleteUser`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes` and `nodeMetrics`, each as in `lotse-client`.
+
 ### Connecting
 
 ```java
@@ -165,7 +182,7 @@ LOTSE_BIN=/path/to/lotse make sdk-test   # also the tests that need real certifi
 make sdk-vectors         # regenerate sdk/conformance after changing the protocol
 ```
 
-`make sdk-test` needs a JDK 17 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce, fetch, transaction and group rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
+`make sdk-test` needs a JDK 17 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce, fetch, transaction, group and admin rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
 
 ## Conformance
 

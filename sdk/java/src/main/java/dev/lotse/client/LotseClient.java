@@ -1,6 +1,7 @@
 package dev.lotse.client;
 
 import dev.lotse.auth.AuthenticationException;
+import dev.lotse.auth.ScramCredential;
 import dev.lotse.net.Address;
 import dev.lotse.net.BrokerException;
 import dev.lotse.net.Connection;
@@ -14,6 +15,7 @@ import dev.lotse.proto.Messages.Config;
 import dev.lotse.proto.Messages.FetchPartition;
 import dev.lotse.proto.Messages.FetchPartitionResponse;
 import dev.lotse.proto.Messages.FetchResource;
+import dev.lotse.proto.Messages.HeaderMatch;
 import dev.lotse.proto.Messages.PartitionMetadata;
 import dev.lotse.proto.Messages.ProducePartition;
 import dev.lotse.proto.Messages.ProducePartitionResponse;
@@ -24,7 +26,9 @@ import dev.lotse.proto.Response;
 import dev.lotse.record.Batch;
 import dev.lotse.record.BatchBuilder;
 import dev.lotse.record.ByteString;
+import dev.lotse.record.Header;
 import dev.lotse.record.RecordFormatException;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1081,11 +1085,15 @@ public final class LotseClient implements AutoCloseable {
         return new Published(written);
     }
 
-    // ---- admin: the least that streams need ----
+    // ---- admin (ADR 0034, 0035) ----
+    //
+    // Admin requests go to the metadata group's leader. Any broker answers NOT_LEADER with a hint to it, which the
+    // client follows. A create whose outcome is unknown is retried; if the first attempt did create the resource, the
+    // retry finds it and the call fails with ClientException.ResourceExists with its id. A delete is done once the
+    // resource is gone, whoever deleted it, so a retried delete succeeds too.
 
     /**
-     * Creates a stream in the configured tenant and returns its id. Phase 6 of the SDK adds the rest of the admin
-     * calls; this one is here so that a stream can be created at all.
+     * Creates a stream in the configured tenant and returns its id.
      *
      * <p>A create whose outcome is unknown is retried. If the first attempt did create the stream, the retry finds
      * it and the call fails with {@link ClientException.ResourceExists}, which carries the id.
@@ -1124,8 +1132,8 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
-     * Creates a queue in the configured tenant and returns its id. Phase 6 of the SDK adds the rest of the admin
-     * calls. A create whose outcome is unknown is retried and may then fail with
+     * Creates a queue in the configured tenant and returns its id. A create whose outcome is unknown is retried and
+     * may then fail with
      * {@link ClientException.ResourceExists}, as for {@link #createStream}.
      */
     public long createQueue(String name, QueueOptions options) {
@@ -1165,6 +1173,419 @@ public final class LotseClient implements AutoCloseable {
     /** Creates a stream with the node's default settings; see {@link #createStream(String, int, int, Map)}. */
     public long createStream(String name, int partitions, int replication) {
         return createStream(name, partitions, replication, Map.of());
+    }
+
+    /**
+     * Declares an exchange in the configured tenant and returns its id.
+     *
+     * @param type one of {@link Messages.ExchangeType}: direct, topic, fanout or headers
+     */
+    public long declareExchange(String name, int type) {
+        checkOpen();
+        if (type < Messages.ExchangeType.DIRECT || type > Messages.ExchangeType.HEADERS) {
+            throw new IllegalArgumentException("unknown exchange type " + type);
+        }
+        return create(name, new Request.DeclareExchange(name, cfg.tenant(), type, List.of()));
+    }
+
+    /** Binds {@code queue} to {@code exchange} with a binding key (direct and topic exchanges). */
+    public void bind(String exchange, String queue, String key) {
+        binding(exchange, queue, key, List.of(), true, false);
+    }
+
+    /**
+     * Binds {@code queue} to a headers exchange: all of {@code headers} must match ({@code matchAll}), or any one. A
+     * header with a {@code null} value matches only a header whose value is null.
+     */
+    public void bindHeaders(String exchange, String queue, List<Header> headers, boolean matchAll) {
+        List<HeaderMatch> matches = new ArrayList<>();
+        for (Header h : headers) {
+            matches.add(new HeaderMatch(h.key(), h.value()));
+        }
+        binding(exchange, queue, "", matches, matchAll, false);
+    }
+
+    /** Removes a binding made by {@link #bind}. */
+    public void unbind(String exchange, String queue, String key) {
+        binding(exchange, queue, key, List.of(), true, true);
+    }
+
+    private void binding(
+            String exchange, String queue, String key, List<HeaderMatch> matches, boolean matchAll, boolean unbind) {
+        checkOpen();
+        List<ResourceMetadata> m = metadataFromAll(exchange, queue);
+        ResourceMetadata x = find(m, exchange);
+        ResourceMetadata q = find(m, queue);
+        if (x == null || q == null) {
+            throw new ClientException.UnknownStream(exchange + " or " + queue, 0);
+        }
+        Request req = unbind
+                ? new Request.Unbind(x.resourceId(), q.resourceId(), key, matches, matchAll)
+                : new Request.Bind(x.resourceId(), q.resourceId(), key, matches, matchAll);
+        retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.Outcome o)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(o.error(), o.leaderHint(), null);
+            return null;
+        });
+        // A transaction's publish routes by the bindings this client has seen: see the new ones.
+        forgetExchange(exchange);
+    }
+
+    private void forgetExchange(String name) {
+        synchronized (state) {
+            exchanges.remove(name);
+            exchangesAt.remove(name);
+        }
+    }
+
+    /**
+     * Deletes a stream, queue or exchange created at runtime, with its data and bindings, and returns its id.
+     * Resources from the node configuration cannot be deleted. Done once the resource is gone, even if someone else
+     * deleted it first.
+     */
+    public long delete(String name) {
+        return deleteWith(name, false);
+    }
+
+    /**
+     * {@link #delete}, but only if the stream or queue holds nothing (ADR 0063): no unsettled message in a queue, no
+     * record in a stream. Otherwise it fails with {@code RESOURCE_NOT_EMPTY} and nothing is deleted. An exchange
+     * holds no messages and is deleted. The check guards against mistakes, not against a producer: a message produced
+     * while the delete is under way goes with it.
+     */
+    public long deleteIfEmpty(String name) {
+        return deleteWith(name, true);
+    }
+
+    private long deleteWith(String name, boolean ifEmpty) {
+        checkOpen();
+        long id = resourceId(name);
+        Request req = new Request.DeleteResource(id, ifEmpty);
+        retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.Admin a)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            // Gone already, deleted by this request's earlier attempt or by someone else: done.
+            if (a.error().equals(ErrorCode.UNKNOWN_RESOURCE)) {
+                return null;
+            }
+            adminAnswer(a.error(), a.leaderHint(), a.errorMsg());
+            return null;
+        });
+        forgetExchange(name);
+        exchangeIds.remove(name);
+        return id;
+    }
+
+    /**
+     * Settles every message of {@code queue} that is ready now: not held by a consumer, not in an open transaction
+     * (ADR 0064). Messages produced while it runs are left alone. Returns how many were purged. Needs the
+     * tenant-admin role.
+     */
+    public long purge(String queue) {
+        return queueAction(queue, false);
+    }
+
+    /**
+     * Moves every ready message of the dead-letter queue {@code queue} back to the queue its dead-letter headers
+     * name, once each across failovers (ADR 0064). Messages without such headers, or whose queue is gone, stay.
+     * Returns how many were moved. Needs the tenant-admin role.
+     */
+    public long requeue(String queue) {
+        return queueAction(queue, true);
+    }
+
+    private record ActionStep(long count, long upTo, boolean more) {}
+
+    private long queueAction(String queue, boolean requeue) {
+        checkOpen();
+        long total = 0;
+        long upTo = 0;
+        while (true) {
+            long bound = upTo;
+            ActionStep step = retrying(() -> queueActionOnce(queue, requeue, bound));
+            total += step.count();
+            upTo = step.upTo();
+            if (!step.more()) {
+                return total;
+            }
+        }
+    }
+
+    private ActionStep queueActionOnce(String queue, boolean requeue, long upTo) {
+        Routed routed = route(queue, 0);
+        Response r;
+        try {
+            r = call(routed.address(), new Request.QueueAction(requeue, routed.route().resourceId(), upTo));
+        } catch (CallFailure e) {
+            forget(queue, 0);
+            throw e.toAttempt();
+        }
+        if (!(r instanceof Response.QueueAction a)) {
+            throw Attempt.retry("unexpected response " + r);
+        }
+        if (a.error().isOk()) {
+            return new ActionStep(a.count(), a.upTo(), a.more());
+        }
+        if (a.error().retriable()) {
+            redirect(queue, 0, a.leaderHint());
+            // Acting again is harmless: what was done is settled.
+            throw Attempt.retryMaybeDone(a.error().toString());
+        }
+        throw Attempt.fail(new ClientException.Broker(a.error(), a.errorMsg()));
+    }
+
+    /**
+     * Changes settings of a resource created at runtime: {@code set} gives keys new values, {@code reset} returns keys
+     * to their default.
+     */
+    public void alterConfigs(String name, Map<String, String> set, List<String> reset) {
+        checkOpen();
+        long id = resourceId(name);
+        List<Config> configs = new ArrayList<>();
+        new TreeMap<>(set).forEach((k, v) -> configs.add(new Config(k, v)));
+        adminChange(new Request.AlterConfigs(id, configs, reset));
+    }
+
+    /**
+     * A resource's settings, each with where its value comes from ({@link Messages.ConfigSource}). Read from the
+     * metadata leader, so changes this client made are in it.
+     */
+    public List<Messages.ConfigEntry> describeConfigs(String name) {
+        checkOpen();
+        long id = resourceId(name);
+        Request req = new Request.DescribeConfigs(List.of(id));
+        return retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.DescribeConfigs d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            if (d.resources().isEmpty()) {
+                throw Attempt.retry("no resource in the answer");
+            }
+            Messages.ResourceConfigs rc = d.resources().get(0);
+            if (!rc.error().isOk()) {
+                throw Attempt.fail(new ClientException.Broker(rc.error(), null));
+            }
+            return rc.configs();
+        });
+    }
+
+    /**
+     * Sets {@code user}'s SCRAM-SHA-512 password, creating the user if needed. Only a salted credential leaves the
+     * client; the password does not.
+     */
+    public void setUserPassword(String user, String password) {
+        checkOpen();
+        adminChange(ScramCredential.forPassword(password, new SecureRandom()).alterUser(user));
+    }
+
+    /**
+     * Removes {@code user}'s SCRAM credential. Sessions it opened end at the latest when the node's maximum session
+     * time is up.
+     */
+    public void deleteUser(String user) {
+        checkOpen();
+        adminChange(ScramCredential.removal(user));
+    }
+
+    /** The users with a SCRAM credential, configured and set at runtime. */
+    public List<Messages.UserEntry> describeUsers() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeUsers());
+            if (!(r instanceof Response.DescribeUsers d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d.users();
+        });
+    }
+
+    /** Creates a tenant. */
+    public void createTenant(String name) {
+        checkOpen();
+        adminChange(new Request.CreateTenant(name));
+    }
+
+    /** Deletes a tenant that holds no resources, and its role bindings. */
+    public void deleteTenant(String name) {
+        checkOpen();
+        adminChange(new Request.DeleteTenant(name));
+    }
+
+    /** The tenants this client has a role in; all of them for a cluster admin. */
+    public List<Messages.TenantEntry> describeTenants() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeTenants());
+            if (!(r instanceof Response.DescribeTenants d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d.tenants();
+        });
+    }
+
+    /** Adds and removes role bindings; removals first. */
+    public void alterRoleBindings(List<Messages.RoleBinding> add, List<Messages.RoleBinding> remove) {
+        checkOpen();
+        adminChange(new Request.AlterRoleBindings(add, remove));
+    }
+
+    /** Every role binding, each with where it comes from ({@link Messages.ConfigSource}). */
+    public List<Messages.SourcedBinding> describeRoleBindings() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeRoleBindings());
+            if (!(r instanceof Response.DescribeRoleBindings d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d.bindings();
+        });
+    }
+
+    /** Who this client acts as, and the role bindings that apply. */
+    public Response.WhoAmI whoAmI() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.WhoAmI());
+            if (!(r instanceof Response.WhoAmI w)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            return w;
+        });
+    }
+
+    /**
+     * Revokes the sessions of a user, or of every member of an IdP group (ADR 0070): each node ends their sessions
+     * that authenticated before now, and refuses their tokens issued before now. A SCRAM user who still has the
+     * password can sign in again; change or delete the password to keep them out. Needs the cluster-admin role.
+     */
+    public void revokeSessions(String subject, boolean group) {
+        checkOpen();
+        int kind = group ? Messages.SubjectKind.GROUP : Messages.SubjectKind.USER;
+        adminChange(new Request.RevokeSessions(kind, subject, 0));
+    }
+
+    /**
+     * Adds node {@code nodeId} to the cluster, reached by nodes at {@code peer} and by clients at {@code client};
+     * start it with {@code join} afterwards. Ids are never used twice.
+     */
+    public void addNode(long nodeId, String peer, String client) {
+        checkOpen();
+        adminChange(new Request.AddNode(nodeId, peer, client));
+    }
+
+    /**
+     * Starts draining a node: its replicas move to other nodes, then it leaves. {@link #describeNodes} shows how
+     * far.
+     */
+    public void removeNode(long nodeId) {
+        checkOpen();
+        adminChange(new Request.RemoveNode(nodeId));
+    }
+
+    /** The cluster's nodes, as the metadata group knows them. */
+    public List<Messages.NodeEntry> describeNodes() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeNodes());
+            if (!(r instanceof Response.DescribeNodes d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d.nodes();
+        });
+    }
+
+    /**
+     * Pins the leader of {@code partition} of the stream or queue {@code name} to {@code node}, one of its voters, or
+     * unpins it with {@code null} so that leaders spread by themselves again (ADR 0065). The group's leader hands over
+     * shortly after; the pin stays until it is removed or the node leaves. Needs the cluster-admin role.
+     */
+    public void moveLeader(String name, int partition, Long node) {
+        checkOpen();
+        long id = resourceId(name);
+        adminChange(new Request.MoveLeader(id, partition, node == null ? 0 : node));
+    }
+
+    /**
+     * Raises the partition count of the stream {@code name}, created at runtime, to {@code count} (ADR 0074).
+     * Existing partitions stay as they are, so a key may map to another partition afterwards; consumer groups spread
+     * over the new ones on their next heartbeat. Needs the tenant-admin role.
+     */
+    public void createPartitions(String name, int count) {
+        checkOpen();
+        long id = resourceId(name);
+        adminChange(new Request.CreatePartitions(id, count));
+    }
+
+    /**
+     * Every node's metrics, asked of each node directly, for every node the cluster's metadata names: each with its
+     * answer, or why there is none. Counters grow from each node's start; see {@code DescribeMetrics}.
+     */
+    public List<NodeMetrics> nodeMetrics() {
+        checkOpen();
+        Response.Metadata m = metadata();
+        List<NodeMetrics> out = new ArrayList<>();
+        for (Messages.Broker b : m.brokers()) {
+            Address addr = new Address(b.host(), b.port());
+            try {
+                Response r = call(addr, new Request.DescribeMetrics());
+                if (r instanceof Response.DescribeMetrics d && d.error().isOk()) {
+                    out.add(new NodeMetrics(b.nodeId(), d, null));
+                } else if (r instanceof Response.DescribeMetrics d) {
+                    out.add(new NodeMetrics(b.nodeId(), null, new ClientException.Broker(d.error(), null)));
+                } else {
+                    out.add(new NodeMetrics(
+                            b.nodeId(), null, new ClientException.NoAnswer(b.nodeId(), "unexpected response " + r)));
+                }
+            } catch (CallFailure e) {
+                out.add(new NodeMetrics(
+                        b.nodeId(), null, new ClientException.NoAnswer(b.nodeId(), addr + ": " + e.describe())));
+            }
+        }
+        return out;
+    }
+
+    /** The id of the resource called {@code name}, asking every broker before calling it unknown. */
+    private long resourceId(String name) {
+        ResourceMetadata r = find(metadataFromAll(name), name);
+        if (r == null) {
+            throw new ClientException.UnknownStream(name, 0);
+        }
+        return r.resourceId();
+    }
+
+    /** An admin change answered with {@code AdminResponse}. */
+    private void adminChange(Request req) {
+        retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.Admin a)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(a.error(), a.leaderHint(), a.errorMsg());
+            return null;
+        });
+    }
+
+    /** An admin answer: retriable errors follow the leader hint and may have been carried out; others fail. */
+    private void adminAnswer(ErrorCode error, LeaderHint hint, String message) {
+        if (error.isOk()) {
+            return;
+        }
+        if (error.retriable()) {
+            metadataLeader = hint == null ? null : hint.leader();
+            throw Attempt.retryMaybeDone(error.toString());
+        }
+        throw Attempt.fail(new ClientException.Broker(error, message));
     }
 
     /** Sends an admin request to the metadata leader, or any broker if it is not known. */
