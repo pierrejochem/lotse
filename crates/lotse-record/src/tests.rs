@@ -462,3 +462,19 @@ fn timer_batches_round_trip_and_the_delay_header_reads_only_numbers() {
     assert_eq!(delay::of(&record(None)), 0);
     assert_eq!(delay::of(&record(Some(b"4294967295"))), delay::MAX_MS);
 }
+
+#[test]
+fn the_priority_header_reads_levels_from_0_to_255() {
+    let record = |value: &'static [u8]| Record {
+        offset: 0,
+        timestamp: 0,
+        key: None,
+        value: None,
+        headers: vec![Header { key: Bytes::from_static(priority::HEADER), value: Some(Bytes::from_static(value)) }],
+    };
+    assert_eq!(priority::of(&record(b"7")), 7);
+    assert_eq!(priority::of(&record(b"255")), 255);
+    for bad in [&b"256"[..], b"-1", b"high", b""] {
+        assert_eq!(priority::of(&record(bad)), 0, "{bad:?} is level 0");
+    }
+}

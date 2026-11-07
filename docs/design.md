@@ -161,7 +161,7 @@ Eine Queue ist ein Log plus Ack-Index. Acks, Zustellzähler und Timer sind selbs
 - **Delayed Delivery** (ADR 0077): Eine Nachricht geht nicht vor ihrer Fälligkeit hinaus. Ein Producer verlangt eine Verzögerung mit dem Header `x-lotse-delay-ms` (dezimale ms bis 4.294.967.295), gezählt vom Basis-Zeitstempel des Batches, den der Leader jeder Queue beim Anhängen auf seine Uhr setzt; nur Daten-Batches zählen, Dead Letters und Requeues warten kein zweites Mal. Ein `Nack` mit `requeue` und `delay_ms` schreibt statt QUEUE_STATE einen `TIMER`-Batch (Offset, Zustellungen, Fälligkeit nach der Uhr des Leaders); jede Replica hält die Fälligkeit im Ack-Index, bis die Nachricht erledigt ist, und im Snapshot, also wartet auch ein neuer Leader. Der Leader stellt eine noch nicht fällige Nachricht zurück und liefert sie, wenn es soweit ist, vor allem Neuen; die anderen Nachrichten laufen weiter.
 - **Single Active Consumer** (ADR 0076) ist die Einstellung `single.active.consumer` der Queue (beim Anlegen oder per `AlterConfigs`, standardmäßig aus). Jeder Subscriber wird angenommen, Nachrichten bekommt nur der aktive; die anderen warten als Standby in der Reihenfolge ihres Subscribe. Der aktive behält seinen Platz, bis er endet (Unsubscribe und fertig, Disconnect, Ack-Timeout). Der älteste Standby übernimmt erst, wenn nichts mehr draußen ist: nichts in flight, nichts für einen Zähler zurückgehalten, nichts von einer Transaktion gehalten. Was der vorige hatte, kommt dann zuerst, nach Offset; so bleibt die Reihenfolge der Queue über die Übergabe. Die Antwort auf `Subscribe` sagt mit Tag 1 `standby`, ob die Subscription wartet; wer mit Tag 1 `notify_active` fragt, bekommt beim Aktivwerden einen Push ohne Fehler, Batch und Zustellungen. Alles ist Leader-lokal: Nach einem Failover ist aktiv, wer zuerst neu subscribed; ein abgesetzter Leader, der es noch nicht gemerkt hat, kann bis zum Check-Quorum noch an seinen aktiven Consumer liefern, dessen Acks dann scheitern. `exclusive` (ein Consumer, der jeden anderen ausschließt) ist nicht gebaut und wird abgelehnt.
 
-Prioritäten: siehe Weitere Entscheidungen.
+- **Prioritäten** (ADR 0078): Die Einstellung `priority.levels` (1–10, beim Anlegen oder per `AlterConfigs`; 1 heißt keine) gibt einer Queue Stufen; der Header `x-lotse-priority` einer Nachricht nennt ihre Stufe (höher zuerst; über der höchsten zählt die höchste, Unlesbares als 0; nur Daten-Batches). Alle Stufen teilen das eine Log der Queue. Der Leader liest die Stufen, sobald Daten zustellbar werden, höchstens 1 MiB je Runde (ein neuer Leader liest den Rückstand ab dem Ack-Floor einmal), und gibt die höchste Stufe zuerst aus, innerhalb einer Stufe nach Offset; Stufe 0 läuft wie bisher, und eine höhere Nachricht verschiebt den Cursor nicht. Acks, Transaktionen, Verzögerungen und Single Active Consumer bleiben je Nachricht, gleich welcher Stufe.
 
 ## Replikation & Snapshots
 
@@ -471,7 +471,7 @@ CreateStream    <- name string, partitions u32, replication u8, configs: array{k
                 -> error u16, resource_id u64, error_msg string?
 CreatePartitions <- resource_id u64, count u32            // neue Gesamtzahl, nur nach oben (ADR 0074)
                 -> error u16, error_msg string?, leader_hint
-CreateQueue     <- name string, priority_levels u8,       // 1–10, je Stufe ein Sub-Log
+CreateQueue     <- name string, priority_levels u8,       // 1–10, Stufen im einen Log (ADR 0078)
                    single_active u8, dlq string?, replication u8,
                    configs: array{key string, value string}   // ack.timeout.ms
                 -> error u16, resource_id u64, error_msg string?
@@ -548,7 +548,7 @@ Der Broker heißt **Lotse**. Raft wird selbst implementiert und von Anfang an ü
 
 | Thema | Entscheidung | Folge |
 | --- | --- | --- |
-| Prioritäten | Eigenes Sub-Log (eigene Raft-Gruppe) pro Prioritätsstufe unter einer Queue-ID, höchste nicht leere Stufe zuerst | Transaktionale Acks können mehrere Sub-Logs umfassen; der Koordinator behandelt sie wie Partitionen |
+| Prioritäten | Ein Log je Queue, der Leader ordnet nach dem Header `x-lotse-priority`, höchste Stufe mit bereiten Nachrichten zuerst (ADR 0078; ersetzt die Sub-Logs je Stufe) | Alle Stufen teilen den Durchsatz eines Logs; nach einem Failover kennt der neue Leader die Stufen erst, wenn er den Rückstand gelesen hat |
 | Single Active Consumer | Einstellung der Queue, Leader-lokal: erster Subscriber ist aktiv, Übernahme nach Unsubscribe, Disconnect oder Ack-Timeout, sobald nichts mehr draußen ist (ADR 0076) | Vor der Übergabe bricht der Leader offene Ack-Transaktionen des alten Consumers ab |
 | Rebalancing | Kooperativ, Zuweisung durch den Broker (KIP-848-Stil) | `GroupHeartbeat` ersetzt `JoinGroup`, `SyncGroup` und `Heartbeat` |
 | Group-Koordinator | Interne Partitionen `__groups`, Gruppen per Hash verteilt; Leader = Koordinator | Offset-Commits sind Records und laufen über `AddOffsetsToTxn` in Transaktionen |
@@ -574,7 +574,7 @@ Die Kernlogik ist sans-I/O: Raft, Log-Zustand, Transaktionen und Queue-Semantik 
 | Kern | `lotse-log` | Segmente, Indizes, `.pstate`, Snapshot-Manifest, Recovery | `rt`, `record` |
 | Kern | `lotse-raft` | Raft-Zustandsmaschine pro Gruppe, Multi-Raft-Batching pro Node-Paar | `record` |
 | Kern | `lotse-txn` | Producer-State, Idempotenz, LSO, Koordinator-Zustand | `record` |
-| Domäne | `lotse-queue` | Ack-Index (Bereiche), Credits, DLQ, Timer-Wheel, Prioritäts-Sub-Logs, SAC | `record`, `txn` |
+| Domäne | `lotse-queue` | Ack-Index (Bereiche), Credits, DLQ, Fälligkeiten, Prioritätsstufen, SAC | `record`, `txn` |
 | Domäne | `lotse-stream` | Partitionen, Offsets, `__groups`, kooperative Zuweisung | `record`, `txn` |
 | Domäne | `lotse-route` | Exchanges, Bindings, Routing-Policies | – |
 | Domäne | `lotse-meta` | Metadaten-Zustand: Ressourcen, IDs, Leader, Quota-Nutzung | `raft` |

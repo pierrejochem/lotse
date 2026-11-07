@@ -504,6 +504,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             limits: Default::default(),
             dead_letter: None,
             single_active: false,
+            priority_levels: 0,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -587,6 +588,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             limits: Default::default(),
             dead_letter: None,
             single_active: false,
+            priority_levels: 0,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -980,6 +982,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                         limits: Default::default(),
                         dead_letter: None,
                         single_active: false,
+                        priority_levels: 0,
                     }
                 })
                 .collect()
@@ -1160,6 +1163,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             limits: Default::default(),
             dead_letter: None,
             single_active: false,
+            priority_levels: 0,
         }];
         let exchanges = [Exchange {
             name: "x".into(),

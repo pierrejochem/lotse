@@ -1351,6 +1351,7 @@ impl Known {
                 },
                 dead_letter: Some(q.limits.dead_letter).filter(|d| *d != 0),
                 single_active: q.limits.single_active,
+                priority_levels: q.limits.priority_levels,
             });
         }
         for x in state.exchanges.values() {

@@ -378,7 +378,7 @@ fn queue(name: &str, tenant: &str, limits: QueueLimits) -> Change {
 #[test]
 fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_used() {
     let mut s = MetadataState::default();
-    let limits = |dead_letter| QueueLimits { max_deliveries: 3, message_ttl_ms: 0, dead_letter, single_active: false };
+    let limits = |dead_letter| QueueLimits { max_deliveries: 3, message_ttl_ms: 0, dead_letter, ..Default::default() };
     s.apply(1, &payload(&queue("dead", "t", QueueLimits::default()))).unwrap();
     let dead = resource_id(1);
     s.apply(2, &payload(&queue("work", "t", limits(dead)))).unwrap();
@@ -406,7 +406,7 @@ fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_
     s.apply(8, &payload(&ttl)).unwrap();
     assert_eq!(
         s.queues[&work].limits,
-        QueueLimits { max_deliveries: 3, message_ttl_ms: 500, dead_letter: dead, single_active: false }
+        QueueLimits { max_deliveries: 3, message_ttl_ms: 500, dead_letter: dead, ..Default::default() }
     );
     // A queue that others dead-letter into stays.
     s.apply(9, &payload(&Change::Delete { resource_id: dead })).unwrap();
@@ -497,4 +497,34 @@ fn single_active_consumer_is_set_and_reset_survives_a_snapshot_and_old_forms_sti
     let mut bad = change_bytes(&queue("x", "t", single)).to_vec();
     *bad.last_mut().unwrap() = 2;
     assert!(decode_change(&bad).is_err());
+}
+
+#[test]
+fn priority_levels_are_set_and_changed_survive_a_snapshot_and_sit_beside_single_active() {
+    let mut s = MetadataState::default();
+    let both = QueueLimits { single_active: true, priority_levels: 5, ..Default::default() };
+    let levels = QueueLimits { priority_levels: 3, ..Default::default() };
+    for (i, l) in [both, levels].into_iter().enumerate() {
+        let c = queue(&format!("q{i}"), "t", l);
+        assert_eq!(decode_change(&change_bytes(&c)).unwrap(), c);
+    }
+    s.apply(1, &payload(&queue("q0", "t", both))).unwrap();
+    s.apply(2, &payload(&queue("q1", "t", levels))).unwrap();
+    let (q0, q1) = (resource_id(1), resource_id(2));
+    assert_eq!((s.queues[&q0].limits, s.queues[&q1].limits), (both, levels));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    let alter = |id, n| Change::AlterQueue {
+        resource_id: id,
+        change: QueueChange { priority_levels: Some(n), ..Default::default() },
+    };
+    assert_eq!(decode_change(&change_bytes(&alter(q1, 7))).unwrap(), alter(q1, 7));
+    s.apply(3, &payload(&alter(q1, 7))).unwrap();
+    s.apply(4, &payload(&alter(q0, 0))).unwrap();
+    assert_eq!(s.queues[&q1].limits.priority_levels, 7);
+    assert_eq!(s.queues[&q0].limits, QueueLimits { single_active: true, ..Default::default() });
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // Flags with levels promised but missing are refused.
+    let mut cut = change_bytes(&queue("x", "t", levels)).to_vec();
+    cut.pop();
+    assert!(decode_change(&cut).is_err());
 }

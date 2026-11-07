@@ -176,7 +176,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                 <div className="field">
                   <label htmlFor="cq-levels">Priority levels</label>
                   <input id="cq-levels" className="input" type="number" min={1} max={10} value={levels} onChange={(e) => setLevels(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} aria-describedby="cq-levels-help" />
-                  <span id="cq-levels-help" className="help">1 to 10. Each level is its own sub-log.</span>
+                  <span id="cq-levels-help" className="help">1 to 10. Messages with a higher x-lotse-priority go first.</span>
                 </div>
                 <div className="field">
                   <label htmlFor="cq-ttl">Message TTL</label>

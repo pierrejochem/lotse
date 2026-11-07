@@ -70,6 +70,7 @@ fn config(id: NodeId) -> NodeConfig {
             limits: Default::default(),
             dead_letter: None,
             single_active: false,
+            priority_levels: 0,
         }],
         exchanges: Vec::new(),
         group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,

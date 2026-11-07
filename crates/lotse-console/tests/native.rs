@@ -93,6 +93,7 @@ async fn the_console_shows_a_real_cluster() {
                 limits: Default::default(),
                 dead_letter: None,
                 single_active: false,
+                priority_levels: 0,
             }],
             exchanges: Vec::new(),
             group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
@@ -188,10 +189,13 @@ async fn the_console_shows_a_real_cluster() {
     assert_eq!(status, StatusCode::CREATED, "{done}");
     let (status, _) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(plain)).await;
     assert_eq!(status, StatusCode::CONFLICT);
+    // Priority levels (ADR 0078) go through as well.
     let fancy = json!({"name": "vip", "priority_levels": 3, "single_active": true, "create_dlq": false});
-    let (status, err) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(fancy)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err["message"].as_str().unwrap().contains("not support priority levels yet"), "{err}");
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(fancy)).await;
+    assert_eq!(status, StatusCode::CREATED, "{done}");
+    let too_many = json!({"name": "many", "priority_levels": 11, "single_active": false, "create_dlq": false});
+    let (status, err) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(too_many)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     // A single active consumer (ADR 0076) goes through and shows.
     let single = json!({"name": "ledger", "priority_levels": 1, "single_active": true, "create_dlq": false});
     let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(single)).await;
@@ -221,7 +225,7 @@ async fn the_console_shows_a_real_cluster() {
     let (status, t) = get(&app, "/api/v1/clusters/local/tenants").await;
     assert_eq!(status, StatusCode::OK, "{t}");
     assert_eq!(t["tenants"][0]["name"], "default", "{t}");
-    assert!(t["tenants"][0]["quota_bytes"].is_null() && t["tenants"][0]["queues"] == 3, "{t}");
+    assert!(t["tenants"][0]["quota_bytes"].is_null() && t["tenants"][0]["queues"] == 4, "{t}");
 
     // What a real cluster does not have.
     let (_, n) = get(&app, "/api/v1/clusters/local/nodes").await;

@@ -82,5 +82,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0075 | [Queue acks in transactions](0075-queue-acks-in-transactions.md) | Accepted |
 | 0076 | [Single active consumer](0076-single-active-consumer.md) | Accepted |
 | 0077 | [Delayed delivery](0077-delayed-delivery.md) | Accepted |
+| 0078 | [Queue priorities](0078-queue-priorities.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

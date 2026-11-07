@@ -71,6 +71,9 @@ pub struct QueueConfig {
     /// Single active consumer (ADR 0076): one subscription at a time gets
     /// messages, the others wait.
     pub single_active: bool,
+    /// Priority levels (ADR 0078): messages of a higher level go first;
+    /// 0 or 1 for none.
+    pub priority_levels: u8,
 }
 
 impl QueueConfig {
@@ -87,6 +90,7 @@ impl QueueConfig {
             limits: lotse_queue::Limits::default(),
             dead_letter: None,
             single_active: false,
+            priority_levels: 0,
         }
     }
 }
@@ -109,6 +113,10 @@ pub(super) struct Serving {
     /// Subscriptions that asked to hear when they become the single active
     /// consumer (ADR 0076).
     pub(super) notify: std::collections::BTreeSet<SubscriptionId>,
+    /// Priority levels (ADR 0078): the queue's count as last seen, and how
+    /// far the log has been read for them.
+    levels: u8,
+    scanned: u64,
 }
 
 impl Serving {
@@ -258,6 +266,8 @@ impl Clients {
             dispatcher: Dispatcher::new(replica.queue().expect("a queue group")),
             conns: BTreeMap::new(),
             notify: std::collections::BTreeSet::new(),
+            levels: 0,
+            scanned: 0,
         })
     }
 
@@ -671,6 +681,7 @@ impl Clients {
 
             let s = self.queues.get_mut(&g).expect("serving");
             s.hand_over(qc.single_active, replica.queue().expect("a queue group"));
+            read_levels(s, replica, limit, qc.priority_levels).await?;
             let none = std::collections::BTreeSet::new();
             let skip = self.retiring.get(&g).map_or(&none, retire::Retiring::claiming);
             let due = Due { now: view.now, unix_ms: view.unix_ms, limits: qc.limits };
@@ -686,6 +697,55 @@ impl Clients {
         }
         Ok(())
     }
+}
+
+/// Bytes of the log a round reads for priority levels at most: a new
+/// leader reads the whole backlog once, over several rounds.
+const LEVEL_BYTES_PER_ROUND: usize = 1 << 20;
+
+/// Tells the dispatcher the levels of messages appended since the last
+/// round, from their `x-lotse-priority` headers (ADR 0078). A level above
+/// the queue's highest counts as its highest.
+async fn read_levels<R: Runtime, S: StateMachine>(
+    s: &mut Serving,
+    replica: &Replica<R, S>,
+    limit: u64,
+    levels: u8,
+) -> Result<(), Error> {
+    let levels = if levels > 1 { levels } else { 0 };
+    if s.levels != levels {
+        s.dispatcher.clear_levels();
+        (s.levels, s.scanned) = (levels, 0);
+    }
+    if levels == 0 {
+        return Ok(());
+    }
+    let q = replica.queue().expect("a queue group");
+    let mut at = s.scanned.max(q.floor()).max(replica.log().start_offset());
+    let mut budget = LEVEL_BYTES_PER_ROUND;
+    while at < limit && budget > 0 {
+        let read = replica.log().read(at, budget).await?;
+        if read.is_empty() {
+            break;
+        }
+        budget = budget.saturating_sub(read.len());
+        for batch in crate::replica::batches(read)? {
+            if batch.base_offset() >= limit {
+                break;
+            }
+            if batch.attributes().kind == lotse_record::BatchKind::Data && !batch.attributes().control {
+                for r in batch.records()? {
+                    let level = lotse_record::priority::of(&r).min(levels - 1);
+                    if level > 0 && !q.is_settled(r.offset) {
+                        s.dispatcher.set_level(r.offset, level);
+                    }
+                }
+            }
+            at = batch.next_offset();
+        }
+    }
+    s.scanned = at;
+    Ok(())
 }
 
 /// The messages among `here` (all in `batch`) that may not go out yet at
@@ -768,7 +828,9 @@ async fn deliver<R: Runtime, S: StateMachine>(
             let read = replica.log().read(first, 1).await?;
             let (batch, _) = Batch::parse(&read)?;
             let raw = read.slice(..batch.len());
-            let n = rest.iter().take_while(|o| **o < batch.next_offset()).count();
+            // Candidates come in the order to deliver them, not by offset
+            // (ADR 0078): the run that lies in this batch goes together.
+            let n = rest.iter().take_while(|o| (batch.base_offset()..batch.next_offset()).contains(*o)).count();
             let (here, more) = rest.split_at(n);
             rest = more;
             if limits.expired(batch.max_timestamp(), unix_ms) {

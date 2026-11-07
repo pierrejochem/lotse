@@ -658,9 +658,9 @@ export interface components {
              */
             v: number;
         };
-        /** @description A queue priority level (its own sub-log). */
+        /** @description A queue priority level (ADR 0078: levels share the queue's one log). */
         PriorityLevel: {
-            /** @description Leader of the sub-log. */
+            /** @description Leader of the queue the level belongs to. */
             leader: string;
             /**
              * Format: int32

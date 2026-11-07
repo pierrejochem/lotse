@@ -459,7 +459,7 @@ impl Cluster for NativeCluster {
                     tone: Tone::Critical,
                     demo: false,
                     tenants: true,
-                    queue_options: false,
+                    queue_options: true,
                 });
             }
         };
@@ -477,7 +477,7 @@ impl Cluster for NativeCluster {
             tone,
             demo: false,
             tenants: true,
-            queue_options: false,
+            queue_options: true,
         })
     }
 
@@ -776,14 +776,6 @@ impl Cluster for NativeCluster {
     }
 
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
-        let unsupported = [(req.priority_levels != 1, "priority levels")];
-        let missing: Vec<&str> = unsupported.iter().filter(|(on, _)| *on).map(|(_, what)| *what).collect();
-        if !missing.is_empty() {
-            return Err(ApiError::BadRequest(format!(
-                "This cluster does not support {} yet. Create the queue without them.",
-                missing.join(", ")
-            )));
-        }
         let seat = self.seat(who);
         let meta = seat.client.metadata(&[]).await.map_err(failed)?;
         let replication = meta.brokers.len().clamp(1, 3) as u8;
@@ -808,6 +800,10 @@ impl Cluster for NativeCluster {
         }
         if req.single_active {
             configs.push(("single.active.consumer", "true"));
+        }
+        let levels = req.priority_levels.to_string();
+        if req.priority_levels > 1 {
+            configs.push(("priority.levels", &levels));
         }
         match client.create_queue_in_with(tenant, &req.name, replication, &configs, req.dlq.as_deref()).await {
             Ok(_) => Ok(()),

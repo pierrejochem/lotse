@@ -272,6 +272,8 @@ pub(crate) struct QueueLimits {
     pub(crate) dead_letter: u64,
     /// `single.active.consumer` (ADR 0076).
     pub(crate) single_active: bool,
+    /// `priority.levels` (ADR 0078): 2 to 10; 0 for one level, none.
+    pub(crate) priority_levels: u8,
 }
 
 /// What an `AlterQueue` does: each field is left (`None`) or set, 0
@@ -283,6 +285,8 @@ pub(crate) struct QueueChange {
     pub(crate) message_ttl_ms: Option<u64>,
     pub(crate) dead_letter: Option<u64>,
     pub(crate) single_active: Option<bool>,
+    /// 0 for one level.
+    pub(crate) priority_levels: Option<u8>,
 }
 
 impl QueueChange {
@@ -297,6 +301,7 @@ impl QueueChange {
         l.message_ttl_ms = self.message_ttl_ms.unwrap_or(l.message_ttl_ms);
         l.dead_letter = self.dead_letter.unwrap_or(l.dead_letter);
         l.single_active = self.single_active.unwrap_or(l.single_active);
+        l.priority_levels = self.priority_levels.unwrap_or(l.priority_levels);
         l
     }
 }
@@ -780,11 +785,19 @@ impl MetadataState {
         // last that holds something, so a snapshot without them reads on a
         // node from before them: pins (ADR 0065), compaction settings (ADR
         // 0067), tenants' incarnations (ADR 0069), revoked sessions (ADR
-        // 0070), single active consumer queues (ADR 0076). A later section
-        // needs the ones before it, empty or not.
+        // 0070), single active consumer queues (ADR 0076), priority levels
+        // (ADR 0078). A later section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
-        let sections = if !single.is_empty() {
+        let levels: Vec<(u64, u8)> = self
+            .queues
+            .values()
+            .filter(|q| q.limits.priority_levels != 0)
+            .map(|q| (q.resource_id, q.limits.priority_levels))
+            .collect();
+        let sections = if !levels.is_empty() {
+            6
+        } else if !single.is_empty() {
             5
         } else if !self.revocations.is_empty() {
             4
@@ -827,6 +840,13 @@ impl MetadataState {
             b.put_u32_le(single.len() as u32);
             for id in single {
                 b.put_u64_le(id);
+            }
+        }
+        if sections >= 6 {
+            b.put_u32_le(levels.len() as u32);
+            for (id, n) in levels {
+                b.put_u64_le(id);
+                b.put_u8(n);
             }
         }
         b.freeze()
@@ -958,6 +978,14 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 9)?;
+                let id = b.get_u64_le();
+                let levels = b.get_u8();
+                s.queues.get_mut(&id).ok_or("priority levels of an unknown queue")?.limits.priority_levels = levels;
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1000,11 +1028,9 @@ fn change_bytes(change: &Change) -> Bytes {
             put_nodes(&mut b, voters);
             b.put_u64_le(*ack_timeout_ms);
             put_limits(&mut b, limits);
-            // A trailing flag byte only when a flag is set: older records
-            // read as before.
-            if limits.single_active {
-                b.put_u8(1);
-            }
+            // A trailing flag byte only when a flag is set, then what the
+            // flags say comes: older records read as before.
+            put_flags(&mut b, limits.single_active, limits.priority_levels);
         }
         Change::DeclareExchange { name, tenant, kind } => {
             b.put_u8(2);
@@ -1028,7 +1054,8 @@ fn change_bytes(change: &Change) -> Bytes {
                 | u8::from(change.max_deliveries.is_some()) << 1
                 | u8::from(change.message_ttl_ms.is_some()) << 2
                 | u8::from(change.dead_letter.is_some()) << 3
-                | u8::from(change.single_active.is_some()) << 4;
+                | u8::from(change.single_active.is_some()) << 4
+                | u8::from(change.priority_levels.is_some()) << 5;
             b.put_u8(mask);
             b.put_u64_le(change.ack_timeout_ms.unwrap_or(0));
             b.put_u32_le(change.max_deliveries.unwrap_or(0));
@@ -1036,6 +1063,9 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u64_le(change.dead_letter.unwrap_or(0));
             if let Some(on) = change.single_active {
                 b.put_u8(u8::from(on));
+            }
+            if let Some(n) = change.priority_levels {
+                b.put_u8(n);
             }
         }
         Change::AlterStream { resource_id, change } => {
@@ -1152,7 +1182,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let ack_timeout_ms = b.get_u64_le();
             let mut limits = get_limits(b)?;
             if b.has_remaining() {
-                limits.single_active = get_flags(b)? & 1 != 0;
+                (limits.single_active, limits.priority_levels) = get_flags(b)?;
             }
             Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits }
         }
@@ -1182,7 +1212,13 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
                 max_deliveries: (mask & 2 != 0).then_some(max),
                 message_ttl_ms: (mask & 4 != 0).then_some(ttl),
                 dead_letter: (mask & 8 != 0).then_some(dlq),
-                single_active: if mask & 16 != 0 { Some(get_flags(b)? & 1 != 0) } else { None },
+                single_active: if mask & 16 != 0 { Some(get_flags(b)?.0) } else { None },
+                priority_levels: if mask & 32 != 0 {
+                    need(b, 1)?;
+                    Some(b.get_u8())
+                } else {
+                    None
+                },
             };
             Change::AlterQueue { resource_id, change }
         }
@@ -1295,16 +1331,37 @@ fn get_limits(b: &mut &[u8]) -> Result<QueueLimits, String> {
         message_ttl_ms: b.get_u64_le(),
         dead_letter: b.get_u64_le(),
         single_active: false,
+        priority_levels: 0,
     })
 }
 
-/// A byte of flags; only bit 0 is known.
-fn get_flags(b: &mut &[u8]) -> Result<u8, String> {
-    need(b, 1)?;
-    match b.get_u8() {
-        f @ (0 | 1) => Ok(f),
-        _ => Err("unknown queue flags".into()),
+/// A queue's flags, written only when one is set: bit 0 single active
+/// consumer; bit 1 priority levels, whose count follows.
+fn put_flags(b: &mut BytesMut, single_active: bool, levels: u8) {
+    let flags = u8::from(single_active) | u8::from(levels != 0) << 1;
+    if flags != 0 {
+        b.put_u8(flags);
     }
+    if levels != 0 {
+        b.put_u8(levels);
+    }
+}
+
+/// The flags [`put_flags`] writes; in an `AlterQueue` record only bit 0
+/// is ever set.
+fn get_flags(b: &mut &[u8]) -> Result<(bool, u8), String> {
+    need(b, 1)?;
+    let flags = b.get_u8();
+    if flags > 3 {
+        return Err("unknown queue flags".into());
+    }
+    let levels = if flags & 2 != 0 {
+        need(b, 1)?;
+        b.get_u8()
+    } else {
+        0
+    };
+    Ok((flags & 1 != 0, levels))
 }
 
 fn need(b: &&[u8], n: usize) -> Result<(), String> {

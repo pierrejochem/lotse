@@ -37,6 +37,13 @@
 //! a requeueing nack's) is **deferred**: left out until its time, then
 //! delivered before anything new. The caller works out the time from the
 //! log, so a new leader defers the same messages again.
+//!
+//! On a queue with **priority levels** (ADR 0078) the caller tells the
+//! dispatcher each message's level above 0 as it reads the log. Messages of
+//! a higher level go first, lowest offset first within a level; level 0 is
+//! everything else, in offset order as before. A message of a higher level
+//! does not move the cursor: the level-0 messages it overtook are still to
+//! come.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -96,6 +103,10 @@ pub struct Dispatcher {
     next_order: u64,
     /// Messages that wait, and until when (ms since the epoch).
     deferred: BTreeMap<u64, i64>,
+    /// Unsettled messages above level 0, and their levels.
+    levels: BTreeMap<u64, u8>,
+    /// The same, highest level first: `(u8::MAX - level, offset)`.
+    ranked: BTreeSet<(u8, u64)>,
 }
 
 /// A message a transactional ack took.
@@ -133,6 +144,8 @@ impl Dispatcher {
             activated: Vec::new(),
             next_order: 0,
             deferred: BTreeMap::new(),
+            levels: BTreeMap::new(),
+            ranked: BTreeSet::new(),
         }
     }
 
@@ -297,6 +310,12 @@ impl Dispatcher {
         self.redeliver.retain(|o| !queue.is_settled(*o));
         self.extra.retain(|o, _| !queue.is_settled(*o));
         self.deferred.retain(|o, _| !queue.is_settled(*o));
+        let settled: Vec<(u64, u8)> =
+            self.levels.iter().filter(|(o, _)| queue.is_settled(**o)).map(|(o, l)| (*o, *l)).collect();
+        for (o, l) in settled {
+            self.levels.remove(&o);
+            self.ranked.remove(&(u8::MAX - l, o));
+        }
         // A held message whose transaction aborted goes out again.
         let mut back = Vec::new();
         self.held.retain(|o, h| {
@@ -327,6 +346,29 @@ impl Dispatcher {
     fn drop_finished(&mut self) {
         let in_flight = &self.in_flight;
         self.subs.retain(|id, s| !s.closing || in_flight.values().any(|f| f.sub == *id));
+    }
+
+    /// Notes the priority level of the message at `offset`; level 0 is
+    /// every message the dispatcher was not told about.
+    pub fn set_level(&mut self, offset: u64, level: u8) {
+        if let Some(old) = self.levels.remove(&offset) {
+            self.ranked.remove(&(u8::MAX - old, offset));
+        }
+        if level > 0 {
+            self.levels.insert(offset, level);
+            self.ranked.insert((u8::MAX - level, offset));
+        }
+    }
+
+    /// Forgets every level: the queue has none any more.
+    pub fn clear_levels(&mut self) {
+        self.levels.clear();
+        self.ranked.clear();
+    }
+
+    /// The level the dispatcher knows for `offset`.
+    pub fn level_of(&self, offset: u64) -> u8 {
+        self.levels.get(&offset).copied().unwrap_or(0)
     }
 
     /// Leaves `offset` out until `due_ms` (ms since the epoch).
@@ -362,17 +404,32 @@ impl Dispatcher {
     }
 
     /// Offsets to deliver next, at most `max`, all below `limit` (the last
-    /// stable offset): released ones first, then new ones.
+    /// stable offset), in the order to deliver them: messages above level 0,
+    /// highest level first and lowest offset first within one; then level
+    /// 0, released ones and new ones by offset.
     ///
     /// `skip` holds messages that must not go out: the leader has decided
     /// to retire them (dead-letter or drop them) and waits for the claim to
     /// be applied.
     pub fn candidates(&mut self, queue: &QueueLog, limit: u64, max: usize, skip: &BTreeSet<u64>) -> Vec<u64> {
+        // Higher levels first, in their own order.
+        let ready = |o: &u64| {
+            *o < limit
+                && !skip.contains(o)
+                && !self.in_flight.contains_key(o)
+                && !self.held.contains_key(o)
+                && !self.deferred.contains_key(o)
+                && !self.out.contains(o)
+                && !queue.is_settled(*o)
+        };
+        let first: Vec<u64> = self.ranked.iter().map(|(_, o)| *o).filter(|o| ready(o)).take(max).collect();
+        let max = max - first.len();
         let mut out: Vec<u64> = self
             .redeliver
             .iter()
             .copied()
             .filter(|o| *o < limit && !skip.contains(o) && !self.held.contains_key(o) && !self.deferred.contains_key(o))
+            .filter(|o| !self.levels.contains_key(o))
             .take(max)
             .collect();
         let mut o = queue.next_unsettled(self.cursor);
@@ -385,14 +442,17 @@ impl Dispatcher {
             let free = !self.in_flight.contains_key(&o)
                 && !self.redeliver.contains(&o)
                 && !self.held.contains_key(&o)
-                && !self.deferred.contains_key(&o);
+                && !self.deferred.contains_key(&o)
+                && !self.levels.contains_key(&o);
             if free && !skip.contains(&o) {
                 out.push(o);
             }
             o = queue.next_unsettled(o + 1);
         }
         out.sort_unstable();
-        out
+        let mut all = first;
+        all.extend(out);
+        all
     }
 
     /// Hands `offsets` (all in one batch of `batch_bytes`) to subscriptions
@@ -429,7 +489,10 @@ impl Dispatcher {
             for &o in mine {
                 self.in_flight.insert(o, InFlight { sub: id, at: now });
                 self.redeliver.remove(&o);
-                self.cursor = self.cursor.max(o + 1);
+                // Level-0 messages a higher one overtook are still to come.
+                if !self.levels.contains_key(&o) {
+                    self.cursor = self.cursor.max(o + 1);
+                }
                 let count =
                     queue.delivery_count(o).saturating_add(self.extra.get(&o).copied().unwrap_or(0)).saturating_add(1);
                 deliveries.push(Delivery { offset: o, delivery_count: count });

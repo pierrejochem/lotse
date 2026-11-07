@@ -426,12 +426,12 @@ pub struct StreamDetail {
     pub assignment: Option<Assignment>,
 }
 
-/// A queue priority level (its own sub-log).
+/// A queue priority level (ADR 0078: levels share the queue's one log).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct PriorityLevel {
     /// Level number; higher is delivered first.
     pub level: u8,
-    /// Leader of the sub-log.
+    /// Leader of the queue the level belongs to.
     pub leader: String,
     /// Messages ready.
     pub ready: u64,

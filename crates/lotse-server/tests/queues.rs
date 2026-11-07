@@ -180,6 +180,12 @@ impl Scenario {
         Scenario { queues, exchanges: Vec::new(), groups: vec![2, 11, 12, 13, 14] }
     }
 
+    /// One queue with four priority levels (ADR 0078).
+    fn priorities() -> Scenario {
+        let ranked = QueueConfig { ack_timeout: ACK_TIMEOUT, priority_levels: 4, ..QueueConfig::new("ranked", 40, 1) };
+        Scenario { queues: vec![ranked], exchanges: Vec::new(), groups: vec![1, 2] }
+    }
+
     /// One queue with a single active consumer (ADR 0076).
     fn single_active() -> Scenario {
         let line = QueueConfig { ack_timeout: ACK_TIMEOUT, single_active: true, ..QueueConfig::new("line", 30, 1) };
@@ -1463,8 +1469,9 @@ fn delayed_messages_wait_for_their_time_across_a_failover() {
     });
 }
 
-// A producer writes messages to `jobs`, many asking for a delay of up to
-// 1.5 s; consumers take them, ack most, give some back with a delay or
+// A producer writes messages to `jobs`, a queue with three priority levels,
+// many asking for a delay of up to 1.5 s and each for a level; consumers
+// take them, ack most, give some back with a delay or
 // without, and drop their subscriptions, while nodes crash and hosts are
 // partitioned. Afterwards the network heals and a last consumer takes what
 // is left.
@@ -1498,7 +1505,17 @@ async fn delay_producer(rt: SimRuntime, out: Arc<Mutex<DelayOutcomes>>, stop: Ar
         n += 1;
         let ms = if rt.chance(1, 2) { rt.below(MAX_DELAY_MS) } else { 0 };
         out.lock().unwrap().sent.insert(value.clone(), (unix_ms(&rt), ms));
-        let batch = if ms > 0 { delayed(&value, ms) } else { message(&value) };
+        // Priorities mixed in (ADR 0078): they change the order, never
+        // what arrives or when it may.
+        let level = rt.below(4).to_string();
+        let mut b = BatchBuilder::new(BatchOptions::default());
+        let delay = ms.to_string();
+        let mut headers = vec![(lotse_record::priority::HEADER, Some(level.as_bytes()))];
+        if ms > 0 {
+            headers.push((lotse_record::delay::HEADER, Some(delay.as_bytes())));
+        }
+        b.push(0, None, Some(value.as_bytes()), &headers);
+        let batch = b.finish().unwrap();
         if client.produce("jobs", 0, batch).await.is_ok() {
             out.lock().unwrap().produced.insert(value);
         }
@@ -1563,7 +1580,9 @@ async fn delay_consumer(rt: SimRuntime, out: Arc<Mutex<DelayOutcomes>>, stop: Ar
 }
 
 async fn run_delays(rt: SimRuntime) {
-    let mut w = World::new(rt.clone(), Scenario::classic()).await;
+    let mut scenario = Scenario::classic();
+    scenario.queues[0].priority_levels = 3;
+    let mut w = World::new(rt.clone(), scenario).await;
     let out = Arc::new(Mutex::new(DelayOutcomes::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let tasks = vec![
@@ -1619,4 +1638,63 @@ async fn run_delays(rt: SimRuntime) {
 #[test]
 fn delayed_messages_never_arrive_early_under_faults() {
     check_seeds(10, |seed| Sim::new(seed).run(run_delays));
+}
+
+// ---------------------------------------------------------------------------
+// Priorities (ADR 0078).
+
+/// A message at priority `level`.
+fn ranked(value: &str, level: &str) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(value.as_bytes()), &[(lotse_record::priority::HEADER, Some(level.as_bytes()))]);
+    b.finish().unwrap()
+}
+
+#[test]
+fn higher_priorities_go_first_also_after_a_failover() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::priorities()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            let fill = async |tag: &str| {
+                for i in 0..3 {
+                    c.produce("ranked", 0, message(&format!("{tag}low{i}"))).await.unwrap();
+                }
+                c.produce("ranked", 0, ranked(&format!("{tag}mid"), "1")).await.unwrap();
+                c.produce("ranked", 0, ranked(&format!("{tag}high0"), "3")).await.unwrap();
+                // Above the highest level: the highest.
+                c.produce("ranked", 0, ranked(&format!("{tag}high1"), "9")).await.unwrap();
+                c.produce("ranked", 0, ranked(&format!("{tag}junk"), "soon")).await.unwrap();
+            };
+            let expected = |tag: &str| {
+                ["high0", "high1", "mid", "low0", "low1", "low2", "junk"].map(|v| format!("{tag}{v}")).to_vec()
+            };
+            // Credit 1 takes one message per round; more takes runs of
+            // several levels at once, across batches.
+            let take = async |n: usize, credit: u32| {
+                let mut sub = c.subscribe("ranked", credit).await.expect("subscribed");
+                let mut got = Vec::new();
+                while got.len() < n {
+                    let m = sub.next(Duration::from_secs(10)).await.unwrap().expect("delivered");
+                    got.push(value_of(&m));
+                    sub.ack(&m).await.unwrap();
+                }
+                got
+            };
+            fill("a-").await;
+            assert_eq!(take(7, 1).await, expected("a-"));
+
+            // A new leader reads the levels from the log again.
+            fill("b-").await;
+            let meta = c.metadata(&["ranked"]).await.unwrap();
+            let leader = meta.resources.iter().find(|r| r.name == "ranked").unwrap().partitions[0].leader;
+            w.crash(u64::from(leader), false).await;
+            assert_eq!(take(7, 7).await, expected("b-"));
+            w.start(u64::from(leader)).await;
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
 }

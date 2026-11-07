@@ -1690,7 +1690,7 @@
       },
       "PriorityLevel": {
         "type": "object",
-        "description": "A queue priority level (its own sub-log).",
+        "description": "A queue priority level (ADR 0078: levels share the queue's one log).",
         "required": [
           "level",
           "leader",
@@ -1699,7 +1699,7 @@
         "properties": {
           "leader": {
             "type": "string",
-            "description": "Leader of the sub-log."
+            "description": "Leader of the queue the level belongs to."
           },
           "level": {
             "type": "integer",

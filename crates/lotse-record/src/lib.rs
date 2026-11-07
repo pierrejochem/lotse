@@ -1023,6 +1023,22 @@ pub mod delay {
     }
 }
 
+/// The header a producer sets on a message for a queue with priority
+/// levels (ADR 0078): a decimal level from 0, higher first. A level above
+/// the queue's highest counts as its highest; a value that is not a number
+/// from 0 to 255 is level 0.
+pub mod priority {
+    /// The header's name.
+    pub const HEADER: &[u8] = b"x-lotse-priority";
+
+    /// The level a record asks for.
+    pub fn of(record: &crate::Record) -> u8 {
+        let Some(h) = record.headers.iter().find(|h| h.key.as_ref() == HEADER) else { return 0 };
+        let Some(v) = &h.value else { return 0 };
+        std::str::from_utf8(v).ok().and_then(|t| t.parse::<u8>().ok()).unwrap_or(0)
+    }
+}
+
 fn queue_batch(kind: BatchKind, value: &[u8]) -> Result<Bytes, Error> {
     let mut b = BatchBuilder::new(BatchOptions {
         attributes: Attributes { compression: Compression::None, transactional: false, control: false, kind },

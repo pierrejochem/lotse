@@ -673,3 +673,31 @@ fn a_settled_message_leaves_no_time_behind() {
     plain.apply(&ack(4, &[(0, 2)])).unwrap();
     assert_eq!(q.encode(), plain.encode(), "no time of a settled message in the snapshot");
 }
+
+#[test]
+fn higher_levels_go_first_and_the_messages_they_overtake_still_come() {
+    let mut q = queue(8);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 1, 3, 1 << 20);
+    d.set_level(6, 2);
+    d.set_level(4, 1);
+    d.set_level(7, 2);
+    let c = d.candidates(&q, 8, 3, &Default::default());
+    assert_eq!(c, vec![6, 7, 4], "level 2 by offset, then level 1");
+    let got = d.assign(&q, &c, 100, at(0));
+    assert_eq!(got[0].1.iter().map(|x| x.offset).collect::<Vec<_>>(), vec![6, 7, 4]);
+    d.credit(1, 10, 0);
+    let c = d.candidates(&q, 8, 10, &Default::default());
+    assert_eq!(c, vec![0, 1, 2, 3, 5], "level 0, all of it: the cursor stayed");
+    // Released, a higher-level message goes before level 0 again.
+    d.end(1);
+    d.subscribe(2, 2, 1, 1 << 20);
+    assert_eq!(d.candidates(&q, 8, 1, &Default::default()), vec![6]);
+    // Settled, it is forgotten; below the limit only.
+    q.apply(&ack(8, &[(6, 7)])).unwrap();
+    d.sweep(&q);
+    assert_eq!(d.level_of(6), 0);
+    assert_eq!(d.candidates(&q, 5, 10, &Default::default()), vec![4, 0, 1, 2, 3]);
+    d.clear_levels();
+    assert_eq!(d.candidates(&q, 8, 10, &Default::default()), vec![0, 1, 2, 3, 4, 5, 7]);
+}

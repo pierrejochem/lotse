@@ -100,7 +100,7 @@ export function QueueDetail() {
         <section className="card stack" aria-labelledby="prio-title" style={{ flex: '1 1 400px', '--gap': '16px' } as React.CSSProperties}>
           <div>
             <h2 id="prio-title" className="h3">Priority levels</h2>
-            <p className="small muted" style={{ margin: '4px 0 0' }}>Each level is its own sub-log and Raft group. Delivery drains the highest non-empty level first.</p>
+            <p className="small muted" style={{ margin: '4px 0 0' }}>Messages carry their level in the x-lotse-priority header. Delivery takes the highest level with ready messages first.</p>
           </div>
           {d.levels.map((l) => (
             <div key={l.level} className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
