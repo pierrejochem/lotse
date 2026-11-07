@@ -78,7 +78,8 @@ try (var client = new LotseClient(config)) {
 - `nack(job, true)` only works for a message of the current subscription, on its connection. After the subscription ended the broker has already taken the message back, and the call does nothing.
 - `poll` and `next` are for one thread; `ack`, `nack` and `close` may be called from any thread. `close` hands back the messages the consumer received but did not hand out. Messages it handed out stay with it until acknowledged or until the client's connection closes.
 - A dead-lettered message carries where it came from: `delivery.deadLetter()` has the reason (`max-deliveries` or `expired`), the source queue, its id, the offset there, the delivery count and the ack floor.
-- `ackIn(txn, delivery)` acknowledges within a transaction; see below. Delayed requeue (ADR 0077) and the standby answer of a single-active queue (ADR 0076) are not offered yet: on such a queue a second consumer simply waits for messages.
+- `ackIn(txn, delivery)` acknowledges within a transaction; see below. `nackAfter(job, Duration.ofSeconds(30))` gives a message back to be delivered again once the delay has passed (ADR 0077); a producer delays a message with the header `x-lotse-delay-ms`.
+- On a queue with `single.active.consumer` (ADR 0076) one subscription gets messages and the others wait as standbys in the order they subscribed: `isStandby()` says which this one is.
 
 ### Transactions
 

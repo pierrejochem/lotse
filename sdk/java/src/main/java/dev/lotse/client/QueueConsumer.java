@@ -52,6 +52,8 @@ public final class QueueConsumer implements AutoCloseable {
     private static final class Sub implements PushListener {
         final Connection conn;
         final long id;
+        /** Waits as a standby of the queue's single active consumer (ADR 0076). */
+        volatile boolean standby;
         final BlockingQueue<Object> events = new LinkedBlockingQueue<>();
 
         Sub(Connection conn, long id) {
@@ -131,7 +133,8 @@ public final class QueueConsumer implements AutoCloseable {
         } catch (CallFailure e) {
             throw e.toAttempt();
         }
-        Request req = new Request.Subscribe(routed.route().resourceId(), "", credit, U32_MAX, false);
+        // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076).
+        Request req = new Request.Subscribe(routed.route().resourceId(), "", credit, U32_MAX, false, true);
         Response resp;
         try {
             resp = client.callOn(conn, req);
@@ -146,6 +149,7 @@ public final class QueueConsumer implements AutoCloseable {
         ErrorCode code = s.error();
         if (code.isOk()) {
             Sub made = new Sub(conn, s.subscriptionId());
+            made.standby = s.standby();
             try {
                 conn.register(made.id, made);
             } catch (ConnectionException e) {
@@ -257,6 +261,11 @@ public final class QueueConsumer implements AutoCloseable {
             ended(from);
             return;
         }
+        // Its turn as the single active consumer, or messages, which come to the active consumer only.
+        from.standby = false;
+        if (push.isActivation()) {
+            return;
+        }
         List<BatchRecord> records;
         try {
             records = Batch.parse(push.batch()).batch().records();
@@ -310,6 +319,17 @@ public final class QueueConsumer implements AutoCloseable {
         usedMsgs = 0;
         usedBytes = 0;
         return req;
+    }
+
+    /**
+     * Whether the subscription waits as a standby of its queue's single active consumer (ADR 0076): subscribed, and
+     * not its turn yet. The broker tells a standby when it becomes active; this is false from the next {@link #poll}
+     * or {@link #next} on that sees it.
+     */
+    public boolean isStandby() {
+        synchronized (mu) {
+            return sub != null && sub.standby;
+        }
     }
 
     // ---- settling ----
@@ -406,6 +426,20 @@ public final class QueueConsumer implements AutoCloseable {
             settle(ranges, Boolean.FALSE);
             return;
         }
+        requeue(deliveries, 0);
+    }
+
+    /**
+     * Gives a message back to be delivered again, to any consumer, once {@code delay} has passed (ADR 0077): a retry
+     * with backoff. Rounded down to whole milliseconds, at most about 49 days; a delay of 0 is {@link #nack(Delivery,
+     * boolean)} with requeue. If the subscription has ended, the message went back with it, without a delay.
+     */
+    public void nackAfter(Delivery delivery, Duration delay) {
+        long ms = Math.min(Math.max(delay.toMillis(), 0), U32_MAX);
+        requeue(List.of(delivery), ms);
+    }
+
+    private void requeue(Collection<Delivery> deliveries, long delayMs) {
         // Only the subscription's connection can give a message back; if it is gone, so is the message (it went
         // back with the subscription). A message of an earlier subscription is gone with it.
         Sub on;
@@ -426,7 +460,7 @@ public final class QueueConsumer implements AutoCloseable {
         if (held.isEmpty()) {
             return;
         }
-        Request req = new Request.Nack(queueId, OffsetRanges.of(offsets(held)), true, 0);
+        Request req = new Request.Nack(queueId, OffsetRanges.of(offsets(held)), true, delayMs);
         Response resp;
         try {
             resp = client.callOn(on.conn, req);

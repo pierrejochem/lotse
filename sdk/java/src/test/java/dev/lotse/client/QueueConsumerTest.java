@@ -1,6 +1,7 @@
 package dev.lotse.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -438,6 +439,76 @@ class QueueConsumerTest {
             List<Delivery> all = List.of(take(c), take(c), take(c));
             c.ack(all);
             assertEquals(List.of(new Range(10, 13)), a.requests(Request.Ack.class).get(0).ranges());
+        }
+    }
+
+    @Test
+    void aStandbyIsToldWhenItsTurnComes() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        AtomicLong sub = new AtomicLong();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                where.set(conn);
+                sub.set(nextSub.incrementAndGet());
+                return new Response.Subscribe(ErrorCode.NONE, sub.get(), null, true);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        try (QueueConsumer c = client.subscribe("jobs")) {
+            assertTrue(c.isStandby());
+            assertTrue(a.requests(Request.Subscribe.class).get(0).notifyActive(), "asks to be told");
+            where.get().push(new Frames.DeliverPush(sub.get(), ErrorCode.NONE, ByteString.EMPTY, List.of(), null));
+            assertNull(c.poll(SHORT), "the activation is no message");
+            assertFalse(c.isStandby());
+            where.get().push(pushAll(sub.get(), 10, 1));
+            assertEquals(10, take(c).offset());
+        }
+    }
+
+    @Test
+    void aStandbyThatGetsAMessageIsActive() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        AtomicLong sub = new AtomicLong();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                where.set(conn);
+                sub.set(nextSub.incrementAndGet());
+                return new Response.Subscribe(ErrorCode.NONE, sub.get(), null, true);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        try (QueueConsumer c = client.subscribe("jobs")) {
+            where.get().push(pushAll(sub.get(), 10, 1));
+            take(c);
+            assertFalse(c.isStandby());
+        }
+    }
+
+    @Test
+    void aDelayedRequeueCarriesItsDelayOnTheSubscriptionsConnection() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        AtomicLong sub = new AtomicLong();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                where.set(conn);
+                sub.set(nextSub.incrementAndGet());
+                return new Response.Subscribe(ErrorCode.NONE, sub.get(), null);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        try (QueueConsumer c = client.subscribe("jobs")) {
+            assertFalse(c.isStandby());
+            where.get().push(pushAll(sub.get(), 10, 2));
+            c.nackAfter(take(c), Duration.ofMillis(1500));
+            Request.Nack nack = where.get().requests(Request.Nack.class).get(0);
+            assertEquals(1500, nack.delayMs());
+            assertEquals(true, nack.requeue());
+            assertEquals(List.of(new Range(10, 11)), nack.ranges());
+            c.nack(take(c), true);
+            assertEquals(0, where.get().requests(Request.Nack.class).get(1).delayMs(), "a plain requeue waits not");
         }
     }
 
