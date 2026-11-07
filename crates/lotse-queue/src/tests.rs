@@ -498,3 +498,115 @@ fn a_new_leader_learns_what_transactions_hold_from_the_log() {
     d.sweep(&q);
     assert_eq!(d.candidates(&q, 3, 10, &Default::default()), vec![1], "aborted: noticed and delivered");
 }
+
+#[test]
+fn a_single_active_consumer_gets_everything_and_the_next_waits_until_nothing_is_out() {
+    let q = queue(6);
+    let mut d = Dispatcher::new(&q);
+    d.set_single_active(true);
+    d.subscribe(1, 1, 2, 1 << 20);
+    d.subscribe(2, 2, 10, 1 << 20);
+    assert_eq!(d.hand_over(&q), Some(1), "the first to subscribe");
+    assert_eq!(d.take_activated(), vec![1]);
+    assert!(d.is_standby(2) && !d.is_standby(1));
+    assert_eq!(d.open_credit(), 2, "only the active one's credit counts");
+    let c = d.candidates(&q, 6, 10, &Default::default());
+    let got = d.assign(&q, &c, 100, at(0));
+    assert_eq!(got.len(), 1, "one subscription gets messages: {got:?}");
+    assert_eq!(got[0].0, 1);
+    assert_eq!(got[0].1.iter().map(|x| x.offset).collect::<Vec<_>>(), vec![0, 1]);
+    // Out of credit, the active one still keeps its place.
+    let c = d.candidates(&q, 6, 10, &Default::default());
+    assert!(d.assign(&q, &c, 100, at(1)).is_empty(), "the standby gets nothing");
+
+    // A nack with requeue holds one back; the active one leaves; the
+    // standby waits until that message is back.
+    assert_eq!(d.take(1, [1]), vec![1]);
+    d.disconnect(1);
+    assert_eq!(d.hand_over(&q), None, "message 1 is still out");
+    assert!(d.take_activated().is_empty());
+    d.release([1]);
+    assert_eq!(d.hand_over(&q), Some(2));
+    assert_eq!(d.take_activated(), vec![2]);
+    let c = d.candidates(&q, 6, 10, &Default::default());
+    let got = d.assign(&q, &c, 100, at(2));
+    let offsets: Vec<u64> = got[0].1.iter().map(|x| x.offset).collect();
+    assert_eq!(offsets, vec![0, 1, 2, 3, 4, 5], "what the last one had comes first, in order");
+}
+
+#[test]
+fn a_standby_waits_for_timed_out_and_transaction_held_messages() {
+    let mut q = queue(3);
+    let mut d = Dispatcher::new(&q);
+    d.set_single_active(true);
+    d.subscribe(1, 1, 10, 1 << 20);
+    d.subscribe(2, 2, 10, 1 << 20);
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    d.assign(&q, &c, 100, at(0));
+    assert_eq!(d.take_for_txn(1, 7, &[0]), Some(vec![0]));
+    let ended = d.timed_out(at(10_000), Duration::from_millis(1));
+    assert_eq!(ended, vec![(1, vec![1, 2])]);
+    assert_eq!(d.hand_over(&q), None, "held back for their counts, and held by a transaction");
+    d.release([1, 2]);
+    assert_eq!(d.hand_over(&q), None, "still held by the transaction");
+    // The ack is applied and the transaction aborts: message 0 comes back.
+    q.apply(&txn_ack(3, 7, 0, &[(0, 1)])).unwrap();
+    d.held_applied(&[0]);
+    q.apply(&marker(4, 7, false)).unwrap();
+    d.sweep(&q);
+    assert_eq!(d.hand_over(&q), Some(2));
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    let got = d.assign(&q, &c, 100, at(20_000));
+    assert_eq!(got[0].1.iter().map(|x| x.offset).collect::<Vec<_>>(), vec![0, 1, 2]);
+}
+
+#[test]
+fn a_new_leader_waits_for_what_an_earlier_one_left_held() {
+    let mut q = queue(2);
+    q.apply(&txn_ack(2, 7, 0, &[(0, 1)])).unwrap();
+    let mut d = Dispatcher::new(&q);
+    d.set_single_active(true);
+    d.subscribe(1, 1, 10, 1 << 20);
+    assert_eq!(d.hand_over(&q), None, "message 0 is held by a transaction the log knows");
+    let c = d.candidates(&q, 2, 10, &Default::default());
+    assert!(d.assign(&q, &c, 100, at(0)).is_empty(), "nothing goes out before the handover");
+    q.apply(&marker(3, 7, true)).unwrap();
+    d.sweep(&q);
+    assert_eq!(d.hand_over(&q), Some(1));
+}
+
+#[test]
+fn turning_single_active_consumer_on_waits_for_what_is_in_flight() {
+    let q = queue(4);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 1, 1, 1 << 20);
+    d.subscribe(2, 2, 1, 1 << 20);
+    let c = d.candidates(&q, 4, 2, &Default::default());
+    assert_eq!(d.assign(&q, &c, 100, at(0)).len(), 2, "two consumers while it is off");
+    d.set_single_active(true);
+    assert_eq!(d.hand_over(&q), None, "both still have a message");
+    d.disconnect(2);
+    assert_eq!(d.hand_over(&q), None, "1 still has one");
+    d.disconnect(1);
+    d.subscribe(3, 3, 10, 1 << 20);
+    assert_eq!(d.hand_over(&q), Some(3));
+    d.set_single_active(false);
+    assert!(!d.is_standby(3) && d.active().is_none());
+}
+
+#[test]
+fn a_standby_waits_until_the_messages_of_a_timed_out_consumer_are_back() {
+    let q = queue(3);
+    let mut d = Dispatcher::new(&q);
+    d.set_single_active(true);
+    d.subscribe(1, 1, 10, 1 << 20);
+    d.subscribe(2, 2, 10, 1 << 20);
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    d.assign(&q, &c, 100, at(0));
+    assert_eq!(d.timed_out(at(10_000), Duration::from_millis(1)), vec![(1, vec![0, 1, 2])]);
+    assert_eq!(d.hand_over(&q), None, "held back until their counts are written");
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    assert!(d.assign(&q, &c, 100, at(10_001)).is_empty(), "nothing goes out meanwhile");
+    d.release([0, 1, 2]);
+    assert_eq!(d.hand_over(&q), Some(2));
+}

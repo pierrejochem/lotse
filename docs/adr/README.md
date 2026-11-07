@@ -80,5 +80,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0073 | [Pattern subscriptions](0073-pattern-subscriptions.md) | Accepted |
 | 0074 | [Adding partitions to a stream](0074-adding-partitions-to-a-stream.md) | Accepted |
 | 0075 | [Queue acks in transactions](0075-queue-acks-in-transactions.md) | Accepted |
+| 0076 | [Single active consumer](0076-single-active-consumer.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

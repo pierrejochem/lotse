@@ -159,8 +159,9 @@ Eine Queue ist ein Log plus Ack-Index. Acks, Zustellzähler und Timer sind selbs
 - **Dead-Letter-Queues und TTL** (ADR 0055) sind Einstellungen der Queue: `max.deliveries`, `message.ttl.ms` und `dead.letter.queue`, beim Anlegen oder per `AlterConfigs` gesetzt, standardmäßig aus. Nur der Leader entscheidet, und jede Entscheidung ist ein `RETIRE`-Batch im Log der Queue: Der **Claim** erledigt die Nachricht wie ein Ack (ohne DLQ ist sie damit verworfen) und vermerkt sie als der DLQ geschuldet; Ack und Claim ordnet das Log, es gewinnt der erste. Der Leader schickt die geschuldeten Nachrichten per internem `DeadLetter` an den Leader der DLQ und vermerkt danach in einem zweiten `RETIRE`-Batch, dass sie weitergeleitet sind. Die DLQ erkennt eine schon übernommene Nachricht (Quell-Queue und -Offset in den Headern der Kopie) beim Anwenden und stellt sie nicht erneut zu: genau einmal über Failover hinweg. Die TTL zählt ab der Uhrzeit des Leaders beim Anhängen; Replicas lesen keine Uhr, sie wenden den Claim an. Zyklen, fremde Tenants und das Löschen einer als DLQ genutzten Queue werden abgelehnt.
 - **Purge und Requeue** (ADR 0064) bedient der Leader der Queue, für Tenant-Admins. `PurgeQueue` erledigt mit einem Ack-Batch alle bereiten Nachrichten: was ein Consumer hält, bleibt seins, Nachrichten offener Transaktionen warten auf ihren Marker. `Requeue` schickt die bereiten Nachrichten einer DLQ dorthin zurück, woher ihre Header sagen, dass sie kamen: derselbe Weg wie beim Dead-Lettering, nur umgekehrt (Claim mit Grund `requeued`, `DeadLetter`, Wiedererkennung beim Empfänger), also genau einmal über Failover hinweg. Nachrichten ohne Herkunft oder mit gelöschter Herkunft bleiben. Jede Anfrage behandelt höchstens einige tausend Nachrichten unterhalb einer Grenze, die die erste festlegt; der Client wiederholt sie, bis nichts übrig ist, und was währenddessen produziert wird, bleibt.
 - **Delayed Delivery** nutzt `TIMER`-Records mit Fälligkeitszeit. Im Speicher steckt eine Timer-Wheel, die bei Recovery aus Snapshot und Log neu aufgebaut wird.
+- **Single Active Consumer** (ADR 0076) ist die Einstellung `single.active.consumer` der Queue (beim Anlegen oder per `AlterConfigs`, standardmäßig aus). Jeder Subscriber wird angenommen, Nachrichten bekommt nur der aktive; die anderen warten als Standby in der Reihenfolge ihres Subscribe. Der aktive behält seinen Platz, bis er endet (Unsubscribe und fertig, Disconnect, Ack-Timeout). Der älteste Standby übernimmt erst, wenn nichts mehr draußen ist: nichts in flight, nichts für einen Zähler zurückgehalten, nichts von einer Transaktion gehalten. Was der vorige hatte, kommt dann zuerst, nach Offset; so bleibt die Reihenfolge der Queue über die Übergabe. Die Antwort auf `Subscribe` sagt mit Tag 1 `standby`, ob die Subscription wartet; wer mit Tag 1 `notify_active` fragt, bekommt beim Aktivwerden einen Push ohne Fehler, Batch und Zustellungen. Alles ist Leader-lokal: Nach einem Failover ist aktiv, wer zuerst neu subscribed; ein abgesetzter Leader, der es noch nicht gemerkt hat, kann bis zum Check-Quorum noch an seinen aktiven Consumer liefern, dessen Acks dann scheitern. `exclusive` (ein Consumer, der jeden anderen ausschließt) ist nicht gebaut und wird abgelehnt.
 
-Prioritäten und Single Active Consumer: siehe Weitere Entscheidungen.
+Prioritäten: siehe Weitere Entscheidungen.
 
 ## Replikation & Snapshots
 
@@ -413,8 +414,10 @@ Publish     <- txn_id string?, timeout_ms u32,
                entries: array{error u16, routed: array{queue_id u64, base_offset u64}}
 
 Subscribe   <- queue_id u64, consumer_tag string, credit_msgs u32, credit_bytes u32,
-               exclusive u8
-            -> error u16, subscription_id u32
+               exclusive u8,                        // abgelehnt
+               tags: 1 notify_active u8             // ADR 0076
+            -> error u16, subscription_id u32,
+               tags: 0 Leader-Hinweis, 1 standby u8
 
 Deliver     (Push, correlation_id 0)
                subscription_id u32, error u16, batch bytes,
@@ -546,7 +549,7 @@ Der Broker heißt **Lotse**. Raft wird selbst implementiert und von Anfang an ü
 | Thema | Entscheidung | Folge |
 | --- | --- | --- |
 | Prioritäten | Eigenes Sub-Log (eigene Raft-Gruppe) pro Prioritätsstufe unter einer Queue-ID, höchste nicht leere Stufe zuerst | Transaktionale Acks können mehrere Sub-Logs umfassen; der Koordinator behandelt sie wie Partitionen |
-| Single Active Consumer | Leader-lokal: erster Subscriber ist aktiv, Übernahme bei Disconnect oder Credit-Timeout | Vor der Übergabe bricht der Leader offene Ack-Transaktionen des alten Consumers ab |
+| Single Active Consumer | Einstellung der Queue, Leader-lokal: erster Subscriber ist aktiv, Übernahme nach Unsubscribe, Disconnect oder Ack-Timeout, sobald nichts mehr draußen ist (ADR 0076) | Vor der Übergabe bricht der Leader offene Ack-Transaktionen des alten Consumers ab |
 | Rebalancing | Kooperativ, Zuweisung durch den Broker (KIP-848-Stil) | `GroupHeartbeat` ersetzt `JoinGroup`, `SyncGroup` und `Heartbeat` |
 | Group-Koordinator | Interne Partitionen `__groups`, Gruppen per Hash verteilt; Leader = Koordinator | Offset-Commits sind Records und laufen über `AddOffsetsToTxn` in Transaktionen |
 | Raft-Implementierung | Eigener Raft-Kern: Partition-Log = Raft-Log, Batching nativ | Mehr Eigenaufwand, passt exakt zum Storage-Design |

@@ -79,6 +79,7 @@ async fn main() {
                 ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
                 limits: Default::default(),
                 dead_letter: None,
+                single_active: false,
             }],
             exchanges: Vec::new(),
             group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,

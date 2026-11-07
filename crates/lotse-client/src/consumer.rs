@@ -50,6 +50,8 @@ struct Sub<C: lotse_rt::Conn> {
     conn: Arc<Connection<C>>,
     id: u32,
     pushes: PushQueue,
+    /// Waiting for its turn as the queue's single active consumer.
+    standby: bool,
 }
 
 /// A subscription to a queue, from [`Client::subscribe`]. Read messages with
@@ -65,6 +67,8 @@ pub struct Consumer<'a, R: Net + Clock + Spawn + Rng> {
     buffered: VecDeque<Message>,
     /// Messages and bytes used since credit was last added.
     used: (u32, u32),
+    /// How often it has subscribed.
+    subscribed: u64,
 }
 
 impl<R: Net + Clock + Spawn + Rng> std::fmt::Debug for Consumer<'_, R> {
@@ -89,6 +93,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             sub: None,
             buffered: VecDeque::new(),
             used: (0, 0),
+            subscribed: 0,
         };
         c.ensure_subscribed().await?;
         Ok(c)
@@ -109,6 +114,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         if self.sub.is_none() {
             let (sub, resource_id) = self.client.retrying(|| self.subscribe_once()).await?;
             self.sub = Some(sub);
+            self.subscribed += 1;
             self.resource_id = resource_id;
             self.used = (0, 0);
         }
@@ -125,6 +131,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             credit_msgs: self.credit,
             credit_bytes: u32::MAX,
             exclusive: false,
+            notify_active: true,
         });
         let resp = match conn.call(&req, &c.rt, c.cfg.request_timeout).await {
             Ok(Response::Subscribe(r)) => r,
@@ -139,7 +146,10 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         };
         match resp.error {
             ErrorCode::NONE => match conn.register(resp.subscription_id) {
-                Some(pushes) => Ok((Sub { conn, id: resp.subscription_id, pushes }, route.resource_id)),
+                Some(pushes) => {
+                    let sub = Sub { conn, id: resp.subscription_id, pushes, standby: resp.standby };
+                    Ok((sub, route.resource_id))
+                }
                 None => Err(Attempt::Retry("the connection broke".into())),
             },
             code if code.retriable() => {
@@ -193,6 +203,11 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
                     }
                     self.ended();
                 }
+                Some(Ok(push)) if push.is_activation() => {
+                    if let Some(sub) = &mut self.sub {
+                        sub.standby = false;
+                    }
+                }
                 Some(Ok(push)) => {
                     let corrupt = |e: lotse_record::Error| ClientError::Broker {
                         code: ErrorCode::CORRUPT_BATCH,
@@ -207,9 +222,28 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
                         }
                     }
                     self.used.1 = self.used.1.saturating_add(push.batch.len() as u32);
+                    // Messages come to the active consumer only.
+                    if let Some(sub) = &mut self.sub {
+                        sub.standby = false;
+                    }
                 }
             }
         }
+    }
+
+    /// How often this consumer has subscribed: it subscribes again after a
+    /// subscription ends (a failover, the ack timeout, a broken
+    /// connection), and messages it had go to others then.
+    pub fn subscriptions(&self) -> u64 {
+        self.subscribed
+    }
+
+    /// Whether the subscription waits as a standby of its queue's single
+    /// active consumer (ADR 0076): subscribed, and not its turn yet. A
+    /// standby that becomes active is told; this is false again from the
+    /// next [`Consumer::next`] on that sees it.
+    pub fn is_standby(&self) -> bool {
+        self.sub.as_ref().is_some_and(|s| s.standby)
     }
 
     /// The subscription is over: its messages go to others, so the ones

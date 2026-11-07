@@ -230,7 +230,7 @@ These rules come from `crates/lotse-client/src/consumer.rs` and the push handlin
 ### Subscribing
 
 1. Look up the route of `(queue, 0)` and open (or reuse) the connection to its leader.
-2. Send `Subscribe(queue_id, consumer_tag = "", credit_msgs, credit_bytes = 0xFFFFFFFF, exclusive = false)`. `exclusive` and `single_active` queues are refused with `INVALID_REQUEST`; do not offer them.
+2. Send `Subscribe(queue_id, consumer_tag = "", credit_msgs, credit_bytes = 0xFFFFFFFF, exclusive = false)`. `exclusive` is refused with `INVALID_REQUEST`; do not offer it. On a queue with a single active consumer (ADR 0076) the answer may carry tag 1 `standby`: the subscription is accepted but gets nothing until it is its turn. A client that sends tag 1 `notify_active = 1` gets a push when that happens: error `NONE`, an empty batch and no deliveries; one that does not send it never gets such a push.
 3. On `NONE`, register the `subscription_id` **on that connection**. Subscription ids are per node, and `Credit`, `Unsubscribe` and a requeueing `Nack` are honoured only on the connection that owns the subscription (`UNKNOWN_SUBSCRIPTION` otherwise). Pushes can arrive before the answer to `Subscribe` has been handled: the connection keeps them (see Connections) and hands them over on registration.
 4. A retriable error (`NOT_LEADER`) follows the leader hint and retries. `UNKNOWN_RESOURCE` drops the route and fails the call. A lost answer drops the connection (a subscription the broker may have made ends with it), drops the route and retries.
 

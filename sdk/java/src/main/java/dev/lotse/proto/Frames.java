@@ -255,6 +255,14 @@ public final class Frames {
         public DeliverPush {
             deliveries = List.copyOf(deliveries);
         }
+
+        /**
+         * Whether this push says the subscription became its queue's single active consumer (ADR 0076): no error, no
+         * batch, no deliveries. Only a subscription that asked for it gets one.
+         */
+        public boolean isActivation() {
+            return error.code() == 0 && batch.size() == 0 && deliveries.isEmpty();
+        }
     }
 
     /**

@@ -92,6 +92,7 @@ async fn the_console_shows_a_real_cluster() {
                 ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
                 limits: Default::default(),
                 dead_letter: None,
+                single_active: false,
             }],
             exchanges: Vec::new(),
             group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
@@ -190,7 +191,21 @@ async fn the_console_shows_a_real_cluster() {
     let fancy = json!({"name": "vip", "priority_levels": 3, "single_active": true, "create_dlq": false});
     let (status, err) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(fancy)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err["message"].as_str().unwrap().contains("priority levels, single active consumer"), "{err}");
+    assert!(err["message"].as_str().unwrap().contains("not support priority levels yet"), "{err}");
+    // A single active consumer (ADR 0076) goes through and shows.
+    let single = json!({"name": "ledger", "priority_levels": 1, "single_active": true, "create_dlq": false});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(single)).await;
+    assert_eq!(status, StatusCode::CREATED, "{done}");
+    let mut shown = false;
+    for _ in 0..50 {
+        let (status, q) = get(&app, "/api/v1/clusters/local/queues/ledger").await;
+        if status == StatusCode::OK && q["single_active"] == true {
+            shown = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(shown, "the queue's single active consumer shows");
     let mut found = false;
     for _ in 0..50 {
         let (_, list) = get(&app, "/api/v1/clusters/local/queues").await;
@@ -206,7 +221,7 @@ async fn the_console_shows_a_real_cluster() {
     let (status, t) = get(&app, "/api/v1/clusters/local/tenants").await;
     assert_eq!(status, StatusCode::OK, "{t}");
     assert_eq!(t["tenants"][0]["name"], "default", "{t}");
-    assert!(t["tenants"][0]["quota_bytes"].is_null() && t["tenants"][0]["queues"] == 2, "{t}");
+    assert!(t["tenants"][0]["quota_bytes"].is_null() && t["tenants"][0]["queues"] == 3, "{t}");
 
     // What a real cluster does not have.
     let (_, n) = get(&app, "/api/v1/clusters/local/nodes").await;

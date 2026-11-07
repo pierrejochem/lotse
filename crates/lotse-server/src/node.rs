@@ -1350,6 +1350,7 @@ impl Known {
                     message_ttl_ms: q.limits.message_ttl_ms,
                 },
                 dead_letter: Some(q.limits.dead_letter).filter(|d| *d != 0),
+                single_active: q.limits.single_active,
             });
         }
         for x in state.exchanges.values() {

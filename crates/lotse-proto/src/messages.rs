@@ -21,6 +21,10 @@ const TAG_INSTANCE: u64 = 2;
 const TAG_PATTERN: u64 = 3;
 /// The producer id and epoch of a transactional ack (ADR 0075).
 const TAG_PRODUCER: u64 = 2;
+/// A subscription asks to hear that it became active (ADR 0076).
+const TAG_NOTIFY_ACTIVE: u64 = 1;
+/// A subscription waits as a standby (ADR 0076), next to the leader hint.
+const TAG_STANDBY: u64 = 1;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -1048,8 +1052,13 @@ pub struct SubscribeRequest {
     pub credit_msgs: u32,
     /// Initial credit in bytes.
     pub credit_bytes: u32,
-    /// Single active consumer (not yet supported: refused).
+    /// An exclusive consumer, the only one the queue may have (AMQP's):
+    /// not built, refused. A single active consumer is the queue's setting
+    /// `single.active.consumer` (ADR 0076).
     pub exclusive: bool,
+    /// Asks for a push when the subscription becomes the queue's single
+    /// active consumer (ADR 0076); sent as a tag.
+    pub notify_active: bool,
 }
 
 impl SubscribeRequest {
@@ -1059,17 +1068,29 @@ impl SubscribeRequest {
         w.u32(self.credit_msgs);
         w.u32(self.credit_bytes);
         w.u8(u8::from(self.exclusive));
-        w.no_tags();
+        if self.notify_active {
+            w.tags(&[(TAG_NOTIFY_ACTIVE, Bytes::from_static(&[1]))]);
+        } else {
+            w.no_tags();
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = SubscribeRequest {
+        let mut req = SubscribeRequest {
             queue_id: r.u64()?,
             consumer_tag: r.string()?,
             credit_msgs: r.u32()?,
             credit_bytes: r.u32()?,
             exclusive: r.u8()? != 0,
+            notify_active: false,
         };
-        r.tags()?;
+        for (tag, value) in r.tags()? {
+            if tag == TAG_NOTIFY_ACTIVE {
+                let mut v = Reader::new(value);
+                req.notify_active = v.u8()? != 0;
+                v.finish()?;
+            }
+            // Unknown tags come from newer versions: skipped.
+        }
         Ok(req)
     }
 }
@@ -1083,16 +1104,46 @@ pub struct SubscribeResponse {
     pub subscription_id: u32,
     /// The queue's leader, with [`ErrorCode::NOT_LEADER`].
     pub leader_hint: Option<LeaderHint>,
+    /// The queue has a single active consumer and this subscription waits
+    /// for its turn (ADR 0076); a tag in the hint's block, sent only when
+    /// set.
+    pub standby: bool,
 }
 
 impl SubscribeResponse {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.u16(self.error.0);
         w.u32(self.subscription_id);
-        put_hint(w, self.leader_hint);
+        let mut tags = Vec::new();
+        if let Some(h) = self.leader_hint {
+            let mut v = Writer::new();
+            v.u32(h.leader);
+            v.u64(h.term);
+            tags.push((TAG_LEADER_HINT, v.finish()));
+        }
+        if self.standby {
+            tags.push((TAG_STANDBY, Bytes::from_static(&[1])));
+        }
+        if tags.is_empty() {
+            w.no_tags();
+        } else {
+            w.tags(&tags);
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(SubscribeResponse { error: ErrorCode(r.u16()?), subscription_id: r.u32()?, leader_hint: get_hint(r)? })
+        let (error, subscription_id) = (ErrorCode(r.u16()?), r.u32()?);
+        let mut resp = SubscribeResponse { error, subscription_id, leader_hint: None, standby: false };
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_LEADER_HINT => resp.leader_hint = Some(LeaderHint { leader: v.u32()?, term: v.u64()? }),
+                TAG_STANDBY => resp.standby = v.u8()? != 0,
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
+        Ok(resp)
     }
 }
 
@@ -1107,7 +1158,10 @@ pub struct DeliveredOffset {
 
 /// A push to a subscription: a batch as stored and the messages in it that
 /// are this subscription's. With an error, the subscription has ended
-/// (e.g. `NOT_LEADER` after a leader change) and carries no batch.
+/// (e.g. `NOT_LEADER` after a leader change) and carries no batch. Without
+/// an error, a batch or deliveries, the subscription has become its queue's
+/// single active consumer; only a subscription that asked for it
+/// ([`SubscribeRequest::notify_active`]) gets that (ADR 0076).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverPush {
     /// The subscription.
@@ -1123,6 +1177,23 @@ pub struct DeliverPush {
 }
 
 impl DeliverPush {
+    /// The push that tells a subscription it became its queue's single
+    /// active consumer.
+    pub fn activated(subscription_id: u32) -> Self {
+        DeliverPush {
+            subscription_id,
+            error: ErrorCode::NONE,
+            batch: Bytes::new(),
+            deliveries: Vec::new(),
+            leader_hint: None,
+        }
+    }
+
+    /// Whether this is the push [`DeliverPush::activated`] makes.
+    pub fn is_activation(&self) -> bool {
+        self.error == ErrorCode::NONE && self.batch.is_empty() && self.deliveries.is_empty()
+    }
+
     pub(crate) fn put(&self, w: &mut Writer) {
         w.u32(self.subscription_id);
         w.u16(self.error.0);
@@ -1781,7 +1852,8 @@ pub struct CreateQueueRequest {
     pub tenant: String,
     /// Priority levels, 1-10 (only 1 is supported so far).
     pub priority_levels: u8,
-    /// Single active consumer (not supported so far).
+    /// Single active consumer (ADR 0076): the same as
+    /// `single.active.consumer = true` among the settings.
     pub single_active: bool,
     /// Dead-letter queue (not supported so far).
     pub dlq: Option<String>,

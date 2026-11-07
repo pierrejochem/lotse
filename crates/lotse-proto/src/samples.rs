@@ -64,6 +64,15 @@ pub fn requests() -> Vec<Request> {
             credit_msgs: 100,
             credit_bytes: 1 << 20,
             exclusive: false,
+            notify_active: false,
+        }),
+        Request::Subscribe(SubscribeRequest {
+            queue_id: 9,
+            consumer_tag: "worker-2".into(),
+            credit_msgs: 10,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+            notify_active: true,
         }),
         Request::Credit(CreditRequest { subscription_id: 3, add_msgs: 10, add_bytes: 4096 }),
         Request::Ack(AckRequest::plain(9, vec![(0, 3), (5, 6)])),
@@ -546,7 +555,21 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         ),
         (
             ApiKey::SUBSCRIBE,
-            Response::Subscribe(SubscribeResponse { error: ErrorCode::NONE, subscription_id: 3, leader_hint: None }),
+            Response::Subscribe(SubscribeResponse {
+                error: ErrorCode::NONE,
+                subscription_id: 3,
+                leader_hint: None,
+                standby: false,
+            }),
+        ),
+        (
+            ApiKey::SUBSCRIBE,
+            Response::Subscribe(SubscribeResponse {
+                error: ErrorCode::NONE,
+                subscription_id: 4,
+                leader_hint: None,
+                standby: true,
+            }),
         ),
         (ApiKey::ACK, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
         (
@@ -743,6 +766,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 error: ErrorCode::NOT_LEADER,
                 subscription_id: 0,
                 leader_hint: Some(LeaderHint { leader: 2, term: 8 }),
+                standby: false,
             }),
         ),
         (
@@ -892,7 +916,8 @@ pub fn metrics() -> DescribeMetricsResponse {
     }
 }
 
-/// Pushes: a delivery, and a subscription that ended.
+/// Pushes: a delivery, a subscription that ended, and one that became its
+/// queue's single active consumer.
 pub fn pushes() -> Vec<DeliverPush> {
     vec![
         DeliverPush {
@@ -912,5 +937,6 @@ pub fn pushes() -> Vec<DeliverPush> {
             deliveries: vec![],
             leader_hint: Some(LeaderHint { leader: 1, term: 7 }),
         },
+        DeliverPush::activated(4),
     ]
 }

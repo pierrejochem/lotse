@@ -25,6 +25,13 @@
 //! messages are then **held**: never delivered, never timed out, until the
 //! log settles them (the transaction committed) or no transaction holds
 //! them any more (it aborted), when they are delivered again.
+//!
+//! With a **single active consumer** (ADR 0076) only one subscription gets
+//! messages; the others are standbys, in the order they subscribed. The
+//! active one keeps its place until it ends. The next one takes over only
+//! once no message is out with anyone: none in flight, none held back for a
+//! count, none held by a transaction. Messages the last one had come back
+//! first, so the queue's order holds across the handover.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -46,6 +53,9 @@ struct Subscription {
     credit_bytes: u32,
     /// Unsubscribed: no new deliveries; gone once nothing is in flight.
     closing: bool,
+    /// When it subscribed, among this dispatcher's subscriptions: standbys
+    /// take over in this order.
+    order: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +79,16 @@ pub struct Dispatcher {
     rotate: usize,
     /// Messages a transaction holds or is about to.
     held: BTreeMap<u64, Hold>,
+    /// Messages held back until the caller releases them (nack with
+    /// requeue, ack timeout).
+    out: BTreeSet<u64>,
+    /// One subscription at a time gets messages.
+    single_active: bool,
+    /// That subscription.
+    active: Option<SubscriptionId>,
+    /// Subscriptions that became active since the caller last asked.
+    activated: Vec<SubscriptionId>,
+    next_order: u64,
 }
 
 /// A message a transactional ack took.
@@ -100,12 +120,64 @@ impl Dispatcher {
             cursor: queue.floor(),
             rotate: 0,
             held: BTreeMap::new(),
+            out: BTreeSet::new(),
+            single_active: false,
+            active: None,
+            activated: Vec::new(),
+            next_order: 0,
         }
     }
 
     /// Adds subscription `id` with an initial credit window.
     pub fn subscribe(&mut self, id: SubscriptionId, conn: ConnId, credit_msgs: u32, credit_bytes: u32) {
-        self.subs.insert(id, Subscription { conn, credit_msgs, credit_bytes, closing: false });
+        let order = self.next_order;
+        self.next_order += 1;
+        self.subs.insert(id, Subscription { conn, credit_msgs, credit_bytes, closing: false, order });
+    }
+
+    /// Turns single active consumer on or off (ADR 0076). Turned on, no one
+    /// is active until every message out has come back.
+    pub fn set_single_active(&mut self, on: bool) {
+        if self.single_active != on {
+            self.single_active = on;
+            self.active = None;
+        }
+    }
+
+    /// Whether `id` waits as a standby: single active consumer is on and
+    /// another subscription gets the messages, or will once nothing is out.
+    pub fn is_standby(&self, id: SubscriptionId) -> bool {
+        self.single_active && self.active != Some(id)
+    }
+
+    /// The active subscription, if single active consumer is on and one is.
+    pub fn active(&self) -> Option<SubscriptionId> {
+        self.active.filter(|_| self.single_active)
+    }
+
+    /// Subscriptions that became active since the last call.
+    pub fn take_activated(&mut self) -> Vec<SubscriptionId> {
+        std::mem::take(&mut self.activated)
+    }
+
+    /// With a single active consumer: makes the first standby active if the
+    /// active one is gone or closing and nothing is out with anyone; returns
+    /// the active one. [`Dispatcher::assign`] does this too; the caller does
+    /// it each round so a standby hears it is active before messages come.
+    pub fn hand_over(&mut self, queue: &QueueLog) -> Option<SubscriptionId> {
+        if !self.single_active {
+            return None;
+        }
+        if self.active.is_some_and(|id| self.subs.get(&id).is_none_or(|s| s.closing)) {
+            self.active = None;
+        }
+        // The queue's count covers transactions an earlier leader saw.
+        let nothing_out = self.in_flight.is_empty() && self.out.is_empty() && self.held.is_empty() && queue.held() == 0;
+        if self.active.is_none() && nothing_out {
+            self.active = self.subs.iter().filter(|(_, s)| !s.closing).min_by_key(|(_, s)| s.order).map(|(id, _)| *id);
+            self.activated.extend(self.active);
+        }
+        self.active
     }
 
     /// Whether `id` exists and belongs to `conn`.
@@ -160,6 +232,7 @@ impl Dispatcher {
             let mine = self.in_flight.get(&o).and_then(|f| self.subs.get(&f.sub)).is_some_and(|s| s.conn == conn);
             if mine {
                 self.in_flight.remove(&o);
+                self.out.insert(o);
                 taken.push(o);
             }
         }
@@ -173,6 +246,7 @@ impl Dispatcher {
         for o in offsets {
             self.extra.remove(&o);
             self.held.remove(&o);
+            self.out.remove(&o);
             if self.in_flight.remove(&o).is_some() || o < self.cursor {
                 self.redeliver.insert(o);
             }
@@ -246,9 +320,14 @@ impl Dispatcher {
         self.subs.retain(|id, s| !s.closing || in_flight.values().any(|f| f.sub == *id));
     }
 
-    /// Credit for messages left over all open subscriptions.
+    /// Credit for messages left over all open subscriptions; with a single
+    /// active consumer, the active one's.
     pub fn open_credit(&self) -> u64 {
-        self.subs.values().filter(|s| !s.closing && s.credit_bytes > 0).map(|s| u64::from(s.credit_msgs)).sum()
+        let open = |s: &&Subscription| !s.closing && s.credit_bytes > 0;
+        if self.single_active {
+            return self.active.and_then(|id| self.subs.get(&id)).filter(open).map_or(0, |s| u64::from(s.credit_msgs));
+        }
+        self.subs.values().filter(open).map(|s| u64::from(s.credit_msgs)).sum()
     }
 
     /// Offsets to deliver next, at most `max`, all below `limit` (the last
@@ -291,7 +370,11 @@ impl Dispatcher {
         batch_bytes: u32,
         now: Instant,
     ) -> Vec<(SubscriptionId, Vec<Delivery>)> {
-        let ids: Vec<SubscriptionId> = self.subs.keys().copied().collect();
+        let ids: Vec<SubscriptionId> = if self.single_active {
+            self.hand_over(queue).into_iter().collect()
+        } else {
+            self.subs.keys().copied().collect()
+        };
         let mut out = Vec::new();
         let mut rest = offsets;
         for k in 0..ids.len() {
@@ -343,6 +426,7 @@ impl Dispatcher {
                 let held: Vec<u64> = self.in_flight.iter().filter(|(_, f)| f.sub == id).map(|(o, _)| *o).collect();
                 for o in &held {
                     self.in_flight.remove(o);
+                    self.out.insert(*o);
                 }
                 (id, held)
             })

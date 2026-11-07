@@ -375,10 +375,18 @@ public sealed interface Request {
      * @param consumerTag the consumer's name for itself
      * @param creditMsgs initial credit in messages, a {@code u32}
      * @param creditBytes initial credit in bytes, a {@code u32}
-     * @param exclusive single active consumer (not yet supported: refused)
+     * @param exclusive an exclusive consumer, the only one the queue may have: not built, refused; a single active
+     *     consumer is the queue's setting {@code single.active.consumer} (ADR 0076)
+     * @param notifyActive asks for a push when the subscription becomes the queue's single active consumer; a tag
      */
-    record Subscribe(long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive)
+    record Subscribe(
+            long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive, boolean notifyActive)
             implements Request {
+        /** Without asking to hear about becoming active. */
+        public Subscribe(long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive) {
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, false);
+        }
+
         @Override
         public ApiKey apiKey() {
             return ApiKey.SUBSCRIBE;
@@ -386,13 +394,29 @@ public sealed interface Request {
 
         @Override
         public void write(Writer w) {
-            w.u64(queueId).string(consumerTag).u32(creditMsgs).u32(creditBytes).bool(exclusive).noTags();
+            w.u64(queueId).string(consumerTag).u32(creditMsgs).u32(creditBytes).bool(exclusive);
+            if (notifyActive) {
+                w.tags(List.of(new Tag(Messages.TAG_NOTIFY_ACTIVE, ByteString.copyOf(new byte[] {1}))));
+            } else {
+                w.noTags();
+            }
         }
 
         static Subscribe read(Reader r) {
-            Subscribe x = new Subscribe(r.u64(), r.string(), r.u32(), r.u32(), r.bool());
-            r.tags();
-            return x;
+            long queueId = r.u64();
+            String tag = r.string();
+            long msgs = r.u32();
+            long bytes = r.u32();
+            boolean exclusive = r.bool();
+            boolean notify = false;
+            for (Tag t : r.tags()) {
+                if (t.tag() == Messages.TAG_NOTIFY_ACTIVE) {
+                    Reader vr = new Reader(t.value().toByteArray());
+                    notify = vr.u8() != 0;
+                    vr.finish();
+                }
+            }
+            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify);
         }
     }
 

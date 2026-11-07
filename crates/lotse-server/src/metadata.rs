@@ -270,6 +270,8 @@ pub(crate) struct QueueLimits {
     pub(crate) message_ttl_ms: u64,
     /// `dead.letter.queue`: the resource id of a queue of the same tenant.
     pub(crate) dead_letter: u64,
+    /// `single.active.consumer` (ADR 0076).
+    pub(crate) single_active: bool,
 }
 
 /// What an `AlterQueue` does: each field is left (`None`) or set, 0
@@ -280,6 +282,7 @@ pub(crate) struct QueueChange {
     pub(crate) max_deliveries: Option<u32>,
     pub(crate) message_ttl_ms: Option<u64>,
     pub(crate) dead_letter: Option<u64>,
+    pub(crate) single_active: Option<bool>,
 }
 
 impl QueueChange {
@@ -293,6 +296,7 @@ impl QueueChange {
         l.max_deliveries = self.max_deliveries.unwrap_or(l.max_deliveries);
         l.message_ttl_ms = self.message_ttl_ms.unwrap_or(l.message_ttl_ms);
         l.dead_letter = self.dead_letter.unwrap_or(l.dead_letter);
+        l.single_active = self.single_active.unwrap_or(l.single_active);
         l
     }
 }
@@ -776,9 +780,13 @@ impl MetadataState {
         // last that holds something, so a snapshot without them reads on a
         // node from before them: pins (ADR 0065), compaction settings (ADR
         // 0067), tenants' incarnations (ADR 0069), revoked sessions (ADR
-        // 0070). A later section needs the ones before it, empty or not.
+        // 0070), single active consumer queues (ADR 0076). A later section
+        // needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
-        let sections = if !self.revocations.is_empty() {
+        let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
+        let sections = if !single.is_empty() {
+            5
+        } else if !self.revocations.is_empty() {
             4
         } else if !self.incarnations.is_empty() {
             3
@@ -813,6 +821,12 @@ impl MetadataState {
             for (subject, before) in &self.revocations {
                 put_subject(&mut b, subject);
                 b.put_u64_le(*before);
+            }
+        }
+        if sections >= 5 {
+            b.put_u32_le(single.len() as u32);
+            for id in single {
+                b.put_u64_le(id);
             }
         }
         b.freeze()
@@ -937,6 +951,13 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let id = b.get_u64_le();
+                s.queues.get_mut(&id).ok_or("single active consumer of an unknown queue")?.limits.single_active = true;
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -979,6 +1000,11 @@ fn change_bytes(change: &Change) -> Bytes {
             put_nodes(&mut b, voters);
             b.put_u64_le(*ack_timeout_ms);
             put_limits(&mut b, limits);
+            // A trailing flag byte only when a flag is set: older records
+            // read as before.
+            if limits.single_active {
+                b.put_u8(1);
+            }
         }
         Change::DeclareExchange { name, tenant, kind } => {
             b.put_u8(2);
@@ -1001,12 +1027,16 @@ fn change_bytes(change: &Change) -> Bytes {
             let mask = u8::from(change.ack_timeout_ms.is_some())
                 | u8::from(change.max_deliveries.is_some()) << 1
                 | u8::from(change.message_ttl_ms.is_some()) << 2
-                | u8::from(change.dead_letter.is_some()) << 3;
+                | u8::from(change.dead_letter.is_some()) << 3
+                | u8::from(change.single_active.is_some()) << 4;
             b.put_u8(mask);
             b.put_u64_le(change.ack_timeout_ms.unwrap_or(0));
             b.put_u32_le(change.max_deliveries.unwrap_or(0));
             b.put_u64_le(change.message_ttl_ms.unwrap_or(0));
             b.put_u64_le(change.dead_letter.unwrap_or(0));
+            if let Some(on) = change.single_active {
+                b.put_u8(u8::from(on));
+            }
         }
         Change::AlterStream { resource_id, change } => {
             b.put_u8(11);
@@ -1120,7 +1150,11 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let (name, tenant, voters) = (get_str(b)?, get_str(b)?, get_nodes(b)?);
             need(b, 8)?;
             let ack_timeout_ms = b.get_u64_le();
-            Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits: get_limits(b)? }
+            let mut limits = get_limits(b)?;
+            if b.has_remaining() {
+                limits.single_active = get_flags(b)? & 1 != 0;
+            }
+            Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits }
         }
         2 => {
             let (name, tenant) = (get_str(b)?, get_str(b)?);
@@ -1148,6 +1182,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
                 max_deliveries: (mask & 2 != 0).then_some(max),
                 message_ttl_ms: (mask & 4 != 0).then_some(ttl),
                 dead_letter: (mask & 8 != 0).then_some(dlq),
+                single_active: if mask & 16 != 0 { Some(get_flags(b)? & 1 != 0) } else { None },
             };
             Change::AlterQueue { resource_id, change }
         }
@@ -1255,7 +1290,21 @@ fn put_limits(b: &mut BytesMut, l: &QueueLimits) {
 
 fn get_limits(b: &mut &[u8]) -> Result<QueueLimits, String> {
     need(b, 20)?;
-    Ok(QueueLimits { max_deliveries: b.get_u32_le(), message_ttl_ms: b.get_u64_le(), dead_letter: b.get_u64_le() })
+    Ok(QueueLimits {
+        max_deliveries: b.get_u32_le(),
+        message_ttl_ms: b.get_u64_le(),
+        dead_letter: b.get_u64_le(),
+        single_active: false,
+    })
+}
+
+/// A byte of flags; only bit 0 is known.
+fn get_flags(b: &mut &[u8]) -> Result<u8, String> {
+    need(b, 1)?;
+    match b.get_u8() {
+        f @ (0 | 1) => Ok(f),
+        _ => Err("unknown queue flags".into()),
+    }
 }
 
 fn need(b: &&[u8], n: usize) -> Result<(), String> {

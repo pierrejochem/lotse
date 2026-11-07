@@ -629,13 +629,19 @@ async fn run(rt: SimRuntime) {
             assert!(configs.is_empty(), "{name} has settings: {configs:?}");
             continue;
         }
-        // The ack timeout, then the limits (ADR 0055), which this run never sets.
+        // The ack timeout, then the limits (ADR 0055) and single active
+        // consumer (ADR 0076), which this run never sets.
         let [c, limits @ ..] = &configs[..] else { panic!("{name} has settings {configs:?}") };
         let keys: Vec<(&str, &str, u8)> = limits.iter().map(|e| (e.key.as_str(), e.value.as_str(), e.source)).collect();
         let off = lotse_proto::config_source::DEFAULT;
         assert_eq!(
             keys,
-            [("max.deliveries", "0", off), ("message.ttl.ms", "0", off), ("dead.letter.queue", "", off)],
+            [
+                ("max.deliveries", "0", off),
+                ("message.ttl.ms", "0", off),
+                ("dead.letter.queue", "", off),
+                ("single.active.consumer", "false", off)
+            ],
             "{name}: no limits were set"
         );
         let tried = out.timeouts.get(name).cloned().unwrap_or_default();
@@ -1014,5 +1020,90 @@ fn a_pinned_leader_stays_where_it_is_put() {
                 }
             }
         });
+    });
+}
+
+/// Single active consumer on a queue made at runtime (ADR 0076): the first
+/// subscriber gets the messages, the next waits as a standby and takes over,
+/// in order, once the first is gone; turned off, everyone gets messages.
+#[test]
+fn a_runtime_queue_with_a_single_active_consumer_hands_over_in_order() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let cfg = || ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) };
+            let admin = Client::new(rt.node("admin"), cfg());
+            let line = admin.create_queue_with("line", 3, &[("single.active.consumer", "true")], None).await.unwrap();
+            let configs = admin.describe_configs("line").await.unwrap();
+            let sac = configs.iter().find(|c| c.key == "single.active.consumer").expect("described");
+            assert_eq!((sac.value.as_str(), sac.source), ("true", lotse_proto::config_source::DYNAMIC));
+            let refused = admin.create_queue_with("odd", 3, &[("single.active.consumer", "yes")], None).await;
+            assert!(refused.is_err(), "only true or false");
+            // After a failover whoever subscribes again first is active: the
+            // leader is pinned where the spreading leaves it, so the order
+            // below is the test's.
+            rt.sleep(Duration::from_secs(30)).await;
+            let (mut leader, mut voters) = leader_of(&admin, "line").await;
+            while leader == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (leader, voters) = leader_of(&admin, "line").await;
+            }
+            admin.move_leader("line", 0, Some(u64::from(leader))).await.unwrap();
+            assert!(led_by(&rt, &admin, "line", leader).await);
+
+            let first = Client::new(rt.node("first"), cfg());
+            let second = Client::new(rt.node("second"), cfg());
+            let mut a = first.subscribe("line", 10).await.unwrap();
+            assert!(a.next(TICK * 30).await.unwrap().is_none());
+            assert!(!a.is_standby(), "the first to subscribe is active");
+            let mut b = second.subscribe("line", 10).await.unwrap();
+            assert!(b.next(TICK * 30).await.unwrap().is_none());
+            assert!(b.is_standby(), "the second waits");
+            for i in 0..4 {
+                admin.produce("line", 0, message(&format!("m{i}"))).await.unwrap();
+            }
+            let mut got = Vec::new();
+            while got.len() < 4 {
+                got.push(a.next(Duration::from_secs(5)).await.unwrap().expect("the active one gets them"));
+            }
+            assert_eq!(got.iter().map(text).collect::<Vec<_>>(), ["m0", "m1", "m2", "m3"]);
+            assert!(b.next(TICK * 50).await.unwrap().is_none(), "the standby gets nothing");
+            a.ack(&got[0]).await.unwrap();
+            a.ack(&got[1]).await.unwrap();
+            // The active one goes away: the standby takes over and gets what
+            // it left, in order.
+            drop(a);
+            drop(first);
+            let mut rest = Vec::new();
+            while rest.len() < 2 {
+                rest.push(b.next(Duration::from_secs(5)).await.unwrap().expect("given over"));
+            }
+            assert_eq!(rest.iter().map(text).collect::<Vec<_>>(), ["m2", "m3"]);
+            assert!(!b.is_standby());
+            assert!(rest.iter().all(|m| m.delivery_count == 2));
+
+            // Turned off, a third consumer gets messages next to the second.
+            admin.alter_configs("line", &[("single.active.consumer", "false")], &[]).await.unwrap();
+            let third = Client::new(rt.node("third"), cfg());
+            let mut c = third.subscribe("line", 10).await.unwrap();
+            for i in 4..12 {
+                admin.produce("line", 0, message(&format!("m{i}"))).await.unwrap();
+            }
+            let mut to_c = 0;
+            for _ in 0..40 {
+                if c.next(TICK * 5).await.unwrap().is_some() {
+                    to_c += 1;
+                }
+                let _ = b.next(TICK * 5).await.unwrap();
+            }
+            assert!(to_c > 0 && !c.is_standby(), "the third gets messages once it is off");
+            let _ = line;
+            drop((b, c));
+            for (_, n) in std::mem::take(&mut w.running) {
+                let (node, handle) = n.unwrap();
+                handle.stop();
+                node.join().await.unwrap();
+            }
+        })
     });
 }

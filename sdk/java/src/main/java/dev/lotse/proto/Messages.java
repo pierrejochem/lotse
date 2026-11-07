@@ -178,6 +178,12 @@ public final class Messages {
     /** Tag of a group member's subscription pattern (ADR 0073). */
     static final long TAG_PATTERN = 3;
 
+    /** Tag of a subscription that asks to hear it became the single active consumer (ADR 0076). */
+    static final long TAG_NOTIFY_ACTIVE = 1;
+
+    /** Tag of a subscription that waits as a standby, next to the leader hint (ADR 0076). */
+    static final long TAG_STANDBY = 1;
+
     /** Tag of a transactional ack's producer id and epoch (ADR 0075). */
     static final long TAG_PRODUCER = 2;
 

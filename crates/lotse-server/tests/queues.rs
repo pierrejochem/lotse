@@ -179,6 +179,12 @@ impl Scenario {
         ];
         Scenario { queues, exchanges: Vec::new(), groups: vec![2, 11, 12, 13, 14] }
     }
+
+    /// One queue with a single active consumer (ADR 0076).
+    fn single_active() -> Scenario {
+        let line = QueueConfig { ack_timeout: ACK_TIMEOUT, single_active: true, ..QueueConfig::new("line", 30, 1) };
+        Scenario { queues: vec![line], exchanges: Vec::new(), groups: vec![1, 2] }
+    }
 }
 
 impl World {
@@ -1238,4 +1244,168 @@ async fn run_moves(rt: SimRuntime) {
 #[test]
 fn a_message_moves_from_a_queue_exactly_once_under_faults() {
     check_seeds(10, |seed| Sim::new(seed).run(run_moves));
+}
+
+// ---------------------------------------------------------------------------
+// Single active consumer (ADR 0076).
+//
+// A producer writes numbered messages to `line`, a queue with a single
+// active consumer. Three consumers subscribe, take messages, ack them, now
+// and then hold one past the ack timeout, unsubscribe, or drop their client
+// (a disconnect), while nodes crash and hosts are partitioned. Afterwards
+// the network heals and a last consumer takes what is left.
+//
+// Checked: each subscription receives offsets in increasing order. A
+// subscription gets its messages before newer ones only if no one else had
+// them when it took over, which is what the handover promises; without it,
+// a consumer that takes over while another still holds older messages, or
+// two that receive at once, see an older message after a newer one. And
+// nothing is lost: every message the queue acknowledged was acknowledged by
+// a consumer or is delivered at the end.
+
+#[derive(Default)]
+struct LineOutcomes {
+    produced: BTreeSet<String>,
+    maybe_produced: BTreeSet<String>,
+    acked: BTreeSet<String>,
+    maybe_acked: BTreeSet<String>,
+    /// Per subscription (consumer, its client's round, the subscription's
+    /// number): the offsets it received, in order.
+    received: BTreeMap<(String, u64, u64), Vec<u64>>,
+    /// A consumer found itself a standby.
+    standby_seen: bool,
+}
+
+async fn line_producer(rt: SimRuntime, out: Arc<Mutex<LineOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    let mut n = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let value = format!("m-{n}");
+        n += 1;
+        let res = client.produce("line", 0, message(&value)).await;
+        {
+            let mut o = out.lock().unwrap();
+            match res {
+                Ok(_) => o.produced.insert(value),
+                Err(_) => o.maybe_produced.insert(value),
+            };
+        }
+        rt.sleep(TICK * (2 + rt.below(6) as u32)).await;
+    }
+}
+
+async fn line_consumer(rt: SimRuntime, name: &'static str, out: Arc<Mutex<LineOutcomes>>, stop: Arc<AtomicBool>) {
+    let mut client = Client::new(rt.clone(), client_config());
+    let mut round = 0;
+    while !stop.load(Ordering::Relaxed) {
+        round += 1;
+        let Ok(mut c) = client.subscribe("line", 1 + rt.below(3) as u32).await else { continue };
+        for _ in 0..1 + rt.below(30) {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match c.next(TICK * 20).await {
+                Ok(Some(m)) => {
+                    let key = (name.to_string(), round, c.subscriptions());
+                    out.lock().unwrap().received.entry(key).or_default().push(m.offset());
+                    if rt.chance(1, 25) {
+                        rt.sleep(ACK_TIMEOUT + TICK * 10).await;
+                    }
+                    let res = c.ack(&m).await;
+                    let mut o = out.lock().unwrap();
+                    match res {
+                        Ok(()) => o.acked.insert(value_of(&m)),
+                        Err(_) => o.maybe_acked.insert(value_of(&m)),
+                    };
+                }
+                Ok(None) => {
+                    if c.is_standby() {
+                        out.lock().unwrap().standby_seen = true;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        match rt.below(3) {
+            0 => c.close().await,
+            1 => drop(c),
+            _ => {
+                // The connection goes: whatever it held is released.
+                drop(c);
+                client = Client::new(rt.clone(), client_config());
+            }
+        }
+    }
+}
+
+async fn run_line(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::single_active()).await;
+    let out = Arc::new(Mutex::new(LineOutcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tasks = vec![
+        rt.spawn(line_producer(rt.node("p"), out.clone(), stop.clone())),
+        rt.spawn(line_consumer(rt.node("c1"), "c1", out.clone(), stop.clone())),
+        rt.spawn(line_consumer(rt.node("c2"), "c2", out.clone(), stop.clone())),
+        rt.spawn(line_consumer(rt.node("c3"), "c3", out.clone(), stop.clone())),
+    ];
+    faults(&rt, &mut w, &["p", "c1", "c2", "c3"], Duration::from_secs(5)).await;
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        t.await;
+    }
+    rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
+
+    let last = Client::new(rt.node("last"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
+    let mut c = last.subscribe("line", 50).await.expect("the healed cluster takes a subscription");
+    let mut drained = BTreeSet::new();
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
+        let Some(m) = c.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+        quiet_since = rt.now();
+        let key = ("last".to_string(), 0, c.subscriptions());
+        out.lock().unwrap().received.entry(key).or_default().push(m.offset());
+        c.ack(&m).await.expect("the healed cluster takes acks");
+        drained.insert(value_of(&m));
+    }
+    assert!(!c.is_standby(), "the last consumer took over");
+    drop(c);
+
+    let out = std::mem::take(&mut *out.lock().unwrap());
+    if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        let handovers = out.received.len();
+        eprintln!(
+            "stats: produced {} acked {} drained {} subscriptions that received {} standby seen {}",
+            out.produced.len(),
+            out.acked.len(),
+            drained.len(),
+            handovers,
+            out.standby_seen
+        );
+    }
+    for (who, offsets) in &out.received {
+        assert!(
+            offsets.windows(2).all(|p| p[0] < p[1]),
+            "{who:?} received {offsets:?}: an older message after a newer one"
+        );
+    }
+    for v in &out.produced {
+        assert!(
+            out.acked.contains(v) || out.maybe_acked.contains(v) || drained.contains(v),
+            "{v} was produced and neither acknowledged nor delivered at the end"
+        );
+    }
+    for (_, n) in std::mem::take(&mut w.running) {
+        if let Some((node, handle)) = n {
+            handle.stop();
+            let _ = node.join().await;
+        }
+    }
+}
+
+#[test]
+fn a_single_active_consumer_hands_over_in_order_under_faults() {
+    check_seeds(10, |seed| Sim::new(seed).run(run_line));
 }

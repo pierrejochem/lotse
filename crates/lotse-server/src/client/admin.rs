@@ -174,6 +174,7 @@ const ACK_TIMEOUT: &str = "ack.timeout.ms";
 const MAX_DELIVERIES: &str = "max.deliveries";
 const MESSAGE_TTL: &str = "message.ttl.ms";
 const DEAD_LETTER: &str = "dead.letter.queue";
+const SINGLE_ACTIVE: &str = "single.active.consumer";
 /// The most deliveries a limit may name: a delivery count is 16 bits.
 const MAX_DELIVERIES_LIMIT: u32 = u16::MAX as u32;
 const RETENTION_MS: &str = "retention.ms";
@@ -288,10 +289,18 @@ fn set_queue(
                 Some(name) => queue(name)?,
             });
         }
-        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER => return Err(twice()),
+        SINGLE_ACTIVE if change.single_active.is_none() => {
+            change.single_active = Some(match value.map(String::as_str) {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(v) => return Err(format!("{key} = {v}: true or false")),
+            });
+        }
+        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER | SINGLE_ACTIVE => return Err(twice()),
         _ => {
             return Err(format!(
-                "queues have no setting {key}; {ACK_TIMEOUT}, {MAX_DELIVERIES}, {MESSAGE_TTL} and {DEAD_LETTER} can be set"
+                "queues have no setting {key}; {ACK_TIMEOUT}, {MAX_DELIVERIES}, {MESSAGE_TTL}, {DEAD_LETTER} and \
+                 {SINGLE_ACTIVE} can be set"
             ));
         }
     }
@@ -503,8 +512,8 @@ impl Clients {
         groups: &mut Groups<R, S>,
     ) {
         let mut refused = None;
-        if req.priority_levels != 1 || req.single_active {
-            refused = Some("priorities and single active consumer are not supported yet".into());
+        if req.priority_levels != 1 {
+            refused = Some("priorities are not supported yet".into());
         }
         let mut given = QueueChange::default();
         let mut wanted_dlq = req.dlq.clone();
@@ -519,6 +528,11 @@ impl Clients {
                 refused = Some(why);
             }
         }
+        // The request's own field and the setting must not disagree.
+        if req.single_active && given.single_active == Some(false) {
+            refused = Some(format!("{SINGLE_ACTIVE} = false, but the request asks for a single active consumer"));
+        }
+        given.single_active = given.single_active.or(Some(req.single_active));
         if let Some(why) = refused {
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
         }
@@ -974,13 +988,14 @@ impl Clients {
         let default_ms = super::QueueConfig::DEFAULT_ACK_TIMEOUT.as_millis() as u64;
         let entry = |ms: u64, source| ConfigEntry { key: ACK_TIMEOUT.into(), value: ms.to_string(), source };
         // A queue's limits: 0 (off) and no dead-letter queue are the defaults.
-        let limit_entries = |max: u32, ttl: u64, dlq: u64, source| {
+        let limit_entries = |max: u32, ttl: u64, dlq: u64, single: bool, source| {
             let on = |set: bool| if set { source } else { config_source::DEFAULT };
             let dlq_name = view.queues.iter().find(|q| q.resource_id == dlq).map_or(String::new(), |q| q.name.clone());
             vec![
                 ConfigEntry { key: MAX_DELIVERIES.into(), value: max.to_string(), source: on(max != 0) },
                 ConfigEntry { key: MESSAGE_TTL.into(), value: ttl.to_string(), source: on(ttl != 0) },
                 ConfigEntry { key: DEAD_LETTER.into(), value: dlq_name, source: on(dlq != 0) },
+                ConfigEntry { key: SINGLE_ACTIVE.into(), value: single.to_string(), source: on(single) },
             ]
         };
         let resources = req
@@ -998,6 +1013,7 @@ impl Clients {
                         l.max_deliveries,
                         l.message_ttl_ms,
                         l.dead_letter,
+                        l.single_active,
                         config_source::DYNAMIC,
                     ));
                     Some(all)
@@ -1016,6 +1032,7 @@ impl Clients {
                         l.max_deliveries,
                         l.message_ttl_ms,
                         q.dead_letter.unwrap_or(0),
+                        q.single_active,
                         config_source::STATIC,
                     ));
                     Some(all)

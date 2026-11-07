@@ -751,7 +751,7 @@ impl Cluster for NativeCluster {
         Ok(QueueDetail {
             name: r.name.clone(),
             tenant: tenant_of(r),
-            single_active: false,
+            single_active: set("single.active.consumer").as_deref() == Some("true"),
             ttl_ms: positive("message.ttl.ms"),
             dlq: set("dead.letter.queue"),
             max_deliveries: positive("max.deliveries").map(|n| n as u32),
@@ -776,8 +776,7 @@ impl Cluster for NativeCluster {
     }
 
     async fn create_queue(&self, who: &Identity, req: &CreateQueue) -> ApiResult<()> {
-        let unsupported =
-            [(req.priority_levels != 1, "priority levels"), (req.single_active, "single active consumer")];
+        let unsupported = [(req.priority_levels != 1, "priority levels")];
         let missing: Vec<&str> = unsupported.iter().filter(|(on, _)| *on).map(|(_, what)| *what).collect();
         if !missing.is_empty() {
             return Err(ApiError::BadRequest(format!(
@@ -806,6 +805,9 @@ impl Cluster for NativeCluster {
         }
         if let Some(n) = &max {
             configs.push(("max.deliveries", n));
+        }
+        if req.single_active {
+            configs.push(("single.active.consumer", "true"));
         }
         match client.create_queue_in_with(tenant, &req.name, replication, &configs, req.dlq.as_deref()).await {
             Ok(_) => Ok(()),

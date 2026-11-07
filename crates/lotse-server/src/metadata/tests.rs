@@ -378,7 +378,7 @@ fn queue(name: &str, tenant: &str, limits: QueueLimits) -> Change {
 #[test]
 fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_used() {
     let mut s = MetadataState::default();
-    let limits = |dead_letter| QueueLimits { max_deliveries: 3, message_ttl_ms: 0, dead_letter };
+    let limits = |dead_letter| QueueLimits { max_deliveries: 3, message_ttl_ms: 0, dead_letter, single_active: false };
     s.apply(1, &payload(&queue("dead", "t", QueueLimits::default()))).unwrap();
     let dead = resource_id(1);
     s.apply(2, &payload(&queue("work", "t", limits(dead)))).unwrap();
@@ -404,7 +404,10 @@ fn dead_letter_queues_stay_in_their_tenant_never_loop_and_are_not_deleted_while_
         change: QueueChange { message_ttl_ms: Some(500), ..Default::default() },
     };
     s.apply(8, &payload(&ttl)).unwrap();
-    assert_eq!(s.queues[&work].limits, QueueLimits { max_deliveries: 3, message_ttl_ms: 500, dead_letter: dead });
+    assert_eq!(
+        s.queues[&work].limits,
+        QueueLimits { max_deliveries: 3, message_ttl_ms: 500, dead_letter: dead, single_active: false }
+    );
     // A queue that others dead-letter into stays.
     s.apply(9, &payload(&Change::Delete { resource_id: dead })).unwrap();
     assert!(s.queues.contains_key(&dead) && !s.is_deleted(dead));
@@ -457,4 +460,41 @@ fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
     // A deleted stream gets none.
     s.apply(10, &payload(&add)).unwrap();
     assert!(!s.streams.contains_key(&id));
+}
+
+#[test]
+fn single_active_consumer_is_set_and_reset_survives_a_snapshot_and_old_forms_still_read() {
+    let mut s = MetadataState::default();
+    let plain = QueueLimits::default();
+    let single = QueueLimits { single_active: true, ..plain };
+    // A queue without the flag is written as before: no trailing byte.
+    let old = change_bytes(&queue("old", "t", plain));
+    assert_eq!(change_bytes(&queue("new", "t", single)).len(), old.len() + 1);
+    assert_eq!(decode_change(&old).unwrap(), queue("old", "t", plain));
+    s.apply(1, &payload(&queue("orders", "t", single))).unwrap();
+    let orders = resource_id(1);
+    assert!(s.queues[&orders].limits.single_active);
+    let before = s.encode();
+    // A state with it reads back; one without the section reads as before.
+    assert_eq!(MetadataState::decode(&before).unwrap(), s);
+    let alter = |on| Change::AlterQueue {
+        resource_id: orders,
+        change: QueueChange { single_active: Some(on), ..Default::default() },
+    };
+    assert_eq!(decode_change(&change_bytes(&alter(false))).unwrap(), alter(false));
+    s.apply(2, &payload(&alter(false))).unwrap();
+    assert!(!s.queues[&orders].limits.single_active);
+    let ttl_only = Change::AlterQueue {
+        resource_id: orders,
+        change: QueueChange { message_ttl_ms: Some(5), ..Default::default() },
+    };
+    s.apply(3, &payload(&ttl_only)).unwrap();
+    assert!(!s.queues[&orders].limits.single_active, "another setting leaves it");
+    s.apply(4, &payload(&alter(true))).unwrap();
+    assert!(s.queues[&orders].limits.single_active);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // An unknown flag is refused rather than dropped.
+    let mut bad = change_bytes(&queue("x", "t", single)).to_vec();
+    *bad.last_mut().unwrap() = 2;
+    assert!(decode_change(&bad).is_err());
 }

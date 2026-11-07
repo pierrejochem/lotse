@@ -503,6 +503,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
             limits: Default::default(),
             dead_letter: None,
+            single_active: false,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -557,6 +558,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             credit_msgs: 10,
             credit_bytes: 1 << 20,
             exclusive: false,
+            notify_active: false,
         });
         let (r, pushes) = send(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         assert!(matches!(&r[..], [Response::Subscribe(s)] if s.error == ErrorCode::NONE), "{r:?}");
@@ -584,6 +586,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
             limits: Default::default(),
             dead_letter: None,
+            single_active: false,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -643,6 +646,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             credit_msgs: 10,
             credit_bytes: 1 << 20,
             exclusive: false,
+            notify_active: false,
         });
         let req = ClientRequest {
             outbox: outbox.clone(),
@@ -975,6 +979,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                         ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
                         limits: Default::default(),
                         dead_letter: None,
+                        single_active: false,
                     }
                 })
                 .collect()
@@ -1154,6 +1159,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
             limits: Default::default(),
             dead_letter: None,
+            single_active: false,
         }];
         let exchanges = [Exchange {
             name: "x".into(),
@@ -1840,6 +1846,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             credit_msgs: 10,
             credit_bytes: 1 << 20,
             exclusive: false,
+            notify_active: false,
         });
         handle(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         rounds(&mut clients, &mut groups).await;

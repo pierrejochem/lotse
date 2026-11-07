@@ -68,6 +68,9 @@ pub struct QueueConfig {
     /// The queue that receives such messages (a resource id), if any; they
     /// are dropped otherwise.
     pub dead_letter: Option<u64>,
+    /// Single active consumer (ADR 0076): one subscription at a time gets
+    /// messages, the others wait.
+    pub single_active: bool,
 }
 
 impl QueueConfig {
@@ -83,6 +86,7 @@ impl QueueConfig {
             ack_timeout: Self::DEFAULT_ACK_TIMEOUT,
             limits: lotse_queue::Limits::default(),
             dead_letter: None,
+            single_active: false,
         }
     }
 }
@@ -102,6 +106,27 @@ pub(super) struct Serving {
     pub(super) term: u64,
     pub(super) dispatcher: Dispatcher,
     pub(super) conns: BTreeMap<ConnId, Arc<Outbox>>,
+    /// Subscriptions that asked to hear when they become the single active
+    /// consumer (ADR 0076).
+    pub(super) notify: std::collections::BTreeSet<SubscriptionId>,
+}
+
+impl Serving {
+    /// Follows the queue's single active consumer setting, hands over if
+    /// that is due, and tells whoever became active and asked.
+    fn hand_over(&mut self, single_active: bool, queue: &QueueLog) {
+        self.dispatcher.set_single_active(single_active);
+        self.dispatcher.hand_over(queue);
+        let owners: BTreeMap<SubscriptionId, ConnId> = self.dispatcher.subscriptions().collect();
+        for id in self.dispatcher.take_activated() {
+            if self.notify.contains(&id)
+                && let Some(outbox) = owners.get(&id).and_then(|c| self.conns.get(c))
+            {
+                outbox.push_frame(lotse_proto::encode_push(&DeliverPush::activated(id)));
+            }
+        }
+        self.notify.retain(|id| owners.contains_key(id));
+    }
 }
 
 /// An ack or queue-state batch in flight.
@@ -232,6 +257,7 @@ impl Clients {
             term,
             dispatcher: Dispatcher::new(replica.queue().expect("a queue group")),
             conns: BTreeMap::new(),
+            notify: std::collections::BTreeSet::new(),
         })
     }
 
@@ -255,7 +281,8 @@ impl Clients {
         groups: &Groups<R, S>,
     ) {
         let reply = |error, subscription_id, leader_hint| {
-            outbox.push(correlation_id, &Response::Subscribe(SubscribeResponse { error, subscription_id, leader_hint }))
+            let resp = SubscribeResponse { error, subscription_id, leader_hint, standby: false };
+            outbox.push(correlation_id, &Response::Subscribe(resp))
         };
         let group = Self::queue_group(view, req.queue_id);
         let Some((g, replica)) = group.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
@@ -274,10 +301,20 @@ impl Clients {
         self.next_subscription = id.wrapping_add(1);
         self.sub_groups.insert(id, g);
         let conn = conn_id(&outbox);
+        let single_active = view.queues.iter().any(|q| q.group == g && q.single_active);
         let s = self.serving(g, replica);
         s.dispatcher.subscribe(id, conn, req.credit_msgs, req.credit_bytes);
         s.conns.insert(conn, outbox.clone());
-        reply(ErrorCode::NONE, id, None);
+        // The answer says whether it waits; a push follows when it is its
+        // turn, if it asked.
+        // Becoming active now, it hears so in the answer.
+        s.hand_over(single_active, replica.queue().expect("a queue group"));
+        if req.notify_active {
+            s.notify.insert(id);
+        }
+        let standby = s.dispatcher.is_standby(id);
+        let resp = SubscribeResponse { error: ErrorCode::NONE, subscription_id: id, leader_hint: None, standby };
+        outbox.push(correlation_id, &Response::Subscribe(resp));
     }
 
     /// The serving state and the subscription, if `outbox`'s connection
@@ -619,6 +656,7 @@ impl Clients {
             }
 
             let s = self.queues.get_mut(&g).expect("serving");
+            s.hand_over(qc.single_active, replica.queue().expect("a queue group"));
             let none = std::collections::BTreeSet::new();
             let skip = self.retiring.get(&g).map_or(&none, retire::Retiring::claiming);
             let due = Due { now: view.now, unix_ms: view.unix_ms, limits: qc.limits };

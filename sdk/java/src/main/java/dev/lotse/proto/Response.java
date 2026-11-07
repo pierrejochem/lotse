@@ -218,16 +218,52 @@ public sealed interface Response {
      * @param error the outcome
      * @param subscriptionId names the subscription in pushes, {@code Credit} and {@code Unsubscribe}, a {@code u32}
      * @param leaderHint the queue's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param standby the queue has a single active consumer and this subscription waits for its turn (ADR 0076); a
+     *     tag in the hint's block
      */
-    record Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint) implements Response {
+    record Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint, boolean standby)
+            implements Response {
+        /** Not a standby. */
+        public Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint) {
+            this(error, subscriptionId, leaderHint, false);
+        }
+
         @Override
         public void write(Writer w) {
             w.u16(error.code()).u32(subscriptionId);
-            Messages.putHint(w, leaderHint);
+            List<Tag> tags = new java.util.ArrayList<>();
+            if (leaderHint != null) {
+                Writer v = new Writer();
+                v.u32(leaderHint.leader()).u64(leaderHint.term());
+                tags.add(new Tag(Messages.TAG_LEADER_HINT, ByteString.copyOf(v.toByteArray())));
+            }
+            if (standby) {
+                tags.add(new Tag(Messages.TAG_STANDBY, ByteString.copyOf(new byte[] {1})));
+            }
+            if (tags.isEmpty()) {
+                w.noTags();
+            } else {
+                w.tags(tags);
+            }
         }
 
         static Subscribe read(Reader r) {
-            return new Subscribe(new ErrorCode(r.u16()), r.u32(), Messages.getHint(r));
+            ErrorCode error = new ErrorCode(r.u16());
+            long id = r.u32();
+            LeaderHint hint = null;
+            boolean standby = false;
+            for (Tag t : r.tags()) {
+                Reader vr = new Reader(t.value().toByteArray());
+                if (t.tag() == Messages.TAG_LEADER_HINT) {
+                    hint = new LeaderHint(vr.u32(), vr.u64());
+                } else if (t.tag() == Messages.TAG_STANDBY) {
+                    standby = vr.u8() != 0;
+                } else {
+                    continue; // from a newer version: skipped
+                }
+                vr.finish();
+            }
+            return new Subscribe(error, id, hint, standby);
         }
     }
 
