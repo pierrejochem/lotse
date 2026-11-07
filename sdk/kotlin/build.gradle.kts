@@ -36,3 +36,13 @@ kotlin {
 tasks.test {
     useJUnitPlatform()
 }
+
+// Examples (src/examples): compiled by `check` so they keep up with the API.
+val examples: SourceSet by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+    runtimeClasspath += output + compileClasspath
+}
+
+tasks.check {
+    dependsOn(tasks.named(examples.classesTaskName))
+}

@@ -205,10 +205,21 @@ implementation("at.yawk.lz4:lz4-java:1.11.0")
 - zstd-jni ships native libraries for the common platforms; on one it has none for, zstd batches fail the same way.
 - To compress, name the codec in the batch's options: `new BatchBuilder(new BatchOptions(new Attributes(Compression.ZSTD, false, false, BatchKind.DATA), 0, 0, -1))`. A compressed batch holds at most 16 MiB of records and is at most 1 MiB itself. Nothing compresses by default.
 
+## Examples
+
+`sdk/java/src/examples` and `sdk/kotlin/src/examples` hold programs to run against a cluster; `check` compiles them. They read the brokers from `LOTSE_BOOTSTRAP` (`host:port`, comma-separated) and use plain TCP on loopback unless `LOTSE_CA` (and `LOTSE_CERT`, `LOTSE_KEY`) name PEM files; `LOTSE_USER` and `LOTSE_PASSWORD` log in with SCRAM.
+
+| Example | What it shows |
+| --- | --- |
+| `StreamExample` | Creating a stream, producing by key, reading every partition back |
+| `QueueExample` | A work queue: ack, `nackAfter` for a retry later, a dead-letter queue after three deliveries |
+| `ExactlyOnceExample` | Consume, transform, produce: a group's offsets and the output in one transaction |
+| `KotlinExample` | The same in Kotlin with `transaction { }` and a flow |
+
 ## Build and test
 
 ```sh
-make sdk-test            # check the vectors against Rust, then run the Java tests, with and without the codec libraries
+make sdk-test            # check the vectors, run the Java tests (with and without the codecs) and the Kotlin tests, compile the examples
 LOTSE_BIN=/path/to/lotse make sdk-test   # also the tests that need real certificates and a real node
 make sdk-vectors         # regenerate sdk/conformance after changing the protocol
 ```

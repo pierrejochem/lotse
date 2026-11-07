@@ -180,3 +180,22 @@ jobs:
       - run: systemd-analyze verify /lib/systemd/system/lotse@.service
       - run: docker build -f packaging/Dockerfile -t lotse:ci .
       - run: docker run --rm lotse:ci --version
+
+  # The JVM SDK (ADR 0056): the vectors drift check, the Java tests with and
+  # without the codec libraries, the TLS and real-node tests against the lotse
+  # executable built here, the Kotlin layer's tests, and both builds' examples.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: cargo build -p lotse-node
+      - run: make sdk-test
+        env:
+          LOTSE_BIN: ${{ github.workspace }}/target/debug/lotse

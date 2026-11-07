@@ -68,6 +68,12 @@ val testWithoutCodecs by tasks.registering(Test::class) {
     useJUnitPlatform { includeTags("without-codecs") }
 }
 
+// Examples (src/examples): programs to run against a cluster, compiled by `check` so they keep up with the API.
+val examples: SourceSet by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+    runtimeClasspath += output + compileClasspath
+}
+
 tasks.check {
-    dependsOn(testWithoutCodecs)
+    dependsOn(testWithoutCodecs, tasks.named(examples.classesTaskName))
 }
