@@ -84,5 +84,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0077 | [Delayed delivery](0077-delayed-delivery.md) | Accepted |
 | 0078 | [Queue priorities](0078-queue-priorities.md) | Accepted |
 | 0079 | [Publish: routed by the node](0079-publish-routed-by-the-node.md) | Accepted |
+| 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

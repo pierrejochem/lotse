@@ -7,10 +7,11 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 | [`PROTOCOL.md`](PROTOCOL.md) | The protocol as an implementer needs it: byte layouts, the traps, what the vectors pin down |
 | [`conformance/`](conformance/) | Golden vectors, written by Rust and read by every SDK |
 | [`java/`](java/) | Java 17, Gradle; no runtime dependencies, two optional ones for compressed batches |
+| [`kotlin/`](kotlin/) | A thin Kotlin layer on the Java client: `suspend` functions, flows, builders; depends on it and on kotlinx-coroutines |
 
 ## Status
 
-Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction), consumer groups and the admin calls of `lotse-client`. The Kotlin layer follows.
+Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction), consumer groups and the admin calls of `lotse-client`. `sdk/kotlin` wraps all of it for coroutines.
 
 ### Producing and reading a stream
 
@@ -139,6 +140,35 @@ client.deleteIfEmpty("audit");
 - `setUserPassword` sends only a salted SCRAM credential, with a new salt each time; the password does not leave the client.
 - `purge` and `requeue` work through the queue in rounds until its leader says there is no more; messages produced meanwhile are left alone.
 - Also there: `describeConfigs`, `unbind`, `bindHeaders`, `delete`, `createPartitions`, `moveLeader`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `describeUsers`, `deleteUser`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes` and `nodeMetrics`, each as in `lotse-client`.
+
+### Kotlin
+
+```kotlin
+lotse("127.0.0.1:9092") {
+    plaintextOnLoopback()
+    transactionalId("billing-1")
+}.use { lotse ->
+    runBlocking {
+        lotse.produce("orders", 0, message("order-1", key = "customer-7"))
+        lotse.records("orders", 0, from = 0).take(10).collect { println(it.value().toUtf8()) }
+
+        lotse.transaction {                         // commits when the block returns
+            produce("invoices", 0, message("invoice-1"))
+            publish("events", "invoice.created", message("..."))
+        }                                           // aborted if it throws or is cancelled
+
+        lotse.subscribe("jobs").use { jobs ->
+            jobs.deliveries().take(5).collect { work(it); jobs.ack(it) }
+        }
+    }
+}
+```
+
+- Every call of the Java client is a `suspend` function that runs it on `Dispatchers.IO` ([ADR 0080](../docs/adr/0080-kotlin-layer-on-dispatchers-io.md)), with the Java client's rules, retries and exceptions. Each call in flight holds an IO thread.
+- Cancelling a coroutine lets the call it waits for finish, so the outcome is what the Java client decided, then throws `CancellationException`. A retry of up to `retryFor` (30 s by default) is not cut short.
+- `transaction { }` commits when the block returns. When the block or the commit throws, or the coroutine is cancelled, it aborts the transaction if it is still open, and rethrows.
+- `records`, `deliveries()` and a group's `records()` are cold flows that read for as long as they are collected. A group member heartbeats only while its flow is collected, as with `poll`: a collector slower than the session timeout over one poll's records loses the member's partitions.
+- Each wrapper keeps the Java object as `java`, for anything the layer does not wrap.
 
 ### Connecting
 

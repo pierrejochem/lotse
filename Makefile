@@ -49,8 +49,9 @@ sdk-vectors-check: ## Fail if sdk/conformance differs from what the Rust codec w
 		$(VECTORS) "$$dir" && \
 		diff -r sdk/conformance "$$dir" && echo "sdk/conformance matches the Rust codec"
 
-sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK against them
+sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK against them and the Kotlin layer on it
 	cd sdk/java && ./gradlew test testWithoutCodecs
+	cd sdk/kotlin && ./gradlew test
 
 clean: ## Remove build output of the web app and cargo
 	rm -rf console/web/dist

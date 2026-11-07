@@ -59,6 +59,14 @@ public final class Transaction implements AutoCloseable {
         return txnId;
     }
 
+    /**
+     * Whether the transaction may still be committed or aborted: neither has been called, and {@link #close} has not
+     * left it to the coordinator. A commit refused with {@link ClientException.MustAbort} leaves it open for an abort.
+     */
+    public boolean isOpen() {
+        return !ended;
+    }
+
     long producerId() {
         return producerId;
     }

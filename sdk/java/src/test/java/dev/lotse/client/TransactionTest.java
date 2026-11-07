@@ -240,7 +240,9 @@ class TransactionTest {
             assertThrows(ClientException.MustAbort.class, () -> txn.produce("s", 1, OutMessage.value("b")));
             assertThrows(ClientException.MustAbort.class, txn::commit);
             assertEquals(0, node.requests(Request.EndTxn.class).size(), "the coordinator was never asked to commit");
+            assertTrue(txn.isOpen(), "open for the abort");
             txn.abort();
+            assertFalse(txn.isOpen());
         }
         assertFalse(node.requests(Request.EndTxn.class).get(0).commit());
     }
