@@ -84,6 +84,10 @@ pub(crate) fn scope(req: &mut Request, access: &Access) -> Result<(), String> {
             Some(id) => one(&r.tenant, id),
             None => Ok(()),
         },
+        Request::Ack(r) => match &mut r.txn_id {
+            Some(id) => one(&r.tenant, id),
+            None => Ok(()),
+        },
         Request::AddPartitionsToTxn(r) => one(&r.tenant, &mut r.txn_id),
         Request::EndTxn(r) => one(&r.tenant, &mut r.txn_id),
         Request::VerifyTxn(r) => one(&r.tenant, &mut r.txn_id),

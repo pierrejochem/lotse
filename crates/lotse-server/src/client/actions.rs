@@ -84,7 +84,9 @@ impl Clients {
         }
         let dispatcher = self.queues.get(&g).filter(|s| s.term == term).map(|s| &s.dispatcher);
         let q = replica.queue().expect("a queue group");
-        let busy = |o: u64| st.claiming().contains(&o) || dispatcher.is_some_and(|d| d.is_in_flight(o));
+        // Held by a transaction, a message is not ready: it may be committed.
+        let busy =
+            |o: u64| st.claiming().contains(&o) || dispatcher.is_some_and(|d| d.is_busy(o)) || q.held_by(o).is_some();
         let max = if kind == Kind::Purge { PURGE_MAX } else { REQUEUE_MAX };
 
         // The ready messages below the bound, oldest first.

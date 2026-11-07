@@ -16,6 +16,13 @@
 //!
 //! Transactional messages wait for their marker: committed, they are
 //! deliverable; aborted, they are settled.
+//!
+//! A transactional ack (ADR 0075) **holds** the messages it names for its
+//! producer's transaction: they are neither delivered nor settled until the
+//! marker comes. Committed, they are settled; aborted, they are delivered
+//! again. Only an unsettled message that no other transaction holds can be
+//! held, so of two transactions that ack the same message the log's order
+//! picks one; the leader tells the other one's client, which must abort.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +43,9 @@ pub struct QueueLog {
     owed: BTreeMap<u64, Owed>,
     /// Per source queue: what this queue has taken from it as dead letters.
     sources: BTreeMap<u64, Source>,
+    /// Messages transactional acks hold, per producer: the epoch of the
+    /// ack, and the offsets.
+    held: BTreeMap<u64, (u16, RangeSet)>,
 }
 
 /// A claimed message that is to be forwarded.
@@ -73,10 +83,21 @@ impl QueueLog {
         if a.control {
             self.settled.insert(first, next);
             if let Some(Control::Marker(ty, _)) = lotse_record::control(batch)? {
-                let ranges = self.pending.remove(&batch.producer_id()).unwrap_or_default();
+                let producer = batch.producer_id();
+                let ranges = self.pending.remove(&producer).unwrap_or_default();
                 if ty == ControlType::Abort {
                     for (f, t) in ranges {
                         self.settle(f, t);
+                    }
+                }
+                // The marker ends the transaction its acks were written in,
+                // which ran at an older epoch (the coordinator raises it).
+                if self.held.get(&producer).is_some_and(|(epoch, _)| *epoch < batch.producer_epoch()) {
+                    let (_, offsets) = self.held.remove(&producer).expect("checked");
+                    if ty == ControlType::Commit {
+                        for (f, t) in offsets.iter() {
+                            self.settle(f, t);
+                        }
                     }
                 }
             }
@@ -87,6 +108,11 @@ impl QueueLog {
                 if a.transactional && batch.producer_id() != 0 {
                     self.pending.entry(batch.producer_id()).or_default().push((first, next));
                 }
+            }
+            BatchKind::Ack if a.transactional && batch.producer_id() != 0 => {
+                self.settled.insert(first, next);
+                let ranges = lotse_record::ack_ranges(batch)?;
+                self.hold(batch.producer_id(), batch.producer_epoch(), &ranges);
             }
             BatchKind::Ack => {
                 self.settled.insert(first, next);
@@ -113,7 +139,9 @@ impl QueueLog {
                             // Unsettled now means no ack came first: the log
                             // orders the claim and the ack, so exactly one
                             // of them settles the message.
-                            if !self.settled.contains(offset) {
+                            // Held, it belongs to a transaction that may
+                            // still commit.
+                            if !self.settled.contains(offset) && self.held_by(offset).is_none() {
                                 self.settle(offset, offset + 1);
                                 self.owed.insert(offset, Owed { reason, deliveries, target });
                             }
@@ -147,6 +175,35 @@ impl QueueLog {
             }
         }
         Ok(())
+    }
+
+    /// Holds for `producer` what in `ranges` is unsettled and not held by
+    /// another producer's transaction.
+    fn hold(&mut self, producer: u64, epoch: u16, ranges: &[(u64, u64)]) {
+        for &(from, to) in ranges {
+            let mut o = self.settled.next_gap(from);
+            while o < to {
+                if self.held_by(o).is_none() {
+                    let (e, offsets) = self.held.entry(producer).or_insert_with(|| (epoch, RangeSet::new()));
+                    *e = (*e).max(epoch);
+                    offsets.insert(o, o + 1);
+                }
+                o = self.settled.next_gap(o + 1);
+            }
+        }
+    }
+
+    /// The producer whose open transaction holds `offset`, if one does.
+    pub fn held_by(&self, offset: u64) -> Option<u64> {
+        if self.settled.contains(offset) {
+            return None;
+        }
+        self.held.iter().find(|(_, (_, offsets))| offsets.contains(offset)).map(|(p, _)| *p)
+    }
+
+    /// How many messages open transactions hold.
+    pub fn held(&self) -> u64 {
+        self.held.values().flat_map(|(_, o)| o.iter()).map(|(f, t)| t - f - self.settled.count_in(f, t)).sum()
     }
 
     fn settle(&mut self, from: u64, to: u64) {
@@ -243,6 +300,16 @@ impl QueueLog {
             b.put_u64_le(s.floor);
             s.taken.encode(&mut b);
         }
+        // Written only when there is something, so a state without held
+        // messages reads as before.
+        if !self.held.is_empty() {
+            b.put_u32_le(self.held.len() as u32);
+            for (p, (epoch, offsets)) in &self.held {
+                b.put_u64_le(*p);
+                b.put_u16_le(*epoch);
+                offsets.encode(&mut b);
+            }
+        }
         b.freeze()
     }
 
@@ -297,9 +364,22 @@ impl QueueLog {
             let (queue, floor) = (b.get_u64_le(), b.get_u64_le());
             sources.insert(queue, Source { floor, taken: RangeSet::decode(&mut b)? });
         }
+        let mut held = BTreeMap::new();
+        if b.has_remaining() {
+            if b.remaining() < 4 {
+                return Err(short());
+            }
+            for _ in 0..b.get_u32_le() {
+                if b.remaining() < 10 {
+                    return Err(short());
+                }
+                let (p, epoch) = (b.get_u64_le(), b.get_u16_le());
+                held.insert(p, (epoch, RangeSet::decode(&mut b)?));
+            }
+        }
         if b.has_remaining() {
             return Err("queue state has trailing bytes".into());
         }
-        Ok(QueueLog { settled, counts, pending, owed, sources })
+        Ok(QueueLog { settled, counts, pending, owed, sources, held })
     }
 }

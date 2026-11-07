@@ -161,8 +161,8 @@ impl ApiKey {
     pub const UNSUBSCRIBE: ApiKey = ApiKey(15);
     /// Adds partitions to a transaction.
     pub const ADD_PARTITIONS_TO_TXN: ApiKey = ApiKey(17);
-    /// Commits or aborts a transaction. Keys 18 and 19 are `AddAcksToTxn`
-    /// and `AddOffsetsToTxn`.
+    /// Commits or aborts a transaction. Key 19 is `AddOffsetsToTxn`; 18 stays
+    /// free, as queue acks join a transaction through `Ack` (ADR 0075).
     pub const END_TXN: ApiKey = ApiKey(20);
     /// Internal, between nodes: the coordinator asks a partition leader to
     /// write a transaction marker. Internal keys start at 1000.
@@ -310,10 +310,14 @@ impl ErrorCode {
     /// Another member joined the group with this member's instance id and
     /// took its place (ADR 0072): this one must not join again.
     pub const FENCED_INSTANCE_ID: ErrorCode = ErrorCode(30);
+    /// A transactional ack names a message the connection does not hold:
+    /// not delivered on it, gone to another consumer since, or taken by
+    /// another transaction (ADR 0075). The transaction must abort.
+    pub const MESSAGE_NOT_HELD: ErrorCode = ErrorCode(31);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 31] = [
+        const NAMES: [&str; 32] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -345,6 +349,7 @@ impl ErrorCode {
             "UNSUPPORTED_SASL_MECHANISM",
             "RESOURCE_NOT_EMPTY",
             "FENCED_INSTANCE_ID",
+            "MESSAGE_NOT_HELD",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }

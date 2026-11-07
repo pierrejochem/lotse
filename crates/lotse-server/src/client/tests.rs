@@ -541,7 +541,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
         for v in ["a", "b"] {
             send(&mut clients, &mut groups, ApiKey::PRODUCE, produce_request(v)).await; // offsets 1, 2
         }
-        let ack = |ranges| Request::Ack(lotse_proto::AckRequest { queue_id: 7, txn_id: None, ranges });
+        let ack = |ranges| Request::Ack(lotse_proto::AckRequest::plain(7, ranges));
         let outcome = |r: &[Response]| match r {
             [Response::Outcome(o)] => o.error,
             other => panic!("expected one outcome, got {other:?}"),
@@ -618,7 +618,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
 
         // Its ack reaches nodes 2 and 3 and commits on node 1; nobody else
         // learns that it is committed.
-        let ack = Request::Ack(lotse_proto::AckRequest { queue_id: 7, txn_id: None, ranges: vec![(1, 2)] });
+        let ack = Request::Ack(lotse_proto::AckRequest::plain(7, vec![(1, 2)]));
         let req = ClientRequest {
             outbox: outbox.clone(),
             header: header(ApiKey::ACK),
@@ -1767,5 +1767,141 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
             groups.get_mut(&G).unwrap().process().await.unwrap();
         }
         assert!(group(&groups).members.is_empty(), "{:?}", group(&groups));
+    });
+}
+
+/// A transactional ack (ADR 0075) waits for the coordinator when its producer
+/// has no transaction open in the queue, is refused at an epoch older than
+/// one the queue has seen, and is answered `MESSAGE_NOT_HELD` when the log
+/// settled the message before the ack could hold it.
+#[test]
+fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
+    Sim::new(7).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig::new("jobs", 7, G)];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let handle = async |clients: &mut Clients, groups: &mut Groups, key, request| {
+            let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+        };
+        let rounds = async |clients: &mut Clients, groups: &mut Groups| {
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+        };
+        let outcome = |key| match &drain(&outbox, key).0[..] {
+            [Response::Outcome(o)] => o.error,
+            other => panic!("expected one outcome, got {other:?}"),
+        };
+        let txn_ack = |epoch, offset| {
+            Request::Ack(lotse_proto::AckRequest {
+                queue_id: 7,
+                txn_id: Some("t".into()),
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
+                producer: Some((9, epoch)),
+                ranges: vec![(offset, offset + 1)],
+            })
+        };
+        for v in ["a", "b"] {
+            handle(&mut clients, &mut groups, ApiKey::PRODUCE, produce_request(v)).await; // offsets 1, 2
+            rounds(&mut clients, &mut groups).await;
+        }
+        drain(&outbox, ApiKey::PRODUCE);
+        let sub = Request::Subscribe(lotse_proto::SubscribeRequest {
+            queue_id: 7,
+            consumer_tag: "w".into(),
+            credit_msgs: 10,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+        });
+        handle(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
+        rounds(&mut clients, &mut groups).await;
+        drain(&outbox, ApiKey::SUBSCRIBE);
+
+        // The coordinator is asked first; a refusal is passed on.
+        handle(&mut clients, &mut groups, ApiKey::ACK, txn_ack(0, 1)).await;
+        rounds(&mut clients, &mut groups).await;
+        assert!(drain(&outbox, ApiKey::ACK).0.is_empty(), "answered before the coordinator was");
+        let jobs = clients.take_verify_jobs();
+        assert_eq!(jobs.len(), 1, "one question for the coordinator");
+        clients.verified(jobs[0].key, ErrorCode::INVALID_TXN_STATE, &view, &mut groups);
+        assert_eq!(outcome(ApiKey::ACK), ErrorCode::INVALID_TXN_STATE);
+        let q = |groups: &Groups| groups[&G].queue().unwrap().held_by(1);
+        assert_eq!(q(&groups), None, "nothing written");
+
+        // Confirmed: written, and the transaction holds the message.
+        handle(&mut clients, &mut groups, ApiKey::ACK, txn_ack(0, 1)).await;
+        let key = clients.take_verify_jobs()[0].key;
+        clients.verified(key, ErrorCode::NONE, &view, &mut groups);
+        rounds(&mut clients, &mut groups).await;
+        assert_eq!(outcome(ApiKey::ACK), ErrorCode::NONE);
+        assert_eq!(q(&groups), Some(9));
+
+        // The transaction aborts at epoch 1; an ack at epoch 0 is a zombie's.
+        let marker = Request::WriteTxnMarkers(lotse_proto::WriteTxnMarkersRequest {
+            markers: vec![lotse_proto::TxnMarker {
+                producer_id: 9,
+                producer_epoch: 1,
+                commit: false,
+                coordinator_epoch: 1,
+                resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+            }],
+        });
+        handle(&mut clients, &mut groups, ApiKey::WRITE_TXN_MARKERS, marker).await;
+        rounds(&mut clients, &mut groups).await;
+        drain(&outbox, ApiKey::WRITE_TXN_MARKERS);
+        assert_eq!(q(&groups), None, "aborted: given back");
+        handle(&mut clients, &mut groups, ApiKey::ACK, txn_ack(0, 1)).await;
+        for job in clients.take_verify_jobs() {
+            clients.verified(job.key, ErrorCode::NONE, &view, &mut groups);
+        }
+        rounds(&mut clients, &mut groups).await;
+        assert_eq!(outcome(ApiKey::ACK), ErrorCode::PRODUCER_FENCED);
+
+        // A plain ack in the log before the transactional one settles the
+        // message: the transaction does not hold it, and is told so.
+        handle(&mut clients, &mut groups, ApiKey::ACK, Request::Ack(lotse_proto::AckRequest::plain(7, vec![(2, 3)])))
+            .await;
+        handle(&mut clients, &mut groups, ApiKey::ACK, txn_ack(1, 2)).await;
+        for job in clients.take_verify_jobs() {
+            clients.verified(job.key, ErrorCode::NONE, &view, &mut groups);
+        }
+        rounds(&mut clients, &mut groups).await;
+        let answers: Vec<ErrorCode> = drain(&outbox, ApiKey::ACK)
+            .0
+            .iter()
+            .map(|r| match r {
+                Response::Outcome(o) => o.error,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(answers, vec![ErrorCode::NONE, ErrorCode::MESSAGE_NOT_HELD]);
     });
 }

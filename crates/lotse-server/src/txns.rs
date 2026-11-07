@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lotse_record::{Batch, Control, ControlType};
 
-/// An open transaction: its first index and the epoch of its data.
+/// An open transaction: the index of its first data, and its epoch.
+/// `first` is 0 while it has written only acks (ADR 0075): they hide
+/// nothing from readers, so they do not hold the last stable offset back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Open {
     first: u64,
@@ -44,8 +46,9 @@ pub(crate) struct Aborted {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Item {
-    /// Transactional data.
-    Data { epoch: u16 },
+    /// Transactional data, or with `data: false` a queue's transactional
+    /// ack.
+    Data { epoch: u16, data: bool },
     /// A marker.
     Marker { epoch: u16, coordinator_epoch: u32 },
 }
@@ -91,7 +94,8 @@ fn item_of(batch: &Batch) -> Option<(u64, Item)> {
         return None;
     }
     if !a.control {
-        return Some((producer_id, Item::Data { epoch: batch.producer_epoch() }));
+        let data = a.kind == lotse_record::BatchKind::Data;
+        return Some((producer_id, Item::Data { epoch: batch.producer_epoch(), data }));
     }
     match lotse_record::control(batch) {
         Ok(Some(Control::Marker(_, coordinator_epoch))) => {
@@ -105,7 +109,7 @@ impl View {
     /// Applies one item; the same rules as for the applied state.
     fn step(&mut self, item: Item) {
         match item {
-            Item::Data { epoch } => {
+            Item::Data { epoch, .. } => {
                 if self.open.is_none() {
                     self.open = Some(Open { first: 0, epoch });
                 }
@@ -159,6 +163,13 @@ impl TxnState {
         self.view(producer_id).open.is_some()
     }
 
+    /// The producer's newest epoch here, data and markers of the whole log
+    /// counted, if it is newer than `epoch`: a batch at `epoch` comes from
+    /// an instance or transaction that is over.
+    pub(crate) fn newer_epoch(&self, producer_id: u64, epoch: u16) -> Option<u16> {
+        self.view(producer_id).epoch.filter(|e| *e > epoch)
+    }
+
     /// Notes a batch appended at `first`.
     pub(crate) fn appended(&mut self, first: u64, batch: &Batch) {
         if let Some(entry) = item_of(batch) {
@@ -176,8 +187,11 @@ impl TxnState {
         self.tail = self.tail.split_off(&(last + 1));
         let Some((producer_id, item)) = item_of(batch) else { return };
         match item {
-            Item::Data { epoch } => {
-                self.open.entry(producer_id).or_insert(Open { first, epoch });
+            Item::Data { epoch, data } => {
+                let open = self.open.entry(producer_id).or_insert(Open { first: 0, epoch });
+                if data && open.first == 0 {
+                    open.first = first;
+                }
                 let e = self.epochs.entry(producer_id).or_insert(epoch);
                 *e = (*e).max(epoch);
             }
@@ -191,7 +205,7 @@ impl TxnState {
                     self.open.remove(&producer_id);
                     let aborted =
                         matches!(lotse_record::control(batch), Ok(Some(Control::Marker(ControlType::Abort, _))));
-                    if aborted {
+                    if aborted && open.first != 0 {
                         self.aborted.push(Aborted { producer_id, first: open.first, last });
                     }
                 }
@@ -207,7 +221,7 @@ impl TxnState {
     /// an open transaction. `applied` is the applied Raft index, so offsets
     /// below it are applied (index = offset + 1).
     pub(crate) fn last_stable_offset(&self, applied: u64) -> u64 {
-        self.open.values().map(|o| o.first - 1).fold(applied, u64::min)
+        self.open.values().filter(|o| o.first != 0).map(|o| o.first - 1).fold(applied, u64::min)
     }
 
     /// Whether transactional data of `producer_id` at `offset` belongs to

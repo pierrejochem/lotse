@@ -968,3 +968,274 @@ fn queues_lose_nothing_with_dead_letters_and_message_ttl() {
 fn queues_lose_nothing_and_never_redeliver_a_settled_message() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
 }
+
+// ---------------------------------------------------------------------------
+// Acks in transactions (ADR 0075).
+//
+// A scenario first: a transformer reads `jobs` and writes to `audit` in one
+// transaction with the ack. Then a simulation: a producer writes numbered
+// messages to `jobs`; transformers move each to `audit`, writing it and
+// acknowledging the original in one transaction that they commit, abort or
+// abandon, and some hold a message past the ack timeout first. Nodes crash
+// and hosts are partitioned meanwhile. Afterwards the network heals, a last
+// transformer moves what is left, and `audit` is drained.
+//
+// Checked: every message `jobs` acknowledged is in `audit` exactly once, a
+// message whose produce outcome is unknown at most once, and nothing else
+// is; `jobs` is empty at the end.
+
+fn transformer_config(id: &str) -> ClientConfig {
+    ClientConfig { transactional_id: Some(id.into()), txn_timeout: Duration::from_millis(800), ..client_config() }
+}
+
+#[test]
+fn queue_acks_commit_and_abort_with_their_transaction() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let w = World::new(rt.clone(), Scenario::classic()).await;
+            let quiet =
+                Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            quiet.produce("jobs", 0, message("first")).await.expect("written");
+            let tf = Client::new(
+                rt.node("t"),
+                ClientConfig {
+                    retry_for: Duration::from_secs(10),
+                    // Longer than the waits below: the coordinator would
+                    // abort it otherwise.
+                    txn_timeout: Duration::from_secs(10),
+                    ..transformer_config("tf")
+                },
+            );
+            let mut jobs = tf.subscribe("jobs", 1).await.expect("subscribed");
+            let m = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+
+            // Another connection cannot ack it in a transaction.
+            let other = Client::new(
+                rt.node("o"),
+                ClientConfig { retry_for: Duration::from_secs(10), ..transformer_config("other") },
+            );
+            let mut theirs = other.subscribe("jobs", 1).await.expect("subscribed");
+            let mut txn = other.begin_transaction().await.expect("begun");
+            let r = theirs.ack_in(&mut txn, &m).await;
+            assert!(
+                matches!(r, Err(ClientError::Broker { code: lotse_proto::ErrorCode::MESSAGE_NOT_HELD, .. })),
+                "{r:?}"
+            );
+            assert!(matches!(txn.commit().await, Err(ClientError::MustAbort(_))), "only an abort is left");
+
+            // Aborted: the output is not delivered and the message comes back.
+            let mut txn = tf.begin_transaction().await.expect("begun");
+            txn.produce("audit", 0, message("made of first")).await.expect("written");
+            jobs.ack_in(&mut txn, &m).await.expect("held");
+            // Held: the ack timeout passes and nobody gets it.
+            if let Some(x) = theirs.next(ACK_TIMEOUT * 3).await.unwrap() {
+                panic!(
+                    "a held message was delivered: {} at {} count {} (held {})",
+                    value_of(&x),
+                    x.offset(),
+                    x.delivery_count,
+                    m.offset()
+                );
+            }
+            txn.abort().await.expect("aborted");
+            let again = match jobs.next(Duration::from_secs(5)).await.unwrap() {
+                Some(m) => m,
+                None => theirs.next(Duration::from_secs(5)).await.unwrap().expect("given back after the abort"),
+            };
+            assert_eq!((again.offset(), value_of(&again)), (m.offset(), "first".to_string()));
+            assert!(again.delivery_count >= 2, "delivered again: {}", again.delivery_count);
+            drop(theirs);
+
+            // Committed: the output is there and the message never comes back.
+            let mut jobs = tf.subscribe("jobs", 1).await.expect("subscribed");
+            let m = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            let mut txn = tf.begin_transaction().await.expect("begun");
+            txn.produce("audit", 0, message("made of first")).await.expect("written");
+            jobs.ack_in(&mut txn, &m).await.expect("held");
+            txn.commit().await.expect("committed");
+            let mut audit = quiet.subscribe("audit", 10).await.expect("subscribed");
+            let out = audit.next(Duration::from_secs(5)).await.unwrap().expect("the committed output");
+            assert_eq!(value_of(&out), "made of first");
+            assert!(audit.next(ACK_TIMEOUT).await.unwrap().is_none(), "the aborted output stays hidden");
+            drop(jobs);
+            let mut fresh = quiet.subscribe("jobs", 10).await.expect("subscribed");
+            assert!(fresh.next(ACK_TIMEOUT * 3).await.unwrap().is_none(), "the committed ack settled it");
+            drop((fresh, audit));
+            for (node, handle) in w.running.into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+#[derive(Default)]
+struct MoveOutcomes {
+    /// Values `jobs` acknowledged.
+    produced: BTreeSet<String>,
+    /// Values whose produce outcome is unknown.
+    maybe: BTreeSet<String>,
+    /// Transactions that committed, as their clients saw it.
+    committed: u64,
+}
+
+async fn jobs_producer(rt: SimRuntime, name: &'static str, out: Arc<Mutex<MoveOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    let mut n = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let value = format!("{name}-{n}");
+        n += 1;
+        let res = client.produce("jobs", 0, message(&value)).await;
+        {
+            let mut o = out.lock().unwrap();
+            match res {
+                Ok(_) => o.produced.insert(value),
+                Err(_) => o.maybe.insert(value),
+            };
+        }
+        // Slower than the transformers move them, so the last one has
+        // little left.
+        rt.sleep(TICK * (6 + rt.below(10) as u32)).await;
+    }
+}
+
+/// Moves one message from `jobs` to `audit` in a transaction. `Ok(None)`
+/// when none came.
+async fn move_one(
+    rt: &SimRuntime,
+    client: &Client<SimRuntime>,
+    jobs: &mut lotse_client::Consumer<'_, SimRuntime>,
+    flaky: bool,
+) -> Result<Option<bool>, ClientError> {
+    let Some(m) = jobs.next(TICK * 20).await? else { return Ok(None) };
+    let mut txn = client.begin_transaction().await?;
+    let work = async {
+        txn.produce("audit", 0, message(&value_of(&m))).await?;
+        if flaky && rt.chance(1, 15) {
+            rt.sleep(ACK_TIMEOUT + TICK * 10).await;
+        }
+        jobs.ack_in(&mut txn, &m).await
+    };
+    if work.await.is_err() {
+        let _ = txn.abort().await;
+        return Ok(Some(false));
+    }
+    if flaky {
+        match rt.below(8) {
+            0 => {
+                drop(txn);
+                return Ok(Some(false));
+            }
+            1 => {
+                let _ = txn.abort().await;
+                return Ok(Some(false));
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(txn.commit().await.is_ok()))
+}
+
+async fn transformer(rt: SimRuntime, id: &'static str, out: Arc<Mutex<MoveOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), transformer_config(id));
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(mut jobs) = client.subscribe("jobs", 1 + rt.below(3) as u32).await else { continue };
+        for _ in 0..1 + rt.below(20) {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match move_one(&rt, &client, &mut jobs, true).await {
+                Ok(Some(true)) => out.lock().unwrap().committed += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        if rt.chance(1, 2) {
+            jobs.close().await;
+        }
+    }
+}
+
+async fn run_moves(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::classic()).await;
+    let out = Arc::new(Mutex::new(MoveOutcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tasks = vec![
+        rt.spawn(jobs_producer(rt.node("p1"), "p1", out.clone(), stop.clone())),
+        rt.spawn(transformer(rt.node("t1"), "t1", out.clone(), stop.clone())),
+        rt.spawn(transformer(rt.node("t2"), "t2", out.clone(), stop.clone())),
+    ];
+    faults(&rt, &mut w, &["p1", "t1", "t2"], Duration::from_secs(5)).await;
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        t.await;
+    }
+    rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
+
+    // What is left in `jobs` moves now; held messages come back once their
+    // transactions time out.
+    let last =
+        Client::new(rt.node("last"), ClientConfig { retry_for: Duration::from_secs(20), ..transformer_config("last") });
+    let mut jobs = last.subscribe("jobs", 10).await.expect("the healed cluster takes a subscription");
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < Duration::from_secs(4) {
+        match move_one(&rt, &last, &mut jobs, false).await {
+            Ok(None) => {}
+            Ok(Some(_)) => quiet_since = rt.now(),
+            Err(e) => panic!("the healed cluster moves messages: {e}"),
+        }
+    }
+    drop(jobs);
+
+    let drainer =
+        Client::new(rt.node("drainer"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
+    let mut audit = drainer.subscribe("audit", 50).await.expect("subscribed");
+    let mut found: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
+        let Some(m) = audit.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+        quiet_since = rt.now();
+        found.entry(value_of(&m)).or_default().push(m.offset());
+        audit.ack(&m).await.expect("the healed cluster takes acks");
+    }
+    let mut left = drainer.subscribe("jobs", 50).await.expect("subscribed");
+    let rest = left.next(ACK_TIMEOUT * 2).await.expect("the healed cluster delivers");
+    assert!(
+        rest.is_none(),
+        "{:?} is still in jobs after the last transformer moved everything",
+        rest.map(|m| value_of(&m))
+    );
+
+    let out = std::mem::take(&mut *out.lock().unwrap());
+    if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        eprintln!(
+            "stats: produced {} maybe {} committed by transformers {} in audit {}",
+            out.produced.len(),
+            out.maybe.len(),
+            out.committed,
+            found.len()
+        );
+    }
+    assert!(out.committed > 0, "no transaction committed: the run checked little");
+    for v in &out.produced {
+        let at = found.get(v).map_or(&[][..], |o| &o[..]);
+        assert_eq!(at.len(), 1, "{v} was produced once and is in audit at {at:?}");
+    }
+    for (v, at) in &found {
+        assert!(out.produced.contains(v) || out.maybe.contains(v), "{v} is in audit but was never produced");
+        assert_eq!(at.len(), 1, "{v} is in audit {} times, at {at:?}", at.len());
+    }
+    drop((left, audit));
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn a_message_moves_from_a_queue_exactly_once_under_faults() {
+    check_seeds(10, |seed| Sim::new(seed).run(run_moves));
+}

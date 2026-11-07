@@ -573,6 +573,22 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         Ok(MarkerOutcome::Proposed { last, term })
     }
 
+    /// Proposes a queue's transactional ack (ADR 0075) as the leader: an
+    /// ack batch with the producer's id and epoch. Refused as fenced when
+    /// the producer has written at a newer epoch here (an instance or a
+    /// transaction that is over); whether the coordinator knows the
+    /// transaction is asked before, as for data ([`Replica::opens_txn`]).
+    pub(crate) fn propose_txn_ack(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {
+        let parsed = Batch::parse(&batch)?.0;
+        if self.raft.role() != lotse_raft::Role::Leader {
+            return Err(ProposeError::NotLeader(NotLeader { leader: self.raft.leader() }));
+        }
+        if let Some(current) = self.state.txns.newer_epoch(parsed.producer_id(), parsed.producer_epoch()) {
+            return Err(ProposeError::ProducerFenced { current });
+        }
+        self.propose_internal(batch)
+    }
+
     /// Proposes one of the broker's own records (a coordinator record or a
     /// producer id allocation) as the leader.
     pub(crate) fn propose_internal(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {

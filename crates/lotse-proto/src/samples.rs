@@ -66,7 +66,14 @@ pub fn requests() -> Vec<Request> {
             exclusive: false,
         }),
         Request::Credit(CreditRequest { subscription_id: 3, add_msgs: 10, add_bytes: 4096 }),
-        Request::Ack(AckRequest { queue_id: 9, txn_id: None, ranges: vec![(0, 3), (5, 6)] }),
+        Request::Ack(AckRequest::plain(9, vec![(0, 3), (5, 6)])),
+        Request::Ack(AckRequest {
+            queue_id: 9,
+            txn_id: Some("payments".into()),
+            tenant: "acme".into(),
+            producer: Some((4000, 3)),
+            ranges: vec![(7, 9)],
+        }),
         Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
         Request::CreateStream(CreateStreamRequest {

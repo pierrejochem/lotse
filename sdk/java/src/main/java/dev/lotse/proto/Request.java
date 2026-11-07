@@ -424,14 +424,29 @@ public sealed interface Request {
     /**
      * Acknowledges messages {@code [from, to)} of a queue.
      *
+     * <p>With a transactional id (ADR 0075) the ack takes effect with the transaction's commit: it goes on the
+     * connection the messages were delivered on, after the queue was added to the transaction, and carries the
+     * transaction's producer id and epoch.
+     *
      * @param queueId the queue, a {@code u64}
-     * @param txnId a transaction, for an ack that takes effect with its commit (not yet supported), or {@code null}
+     * @param txnId a transaction, or {@code null} for a plain ack
      * @param ranges offset ranges {@code [from, to)}
+     * @param tenant the tenant the transactional id lives in; sent as a tag, absent for {@code default}
+     * @param producerId the transaction's producer id, a {@code u64}; sent as a tag with {@code producerEpoch} when
+     *     {@code txnId} is set, ignored otherwise
+     * @param producerEpoch the transaction's producer epoch, a {@code u16}
      */
-    record Ack(long queueId, String txnId, List<Range> ranges) implements Request {
+    record Ack(long queueId, String txnId, List<Range> ranges, String tenant, long producerId, int producerEpoch)
+            implements Request {
         /** Creates the request. */
         public Ack {
             ranges = List.copyOf(ranges);
+            tenant = tenant == null ? Messages.DEFAULT_TENANT : tenant;
+        }
+
+        /** A plain ack, outside any transaction. */
+        public Ack(long queueId, List<Range> ranges) {
+            this(queueId, null, ranges, Messages.DEFAULT_TENANT, 0, 0);
         }
 
         @Override
@@ -443,13 +458,42 @@ public sealed interface Request {
         public void write(Writer w) {
             w.u64(queueId).optString(txnId);
             Messages.putRanges(w, ranges);
-            w.noTags();
+            List<Tag> tags = new java.util.ArrayList<>();
+            if (!Messages.DEFAULT_TENANT.equals(tenant)) {
+                tags.add(Messages.stringTag(Messages.TAG_TENANT, tenant));
+            }
+            if (txnId != null) {
+                Writer v = new Writer();
+                v.u64(producerId).u16(producerEpoch);
+                tags.add(new Tag(Messages.TAG_PRODUCER, ByteString.copyOf(v.toByteArray())));
+            }
+            if (tags.isEmpty()) {
+                w.noTags();
+            } else {
+                w.tags(tags);
+            }
         }
 
         static Ack read(Reader r) {
-            Ack x = new Ack(r.u64(), r.optString(), Messages.getRanges(r));
-            r.tags();
-            return x;
+            long queueId = r.u64();
+            String txnId = r.optString();
+            List<Range> ranges = Messages.getRanges(r);
+            String tenant = Messages.DEFAULT_TENANT;
+            long producerId = 0;
+            int epoch = 0;
+            for (Tag t : r.tags()) {
+                Reader vr = new Reader(t.value().toByteArray());
+                if (t.tag() == Messages.TAG_TENANT) {
+                    tenant = vr.string();
+                } else if (t.tag() == Messages.TAG_PRODUCER) {
+                    producerId = vr.u64();
+                    epoch = vr.u16();
+                } else {
+                    continue; // from a newer version: skipped
+                }
+                vr.finish();
+            }
+            return new Ack(queueId, txnId, ranges, tenant, producerId, epoch);
         }
     }
 

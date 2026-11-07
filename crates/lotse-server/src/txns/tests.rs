@@ -98,3 +98,34 @@ fn the_applied_state_round_trips_and_damage_is_refused() {
         assert!(TxnState::default().restore(&bytes[..cut]).is_err(), "cut at {cut}");
     }
 }
+
+/// A queue's transactional ack from producer `id` at `epoch`.
+fn ack(id: u64, epoch: u16) -> Batch {
+    let mut raw = BytesMut::from(&lotse_record::ack_batch(&[(0, 1)]).unwrap()[..]);
+    lotse_record::set_producer(&mut raw, id, epoch, -1).unwrap();
+    lotse_record::set_transactional(&mut raw, true).unwrap();
+    Batch::parse(&raw.freeze()).unwrap().0
+}
+
+#[test]
+fn acks_open_a_transaction_without_holding_the_last_stable_offset_back() {
+    let mut s = TxnState::default();
+    apply(&mut s, 5, &ack(7, 0));
+    assert!(s.has_open(7), "the marker must find it open");
+    assert_eq!(s.last_stable_offset(5), 5, "acks hide nothing from readers");
+    apply(&mut s, 6, &data(7, 0));
+    assert_eq!(s.last_stable_offset(6), 5, "its first data does hold it back");
+    apply(&mut s, 7, &marker(7, 1, false, 1));
+    assert_eq!(s.aborted_between(0, 10), vec![(7, 5)], "the aborted range starts at the data");
+    apply(&mut s, 8, &ack(8, 0));
+    apply(&mut s, 9, &marker(8, 1, false, 1));
+    assert_eq!(s.aborted_between(8, 10), vec![], "acks only: no aborted range");
+    assert_eq!(s.newer_epoch(8, 0), Some(1), "an ack at the old epoch is fenced");
+    assert_eq!(s.newer_epoch(8, 1), None);
+    // Kept in a snapshot.
+    apply(&mut s, 10, &ack(9, 3));
+    let mut back = TxnState::default();
+    back.restore(&s.encode()).unwrap();
+    assert!(back.has_open(9));
+    assert_eq!(back.last_stable_offset(10), 10);
+}

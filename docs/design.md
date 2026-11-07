@@ -153,7 +153,7 @@ Die Marker schreibt der Koordinator-Node über den internen API-Key `WriteTxnMar
 Eine Queue ist ein Log plus Ack-Index. Acks, Zustellzähler und Timer sind selbst Records im selben Log, also repliziert und transaktionsfähig.
 
 - **ACK-Batches** enthalten Offset-Ranges `[from, to)`, varint-kodiert (Key leer). Jede Replica wendet sie auf einen Ack-Index an: die **erledigten** Offsets als zusammengefasste Bereiche plus Ack-Floor (alles darunter ist erledigt). Erledigt ist ein Offset, wenn seine Nachricht bestätigt oder verworfen ist, zu einer abgebrochenen Transaktion gehört oder er gar keine Nachricht ist. Bereiche statt Roaring-Bitmaps (ADR 0031): Bestätigte Offsets bilden wenige lange Läufe. `Produce` nimmt nur Daten-Batches an, kein Client kann einen Ack schreiben.
-- **Consume → Ack → Produce atomar:** Der Ack wird mit `txn=1` und der `producer_id` des Consumers geschrieben und greift erst mit dem COMMIT-Marker. Bei ABORT wird die Nachricht wieder zustellbar.
+- **Consume → Ack → Produce atomar** (ADR 0075): Der Client nimmt die Queue (Partition 0) per `AddPartitionsToTxn` in die Transaktion und schickt dann `Ack` mit Transaktions-ID, Producer-ID und Epoch auf der Verbindung, auf der die Nachrichten kamen. Der Leader nimmt nur, was diese Verbindung in flight hat (oder was dieselbe Transaktion schon hält, für eine Wiederholung), fragt bei der ersten Zeile des Producers per `VerifyTxn` den Koordinator und schreibt einen Ack-Batch mit `txn=1`, der `producer_id` und der Epoch, ohne Sequenz. Jede Replica lässt die genannten Nachrichten dann von dieser Transaktion **halten**, sofern sie unerledigt sind und keine andere Transaktion sie hält: Sie gehen an niemanden sonst, kein Ack-Timeout, kein Purge, kein TTL und kein Dead-Lettering greift. Der COMMIT-Marker erledigt sie, der ABORT-Marker gibt sie wieder frei. Der Leader antwortet nach dem Anwenden; hält die Transaktion nicht alle genannten Nachrichten (von zwei Transaktionen gewinnt die erste im Log), antwortet er `MESSAGE_NOT_HELD`, und der Client muss abbrechen. Eine Transaktion, die in einer Partition nur Acks geschrieben hat, hält den LSO nicht zurück: Acks verbergen nichts vor Lesern.
 - **In-flight-Zustellungen** sind flüchtiger Leader-State. Nach einem Failover wird alles Unbestätigte neu zugestellt. Das ist korrekt, weil nur committete Acks zählen. Ein neuer Leader stellt erst zu, wenn er einen Eintrag seines eigenen Terms angewendet hat: Dann ist jeder vorher committete Ack angewendet, und eine bestätigte Nachricht geht nie wieder hinaus. Zugestellt wird nur unterhalb des LSO, Nachrichten offener Transaktionen warten. Hält eine Subscription eine Nachricht länger als den Ack-Timeout der Queue (Standard 30 Minuten, wie RabbitMQs Consumer-Timeout), endet sie mit `ACK_TIMED_OUT`, und ihre Nachrichten gehen an andere.
 - **Zustellversuche für DLQ** werden nur bei Nack oder Timeout persistiert, jeweils bevor die Nachricht erneut hinausgeht, gebündelt als `QUEUE_STATE`-Record, nicht bei jeder Zustellung. Nach einem Disconnect zählt der Leader nur im Speicher weiter, nach einem Failover kann der Zähler neu beginnen: Er ist eine Untergrenze.
 - **Dead-Letter-Queues und TTL** (ADR 0055) sind Einstellungen der Queue: `max.deliveries`, `message.ttl.ms` und `dead.letter.queue`, beim Anlegen oder per `AlterConfigs` gesetzt, standardmäßig aus. Nur der Leader entscheidet, und jede Entscheidung ist ein `RETIRE`-Batch im Log der Queue: Der **Claim** erledigt die Nachricht wie ein Ack (ohne DLQ ist sie damit verworfen) und vermerkt sie als der DLQ geschuldet; Ack und Claim ordnet das Log, es gewinnt der erste. Der Leader schickt die geschuldeten Nachrichten per internem `DeadLetter` an den Leader der DLQ und vermerkt danach in einem zweiten `RETIRE`-Batch, dass sie weitergeleitet sind. Die DLQ erkennt eine schon übernommene Nachricht (Quell-Queue und -Offset in den Headern der Kopie) beim Anwenden und stellt sie nicht erneut zu: genau einmal über Failover hinweg. Die TTL zählt ab der Uhrzeit des Leaders beim Anhängen; Replicas lesen keine Uhr, sie wenden den Claim an. Zyklen, fremde Tenants und das Löschen einer als DLQ genutzten Queue werden abgelehnt.
@@ -272,8 +272,8 @@ Auch transaktionale IDs und Consumer-Gruppen-IDs gehören zu einem Mandanten (AD
 | --- | --- |
 | Cluster | `ApiVersions`, `Metadata`, `FindCoordinator` |
 | Streams | `Produce`, `Fetch`, `ListOffsets`, `GroupHeartbeat`, `CommitOffsets`, `OffsetFetch` |
-| Queues | `Publish`, `Subscribe`, `Deliver` (Push), `Credit`, `Ack`, `Nack`, `Unsubscribe` |
-| Transaktionen | `InitProducer`, `AddPartitionsToTxn`, `AddAcksToTxn`, `AddOffsetsToTxn`, `EndTxn` |
+| Queues | `Publish`, `Subscribe`, `Deliver` (Push), `Credit`, `Ack` (auch in einer Transaktion), `Nack`, `Unsubscribe` |
+| Transaktionen | `InitProducer`, `AddPartitionsToTxn`, `AddOffsetsToTxn`, `EndTxn` |
 | Admin | `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind`, `DeleteResource`, `DescribeConfigs`, `AlterConfigs`, `Unbind`, `DescribeMetrics`, `CreatePartitions` (51) |
 
 `Publish` routet über Exchanges und schreibt in die Ziel-Queues. Im ersten Schritt routet der Client (ADR 0032): `Metadata` liefert Typ und Bindings eines Exchanges samt der gebundenen Queues, der Client wählt die Queues mit `lotse-route` und schreibt per `Produce` in jede, idempotent pro Queue. Ohne Transaktion gilt jede Queue für sich wie bei RabbitMQ (der Fehler nennt, welche Queues die Nachricht haben), in einer Transaktion alle oder keine. Exchanges und Bindings stehen bis zur Metadaten-Gruppe in der Node-Konfiguration. `Produce` schreibt direkt in eine Partition. Beide nutzen dasselbe Batch-Format und dieselben Idempotenzregeln.
@@ -422,8 +422,9 @@ Deliver     (Push, correlation_id 0)
 
 Credit      <- subscription_id u32, add_msgs u32, add_bytes u32   // flag NO_RESPONSE
 
-Ack         <- queue_id u64, txn_id string?, ranges: array{from u64, to u64}
-            -> error u16
+Ack         <- queue_id u64, txn_id string?, ranges: array{from u64, to u64},
+               tags: 1 tenant string, 2 producer {producer_id u64, producer_epoch u16}   // mit txn_id
+            -> error u16   // in einer Transaktion auch MESSAGE_NOT_HELD (31)
 
 Nack        <- queue_id u64, ranges: array{from u64, to u64}, requeue u8, delay_ms u32
             -> error u16
@@ -441,9 +442,6 @@ AddPartitionsToTxn <- txn_id string, producer_id u64, producer_epoch u16,
                       resources: array{resource_id u64, partitions array<u32>}
                    -> resources: array{resource_id u64, partitions: array{partition u32, error u16}}
 
-AddAcksToTxn       <- txn_id string, producer_id u64, producer_epoch u16, queue_ids array<u64>
-                   -> queues: array{queue_id u64, error u16}
-
 EndTxn             <- txn_id string, producer_id u64, producer_epoch u16, commit u8
                    -> error u16, producer_id u64, producer_epoch u16   // Epoch für die nächste Transaktion
 
@@ -457,6 +455,9 @@ VerifyTxn          <- txn_id string, producer_id u64, producer_epoch u16,       
                       resource_id u64, partition u32
                    -> error u16, leader_hint?   // NONE, INVALID_TXN_STATE, PRODUCER_FENCED, CONCURRENT_TRANSACTIONS
 ```
+
+Key 18 bleibt frei: Eine Queue kommt wie eine Partition (Partition 0) per `AddPartitionsToTxn` in eine Transaktion, ihre Acks schreibt `Ack` mit Transaktions-ID (ADR 0075).
+
 
 ### Admin
 

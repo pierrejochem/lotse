@@ -24,7 +24,7 @@ use lotse_proto::{
 };
 use lotse_rt::{Clock, Net, Rng, Spawn};
 
-use crate::{Attempt, Client, ClientError, Connection, PushQueue, race};
+use crate::{Attempt, CallError, Client, ClientError, Connection, PushQueue, Transaction, race};
 
 /// One message from a queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +242,48 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         self.client.retrying(|| self.settle_once(offset, None)).await
     }
 
+    /// Acknowledges a message within a transaction (ADR 0075): it is settled
+    /// if the transaction commits and delivered again if it aborts, and
+    /// until then no one else receives it. Adds the queue to the
+    /// transaction first. Only a message this subscription holds can be
+    /// acknowledged so; any error leaves the transaction to abort.
+    pub async fn ack_in(&self, txn: &mut Transaction<'_, R>, message: &Message) -> Result<(), ClientError> {
+        txn.add(&self.queue, 0).await?;
+        let res = self.ack_in_once(txn, message.offset()).await;
+        if let Err(e) = &res {
+            txn.poisoned = Some(e.to_string());
+        }
+        res
+    }
+
+    async fn ack_in_once(&self, txn: &Transaction<'_, R>, offset: u64) -> Result<(), ClientError> {
+        let gone = |why: &str| ClientError::Broker { code: ErrorCode::MESSAGE_NOT_HELD, message: Some(why.into()) };
+        // The messages are the subscription's connection's: on another one
+        // they are not held.
+        let Some(sub) = &self.sub else { return Err(gone("the subscription ended; the message went back")) };
+        let c = self.client;
+        let req = Request::Ack(AckRequest {
+            queue_id: self.resource_id,
+            txn_id: Some(txn.txn_id.clone()),
+            tenant: c.cfg.tenant.clone(),
+            producer: Some((txn.producer_id, txn.epoch)),
+            ranges: vec![(offset, offset + 1)],
+        });
+        c.retrying(|| async {
+            match sub.conn.call(&req, &c.rt, c.cfg.request_timeout).await {
+                Ok(Response::Outcome(r)) if r.error == ErrorCode::NONE => Ok(()),
+                Ok(Response::Outcome(r)) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
+                Ok(other) => Err(Attempt::RetryMaybeDone(format!("unexpected response {other:?}"))),
+                // Sent again on the same connection: the leader takes a
+                // retry for what the transaction holds already.
+                Err(CallError::Lost(why)) => Err(Attempt::RetryMaybeDone(why)),
+                Err(CallError::NotSent(_)) => Err(Attempt::Fail(gone("the connection broke; the message went back"))),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await
+    }
+
     /// Rejects a message: with `requeue` it is delivered again (to any
     /// consumer), without it is discarded like an acknowledged one.
     pub async fn nack(&self, message: &Message, requeue: bool) -> Result<(), ClientError> {
@@ -274,7 +316,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         let (route, addr) = c.route(&self.queue, 0).await?;
         let ranges = vec![(offset, offset + 1)];
         let req = match nack {
-            None => Request::Ack(AckRequest { queue_id: route.resource_id, txn_id: None, ranges }),
+            None => Request::Ack(AckRequest::plain(route.resource_id, ranges)),
             Some(requeue) => Request::Nack(NackRequest { queue_id: route.resource_id, ranges, requeue, delay_ms: 0 }),
         };
         match c.call(&addr, &req).await {

@@ -69,7 +69,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 
 ## Error codes
 
-Codes 0 to 29, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
+Codes 0 to 31, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
 
 ## The record batch
 
@@ -254,7 +254,7 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 
 ### Settling
 
-- **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null. An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
+- **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null (an ack in a transaction, ADR 0075, is not in this SDK yet). An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
 - **Nack without requeue** discards the message (or dead-letters it, if the queue's limits say so) and is sent like an ack.
 - **Nack with requeue** is sent **on the subscription's own connection**: the broker takes back only what that connection holds. `delay_ms` is 0 (anything else is refused). If the subscription has ended or the connection fails, the message has gone back already, and the call does nothing. The Java client also does nothing for a message of an earlier subscription, rather than ask the new connection for something it does not hold.
 

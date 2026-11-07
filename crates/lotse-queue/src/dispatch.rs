@@ -18,6 +18,13 @@
 //! correct because only committed acks settle a message. A subscription
 //! whose oldest message in flight is older than the ack timeout is ended and
 //! its messages are held back as above (RabbitMQ's consumer timeout).
+//!
+//! A transactional ack (ADR 0075) takes messages out of flight for good:
+//! [`Dispatcher::take_for_txn`] accepts only what the connection has in
+//! flight (or what the same producer holds already, for a retry), and the
+//! messages are then **held**: never delivered, never timed out, until the
+//! log settles them (the transaction committed) or no transaction holds
+//! them any more (it aborted), when they are delivered again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -60,6 +67,16 @@ pub struct Dispatcher {
     cursor: u64,
     /// Where the next round of assignment starts, for fairness.
     rotate: usize,
+    /// Messages a transaction holds or is about to.
+    held: BTreeMap<u64, Hold>,
+}
+
+/// A message a transactional ack took.
+#[derive(Debug, Clone, Copy)]
+struct Hold {
+    producer: u64,
+    /// The ack is applied: from now on the log says who holds it.
+    applied: bool,
 }
 
 /// One message handed to a subscription.
@@ -82,6 +99,7 @@ impl Dispatcher {
             extra: BTreeMap::new(),
             cursor: queue.floor(),
             rotate: 0,
+            held: BTreeMap::new(),
         }
     }
 
@@ -154,11 +172,40 @@ impl Dispatcher {
     pub fn release(&mut self, offsets: impl IntoIterator<Item = u64>) {
         for o in offsets {
             self.extra.remove(&o);
+            self.held.remove(&o);
             if self.in_flight.remove(&o).is_some() || o < self.cursor {
                 self.redeliver.insert(o);
             }
         }
         self.drop_finished();
+    }
+
+    /// Takes `offsets` for a transactional ack of `producer`, if each is in
+    /// flight with a subscription of `conn` or taken for `producer` already
+    /// (a retry). Returns the ones newly taken, which the caller releases if
+    /// the ack is not written, or `None`, taking nothing, if one is neither.
+    pub fn take_for_txn(&mut self, conn: ConnId, producer: u64, offsets: &[u64]) -> Option<Vec<u64>> {
+        let mine = |o: &u64| self.in_flight.get(o).and_then(|f| self.subs.get(&f.sub)).is_some_and(|s| s.conn == conn);
+        let again = |o: &u64| self.held.get(o).is_some_and(|h| h.producer == producer);
+        if !offsets.iter().all(|o| mine(o) || again(o)) {
+            return None;
+        }
+        let taken: Vec<u64> = offsets.iter().copied().filter(|o| !again(o)).collect();
+        for &o in &taken {
+            self.in_flight.remove(&o);
+            self.held.insert(o, Hold { producer, applied: false });
+        }
+        self.drop_finished();
+        Some(taken)
+    }
+
+    /// The transactional ack that took `offsets` is applied.
+    pub fn held_applied(&mut self, offsets: &[u64]) {
+        for o in offsets {
+            if let Some(h) = self.held.get_mut(o) {
+                h.applied = true;
+            }
+        }
     }
 
     /// Forgets everything the log has settled since (acks applied, from any
@@ -167,6 +214,30 @@ impl Dispatcher {
         self.in_flight.retain(|o, _| !queue.is_settled(*o));
         self.redeliver.retain(|o| !queue.is_settled(*o));
         self.extra.retain(|o, _| !queue.is_settled(*o));
+        // A held message whose transaction aborted goes out again.
+        let mut back = Vec::new();
+        self.held.retain(|o, h| {
+            if queue.is_settled(*o) {
+                return false;
+            }
+            if !h.applied {
+                return true;
+            }
+            match queue.held_by(*o) {
+                Some(p) => {
+                    h.producer = p;
+                    true
+                }
+                None => {
+                    back.push(*o);
+                    false
+                }
+            }
+        });
+        for o in back {
+            self.redeliver.insert(o);
+            *self.extra.entry(o).or_insert(0) += 1;
+        }
         self.drop_finished();
     }
 
@@ -187,11 +258,22 @@ impl Dispatcher {
     /// to retire them (dead-letter or drop them) and waits for the claim to
     /// be applied.
     pub fn candidates(&mut self, queue: &QueueLog, limit: u64, max: usize, skip: &BTreeSet<u64>) -> Vec<u64> {
-        let mut out: Vec<u64> =
-            self.redeliver.iter().copied().filter(|o| *o < limit && !skip.contains(o)).take(max).collect();
+        let mut out: Vec<u64> = self
+            .redeliver
+            .iter()
+            .copied()
+            .filter(|o| *o < limit && !skip.contains(o) && !self.held.contains_key(o))
+            .take(max)
+            .collect();
         let mut o = queue.next_unsettled(self.cursor);
         while out.len() < max && o < limit {
-            if !self.in_flight.contains_key(&o) && !self.redeliver.contains(&o) && !skip.contains(&o) {
+            // Held by a transaction this leader has not seen taken (an
+            // earlier leader's): noted, so its end is noticed.
+            if let Some(producer) = queue.held_by(o).filter(|_| !self.held.contains_key(&o)) {
+                self.held.insert(o, Hold { producer, applied: true });
+            }
+            let free = !self.in_flight.contains_key(&o) && !self.redeliver.contains(&o) && !self.held.contains_key(&o);
+            if free && !skip.contains(&o) {
                 out.push(o);
             }
             o = queue.next_unsettled(o + 1);
@@ -286,6 +368,16 @@ impl Dispatcher {
     /// The messages in flight with `id`.
     pub fn in_flight_of(&self, id: SubscriptionId) -> Vec<u64> {
         self.in_flight.iter().filter(|(_, f)| f.sub == id).map(|(o, _)| *o).collect()
+    }
+
+    /// Whether a transaction holds `offset`, or a transactional ack took it.
+    pub fn is_held(&self, offset: u64) -> bool {
+        self.held.contains_key(&offset)
+    }
+
+    /// Whether `offset` is with a consumer: in flight or held.
+    pub fn is_busy(&self, offset: u64) -> bool {
+        self.is_in_flight(offset) || self.is_held(offset)
     }
 
     /// Whether `offset` is in flight with any subscription.

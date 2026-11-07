@@ -128,3 +128,16 @@ fn a_marker_raises_the_epoch_and_restarts_the_sequence() {
     back.restore(&bytes).unwrap();
     assert_eq!(back.committed, s.committed);
 }
+
+#[test]
+fn a_transactional_ack_leaves_the_producers_sequences_alone() {
+    let mut s = ProducerState::new(10);
+    let next = commit(&mut s, 1, &batch(7, 0, 0, 2));
+    let mut raw = BytesMut::from(&lotse_record::ack_batch(&[(0, 2)]).unwrap()[..]);
+    lotse_record::set_producer(&mut raw, 7, 0, -1).unwrap();
+    lotse_record::set_transactional(&mut raw, true).unwrap();
+    let ack = Batch::parse(&raw.freeze()).unwrap().0;
+    let next = commit(&mut s, next, &ack);
+    assert_eq!(s.check(&batch(7, 0, 2, 1)), Check::New, "the ack took no sequence: the next data follows on");
+    commit(&mut s, next, &batch(7, 0, 2, 1));
+}

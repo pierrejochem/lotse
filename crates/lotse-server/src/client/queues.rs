@@ -20,23 +20,30 @@
 //! taken back, their delivery counts are written, and they go out again once
 //! that is committed. The ack timeout does the same for a subscription that
 //! held a message too long, after ending it with an `ACK_TIMED_OUT` push.
+//!
+//! An `Ack` with a transactional id (ADR 0075) takes the connection's
+//! messages out of flight and writes a transactional ack batch; the
+//! transaction's marker settles them or gives them back. It is answered once
+//! applied, with `MESSAGE_NOT_HELD` if the transaction does not hold every
+//! message it named.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use bytes::BytesMut;
 use lotse_proto::{
     AckRequest, CreditRequest, DeliverPush, DeliveredOffset, ErrorCode, LeaderHint, NackRequest, OutcomeResponse,
-    Response, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    Response, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, VerifyTxnRequest,
 };
 use lotse_queue::{ConnId, Dispatcher, QueueLog, SubscriptionId};
 use lotse_raft::Role;
 use lotse_record::Batch;
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, outcome, retire};
-use crate::replica::{Error, Proposed, Replica, StateMachine};
+use super::{Clients, ClusterView, Outbox, hint, ids, outcome, retire, verify};
+use crate::replica::{Error, ProposeError, Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
 
 type Groups<R, S> = BTreeMap<GroupId, Replica<R, S>>;
@@ -84,6 +91,9 @@ impl QueueConfig {
 /// `REQUEST_TIMED_OUT`.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Messages one transactional ack may name at most: each is held one by one.
+const MAX_TXN_ACK: u64 = 10_000;
+
 /// Messages handed out per queue and round at most.
 const DELIVER_PER_ROUND: usize = 1024;
 
@@ -110,6 +120,18 @@ pub(super) struct QueueWrite {
     marks: retire::Marks,
     /// For a purge or requeue: what to answer once it is decided.
     action: Option<Action>,
+    /// For a transactional ack: whose, and what.
+    txn: Option<TxnAck>,
+}
+
+/// A transactional ack in flight (ADR 0075).
+pub(super) struct TxnAck {
+    producer: u64,
+    /// The messages it names.
+    offsets: Vec<u64>,
+    /// The ones this request took out of flight: given back if it is not
+    /// written.
+    taken: Vec<u64>,
 }
 
 /// What a purge or requeue answers once its batch is decided (ADR 0064).
@@ -146,11 +168,13 @@ pub(super) struct QueueBatch {
     pub(super) marks: retire::Marks,
     /// For a purge or requeue, how to answer.
     pub(super) action: Option<Action>,
+    /// For a transactional ack.
+    pub(super) txn: Option<TxnAck>,
 }
 
 impl QueueBatch {
     pub(super) fn new(batch: bytes::Bytes) -> Self {
-        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default(), action: None }
+        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default(), action: None, txn: None }
     }
 }
 
@@ -307,14 +331,77 @@ impl Clients {
             Ok(x) => x,
             Err((e, h)) => return answer(&outbox, correlation_id, e, h),
         };
-        // Acks inside a transaction are not supported yet.
-        if req.txn_id.is_some() || !valid(&req.ranges, replica.raft_ref().last_index()) {
+        if !valid(&req.ranges, replica.raft_ref().last_index()) {
             return answer(&outbox, correlation_id, ErrorCode::INVALID_REQUEST, None);
+        }
+        if req.txn_id.is_some() {
+            return self.txn_ack(outbox, correlation_id, g, req, view.now, replica);
         }
         let batch = lotse_record::ack_batch(&req.ranges).expect("ranges fit a batch");
         let acked = req.ranges.iter().map(|&(f, t)| t.saturating_sub(f)).sum();
         let what = QueueBatch { acked, ..QueueBatch::new(batch) };
         self.write_queue(Some((outbox, correlation_id)), g, replica, what, view.now);
+    }
+
+    /// An ack within a transaction: asks the coordinator first if the
+    /// producer has no transaction open in the queue yet (ADR 0057).
+    fn txn_ack<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        correlation_id: u32,
+        g: GroupId,
+        req: AckRequest,
+        now: Instant,
+        replica: &mut Replica<R, S>,
+    ) {
+        let count: u64 = req.ranges.iter().map(|&(f, t)| t - f).sum();
+        let Some((producer, epoch)) = req.producer.filter(|(p, _)| *p != 0 && count <= MAX_TXN_ACK) else {
+            return answer(&outbox, correlation_id, ErrorCode::INVALID_REQUEST, None);
+        };
+        let mut batch = BytesMut::from(&lotse_record::ack_batch(&req.ranges).expect("ranges fit a batch")[..]);
+        lotse_record::set_producer(&mut batch, producer, epoch, -1).expect("a whole batch");
+        lotse_record::set_transactional(&mut batch, true).expect("a whole batch");
+        let batch = batch.freeze();
+        let ack = verify::WaitingAck { outbox, correlation_id, group: g, producer, ranges: req.ranges, batch };
+        match replica.opens_txn(&ack.batch) {
+            Some((producer_id, epoch)) => {
+                let key = verify::Key { group: g, producer_id, epoch };
+                let (tenant, txn_id) = ids::split(req.txn_id.as_deref().expect("a transactional ack"));
+                let request = VerifyTxnRequest {
+                    tenant: tenant.to_string(),
+                    txn_id: txn_id.to_string(),
+                    producer_id,
+                    producer_epoch: epoch,
+                    resource_id: req.queue_id,
+                    partition: 0,
+                };
+                self.verify.wait(key, request, ack);
+            }
+            None => self.write_txn_ack(ack, replica, now),
+        }
+    }
+
+    /// Takes the messages a transactional ack names and writes it, or says
+    /// why not.
+    pub(super) fn write_txn_ack<R: Runtime, S: StateMachine>(
+        &mut self,
+        ack: verify::WaitingAck,
+        replica: &mut Replica<R, S>,
+        now: Instant,
+    ) {
+        let verify::WaitingAck { outbox, correlation_id, group, producer, ranges, batch } = ack;
+        let offsets: Vec<u64> = ranges.iter().flat_map(|&(f, t)| f..t).collect();
+        let term = replica.raft_ref().term();
+        let taken = self
+            .queues
+            .get_mut(&group)
+            .filter(|s| s.term == term && replica.raft_ref().role() == Role::Leader)
+            .and_then(|s| s.dispatcher.take_for_txn(conn_id(&outbox), producer, &offsets));
+        let Some(taken) = taken else {
+            return answer(&outbox, correlation_id, ErrorCode::MESSAGE_NOT_HELD, None);
+        };
+        let what = QueueBatch { txn: Some(TxnAck { producer, offsets, taken }), ..QueueBatch::new(batch) };
+        self.write_queue(Some((outbox, correlation_id)), group, replica, what, now);
     }
 
     pub(super) fn nack<R: Runtime, S: StateMachine>(
@@ -369,10 +456,11 @@ impl Clients {
         reply: Option<(Arc<Outbox>, u32)>,
         group: GroupId,
         replica: &mut Replica<R, S>,
-        QueueBatch { batch, release, acked, marks, action }: QueueBatch,
+        QueueBatch { batch, release, acked, marks, action, txn }: QueueBatch,
         now: Instant,
     ) {
-        match replica.propose_internal(batch) {
+        let proposed = if txn.is_some() { replica.propose_txn_ack(batch) } else { replica.propose_internal(batch) };
+        match proposed {
             Ok(Proposed { last, term: Some(term), .. }) => {
                 let deadline = now + WRITE_TIMEOUT;
                 self.queue_writes.push(QueueWrite {
@@ -385,13 +473,24 @@ impl Clients {
                     acked,
                     marks,
                     action,
+                    txn,
                 });
             }
             Ok(_) => unreachable!("a queue batch is never a duplicate"),
-            Err(_) => {
-                // Not the leader any more: the dispatcher goes with the term.
+            Err(e) => {
+                // Not the leader any more (the dispatcher goes with the
+                // term), or a fenced producer.
+                let (error, h) = match e {
+                    ProposeError::ProducerFenced { .. } => (ErrorCode::PRODUCER_FENCED, None),
+                    _ => (ErrorCode::NOT_LEADER, hint(replica.raft_ref())),
+                };
+                if let Some(t) = txn
+                    && let Some(s) = self.queues.get_mut(&group).filter(|s| s.term == replica.raft_ref().term())
+                {
+                    s.dispatcher.release(t.taken);
+                }
                 if let Some((outbox, id)) = reply {
-                    reply_to(&outbox, id, ErrorCode::NOT_LEADER, hint(replica.raft_ref()), action);
+                    reply_to(&outbox, id, error, h, action);
                 }
             }
         }
@@ -413,9 +512,23 @@ impl Clients {
                 continue;
             }
             match decided {
-                Some(error) => {
+                Some(mut error) => {
                     if error == ErrorCode::NONE {
                         self.stats.group(w.group).acked += w.acked;
+                    }
+                    if let Some(t) = &w.txn {
+                        let serving = self.queues.get_mut(&w.group).filter(|s| s.term == w.term);
+                        if error == ErrorCode::NONE {
+                            let q = replica.queue().expect("a queue group");
+                            if !t.offsets.iter().all(|o| q.held_by(*o) == Some(t.producer)) {
+                                error = ErrorCode::MESSAGE_NOT_HELD;
+                            }
+                            if let Some(s) = serving {
+                                s.dispatcher.held_applied(&t.taken);
+                            }
+                        } else if let Some(s) = serving {
+                            s.dispatcher.release(t.taken.iter().copied());
+                        }
                     }
                     if let Some((outbox, id)) = w.reply.take() {
                         let h = if error == ErrorCode::NOT_LEADER { hint(replica.raft_ref()) } else { None };

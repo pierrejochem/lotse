@@ -19,6 +19,8 @@ const TAG_TENANT: u64 = 1;
 const TAG_INSTANCE: u64 = 2;
 /// A consumer group member's subscription by pattern (ADR 0073).
 const TAG_PATTERN: u64 = 3;
+/// The producer id and epoch of a transactional ack (ADR 0075).
+const TAG_PRODUCER: u64 = 2;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -1183,23 +1185,62 @@ fn get_ranges(r: &mut Reader) -> Result<Vec<(u64, u64)>, DecodeError> {
 pub struct AckRequest {
     /// The queue.
     pub queue_id: u64,
-    /// Transaction, for an ack that takes effect with its commit (not yet
-    /// supported: refused).
+    /// Transaction, for an ack that takes effect with its commit (ADR 0075):
+    /// sent on the connection the messages were delivered on, after the
+    /// queue was added to the transaction.
     pub txn_id: Option<String>,
+    /// The tenant the transactional id lives in; sent as a tag, absent for
+    /// [`DEFAULT_TENANT`].
+    pub tenant: String,
+    /// The transaction's producer id and epoch; sent as a tag with a
+    /// transactional id, never without.
+    pub producer: Option<(u64, u16)>,
     /// Offset ranges `[from, to)`.
     pub ranges: Vec<(u64, u64)>,
 }
 
 impl AckRequest {
+    /// A plain ack, outside any transaction.
+    pub fn plain(queue_id: u64, ranges: Vec<(u64, u64)>) -> Self {
+        AckRequest { queue_id, txn_id: None, tenant: DEFAULT_TENANT.into(), producer: None, ranges }
+    }
+
     pub(crate) fn put(&self, w: &mut Writer) {
         w.u64(self.queue_id);
         w.opt_string(self.txn_id.as_deref());
         put_ranges(w, &self.ranges);
-        w.no_tags();
+        let mut tags = Vec::new();
+        if self.tenant != DEFAULT_TENANT {
+            let mut v = Writer::new();
+            v.string(&self.tenant);
+            tags.push((TAG_TENANT, v.finish()));
+        }
+        if let Some((id, epoch)) = self.producer {
+            let mut v = Writer::new();
+            v.u64(id);
+            v.u16(epoch);
+            tags.push((TAG_PRODUCER, v.finish()));
+        }
+        if tags.is_empty() {
+            w.no_tags();
+        } else {
+            w.tags(&tags);
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = AckRequest { queue_id: r.u64()?, txn_id: r.opt_string()?, ranges: get_ranges(r)? };
-        r.tags()?;
+        let mut req = AckRequest::plain(r.u64()?, Vec::new());
+        req.txn_id = r.opt_string()?;
+        req.ranges = get_ranges(r)?;
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_TENANT => req.tenant = v.string()?,
+                TAG_PRODUCER => req.producer = Some((v.u64()?, v.u16()?)),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
         Ok(req)
     }
 }

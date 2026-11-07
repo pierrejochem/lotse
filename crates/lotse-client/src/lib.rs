@@ -1486,14 +1486,7 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         }
         let c = self.client;
         let key = (stream.to_string(), partition);
-        if !self.added.contains(&key) {
-            let res = c.retrying(|| self.add_partition_once(stream, partition)).await;
-            if let Err(e) = res {
-                self.poison(&e);
-                return Err(e);
-            }
-            self.added.insert(key.clone());
-        }
+        self.add(stream, partition).await?;
         let corrupt = |e: lotse_record::Error| ClientError::Broker {
             code: ErrorCode::CORRUPT_BATCH,
             message: Some(e.to_string()),
@@ -1515,9 +1508,26 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         res
     }
 
+    /// Adds a partition (a queue: partition 0) to the transaction once.
+    pub(crate) async fn add(&mut self, name: &str, partition: u32) -> Result<(), ClientError> {
+        if let Some(why) = &self.poisoned {
+            return Err(ClientError::MustAbort(why.clone()));
+        }
+        let key = (name.to_string(), partition);
+        if !self.added.contains(&key) {
+            let res = self.client.retrying(|| self.add_partition_once(name, partition)).await;
+            if let Err(e) = res {
+                self.poison(&e);
+                return Err(e);
+            }
+            self.added.insert(key);
+        }
+        Ok(())
+    }
+
     /// After an error, the transaction can only be aborted, except when the
     /// batch was definitely not written and nothing else went wrong.
-    fn poison(&mut self, e: &ClientError) {
+    pub(crate) fn poison(&mut self, e: &ClientError) {
         if !matches!(e, ClientError::GaveUp(..) | ClientError::UnknownStream(..)) {
             self.poisoned = Some(e.to_string());
         }

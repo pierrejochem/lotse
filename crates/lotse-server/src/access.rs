@@ -209,7 +209,14 @@ impl Access {
             },
             Request::EndTxn(r) => txn(&r.tenant, &r.txn_id),
             Request::Subscribe(r) => on(Read, &mut std::iter::once(r.queue_id)),
-            Request::Ack(r) => on(Read, &mut std::iter::once(r.queue_id)),
+            // In a transaction, the transactional id is the consumer's too
+            // (ADR 0075).
+            Request::Ack(r) => {
+                if let Some(id) = &r.txn_id {
+                    txn(&r.tenant, id)?;
+                }
+                on(Read, &mut std::iter::once(r.queue_id))
+            }
             Request::Nack(r) => on(Read, &mut std::iter::once(r.queue_id)),
             // Only ever about the connection's own subscriptions.
             Request::Credit(_) | Request::Unsubscribe(_) => Ok(()),

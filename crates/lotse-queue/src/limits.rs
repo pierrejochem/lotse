@@ -38,7 +38,7 @@ impl Limits {
 }
 
 /// The unsettled messages that have been delivered as often as `limits`
-/// allow and are not with a consumer: persisted counts (nack, ack timeout)
+/// allow and are not with a consumer or a transaction: persisted counts (nack, ack timeout)
 /// plus, when the leader has a dispatcher, deliveries it only counts in
 /// memory (disconnects). Not those in `skip`. At most `max`, lowest first,
 /// each with its delivery count.
@@ -58,7 +58,8 @@ pub fn exhausted(
     }
     offsets
         .into_iter()
-        .filter(|o| !skip.contains(o) && !queue.is_settled(*o) && !dispatcher.is_some_and(|d| d.is_in_flight(*o)))
+        .filter(|o| !skip.contains(o) && !queue.is_settled(*o) && queue.held_by(*o).is_none())
+        .filter(|o| !dispatcher.is_some_and(|d| d.is_busy(*o)))
         .map(|o| {
             let n = u32::from(queue.delivery_count(o)) + dispatcher.map_or(0, |d| u32::from(d.extra_of(o)));
             (o, n.min(u32::from(u16::MAX)) as u16)

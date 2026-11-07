@@ -11,14 +11,19 @@
 //! in the log the transaction is open here and later batches go straight
 //! through. A transaction that ends meanwhile raises the producer's epoch
 //! with its marker, so a batch let through late is refused as fenced.
+//!
+//! A queue's transactional ack (ADR 0075) waits for the same question when
+//! its producer has no transaction open in the queue yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::sync::Arc;
+
 use bytes::Bytes;
-use lotse_proto::{ErrorCode, VerifyTxnRequest};
+use lotse_proto::{ErrorCode, OutcomeResponse, Response, VerifyTxnRequest};
 use lotse_rt::Runtime;
 
-use super::{Clients, ClusterView, propose_one, settle};
+use super::{Clients, ClusterView, Outbox, propose_one, settle};
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
 
@@ -48,14 +53,34 @@ pub(crate) struct VerifyJob {
     pub(crate) request: VerifyTxnRequest,
 }
 
+/// A queue's transactional ack waiting for the coordinator's answer
+/// (ADR 0075).
+pub(crate) struct WaitingAck {
+    pub(crate) outbox: Arc<Outbox>,
+    pub(crate) correlation_id: u32,
+    pub(crate) group: GroupId,
+    pub(crate) producer: u64,
+    pub(crate) ranges: Vec<(u64, u64)>,
+    /// The transactional ack batch.
+    pub(crate) batch: Bytes,
+}
+
 /// The questions this node has asked and not yet heard back on.
 #[derive(Default)]
 pub(crate) struct Verifying {
     asked: BTreeSet<Key>,
     jobs: Vec<VerifyJob>,
+    /// Transactional acks waiting for an answer, with their question.
+    acks: Vec<(Key, WaitingAck)>,
 }
 
 impl Verifying {
+    /// Asks about `key` for a transactional ack, which waits for the answer.
+    pub(crate) fn wait(&mut self, key: Key, request: VerifyTxnRequest, ack: WaitingAck) {
+        self.ask(key, request);
+        self.acks.push((key, ack));
+    }
+
     /// Asks about `key`, unless that question is out already.
     pub(crate) fn ask(&mut self, key: Key, request: VerifyTxnRequest) {
         if self.asked.insert(key) {
@@ -81,6 +106,21 @@ impl Clients {
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) {
         self.verify.asked.remove(&key);
+        let (now_acks, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.verify.acks).into_iter().partition(|(k, _)| *k == key);
+        self.verify.acks = rest;
+        for (_, ack) in now_acks {
+            match groups.get_mut(&key.group) {
+                Some(replica) if error == ErrorCode::NONE => self.write_txn_ack(ack, replica, view.now),
+                Some(_) => ack
+                    .outbox
+                    .push(ack.correlation_id, &Response::Outcome(OutcomeResponse { error, leader_hint: None })),
+                None => ack.outbox.push(
+                    ack.correlation_id,
+                    &Response::Outcome(OutcomeResponse { error: ErrorCode::NOT_LEADER, leader_hint: None }),
+                ),
+            }
+        }
         let produces = std::mem::take(&mut self.produces);
         for mut p in produces {
             let (now, rest): (Vec<Held>, Vec<Held>) = p.held.drain(..).partition(|h| h.key == key);

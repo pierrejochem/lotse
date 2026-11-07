@@ -394,7 +394,7 @@ public final class QueueConsumer implements AutoCloseable {
         client.retrying(() -> {
             LotseClient.Routed routed = client.route(queue, 0);
             long queueId = routed.route().resourceId();
-            Request req = nack == null ? new Request.Ack(queueId, null, ranges) : new Request.Nack(queueId, ranges, false, 0);
+            Request req = nack == null ? new Request.Ack(queueId, ranges) : new Request.Nack(queueId, ranges, false, 0);
             Response resp;
             try {
                 resp = client.call(routed.address(), req);

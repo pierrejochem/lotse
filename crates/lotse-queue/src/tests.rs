@@ -369,3 +369,132 @@ fn a_message_expires_exactly_when_its_ttl_has_passed() {
     assert!(Limits { max_deliveries: 3, message_ttl_ms: 0 }.exhausted(3));
     assert!(!Limits::default().exhausted(60_000));
 }
+
+/// A transactional ack of `producer` at `epoch`.
+fn txn_ack(base: u64, producer: u64, epoch: u16, ranges: &[(u64, u64)]) -> Batch {
+    let mut raw = BytesMut::from(&lotse_record::ack_batch(ranges).unwrap()[..]);
+    lotse_record::set_producer(&mut raw, producer, epoch, -1).unwrap();
+    lotse_record::set_transactional(&mut raw, true).unwrap();
+    stamped(raw.freeze(), base)
+}
+
+#[test]
+fn a_transactional_ack_holds_until_the_marker_settles_or_releases() {
+    let mut q = queue(4);
+    q.apply(&txn_ack(4, 7, 0, &[(0, 2)])).unwrap();
+    q.apply(&txn_ack(5, 8, 0, &[(2, 3)])).unwrap();
+    assert_eq!((q.held_by(0), q.held_by(1), q.held_by(2), q.held_by(3)), (Some(7), Some(7), Some(8), None));
+    assert!(!q.is_settled(0) && q.is_settled(4), "held, not settled; the ack batch is no message");
+    assert_eq!(q.held(), 3);
+    q.apply(&marker(6, 7, true)).unwrap();
+    assert!(q.is_settled(0) && q.is_settled(1), "committed: settled");
+    q.apply(&marker(7, 8, false)).unwrap();
+    assert!(!q.is_settled(2) && q.held_by(2).is_none(), "aborted: deliverable again");
+    assert_eq!(q.held(), 0);
+}
+
+#[test]
+fn of_two_transactions_the_first_ack_in_the_log_holds_a_message() {
+    let mut q = queue(3);
+    q.apply(&ack(3, &[(2, 3)])).unwrap();
+    q.apply(&txn_ack(4, 7, 0, &[(0, 1)])).unwrap();
+    q.apply(&txn_ack(5, 8, 0, &[(0, 3)])).unwrap();
+    assert_eq!(q.held_by(0), Some(7), "held already: the second transaction does not get it");
+    assert_eq!(q.held_by(1), Some(8));
+    assert_eq!(q.held_by(2), None, "settled before: nobody holds it");
+    q.apply(&marker(6, 8, true)).unwrap();
+    assert!(!q.is_settled(0), "8's commit does not settle what 7 holds");
+    // A plain ack settles a held message; the commit then changes nothing.
+    q.apply(&ack(7, &[(0, 1)])).unwrap();
+    assert!(q.is_settled(0) && q.held_by(0).is_none());
+    q.apply(&marker(8, 7, false)).unwrap();
+    assert!(q.is_settled(0), "an abort does not take back a plain ack");
+}
+
+#[test]
+fn a_marker_ends_only_acks_of_an_older_epoch() {
+    let mut q = queue(2);
+    // `marker` writes epoch 1: an ack at epoch 1 belongs to the next
+    // transaction, which this marker does not end.
+    q.apply(&txn_ack(2, 7, 1, &[(0, 1)])).unwrap();
+    q.apply(&marker(3, 7, true)).unwrap();
+    assert_eq!(q.held_by(0), Some(7), "still held");
+    assert!(!q.is_settled(0));
+}
+
+#[test]
+fn a_claim_leaves_a_held_message() {
+    let mut q = queue(2);
+    q.apply(&txn_ack(2, 7, 0, &[(0, 1)])).unwrap();
+    q.apply(&retire_out(3, 99, &[(0, Reason::Expired, 1), (1, Reason::Expired, 1)])).unwrap();
+    assert_eq!(q.held_by(0), Some(7), "held: not claimed");
+    assert_eq!(q.owed().map(|(o, _)| o).collect::<Vec<_>>(), vec![1]);
+}
+
+#[test]
+fn held_messages_survive_a_snapshot_and_old_snapshots_still_read() {
+    let mut q = queue(3);
+    let old = q.encode();
+    assert_eq!(QueueLog::decode(old).unwrap(), q, "nothing held: the state reads as before");
+    q.apply(&txn_ack(3, 7, 2, &[(0, 2)])).unwrap();
+    let bytes = q.encode();
+    let back = QueueLog::decode(bytes.clone()).unwrap();
+    assert_eq!(back, q);
+    assert_eq!(back.held_by(1), Some(7));
+    let mut a = back.clone();
+    a.apply(&marker(4, 7, true)).unwrap();
+    assert!(!a.is_settled(0), "the epoch came along: a marker of epoch 1 does not end an ack of epoch 2");
+    let short = bytes.len() - 1;
+    assert!(QueueLog::decode(bytes.slice(..short)).is_err());
+}
+
+#[test]
+fn a_transactional_ack_takes_only_the_connections_messages_and_an_abort_gives_them_back() {
+    let mut q = queue(4);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 1, 1, 1 << 20);
+    d.subscribe(2, 2, 1, 1 << 20);
+    let c = d.candidates(&q, 4, 2, &Default::default());
+    let got = d.assign(&q, &c, 100, at(0));
+    let of = |sub| got.iter().find(|(s, _)| *s == sub).map(|(_, v)| v[0].offset).unwrap();
+    let (mine, theirs) = (of(1), of(2));
+    assert!(d.take_for_txn(1, 7, &[mine, theirs]).is_none(), "one of them is another connection's");
+    assert!(d.is_in_flight(mine), "nothing taken");
+    assert!(d.take_for_txn(1, 7, &[3]).is_none(), "never delivered");
+    assert_eq!(d.take_for_txn(1, 7, &[mine]), Some(vec![mine]));
+    assert_eq!(d.take_for_txn(1, 7, &[mine]), Some(vec![]), "a retry: nothing new to take");
+    assert!(d.take_for_txn(1, 8, &[mine]).is_none(), "another transaction's now");
+    assert!(d.is_held(mine) && !d.is_in_flight(mine));
+    // Neither a disconnect nor the ack timeout gives it back.
+    d.disconnect(1);
+    assert!(d.timed_out(at(10_000), Duration::from_millis(1)).iter().all(|(_, o)| !o.contains(&mine)));
+    d.subscribe(3, 3, 10, 1 << 20);
+    assert!(!d.candidates(&q, 4, 10, &Default::default()).contains(&mine), "not ready while held");
+    // Applied, held by the log; the abort gives it back with one more delivery.
+    q.apply(&txn_ack(4, 7, 0, &[(mine, mine + 1)])).unwrap();
+    d.held_applied(&[mine]);
+    d.sweep(&q);
+    assert!(d.is_held(mine));
+    q.apply(&marker(5, 7, false)).unwrap();
+    d.sweep(&q);
+    assert!(!d.is_held(mine));
+    let c = d.candidates(&q, 4, 10, &Default::default());
+    assert_eq!(c.first(), Some(&mine), "delivered again, first");
+    let got = d.assign(&q, &c, 100, at(20));
+    assert_eq!(got[0].1[0], Delivery { offset: mine, delivery_count: 2 });
+}
+
+#[test]
+fn a_new_leader_learns_what_transactions_hold_from_the_log() {
+    let mut q = queue(3);
+    q.apply(&txn_ack(3, 7, 0, &[(1, 2)])).unwrap();
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 1, 10, 1 << 20);
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    assert_eq!(c, vec![0, 2], "held by a transaction: not delivered");
+    d.assign(&q, &c, 100, at(0));
+    assert!(d.is_held(1));
+    q.apply(&marker(4, 7, false)).unwrap();
+    d.sweep(&q);
+    assert_eq!(d.candidates(&q, 3, 10, &Default::default()), vec![1], "aborted: noticed and delivered");
+}

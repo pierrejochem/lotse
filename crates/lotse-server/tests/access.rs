@@ -258,7 +258,7 @@ fn every_request_needs_its_role() {
                     producer_epoch: 0,
                     resources: part(),
                 }),
-                Request::Ack(lotse_proto::AckRequest { queue_id: queue, txn_id: None, ranges: vec![(0, 1)] }),
+                Request::Ack(lotse_proto::AckRequest::plain(queue, vec![(0, 1)])),
                 Request::Nack(lotse_proto::NackRequest {
                     queue_id: queue,
                     ranges: vec![(0, 1)],

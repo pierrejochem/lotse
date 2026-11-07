@@ -129,6 +129,11 @@ fn producer_of(batch: &Batch) -> Option<(u64, u16, Option<Seqs>)> {
     if batch.attributes().control {
         return batch.attributes().transactional.then_some((id, batch.producer_epoch(), None));
     }
+    // A transactional ack in a queue (ADR 0075) has no sequence: it is not
+    // the producer's data, and settling twice changes nothing.
+    if batch.attributes().kind != lotse_record::BatchKind::Data {
+        return None;
+    }
     let base = batch.base_sequence();
     Some((id, batch.producer_epoch(), Some((base, last_seq(base, batch.span())))))
 }
