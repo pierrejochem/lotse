@@ -145,6 +145,8 @@ impl ApiKey {
     /// Ends a user's or group's sessions and refuses their tokens issued
     /// before a time (cluster admin, ADR 0070).
     pub const REVOKE_SESSIONS: ApiKey = ApiKey(50);
+    /// Raises a runtime stream's partition count (tenant admin, ADR 0074).
+    pub const CREATE_PARTITIONS: ApiKey = ApiKey(51);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -167,7 +169,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 49] = [
+    pub const SUPPORTED: [ApiVersionRange; 50] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -217,6 +219,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::REQUEUE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::MOVE_LEADER, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REVOKE_SESSIONS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREATE_PARTITIONS, min: 0, max: 0 },
     ];
 }
 
@@ -494,6 +497,8 @@ pub enum Request {
     MoveLeader(MoveLeaderRequest),
     /// [`ApiKey::REVOKE_SESSIONS`].
     RevokeSessions(RevokeSessionsRequest),
+    /// [`ApiKey::CREATE_PARTITIONS`].
+    CreatePartitions(CreatePartitionsRequest),
 }
 
 impl Request {
@@ -549,6 +554,7 @@ impl Request {
             Request::Requeue(_) => ApiKey::REQUEUE,
             Request::MoveLeader(_) => ApiKey::MOVE_LEADER,
             Request::RevokeSessions(_) => ApiKey::REVOKE_SESSIONS,
+            Request::CreatePartitions(_) => ApiKey::CREATE_PARTITIONS,
         }
     }
 }
@@ -683,6 +689,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::PurgeQueue(r) | Request::Requeue(r) => r.put(&mut w),
         Request::MoveLeader(r) => r.put(&mut w),
         Request::RevokeSessions(r) => r.put(&mut w),
+        Request::CreatePartitions(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -752,6 +759,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::REQUEUE => Request::Requeue(QueueActionRequest::get(&mut r)?),
         ApiKey::MOVE_LEADER => Request::MoveLeader(MoveLeaderRequest::get(&mut r)?),
         ApiKey::REVOKE_SESSIONS => Request::RevokeSessions(RevokeSessionsRequest::get(&mut r)?),
+        ApiKey::CREATE_PARTITIONS => Request::CreatePartitions(CreatePartitionsRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -894,6 +902,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::REMOVE_NODE
         | ApiKey::MOVE_LEADER
         | ApiKey::REVOKE_SESSIONS
+        | ApiKey::CREATE_PARTITIONS
         | ApiKey::SETTLE_VOTERS => Response::Admin(AdminResponse::get(&mut r)?),
         ApiKey::DESCRIBE_NODES => Response::DescribeNodes(DescribeNodesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),

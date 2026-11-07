@@ -430,3 +430,31 @@ fn revoked_sessions_only_move_forward_and_survive_a_snapshot() {
     assert!(s.pins.is_empty() && s.incarnations.is_empty(), "the sections before it are written empty");
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
+
+#[test]
+fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
+    let mut s = MetadataState::default();
+    let create = Change::CreateStream {
+        name: "o".into(),
+        tenant: "t".into(),
+        partitions: vec![vec![1], vec![2]],
+        settings: StreamSettings::default(),
+    };
+    s.apply(3, &payload(&create)).unwrap();
+    let id = resource_id(3);
+    let add = Change::AddPartitions { resource_id: id, partitions: vec![vec![3], vec![1]] };
+    s.apply(7, &payload(&add)).unwrap();
+    let groups: Vec<GroupId> = s.streams[&id].partitions.iter().map(|(g, _)| *g).collect();
+    assert_eq!(groups, (0..4).map(|p| group_id(3, p)).collect::<Vec<_>>(), "numbered on, under the stream's index");
+    assert_eq!(s.streams[&id].partitions[2].1, vec![3]);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // Past the limit: nothing.
+    let too_many = Change::AddPartitions { resource_id: id, partitions: vec![vec![1]; MAX_PARTITIONS as usize] };
+    s.apply(8, &payload(&too_many)).unwrap();
+    assert_eq!(s.streams[&id].partitions.len(), 4);
+    s.apply(9, &payload(&Change::Delete { resource_id: id })).unwrap();
+    assert_eq!(s.deleted_groups(), groups.into_iter().collect(), "a delete knows every partition's group");
+    // A deleted stream gets none.
+    s.apply(10, &payload(&add)).unwrap();
+    assert!(!s.streams.contains_key(&id));
+}

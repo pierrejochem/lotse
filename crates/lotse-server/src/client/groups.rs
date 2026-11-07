@@ -230,6 +230,17 @@ impl Clients {
             None => req.subscribed.as_ref().map(|s| s.iter().copied().filter(|r| known.contains(r)).collect()),
         };
         let mut changed = false;
+        // A stream that got more partitions (ADR 0074): spread them too.
+        {
+            let parts = partitions_of(view);
+            let covered: BTreeSet<Tp> = g.members.values().flat_map(|m| m.target.iter().copied()).collect();
+            let streams: BTreeSet<u64> = g.members.values().flat_map(|m| m.subscribed.iter().copied()).collect();
+            if streams.iter().any(|&r| (0..parts(r)).any(|p| !covered.contains(&(r, p)))) {
+                g.epoch += 1;
+                g.retarget(partitions_of(view));
+                changed = true;
+            }
+        }
         // The member that holds this request's instance id now (ADR 0072).
         let holder = req.instance_id.as_ref().and_then(|i| {
             g.members.iter().find(|(_, m)| m.instance_id.as_ref() == Some(i)).map(|(mid, _)| mid.clone())

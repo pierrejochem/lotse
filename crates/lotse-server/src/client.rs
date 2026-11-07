@@ -445,6 +445,7 @@ impl Clients {
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
+            Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),

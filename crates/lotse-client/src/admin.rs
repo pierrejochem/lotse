@@ -383,6 +383,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::MoveLeader(req)).await
     }
 
+    /// Raises the partition count of the stream `name`, created at runtime,
+    /// to `count` (ADR 0074). Existing partitions stay as they are, so a
+    /// key may map to another partition afterwards; consumer groups spread
+    /// over the new ones on their next heartbeat. Needs the tenant-admin
+    /// role.
+    pub async fn create_partitions(&self, name: &str, count: u32) -> Result<(), ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = Request::CreatePartitions(lotse_proto::CreatePartitionsRequest { resource_id, count });
+        self.admin_change(req).await
+    }
+
     /// Revokes the sessions of a user (`group` false) or of every member of
     /// an IdP group (ADR 0070): each node ends their sessions that
     /// authenticated before now, and refuses their tokens issued before now.

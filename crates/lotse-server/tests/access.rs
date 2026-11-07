@@ -835,3 +835,76 @@ fn a_pattern_subscribes_to_the_streams_it_may_read_including_new_ones() {
         });
     });
 }
+
+/// How many replicas of `resource`'s partitions the nodes run.
+async fn replicas_of(c: &Client<SimRuntime>, resource: u64) -> usize {
+    c.node_metrics()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, m)| m.unwrap().partitions)
+        .filter(|p| p.resource_id == resource)
+        .count()
+}
+
+#[test]
+fn a_stream_gets_more_partitions_and_its_group_reads_them() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "shop");
+            root.create_tenant("shop").await.unwrap();
+            let add = vec![
+                binding(subject_kind::USER, "c", role::CONSUMER, "shop", ""),
+                binding(subject_kind::USER, "p", role::PRODUCER, "shop", ""),
+                binding(subject_kind::USER, "ta", role::TENANT_ADMIN, "shop", ""),
+            ];
+            root.alter_role_bindings(add, Vec::new()).await.unwrap();
+            let orders = root.create_stream("orders", 2, 3).await.unwrap();
+            settle(&rt).await;
+            let c = as_user(&rt, "c", "shop");
+            let mut m = c.join_group("readers", &["orders"], lotse_client::GroupConfig::default()).await.unwrap();
+            for _ in 0..100 {
+                m.poll(TICK * 5).await.unwrap();
+                if m.assignment().len() == 2 {
+                    break;
+                }
+            }
+            assert_eq!(m.assignment().len(), 2);
+
+            // Only up, only by someone allowed to administer it.
+            assert!(refused(c.create_partitions("orders", 4).await), "a consumer may not");
+            let ta = as_user(&rt, "ta", "shop");
+            assert!(ta.create_partitions("orders", 2).await.is_err(), "never down or level");
+            ta.create_partitions("orders", 4).await.expect("a tenant admin raises it");
+            settle(&rt).await;
+            let meta = c.metadata(&["orders"]).await.unwrap();
+            assert_eq!(meta.resources[0].partitions.len(), 4, "metadata shows four");
+
+            // The new partitions take writes and the group reads them.
+            let p = as_user(&rt, "p", "shop");
+            p.produce("orders", 3, batch("on-a-new-partition")).await.expect("a new partition takes writes");
+            let mut seen = false;
+            for _ in 0..300 {
+                let records = m.poll(TICK * 5).await.unwrap();
+                if records.iter().any(|r| r.partition == 3) {
+                    seen = true;
+                    break;
+                }
+            }
+            assert!(seen, "the group never read partition 3: {:?}", m.assignment());
+            assert_eq!(m.assignment().len(), 4);
+            m.close().await;
+            assert_eq!(replicas_of(&root, orders).await, 12, "four partitions on three nodes each");
+            // Deleting the stream takes every partition with it, the new
+            // ones too.
+            root.delete("orders").await.unwrap();
+            settle(&rt).await;
+            assert_eq!(replicas_of(&root, orders).await, 0, "a partition is still running");
+            for n in nodes {
+                n.handle().stop();
+                n.join().await.unwrap();
+            }
+        });
+    });
+}

@@ -95,6 +95,9 @@ pub(crate) enum Change {
     /// Sessions of a user or group authenticated before `before_ms`, and
     /// its tokens issued before it, no longer count (ADR 0070).
     RevokeSessions { subject: Subject, before_ms: u64 },
+    /// New partitions for a runtime stream, one voter set each, numbered on
+    /// from its last (ADR 0074).
+    AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
 }
 
 /// A node added at runtime: where nodes and clients reach it.
@@ -649,6 +652,20 @@ impl MetadataState {
                     self.pins.remove(&group);
                 }
             },
+            Change::AddPartitions { resource_id, partitions } => {
+                // A stream deleted since, or one that would pass the limit,
+                // stays as it is. The groups keep the stream's own index,
+                // so deleting it later finds them all.
+                if let Some(st) = self.streams.get_mut(&resource_id)
+                    && st.partitions.len() + partitions.len() <= MAX_PARTITIONS as usize
+                {
+                    let first = st.partitions.len() as u32;
+                    for (k, voters) in partitions.into_iter().enumerate() {
+                        let p = first + k as u32;
+                        st.partitions.push((group_id(resource_id - DYNAMIC_BASE, p), voters));
+                    }
+                }
+            }
             Change::RevokeSessions { subject, before_ms } => {
                 // A later revocation with an earlier time does not undo one.
                 let at = self.revocations.entry(subject).or_insert(0);
@@ -1040,6 +1057,14 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(u8::from(node.is_some()));
             b.put_u64_le(node.unwrap_or(0));
         }
+        Change::AddPartitions { resource_id, partitions } => {
+            b.put_u8(19);
+            b.put_u64_le(*resource_id);
+            b.put_u32_le(partitions.len() as u32);
+            for voters in partitions {
+                put_nodes(&mut b, voters);
+            }
+        }
         Change::RevokeSessions { subject, before_ms } => {
             b.put_u8(18);
             put_subject(&mut b, subject);
@@ -1202,6 +1227,12 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let pinned = b.get_u8() != 0;
             let node = b.get_u64_le();
             Change::PinLeader { group, node: pinned.then_some(node) }
+        }
+        19 => {
+            need(b, 8)?;
+            let resource_id = b.get_u64_le();
+            let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
+            Change::AddPartitions { resource_id, partitions }
         }
         18 => {
             let subject = get_subject(b)?;

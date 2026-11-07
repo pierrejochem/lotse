@@ -274,7 +274,7 @@ Auch transaktionale IDs und Consumer-Gruppen-IDs gehören zu einem Mandanten (AD
 | Streams | `Produce`, `Fetch`, `ListOffsets`, `GroupHeartbeat`, `CommitOffsets`, `OffsetFetch` |
 | Queues | `Publish`, `Subscribe`, `Deliver` (Push), `Credit`, `Ack`, `Nack`, `Unsubscribe` |
 | Transaktionen | `InitProducer`, `AddPartitionsToTxn`, `AddAcksToTxn`, `AddOffsetsToTxn`, `EndTxn` |
-| Admin | `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind`, `DeleteResource`, `DescribeConfigs`, `AlterConfigs`, `Unbind`, `DescribeMetrics` |
+| Admin | `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind`, `DeleteResource`, `DescribeConfigs`, `AlterConfigs`, `Unbind`, `DescribeMetrics`, `CreatePartitions` (51) |
 
 `Publish` routet über Exchanges und schreibt in die Ziel-Queues. Im ersten Schritt routet der Client (ADR 0032): `Metadata` liefert Typ und Bindings eines Exchanges samt der gebundenen Queues, der Client wählt die Queues mit `lotse-route` und schreibt per `Produce` in jede, idempotent pro Queue. Ohne Transaktion gilt jede Queue für sich wie bei RabbitMQ (der Fehler nennt, welche Queues die Nachricht haben), in einer Transaktion alle oder keine. Exchanges und Bindings stehen bis zur Metadaten-Gruppe in der Node-Konfiguration. `Produce` schreibt direkt in eine Partition. Beide nutzen dasselbe Batch-Format und dieselben Idempotenzregeln.
 
@@ -465,6 +465,8 @@ Admin-APIs laufen über das native Protokoll, mit derselben Authentifizierung un
 ```
 CreateStream    <- name string, partitions u32, replication u8, configs: array{key string, value string}
                 -> error u16, resource_id u64, error_msg string?
+CreatePartitions <- resource_id u64, count u32            // neue Gesamtzahl, nur nach oben (ADR 0074)
+                -> error u16, error_msg string?, leader_hint
 CreateQueue     <- name string, priority_levels u8,       // 1–10, je Stufe ein Sub-Log
                    single_active u8, dlq string?, replication u8,
                    configs: array{key string, value string}   // ack.timeout.ms
@@ -496,6 +498,7 @@ DescribeMetrics <- (leer)                                   // an jeden Node ein
                                  consumers: array{subscription_id, peer, in_flight, credit}},
                    groups: array{group_id, epoch, members: array{member_id, owned}, offsets}
 ```
+Ein zur Laufzeit angelegter Stream bekommt mit `CreatePartitions` mehr Partitionen (ADR 0074): Der Metadaten-Leader platziert sie wie die eines neuen Streams, mit so vielen Replicas wie die erste Partition, und schlägt `AddPartitions` vor. Ihre Gruppen-IDs folgen der Regel der ersten Partitionen, mit dem Index des Streams und der Partitionsnummer, sodass Löschen sie alle findet. Consumer-Gruppen verteilen neue Partitionen beim nächsten Heartbeat. Weniger Partitionen gibt es nicht.
 
 Antworten mit `NOT_LEADER` tragen als Tag 0 den Leader der Metadaten-Gruppe. Umgesetzt sind `CreateStream`, `CreateQueue`, `DeclareExchange`, `Bind` und `Unbind` (ADR 0034) sowie `DeleteResource`, `DescribeConfigs` und `AlterConfigs` (ADR 0035); Prioritäten und Single Active Consumer lehnt der Leader mit `INVALID_REQUEST` ab, ebenso jede Änderung außer den Einstellungen einer Queue (`ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, `dead.letter.queue`) und der Retention eines Streams.
 

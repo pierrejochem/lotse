@@ -1013,6 +1013,31 @@ public sealed interface Request {
     }
 
     /**
+     * Raises the partition count of a stream created at runtime (tenant admin, ADR 0074); never lowers it.
+     * Answered with {@link Response.Admin}.
+     *
+     * @param resourceId the stream, a {@code u64}
+     * @param count the partition count it is to have, a {@code u32}
+     */
+    record CreatePartitions(long resourceId, long count) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.CREATE_PARTITIONS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u64(resourceId).u32(count).noTags();
+        }
+
+        static CreatePartitions read(Reader r) {
+            CreatePartitions x = new CreatePartitions(r.u64(), r.u32());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * Revokes a user's or an IdP group's sessions (cluster admin, ADR 0070): every node ends the sessions that
      * authenticated before {@code beforeMs} and refuses tokens issued before it. Answered with
      * {@link Response.Admin}.

@@ -1,0 +1,34 @@
+# ZigZag and plain LEB128 varints.
+# zigzag <i64> <hex>; unsigned <u64> <hex> (the raw LEB128 behind it);
+# lenient <u64> <hex>: accepted by the reference reader although a writer never produces it;
+# bad <truncated|overflow> <hex>: refused.
+# kind value hex
+zigzag 0 00
+zigzag -1 01
+zigzag 1 02
+zigzag -2 03
+zigzag 2 04
+zigzag 63 7e
+zigzag -64 7f
+zigzag 64 8001
+zigzag -65 8101
+zigzag 8191 fe7f
+zigzag -8192 ff7f
+zigzag 2147483647 feffffff0f
+zigzag -2147483648 ffffffff0f
+zigzag 9223372036854775807 feffffffffffffffff01
+zigzag -9223372036854775808 ffffffffffffffffff01
+unsigned 0 00
+unsigned 127 7f
+unsigned 128 8001
+unsigned 16383 ff7f
+unsigned 16384 808001
+unsigned 4294967295 ffffffff0f
+unsigned 18446744073709551615 ffffffffffffffffff01
+lenient 0 8000
+lenient 1 818000
+bad truncated 8080
+bad truncated -
+bad overflow ffffffffffffffffffff
+bad overflow ffffffffffffffffff02
+bad overflow ffffffffffffffffffffff

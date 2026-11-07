@@ -32,11 +32,11 @@ use lotse_auth::roles::{Role as AccessRole, RoleBinding, Subject, Who};
 use lotse_auth::scram::ScramCredential;
 use lotse_proto::{
     AdminResponse, AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry,
-    CreateQueueRequest, CreateResponse, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest,
-    DeleteResourceRequest, DeleteTenantRequest, DescribeConfigsRequest, DescribeConfigsResponse,
-    DescribeRoleBindingsResponse, DescribeTenantsResponse, DescribeUsersResponse, ErrorCode, LeaderHint,
-    OutcomeResponse, ResourceConfigs, Response, RevokeSessionsRequest, RoleBindingData, TenantEntry, UserEntry,
-    WhoAmIResponse, config_source, principal_kind, subject_kind,
+    CreatePartitionsRequest, CreateQueueRequest, CreateResponse, CreateStreamRequest, CreateTenantRequest,
+    DeclareExchangeRequest, DeleteResourceRequest, DeleteTenantRequest, DescribeConfigsRequest,
+    DescribeConfigsResponse, DescribeRoleBindingsResponse, DescribeTenantsResponse, DescribeUsersResponse, ErrorCode,
+    LeaderHint, OutcomeResponse, ResourceConfigs, Response, RevokeSessionsRequest, RoleBindingData, TenantEntry,
+    UserEntry, WhoAmIResponse, config_source, principal_kind, subject_kind,
 };
 use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
@@ -462,6 +462,36 @@ impl Clients {
         let change = Change::CreateStream { name: req.name.clone(), tenant: req.tenant.clone(), partitions, settings };
         let then = AdminThen::Created { name: req.name, tenant: req.tenant, id: 0 };
         self.propose_admin(replica, view.now, &change, (outbox, id), then);
+    }
+
+    /// `CreatePartitions` (ADR 0074): raises a runtime stream's partition
+    /// count. The new partitions are placed like a new stream's, with as
+    /// many replicas as its first partition has now.
+    pub(super) fn create_partitions<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: CreatePartitionsRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let Some(stream) = replica.metadata().streams.get(&req.resource_id) else {
+            let why = "only streams created at runtime get more partitions";
+            return outbox.push(id, &admin_response(ErrorCode::UNKNOWN_RESOURCE, Some(why), None));
+        };
+        let now = stream.partitions.len() as u32;
+        if req.count <= now || req.count > MAX_PARTITIONS {
+            let why = format!("the stream has {now} partitions: ask for more, at most {MAX_PARTITIONS}");
+            return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
+        }
+        let replication = stream.partitions.first().map_or(1, |(_, v)| v.len().clamp(1, usize::from(u8::MAX)) as u8);
+        let partitions = Self::place(view, replica, replication, (req.count - now) as usize);
+        let change = Change::AddPartitions { resource_id: req.resource_id, partitions };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 
     pub(super) fn create_queue<R: Runtime, S: StateMachine>(

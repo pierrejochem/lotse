@@ -240,6 +240,7 @@ impl Access {
             // Destructive or moving: the tenant's admins (ADR 0064).
             Request::PurgeQueue(r) | Request::Requeue(r) => on(Admin, &mut std::iter::once(r.queue_id)),
             Request::AlterConfigs(r) => on(Admin, &mut std::iter::once(r.resource_id)),
+            Request::CreatePartitions(r) => on(Admin, &mut std::iter::once(r.resource_id)),
             Request::DescribeConfigs(r) => on(Describe, &mut r.resource_ids.iter().copied()),
             Request::DescribeMetrics(_) | Request::DescribeTenants(_) => Ok(()),
             Request::AlterUser(_)

@@ -3128,6 +3128,32 @@ impl MoveLeaderRequest {
     }
 }
 
+/// Raises the partition count of a stream created at runtime to `count`
+/// (tenant admin, ADR 0074). New partitions are placed like those of a new
+/// stream, with as many replicas as the stream's first partition; existing
+/// partitions are not touched, and a count is never lowered. Answered with
+/// [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePartitionsRequest {
+    /// The stream.
+    pub resource_id: u64,
+    /// The partition count it is to have.
+    pub count: u32,
+}
+
+impl CreatePartitionsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        w.u32(self.count);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = CreatePartitionsRequest { resource_id: r.u64()?, count: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// Revokes a user's or an IdP group's sessions (cluster admin, ADR 0070):
 /// every node ends the sessions that authenticated before `before_ms` and
 /// refuses tokens issued before it. Answered with [`AdminResponse`].
