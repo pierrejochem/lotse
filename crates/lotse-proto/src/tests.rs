@@ -58,7 +58,7 @@ fn an_unknown_key_or_version_is_reported_with_its_header() {
         other => panic!("{other:?}"),
     }
     let mut frame = BytesMut::from(&encode_request(5, &Request::ApiVersions)[..]);
-    frame[0..2].copy_from_slice(&ApiKey(9).0.to_le_bytes()); // a key the design leaves free
+    frame[0..2].copy_from_slice(&ApiKey(18).0.to_le_bytes()); // a key the design leaves free
     assert!(matches!(decode_request(frame.freeze()), Err(DecodeError::Unsupported(_))));
 }
 

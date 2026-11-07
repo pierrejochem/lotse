@@ -1,25 +1,28 @@
 //! Publishing through exchanges: [`Client::publish`] and
 //! [`Transaction::publish`].
 //!
-//! The client routes ([ADR 0032](../../docs/adr/0032-publish-routed-by-the-client.md)):
-//! `Metadata` for an exchange returns its type and bindings together with
-//! the bound queues, the client picks the queues with `lotse-route` and
-//! produces the message to each of them. Each write is an ordinary produce,
-//! idempotent per queue, so retries never duplicate a message in a queue.
-//!
-//! Without a transaction every queue is written on its own, as in RabbitMQ:
+//! Outside a transaction a node routes ([ADR 0079](../../docs/adr/0079-publish-routed-by-the-node.md)):
+//! the client sends `Publish` to any node, which routes by the exchange's
+//! bindings as it knows them, checks that the publisher may write every
+//! queue the message routes to, and writes it to each with an idempotent
+//! producer of its own. Every queue is written on its own, as in RabbitMQ:
 //! `publish` returns once every routed queue has the message, and otherwise
-//! says which queues have it, which do not and which may. Inside a
-//! transaction the message reaches all its queues or none.
+//! says which queues have it, which do not and which may. A `Publish` whose
+//! answer is lost is not sent again, since the node may have written it.
+//!
+//! Inside a transaction the client routes (ADR 0032): `Metadata` for an
+//! exchange returns its type and bindings with the bound queues, the client
+//! picks the queues with `lotse-route` and produces the message to each of
+//! them transactionally, so it reaches all its queues or none.
 
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use lotse_proto::ErrorCode;
+use lotse_proto::{ErrorCode, PublishEntry, PublishRequest, PublishResult, Request, Response};
 use lotse_route::{Binding, Exchange, ExchangeKind};
 use lotse_rt::{Clock, Net, Rng, Spawn};
 
-use crate::{Client, ClientError, Transaction};
+use crate::{CallError, Client, ClientError, Transaction};
 
 /// A message to publish.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,6 +115,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// `routing_key` (and headers). Returns once every routed queue holds
     /// it; a message no queue takes is dropped, or refused with `mandatory`.
     /// If some queues could not be written, the error says which hold it.
+    /// A node routes it (ADR 0079); if the node's answer is lost, the result
+    /// is [`ClientError::Unknown`] rather than a second publish.
     pub async fn publish(
         &self,
         exchange: &str,
@@ -119,16 +124,87 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         message: OutMessage,
         mandatory: bool,
     ) -> Result<Published, ClientError> {
-        let queues = self.route_message(exchange, routing_key, &message, mandatory).await?;
         let batch = message.batch();
-        let mut written = Vec::new();
-        let mut failed = Vec::new();
-        for q in queues {
-            match self.produce(&q, 0, batch.clone()).await {
-                Ok(offset) => written.push((q, offset)),
-                Err(e) => failed.push((q, e)),
+        // A name deleted and made again has a new id: ask once more.
+        for fresh in [false, true] {
+            if fresh {
+                self.exchanges.lock().expect("exchanges lock").remove(exchange);
+            }
+            let x = self.exchange(exchange).await?;
+            let entry = PublishEntry {
+                exchange_id: x.resource_id,
+                routing_key: routing_key.into(),
+                mandatory,
+                batch: batch.clone(),
+            };
+            let result = self.publish_once(entry).await?;
+            match result.error {
+                ErrorCode::NONE => return self.published(result),
+                ErrorCode::UNKNOWN_RESOURCE if !fresh => continue,
+                ErrorCode::UNKNOWN_RESOURCE => return Err(ClientError::UnknownStream(exchange.into(), 0)),
+                ErrorCode::UNROUTABLE => {
+                    return Err(ClientError::Unroutable { exchange: exchange.into(), routing_key: routing_key.into() });
+                }
+                code => return Err(ClientError::Broker { code, message: None }),
             }
         }
+        unreachable!("the second attempt returns")
+    }
+
+    /// One `Publish` to the first node that takes it.
+    async fn publish_once(&self, entry: PublishEntry) -> Result<PublishResult, ClientError> {
+        let timeout_ms = u32::try_from(self.cfg.produce_timeout.as_millis()).unwrap_or(u32::MAX);
+        let req = Request::Publish(PublishRequest { txn_id: None, timeout_ms, entries: vec![entry] });
+        let start = self.rt.now();
+        let mut why = String::from("no broker known");
+        loop {
+            let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
+            addrs.extend(self.cfg.bootstrap.iter().cloned());
+            addrs.dedup();
+            for addr in addrs {
+                match self.call(&addr, &req).await {
+                    Ok(Response::Publish(mut r)) if r.entries.len() == 1 => return Ok(r.entries.remove(0)),
+                    Ok(other) => why = format!("unexpected response {other:?}"),
+                    Err(CallError::Denied(why)) => return Err(ClientError::Authentication(why)),
+                    Err(CallError::Refused(code, why)) => return Err(ClientError::Broker { code, message: Some(why) }),
+                    // The node may have written it: not sent again.
+                    Err(CallError::Lost(why)) => return Err(ClientError::Unknown(format!("{addr}: {why}"))),
+                    Err(e) => why = format!("{addr}: {e}"),
+                }
+            }
+            if self.rt.now() - start >= self.cfg.retry_for {
+                return Err(ClientError::GaveUp(self.cfg.retry_for, why));
+            }
+            self.rt.sleep(self.cfg.backoff).await;
+        }
+    }
+
+    /// A routed message's outcome by queue name.
+    fn published(&self, result: PublishResult) -> Result<Published, ClientError> {
+        // The node names each queue: the client may never have seen one
+        // bound and deleted between two of its lookups. Only a queue the
+        // node no longer knows comes without a name.
+        let names = self.names.lock().expect("names lock").clone();
+        let name = |q: &lotse_proto::RoutedMessage| {
+            if q.name.is_empty() {
+                names.get(&q.queue_id).cloned().unwrap_or_else(|| format!("queue {}", q.queue_id))
+            } else {
+                q.name.clone()
+            }
+        };
+        let mut written = Vec::new();
+        let mut failed = Vec::new();
+        for q in &result.routed {
+            match q.error {
+                ErrorCode::NONE => written.push((name(q), q.base_offset)),
+                ErrorCode::REQUEST_TIMED_OUT => {
+                    failed.push((name(q), ClientError::Unknown("the write's outcome is unknown".into())))
+                }
+                code => failed.push((name(q), ClientError::Broker { code, message: None })),
+            }
+        }
+        written.sort();
+        failed.sort_by(|a, b| a.0.cmp(&b.0));
         if failed.is_empty() {
             Ok(Published { routed: written })
         } else {

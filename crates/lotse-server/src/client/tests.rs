@@ -1916,3 +1916,107 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
         assert_eq!(answers, vec![ErrorCode::NONE, ErrorCode::MESSAGE_NOT_HELD]);
     });
 }
+
+/// What the node does with a `Publish` itself (ADR 0079): refusals answered
+/// at once, routed messages handed on as writes, answered when decided.
+#[test]
+fn a_publish_is_routed_checked_and_answered_once_written() {
+    Sim::new(7).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::new();
+        let queues = [QueueConfig::new("a", 7, G), QueueConfig::new("b", 8, G + 1)];
+        let exchanges = [lotse_route::Exchange {
+            name: "x".into(),
+            resource_id: 20,
+            kind: lotse_route::ExchangeKind::Direct,
+            bindings: vec![lotse_route::Binding::key(7, "k"), lotse_route::Binding::key(8, "k")],
+        }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &exchanges,
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let one = |v: &str| {
+            let mut b = BatchBuilder::new(BatchOptions::default());
+            b.push(0, None, Some(v.as_bytes()), &[]);
+            b.finish().unwrap()
+        };
+        let two = {
+            let mut b = BatchBuilder::new(BatchOptions::default());
+            b.push(0, None, Some(b"1"), &[]);
+            b.push(0, None, Some(b"2"), &[]);
+            b.finish().unwrap()
+        };
+        let entry = |exchange_id, key: &str, mandatory, batch| lotse_proto::PublishEntry {
+            exchange_id,
+            routing_key: key.into(),
+            mandatory,
+            batch,
+        };
+        let publish = |txn_id: Option<&str>, entries| {
+            Request::Publish(lotse_proto::PublishRequest { txn_id: txn_id.map(Into::into), timeout_ms: 1_000, entries })
+        };
+        let header = RequestHeader { api_key: ApiKey::PUBLISH, api_version: 0, correlation_id: 5, flags: 0 };
+        let send = async |clients: &mut Clients, groups: &mut Groups, request| {
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+        };
+        let answer = |outbox: &Outbox| match &drain(outbox, ApiKey::PUBLISH).0[..] {
+            [Response::Publish(r)] => r.entries.clone(),
+            other => panic!("expected one answer, got {other:?}"),
+        };
+        let error = |e: &lotse_proto::PublishResult| e.error;
+
+        // Refused at once, each for its own reason; nothing to write.
+        send(
+            &mut clients,
+            &mut groups,
+            publish(
+                None,
+                vec![
+                    entry(99, "k", false, one("m")),
+                    entry(20, "k", false, two.clone()),
+                    entry(20, "nobody", true, one("m")),
+                    entry(20, "nobody", false, one("m")),
+                ],
+            ),
+        )
+        .await;
+        let got: Vec<ErrorCode> = answer(&outbox).iter().map(error).collect();
+        assert_eq!(
+            got,
+            [ErrorCode::UNKNOWN_RESOURCE, ErrorCode::INVALID_REQUEST, ErrorCode::UNROUTABLE, ErrorCode::NONE]
+        );
+        assert!(clients.take_publish_jobs().is_empty());
+        send(&mut clients, &mut groups, publish(Some("t"), vec![entry(20, "k", false, one("m"))])).await;
+        assert_eq!(answer(&outbox)[0].error, ErrorCode::INVALID_REQUEST, "a transaction publishes itself");
+
+        // Routed to both queues: written by the node, answered once decided.
+        send(&mut clients, &mut groups, publish(None, vec![entry(20, "k", false, one("m"))])).await;
+        assert!(drain(&outbox, ApiKey::PUBLISH).0.is_empty(), "not before the writes");
+        let jobs = clients.take_publish_jobs();
+        let writes: Vec<(usize, u64, String)> = jobs[0].writes.iter().map(|(e, q, n, _)| (*e, *q, n.clone())).collect();
+        assert_eq!(writes, [(0, 7, "a".to_string()), (0, 8, "b".to_string())]);
+        clients.published(
+            jobs[0].key,
+            vec![(0, 8, "b".into(), ErrorCode::REQUEST_TIMED_OUT, 0), (0, 7, "a".into(), ErrorCode::NONE, 41)],
+        );
+        let e = answer(&outbox);
+        assert_eq!(e[0].error, ErrorCode::NONE);
+        let routed: Vec<(u64, &str, ErrorCode, u64)> =
+            e[0].routed.iter().map(|q| (q.queue_id, q.name.as_str(), q.error, q.base_offset)).collect();
+        assert_eq!(routed, [(7, "a", ErrorCode::NONE, 41), (8, "b", ErrorCode::REQUEST_TIMED_OUT, 0)]);
+    });
+}

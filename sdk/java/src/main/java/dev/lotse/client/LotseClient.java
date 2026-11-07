@@ -769,6 +769,123 @@ public final class LotseClient implements AutoCloseable {
         throw Attempt.fail(new ClientException.Broker(code, null));
     }
 
+    // ---- publishing through exchanges (ADR 0079) ----
+
+    /**
+     * Publishes a message to an exchange, which routes it to queues by {@code routingKey} (and headers). A node
+     * routes it by the bindings it knows and writes it to each queue, if this client's roles allow every one of
+     * them. Returns once every routed queue holds it; a message no queue takes is dropped, or refused with
+     * {@link ClientException.Unroutable} when {@code mandatory}. If some queues could not be written,
+     * {@link ClientException.NotAllWritten} says which hold it. If the node's answer is lost, the result is
+     * {@link ClientException.Unknown}: the publish is not sent again, since the node may have written it.
+     */
+    public Published publish(String exchange, String routingKey, OutMessage message, boolean mandatory) {
+        checkOpen();
+        ByteString batch = build(List.of(message));
+        // A name deleted and made again has a new id: ask once more.
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (attempt > 0) {
+                exchangeIds.remove(exchange);
+            }
+            long id = exchangeId(exchange);
+            Messages.PublishResult r = publishOnce(new Messages.PublishEntry(id, routingKey, mandatory, batch));
+            ErrorCode code = r.error();
+            if (code.isOk()) {
+                return published(r);
+            }
+            if (code.equals(ErrorCode.UNKNOWN_RESOURCE) && attempt == 0) {
+                continue;
+            }
+            if (code.equals(ErrorCode.UNKNOWN_RESOURCE)) {
+                throw new ClientException.UnknownStream(exchange, 0);
+            }
+            if (code.equals(ErrorCode.UNROUTABLE)) {
+                throw new ClientException.Unroutable(exchange, routingKey);
+            }
+            throw new ClientException.Broker(code, null);
+        }
+        throw new IllegalStateException("the second attempt returns");
+    }
+
+    private final Map<String, Long> exchangeIds = new ConcurrentHashMap<>();
+
+    /** The exchange's id, from metadata the first time. */
+    private long exchangeId(String exchange) {
+        Long known = exchangeIds.get(exchange);
+        if (known != null) {
+            return known;
+        }
+        ResourceMetadata r = find(metadata(exchange).resources(), exchange, false);
+        if (r == null || !r.error().isOk() || r.kind() != Messages.ResourceKind.EXCHANGE) {
+            throw new ClientException.UnknownStream(exchange, 0);
+        }
+        exchangeIds.put(exchange, r.resourceId());
+        return r.resourceId();
+    }
+
+    /** One {@code Publish} to the first node that takes it. */
+    private Messages.PublishResult publishOnce(Messages.PublishEntry entry) {
+        long timeoutMs = Math.min(cfg.requestTimeout().toMillis(), 0xFFFF_FFFFL);
+        Request req = new Request.Publish(null, timeoutMs, List.of(entry));
+        long start = System.nanoTime();
+        String why = "no broker known";
+        while (true) {
+            for (Address addr : candidates()) {
+                try {
+                    Response r = call(addr, req);
+                    if (r instanceof Response.Publish p && p.entries().size() == 1) {
+                        return p.entries().get(0);
+                    }
+                    why = "unexpected response " + r;
+                } catch (CallFailure e) {
+                    switch (e.kind) {
+                        case DENIED -> throw new ClientException.Authentication(e.getMessage());
+                        case REFUSED -> throw new ClientException.Broker(e.code, e.getMessage());
+                        // The node may have written it: not sent again.
+                        case LOST -> throw new ClientException.Unknown(addr + ": " + e.getMessage());
+                        case NOT_SENT -> why = addr + ": " + e.describe();
+                    }
+                }
+            }
+            if (elapsed(start).compareTo(cfg.retryFor()) >= 0) {
+                throw new ClientException.GaveUp(cfg.retryFor(), why);
+            }
+            if (!pause()) {
+                throw new ClientException.GaveUp(elapsed(start), "interrupted");
+            }
+        }
+    }
+
+    /** A routed message's outcome by queue name. */
+    private Published published(Messages.PublishResult result) {
+        // The node names each queue: this client may never have seen one bound and deleted between two
+        // of its lookups. Only a queue the node no longer knows comes without a name.
+        List<Published.Routed> written = new ArrayList<>();
+        List<String> writtenNames = new ArrayList<>();
+        List<ClientException> failures = new ArrayList<>();
+        for (Messages.RoutedMessage q : result.routed()) {
+            String name = q.name();
+            if (name.isEmpty()) {
+                synchronized (state) {
+                    name = names.getOrDefault(q.queueId(), "queue " + Long.toUnsignedString(q.queueId()));
+                }
+            }
+            if (q.error().isOk()) {
+                written.add(new Published.Routed(name, q.baseOffset()));
+                writtenNames.add(name);
+            } else if (q.error().equals(ErrorCode.REQUEST_TIMED_OUT)) {
+                failures.add(new ClientException.Unknown(name + ": the write's outcome is unknown"));
+            } else {
+                failures.add(new ClientException.Broker(q.error(), name));
+            }
+        }
+        written.sort(java.util.Comparator.comparing(Published.Routed::queue));
+        if (!failures.isEmpty()) {
+            throw new ClientException.NotAllWritten(writtenNames, failures);
+        }
+        return new Published(written);
+    }
+
     // ---- admin: the least that streams need ----
 
     /**

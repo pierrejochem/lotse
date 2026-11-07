@@ -147,6 +147,8 @@ impl ApiKey {
     pub const REVOKE_SESSIONS: ApiKey = ApiKey(50);
     /// Raises a runtime stream's partition count (tenant admin, ADR 0074).
     pub const CREATE_PARTITIONS: ApiKey = ApiKey(51);
+    /// Publishes messages through exchanges; the node routes (ADR 0079).
+    pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
     pub const SUBSCRIBE: ApiKey = ApiKey(10);
     /// Pushes messages to a subscription (never a request).
@@ -169,7 +171,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 50] = [
+    pub const SUPPORTED: [ApiVersionRange; 51] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -220,6 +222,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::MOVE_LEADER, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REVOKE_SESSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::CREATE_PARTITIONS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
 
@@ -314,10 +317,12 @@ impl ErrorCode {
     /// not delivered on it, gone to another consumer since, or taken by
     /// another transaction (ADR 0075). The transaction must abort.
     pub const MESSAGE_NOT_HELD: ErrorCode = ErrorCode(31);
+    /// A mandatory published message routes to no queue (ADR 0079).
+    pub const UNROUTABLE: ErrorCode = ErrorCode(32);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 32] = [
+        const NAMES: [&str; 33] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -350,6 +355,7 @@ impl ErrorCode {
             "RESOURCE_NOT_EMPTY",
             "FENCED_INSTANCE_ID",
             "MESSAGE_NOT_HELD",
+            "UNROUTABLE",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -504,6 +510,8 @@ pub enum Request {
     RevokeSessions(RevokeSessionsRequest),
     /// [`ApiKey::CREATE_PARTITIONS`].
     CreatePartitions(CreatePartitionsRequest),
+    /// [`ApiKey::PUBLISH`].
+    Publish(PublishRequest),
 }
 
 impl Request {
@@ -560,6 +568,7 @@ impl Request {
             Request::MoveLeader(_) => ApiKey::MOVE_LEADER,
             Request::RevokeSessions(_) => ApiKey::REVOKE_SESSIONS,
             Request::CreatePartitions(_) => ApiKey::CREATE_PARTITIONS,
+            Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
 }
@@ -623,6 +632,8 @@ pub enum Response {
     Fetch(FetchResponse),
     /// To [`Request::ListOffsets`].
     ListOffsets(ListOffsetsResponse),
+    /// To [`Request::Publish`].
+    Publish(PublishResponse),
     /// The request could not be served at all: an unsupported version
     /// ([`ErrorCode::UNSUPPORTED_VERSION`]), or a connection not
     /// authenticated or whose session ended ([`ErrorCode::UNAUTHORIZED`]).
@@ -695,6 +706,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::MoveLeader(r) => r.put(&mut w),
         Request::RevokeSessions(r) => r.put(&mut w),
         Request::CreatePartitions(r) => r.put(&mut w),
+        Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
 }
@@ -765,6 +777,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::MOVE_LEADER => Request::MoveLeader(MoveLeaderRequest::get(&mut r)?),
         ApiKey::REVOKE_SESSIONS => Request::RevokeSessions(RevokeSessionsRequest::get(&mut r)?),
         ApiKey::CREATE_PARTITIONS => Request::CreatePartitions(CreatePartitionsRequest::get(&mut r)?),
+        ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
@@ -805,6 +818,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::Produce(r) => r.put(&mut w),
         Response::Fetch(r) => r.put(&mut w),
         Response::ListOffsets(r) => r.put(&mut w),
+        Response::Publish(r) => r.put(&mut w),
         Response::Error(code) => {
             w.u16(code.0);
             w.no_tags();
@@ -926,6 +940,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::PRODUCE => Response::Produce(ProduceResponse::get(&mut r)?),
         ApiKey::FETCH => Response::Fetch(FetchResponse::get(&mut r)?),
         ApiKey::LIST_OFFSETS => Response::ListOffsets(ListOffsetsResponse::get(&mut r)?),
+        ApiKey::PUBLISH => Response::Publish(PublishResponse::get(&mut r)?),
         _ => return Err(DecodeError::Malformed("unknown API key")),
     };
     r.finish()?;

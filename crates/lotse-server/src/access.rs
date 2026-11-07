@@ -160,6 +160,11 @@ impl Access {
             // A lagging node asks for the node list (ADR 0050); the metadata
             // leader asks for the nodes' metrics to weigh moves (ADR 0052).
             (Principal::Node(_), Request::DescribeNodes(_) | Request::DescribeMetrics(_)) => return Ok(()),
+            // A node writes what it was asked to publish, with an idempotent
+            // producer of its own, once the publisher's roles allowed it
+            // (ADR 0079); never in a transaction.
+            (Principal::Node(_), Request::Produce(r)) if r.txn_id.is_none() => return Ok(()),
+            (Principal::Node(_), Request::InitProducer(r)) if r.txn_id.is_none() => return Ok(()),
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
             (_, Request::DeadLetter(_)) => return Err("only broker nodes forward dead letters".into()),
@@ -167,7 +172,7 @@ impl Access {
             (_, Request::CheckEmpty(_)) => return Err("only broker nodes ask whether a partition is empty".into()),
             (Principal::Node(id), _) => {
                 return Err(format!(
-                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters, forward dead letters, verify transactions and check partitions for a delete"
+                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters, forward dead letters, verify transactions, check partitions for a delete and write what it publishes"
                 ));
             }
             (Principal::Anonymous, _) => return Ok(()),
@@ -196,6 +201,9 @@ impl Access {
                 on(Write, &mut r.resources.iter().map(|x| x.resource_id))
             }
             Request::Fetch(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
+            // The queues a message routes to are checked when it is routed:
+            // the roles must allow each of them too (ADR 0079).
+            Request::Publish(r) => on(Write, &mut r.entries.iter().map(|e| e.exchange_id)),
             Request::ListOffsets(r) => on(Read, &mut r.resources.iter().map(|x| x.resource_id)),
             Request::AddPartitionsToTxn(r) => {
                 txn(&r.tenant, &r.txn_id)?;

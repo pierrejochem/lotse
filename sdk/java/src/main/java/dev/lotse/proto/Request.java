@@ -1081,6 +1081,49 @@ public sealed interface Request {
     }
 
     /**
+     * Publishes messages through exchanges (ADR 0079): the node that gets it routes each message by the exchange's
+     * bindings as it knows them and writes it to every queue it routes to, if the publisher may write each of them.
+     * Not atomic across queues.
+     *
+     * @param txnId a transaction: refused; a transaction publishes by producing to each queue itself
+     * @param timeoutMs how long the node may take, a {@code u32}
+     * @param entries the messages
+     */
+    record Publish(String txnId, long timeoutMs, List<Messages.PublishEntry> entries) implements Request {
+        /** Creates the request. */
+        public Publish {
+            entries = List.copyOf(entries);
+        }
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.PUBLISH;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.optString(txnId).u32(timeoutMs);
+            w.array(entries, (w1, e) -> {
+                w1.u64(e.exchangeId()).string(e.routingKey()).bool(e.mandatory()).bytes(e.batch());
+                w1.noTags();
+            });
+            w.noTags();
+        }
+
+        static Publish read(Reader r) {
+            String txnId = r.optString();
+            long timeout = r.u32();
+            List<Messages.PublishEntry> entries = r.array(15, r1 -> {
+                Messages.PublishEntry e = new Messages.PublishEntry(r1.u64(), r1.string(), r1.bool(), r1.bytes());
+                r1.tags();
+                return e;
+            });
+            r.tags();
+            return new Publish(txnId, timeout, entries);
+        }
+    }
+
+    /**
      * Raises the partition count of a stream created at runtime (tenant admin, ADR 0074); never lowers it.
      * Answered with {@link Response.Admin}.
      *

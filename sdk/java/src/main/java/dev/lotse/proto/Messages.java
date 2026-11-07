@@ -673,6 +673,43 @@ public final class Messages {
      */
     public record DeliveredOffset(long offset, int deliveryCount) {}
 
+    // ---- publishing (ADR 0079) ----
+
+    /**
+     * One message to publish.
+     *
+     * @param exchangeId the exchange, a {@code u64}
+     * @param routingKey the routing key
+     * @param mandatory refuse the message with {@code UNROUTABLE} if it routes to no queue, rather than drop it
+     * @param batch a batch of exactly one record, the message; its headers route it through a headers exchange
+     */
+    public record PublishEntry(long exchangeId, String routingKey, boolean mandatory, ByteString batch) {}
+
+    /**
+     * What became of one published message.
+     *
+     * @param error {@code NONE} once routed (each queue's outcome is in {@code routed}); otherwise why nothing was
+     *     written
+     * @param routed the queues it routes to, by id
+     */
+    public record PublishResult(ErrorCode error, List<RoutedMessage> routed) {
+        /** Creates the result. */
+        public PublishResult {
+            routed = List.copyOf(routed);
+        }
+    }
+
+    /**
+     * One queue's copy of a published message.
+     *
+     * @param queueId the queue, a {@code u64}
+     * @param error {@code NONE}: the queue holds it at {@code baseOffset}; {@code REQUEST_TIMED_OUT}: unknown;
+     *     anything else: it does not
+     * @param baseOffset where, with {@code NONE}, a {@code u64}
+     */
+    /** One queue's copy of a published message; {@code name} is empty when the node no longer knows the queue. */
+    public record RoutedMessage(long queueId, String name, ErrorCode error, long baseOffset) {}
+
     // ---- consumer groups ----
 
     /**

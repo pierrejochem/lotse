@@ -498,7 +498,7 @@ fn main() {
     }
     out.write("crc32c.txt", "CRC32C (Castagnoli).\nlabel input_hex crc", &crc);
 
-    let codes: Vec<String> = (0..=31u16)
+    let codes: Vec<String> = (0..=32u16)
         .map(|c| {
             let e = ErrorCode(c);
             format!("{c} {} {}", e.name(), e.retriable())

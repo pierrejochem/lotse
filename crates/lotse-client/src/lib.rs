@@ -345,6 +345,27 @@ enum Attempt {
     Fail(ClientError),
 }
 
+/// Ends the session of `producer_id` when dropped while armed: a produce
+/// dropped before its outcome was known.
+struct Undecided<'a> {
+    session: &'a Mutex<Option<Session>>,
+    producer_id: u64,
+    armed: bool,
+}
+
+impl Drop for Undecided<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut session) = self.session.lock() {
+            if session.as_ref().is_some_and(|s| s.producer_id == self.producer_id) {
+                *session = None;
+            }
+        }
+    }
+}
+
 /// The producer id this client writes with.
 #[derive(Debug, Clone)]
 struct Session {
@@ -581,7 +602,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         lotse_record::set_producer(&mut stamped, producer_id, epoch, seq)
             .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?;
         let stamped = stamped.freeze();
+        // Dropped before its outcome is known (a caller's timeout, a
+        // node's deadline), this produce leaves the sequence in doubt like
+        // `Unknown` does: the guard ends the session, or the next batch
+        // would take the same sequence and be taken for this one.
+        let mut undecided = Undecided { session: &self.session, producer_id, armed: true };
         let res = self.retrying(|| self.produce_once(stream, partition, stamped.clone(), true, None)).await;
+        undecided.armed = false;
         let mut session = self.session.lock().expect("session lock");
         match &res {
             Ok(_) => {
@@ -1498,7 +1525,12 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         lotse_record::set_transactional(&mut stamped, true).map_err(corrupt)?;
         let stamped = stamped.freeze();
         let txn_id = self.txn_id.clone();
+        // Until the outcome is known the sequence is in doubt: a produce
+        // dropped meanwhile leaves the transaction to be aborted, rather
+        // than let the next batch take the same sequence.
+        self.poisoned = Some("a produce was dropped before its outcome was known".into());
         let res = c.retrying(|| c.produce_once(stream, partition, stamped.clone(), true, Some(txn_id.clone()))).await;
+        self.poisoned = None;
         match &res {
             Ok(_) => {
                 self.next.insert(key, seq.wrapping_add(records as i32));

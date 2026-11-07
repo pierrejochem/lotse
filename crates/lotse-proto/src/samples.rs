@@ -327,6 +327,24 @@ pub fn requests() -> Vec<Request> {
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 3 }),
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 0 }),
         Request::CreatePartitions(CreatePartitionsRequest { resource_id: 1_099_511_627_776, count: 12 }),
+        Request::Publish(PublishRequest {
+            txn_id: None,
+            timeout_ms: 5_000,
+            entries: vec![
+                PublishEntry {
+                    exchange_id: 20,
+                    routing_key: "job.created".into(),
+                    mandatory: true,
+                    batch: Bytes::from_static(b"one-record batch"),
+                },
+                PublishEntry {
+                    exchange_id: 21,
+                    routing_key: String::new(),
+                    mandatory: false,
+                    batch: Bytes::from_static(b"another"),
+                },
+            ],
+        }),
         Request::RevokeSessions(RevokeSessionsRequest {
             subject_kind: subject_kind::USER,
             subject: "alice".into(),
@@ -795,6 +813,39 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         ),
         (ApiKey::FETCH, Response::Error(ErrorCode::UNSUPPORTED_VERSION)),
         (ApiKey::METADATA, Response::Error(ErrorCode::CORRUPT_BATCH)),
+        (
+            ApiKey::PUBLISH,
+            Response::Publish(PublishResponse {
+                throttle_ms: 0,
+                entries: vec![
+                    PublishResult {
+                        error: ErrorCode::NONE,
+                        routed: vec![
+                            RoutedMessage {
+                                queue_id: 9,
+                                name: "orders".into(),
+                                error: ErrorCode::NONE,
+                                base_offset: 41,
+                            },
+                            RoutedMessage {
+                                queue_id: 10,
+                                name: String::new(),
+                                error: ErrorCode::REQUEST_TIMED_OUT,
+                                base_offset: 0,
+                            },
+                        ],
+                    },
+                    PublishResult { error: ErrorCode::UNROUTABLE, routed: vec![] },
+                ],
+            }),
+        ),
+        (
+            ApiKey::PUBLISH,
+            Response::Publish(PublishResponse {
+                throttle_ms: 0,
+                entries: vec![PublishResult { error: ErrorCode::UNAUTHORIZED, routed: vec![] }],
+            }),
+        ),
         (
             ApiKey::LIST_OFFSETS,
             Response::ListOffsets(ListOffsetsResponse {

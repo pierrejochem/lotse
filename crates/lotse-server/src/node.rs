@@ -341,6 +341,11 @@ enum Command {
         key: u64,
         answer: crate::client::EmptyAnswer,
     },
+    /// A publish's writes are decided (ADR 0079).
+    Published {
+        key: u64,
+        results: Vec<crate::client::PublishWrite>,
+    },
     /// A queue leader's dead letters were forwarded, or could not be.
     Forwarded {
         group: GroupId,
@@ -733,6 +738,42 @@ async fn check_empty<R: Runtime>(
     shared.work.set();
 }
 
+/// Writes a published message to each queue it routes to, one after
+/// another, and hands the outcomes to the main loop (ADR 0079). What the
+/// publisher's time does not allow is unknown, as is a write the client
+/// could not settle.
+async fn publish<R: Runtime>(
+    rt: R,
+    client: Arc<lotse_client::Client<R>>,
+    job: crate::client::PublishJob,
+    shared: Arc<Shared>,
+) {
+    use lotse_client::ClientError;
+    use lotse_proto::ErrorCode;
+    let deadline = rt.now() + job.timeout;
+    let stop = [&shared.stop];
+    let mut results = Vec::new();
+    for (entry, queue_id, name, batch) in job.writes {
+        let left = deadline.saturating_duration_since(rt.now());
+        let write = race(client.produce(&name, 0, batch), &stop);
+        let (error, offset) = match crate::signal::before(write, rt.sleep(left)).await {
+            None => (ErrorCode::REQUEST_TIMED_OUT, 0),
+            Some(None) => return,
+            Some(Some(Ok(offset))) => (ErrorCode::NONE, offset),
+            Some(Some(Err(e))) => match e {
+                ClientError::Broker { code, .. } => (code, 0),
+                ClientError::UnknownStream(..) => (ErrorCode::UNKNOWN_RESOURCE, 0),
+                // Nothing was written: no leader took it in time.
+                ClientError::GaveUp(..) | ClientError::NoAnswer(..) => (ErrorCode::NOT_LEADER, 0),
+                _ => (ErrorCode::REQUEST_TIMED_OUT, 0),
+            },
+        };
+        results.push((entry, queue_id, name, error, offset));
+    }
+    shared.commands.lock().expect("commands lock").push_back(Command::Published { key: job.key, results });
+    shared.work.set();
+}
+
 /// What the main loop works with besides its groups.
 struct Around<'a, R> {
     links: &'a mut Links,
@@ -760,6 +801,18 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             retry_for: cfg.tick * 100,
             backoff: cfg.tick * 5,
             idempotent: false,
+            ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
+        },
+    ));
+    // Publishes are written like a client's produces, idempotent so that
+    // the client's retries never write a message twice to a queue (ADR
+    // 0079).
+    let publish_client = Arc::new(lotse_client::Client::new(
+        rt.clone(),
+        lotse_client::ClientConfig {
+            request_timeout: cfg.tick * 100,
+            retry_for: cfg.tick * 100,
+            backoff: cfg.tick * 5,
             ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
         },
     ));
@@ -886,6 +939,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.empty_checked(key, answer, &view, groups);
                     continue;
                 }
+                Command::Published { key, results } => {
+                    clients.published(key, results);
+                    continue;
+                }
             };
             let res = match groups.get_mut(&group) {
                 Some(g) => g.propose(batch).map(|p| (p.first, p.last)).map_err(|e: ProposeError| e.to_string()),
@@ -924,6 +981,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         for job in clients.take_empty_jobs() {
             jobs.spawn(rt, check_empty(marker_client.clone(), job, shared.clone()));
+        }
+        for job in clients.take_publish_jobs() {
+            jobs.spawn(rt, publish(rt.clone(), publish_client.clone(), job, shared.clone()));
         }
         // After the round's answers: a request waiting on an entry learns
         // its fate before retention may compact it, which would leave the

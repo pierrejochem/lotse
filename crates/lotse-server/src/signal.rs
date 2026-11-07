@@ -70,3 +70,20 @@ pub(crate) async fn race<F: Future>(fut: F, signals: &[&Signal]) -> Option<F::Ou
     })
     .await
 }
+
+/// Runs `fut` until it completes or `deadline` does; `None` in the second
+/// case.
+pub(crate) async fn before<F: Future, G: Future>(fut: F, deadline: G) -> Option<F::Output> {
+    let mut fut = pin!(fut);
+    let mut deadline = pin!(deadline);
+    poll_fn(|cx| {
+        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(v));
+        }
+        if deadline.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}

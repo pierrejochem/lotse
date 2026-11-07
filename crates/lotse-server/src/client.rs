@@ -69,6 +69,7 @@ mod groups;
 mod ids;
 mod nodes;
 mod offsets;
+mod publish;
 pub(crate) use nodes::{managed_groups, moving};
 mod queues;
 mod retire;
@@ -79,6 +80,7 @@ mod verify;
 pub(crate) use admin::AdminView;
 pub(crate) use coord::MarkerJob;
 pub(crate) use empty::{EmptyAnswer, EmptyJob};
+pub(crate) use publish::{PublishJob, PublishWrite};
 pub use queues::QueueConfig;
 pub(crate) use retire::ForwardJob;
 use session::Session;
@@ -367,6 +369,8 @@ pub(crate) struct Clients {
     verify: verify::Verifying,
     /// Conditional deletes waiting for their partitions (ADR 0063).
     emptiness: empty::Emptiness,
+    /// Publishes waiting for their writes (ADR 0079).
+    publishing: publish::Publishing,
     /// The group coordinator's clocks.
     group_timers: groups::GroupTimers,
     /// Admin records in flight.
@@ -422,6 +426,7 @@ impl Clients {
             Request::Unsubscribe(req) => self.unsubscribe(outbox, id, req),
             Request::DeadLetter(req) => self.dead_letter(outbox, id, req, view, groups),
             Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, &principal, view, groups),
+            Request::Publish(req) => self.publish(outbox, id, req, &principal, view),
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
             Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
             Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),

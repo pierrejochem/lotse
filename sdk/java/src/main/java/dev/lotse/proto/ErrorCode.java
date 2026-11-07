@@ -73,6 +73,8 @@ public record ErrorCode(int code) {
     public static final ErrorCode FENCED_INSTANCE_ID = new ErrorCode(30);
     /** A transactional ack names a message the connection does not hold; the transaction must abort (ADR 0075). */
     public static final ErrorCode MESSAGE_NOT_HELD = new ErrorCode(31);
+    /** A mandatory published message routes to no queue (ADR 0079). */
+    public static final ErrorCode UNROUTABLE = new ErrorCode(32);
 
     private static final List<String> NAMES = List.of(
             "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -82,7 +84,7 @@ public record ErrorCode(int code) {
             "COORDINATOR_NOT_AVAILABLE", "CONCURRENT_TRANSACTIONS", "COORDINATOR_FENCED", "INVALID_REQUEST",
             "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
             "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
-            "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD");
+            "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE");
 
     /** Creates a code. */
     public ErrorCode {

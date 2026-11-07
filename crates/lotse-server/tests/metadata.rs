@@ -1108,3 +1108,50 @@ fn a_runtime_queue_with_a_single_active_consumer_hands_over_in_order() {
         })
     });
 }
+
+/// A node routes a publish by the bindings it has applied, so a binding made
+/// at runtime counts at once, whatever the publisher has cached (ADR 0079).
+#[test]
+fn a_new_binding_counts_for_the_next_publish_at_once() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_queue("first", 3, None).await.unwrap();
+            admin.create_queue("second", 3, None).await.unwrap();
+            admin.declare_exchange("x", ExchangeKind::Direct).await.unwrap();
+            admin.bind("x", "first", "k").await.unwrap();
+            rt.sleep(Duration::from_secs(1)).await;
+            // A publisher that would keep the exchange's bindings for an hour
+            // if it routed itself.
+            let p = Client::new(
+                rt.node("p"),
+                ClientConfig {
+                    retry_for: Duration::from_secs(10),
+                    metadata_max_age: Duration::from_secs(3_600),
+                    ..client_config(3)
+                },
+            );
+            let routed = |r: lotse_client::Published| r.routed.into_iter().map(|(q, _)| q).collect::<Vec<_>>();
+            let before = p.publish("x", "k", OutMessage::value("one"), true).await.unwrap();
+            assert_eq!(routed(before), ["first"]);
+            admin.bind("x", "second", "k").await.unwrap();
+            // Every node has applied it once the metadata group has, give or
+            // take a round trip.
+            rt.sleep(Duration::from_secs(1)).await;
+            let after = p.publish("x", "k", OutMessage::value("two"), true).await.unwrap();
+            assert_eq!(routed(after), ["first", "second"], "the new binding counts");
+            admin.unbind("x", "first", "k").await.unwrap();
+            rt.sleep(Duration::from_secs(1)).await;
+            let last = p.publish("x", "k", OutMessage::value("three"), true).await.unwrap();
+            assert_eq!(routed(last), ["second"], "and so does an unbinding");
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        })
+    });
+}

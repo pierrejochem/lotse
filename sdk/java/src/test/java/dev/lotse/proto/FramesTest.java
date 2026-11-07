@@ -41,7 +41,7 @@ class FramesTest {
         assertEquals(77, e.header().correlationId());
         assertEquals(9, e.header().apiVersion());
         byte[] other = Frames.encodeRequest(5, new Request.ApiVersions());
-        other[0] = 9; // a key the design leaves free
+        other[0] = 18; // a key the design leaves free
         assertEquals(DecodeException.Kind.UNSUPPORTED, assertThrows(DecodeException.class, () -> Frames.decodeRequest(other)).kind());
     }
 

@@ -108,6 +108,8 @@ public record ApiKey(int id) {
     public static final ApiKey REVOKE_SESSIONS = new ApiKey(50);
     /** Raises a runtime stream's partition count (tenant admin, ADR 0074). */
     public static final ApiKey CREATE_PARTITIONS = new ApiKey(51);
+    /** Publishes messages through exchanges; the node routes (ADR 0079). */
+    public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
     public static final ApiKey WRITE_TXN_MARKERS = new ApiKey(1000);
 
@@ -134,7 +136,7 @@ public record ApiKey(int id) {
             range(DELETE_TENANT), range(DESCRIBE_TENANTS), range(ALTER_ROLE_BINDINGS),
             range(DESCRIBE_ROLE_BINDINGS), range(WHO_AM_I), range(ADD_NODE), range(REMOVE_NODE),
             range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER), range(REVOKE_SESSIONS),
-            range(CREATE_PARTITIONS));
+            range(CREATE_PARTITIONS), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

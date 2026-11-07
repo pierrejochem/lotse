@@ -525,17 +525,25 @@ fn only_nodes_write_markers_and_nodes_do_nothing_else() {
                 Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }
             ));
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &check).await, Response::Outcome(_)));
-            // But a node cannot produce or administer.
-            let produce = Request::Produce(lotse_proto::ProduceRequest {
-                txn_id: None,
-                tenant: lotse_proto::DEFAULT_TENANT.into(),
-                timeout_ms: 1000,
-                resources: vec![lotse_proto::ProduceResource {
-                    resource_id: 7,
-                    partitions: vec![lotse_proto::ProducePartition { partition: 0, batch: batch("x") }],
-                }],
-            });
-            assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &produce).await, Response::Refused { .. }));
+            // A node produces outside a transaction, to write what it
+            // publishes (ADR 0079), but never within one, and does not
+            // administer.
+            let produce = |txn_id: Option<String>| {
+                Request::Produce(lotse_proto::ProduceRequest {
+                    txn_id,
+                    tenant: lotse_proto::DEFAULT_TENANT.into(),
+                    timeout_ms: 1000,
+                    resources: vec![lotse_proto::ProduceResource {
+                        resource_id: 7,
+                        partitions: vec![lotse_proto::ProducePartition { partition: 0, batch: batch("x") }],
+                    }],
+                })
+            };
+            assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &produce(None)).await, Response::Produce(_)));
+            assert!(matches!(
+                raw_call(&rt, Some(PeerIdentity::Node(2)), &produce(Some("t".into()))).await,
+                Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }
+            ));
             let tenant = Request::CreateTenant(lotse_proto::CreateTenantRequest { name: "n".into() });
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &tenant).await, Response::Refused { .. }));
             for n in nodes {
@@ -906,5 +914,59 @@ fn a_stream_gets_more_partitions_and_its_group_reads_them() {
                 n.join().await.unwrap();
             }
         });
+    });
+}
+
+/// A publish needs the producer role on the exchange and on every queue the
+/// message routes to; one queue the publisher may not write refuses the
+/// whole message, and nothing is written (ADR 0079).
+#[test]
+fn a_publish_needs_the_role_on_the_exchange_and_every_queue_it_routes_to() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = as_user(&rt, "root", "shop");
+            root.create_tenant("shop").await.expect("a cluster admin creates tenants");
+            let add = vec![
+                binding(subject_kind::USER, "ta", role::TENANT_ADMIN, "shop", ""),
+                binding(subject_kind::USER, "p", role::PRODUCER, "shop", "orders-"),
+            ];
+            root.alter_role_bindings(add, Vec::new()).await.expect("grants");
+            settle(&rt).await;
+            let ta = as_user(&rt, "ta", "shop");
+            ta.create_queue("orders-a", 3, None).await.unwrap();
+            ta.create_queue("audit-b", 3, None).await.unwrap();
+            ta.declare_exchange("orders-x", lotse_route::ExchangeKind::Direct).await.unwrap();
+            ta.declare_exchange("audit-x", lotse_route::ExchangeKind::Direct).await.unwrap();
+            ta.bind("orders-x", "orders-a", "a").await.unwrap();
+            ta.bind("orders-x", "orders-a", "all").await.unwrap();
+            ta.bind("orders-x", "audit-b", "all").await.unwrap();
+            settle(&rt).await;
+
+            let p = as_user(&rt, "p", "shop");
+            let msg = |v: &str| lotse_client::OutMessage::value(Bytes::copy_from_slice(v.as_bytes()));
+            let ok = p.publish("orders-x", "a", msg("mine"), true).await.expect("its exchange and queue");
+            assert_eq!(ok.routed.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>(), ["orders-a"]);
+            let both = p.publish("orders-x", "all", msg("both"), true).await;
+            assert!(
+                matches!(both, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, message: None })),
+                "audit-b is not the publisher's: {both:?}"
+            );
+            assert!(kept_out(p.publish("audit-x", "a", msg("x"), false).await), "nor is that exchange");
+
+            // Only the one it was allowed: nothing of the refused one.
+            let mut sub = ta.subscribe("orders-a", 10).await.expect("a tenant admin consumes");
+            let mut got = Vec::new();
+            while let Some(m) = sub.next(TICK * 50).await.unwrap() {
+                got.push(String::from_utf8(m.record.value.clone().unwrap().to_vec()).unwrap());
+                sub.ack(&m).await.unwrap();
+            }
+            assert_eq!(got, ["mine"]);
+            drop(sub);
+            for node in nodes {
+                node.handle().stop();
+                let _ = node.join().await;
+            }
+        })
     });
 }

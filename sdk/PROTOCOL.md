@@ -69,7 +69,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 
 ## Error codes
 
-Codes 0 to 31, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
+Codes 0 to 32, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
 
 ## The record batch
 
@@ -198,7 +198,7 @@ The client keeps `(stream, partition) -> {resource_id, leader, term}`, learnt fr
 3. **Produces to one partition go out one at a time.** A second batch is not sent until the first has an answer, so the leader sees sequences in order. Different partitions run in parallel.
 4. Retrying a batch whose outcome is unknown (lost connection, `REQUEST_TIMED_OUT`) sends **the same bytes**: same id, epoch and sequence. The leader recognises a batch it has and answers with its offset.
 5. On success the sequence advances by the batch's record count (a wrapping `i32`).
-6. When the call ends with `Unknown`, `OUT_OF_ORDER_SEQUENCE` or `PRODUCER_FENCED`, the whole session is dropped; the next produce gets a new producer id and starts every partition at 0. A gap in the sequence would otherwise block everything behind it. Any other failure means the batch was not written, and its sequence is free.
+6. When the call ends with `Unknown`, `OUT_OF_ORDER_SEQUENCE` or `PRODUCER_FENCED`, the whole session is dropped; the next produce gets a new producer id and starts every partition at 0. A gap in the sequence would otherwise block everything behind it. A call abandoned before its outcome is known (a caller's timeout, a cancelled task) counts as `Unknown` too: reusing its sequence would let the leader take the next batch for the abandoned one, answer with that one's offset and write nothing. Any other failure means the batch was not written, and its sequence is free.
 7. `REQUEST_TIMED_OUT` means the quorum did not confirm in time: the batch may or may not be written.
 8. Without idempotence nothing is stamped and an unknown outcome fails at once, because a retry could write the batch twice. Errors that prove the batch was not written (`NOT_LEADER`, a connection that was never opened) are still retried.
 
@@ -261,6 +261,10 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 ### Closing
 
 Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out, one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
+
+### Publishing through an exchange
+
+`Publish` (key 9, ADR 0079) goes to any node, with entries of exchange id, routing key, `mandatory` and a batch of exactly one non-transactional data record; `txn_id` must be null. The node routes by the bindings it has applied and writes each queue in turn. An entry's `error` is `UNKNOWN_RESOURCE` (exchange unknown: look the name up again, it may have a new id), `INVALID_REQUEST`, `UNROUTABLE` (mandatory and no queue) or `UNAUTHORIZED` (no producer role on a routed queue; nothing written); otherwise `routed` lists each queue by id and name (the publisher may never have seen a queue bound and deleted between two of its lookups; the name is empty only when the node no longer knows the queue), with `NONE` and the offset, `REQUEST_TIMED_OUT` when its outcome is unknown, or the code that refused it. A publish that is not mandatory and routes nowhere has `NONE` and no queues. When the answer is lost, do not send the publish again: the node may have written it, and a second one could write it twice. Report the outcome as unknown.
 
 ### Dead letters
 

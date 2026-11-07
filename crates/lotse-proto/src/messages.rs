@@ -1041,6 +1041,138 @@ impl WriteTxnMarkersResponse {
     }
 }
 
+/// Publishes messages through exchanges (ADR 0079): the node that gets it
+/// routes each message by the exchange's bindings as it knows them and
+/// writes it to every queue it routes to. Not atomic across queues; a
+/// transaction publishes by producing to each queue itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishRequest {
+    /// A transaction: not supported here, refused.
+    pub txn_id: Option<String>,
+    /// How long the node may take, in ms.
+    pub timeout_ms: u32,
+    /// The messages.
+    pub entries: Vec<PublishEntry>,
+}
+
+/// One message to publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishEntry {
+    /// The exchange.
+    pub exchange_id: u64,
+    /// The routing key.
+    pub routing_key: String,
+    /// Refuse the message with [`ErrorCode::UNROUTABLE`] if it routes to no
+    /// queue, rather than drop it.
+    pub mandatory: bool,
+    /// A batch of exactly one record: the message, its headers routing it
+    /// through a headers exchange.
+    pub batch: Bytes,
+}
+
+impl PublishRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.opt_string(self.txn_id.as_deref());
+        w.u32(self.timeout_ms);
+        w.array(&self.entries, |w, e| {
+            w.u64(e.exchange_id);
+            w.string(&e.routing_key);
+            w.u8(u8::from(e.mandatory));
+            w.bytes(&e.batch);
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let txn_id = r.opt_string()?;
+        let timeout_ms = r.u32()?;
+        let entries = r.array(15, |r| {
+            let e = PublishEntry {
+                exchange_id: r.u64()?,
+                routing_key: r.string()?,
+                mandatory: r.u8()? != 0,
+                batch: r.bytes()?,
+            };
+            r.tags()?;
+            Ok(e)
+        })?;
+        r.tags()?;
+        Ok(PublishRequest { txn_id, timeout_ms, entries })
+    }
+}
+
+/// What became of each published message, in the request's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishResponse {
+    /// How long the client should wait before its next request.
+    pub throttle_ms: u32,
+    /// Per message.
+    pub entries: Vec<PublishResult>,
+}
+
+/// What became of one message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishResult {
+    /// `NONE` once routed (each queue's own outcome is in `routed`);
+    /// otherwise why nothing was written: `UNKNOWN_RESOURCE`,
+    /// `UNAUTHORIZED` (the exchange, or a queue it routes to),
+    /// `UNROUTABLE`, `INVALID_REQUEST`.
+    pub error: ErrorCode,
+    /// The queues it routes to.
+    pub routed: Vec<RoutedMessage>,
+}
+
+/// One queue's copy of a published message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedMessage {
+    /// The queue.
+    pub queue_id: u64,
+    /// Its name, which the publisher may never have seen: a queue bound
+    /// and deleted between two of its lookups. Empty when the node no
+    /// longer knows the queue either.
+    pub name: String,
+    /// `NONE`: the queue holds it at `base_offset`. `REQUEST_TIMED_OUT`:
+    /// unknown whether it does. Anything else: it does not.
+    pub error: ErrorCode,
+    /// Where, with `NONE`.
+    pub base_offset: u64,
+}
+
+impl PublishResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.throttle_ms);
+        w.array(&self.entries, |w, e| {
+            w.u16(e.error.0);
+            w.array(&e.routed, |w, q| {
+                w.u64(q.queue_id);
+                w.string(&q.name);
+                w.u16(q.error.0);
+                w.u64(q.base_offset);
+            });
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let throttle_ms = r.u32()?;
+        let entries = r.array(4, |r| {
+            let error = ErrorCode(r.u16()?);
+            let routed = r.array(20, |r| {
+                Ok(RoutedMessage {
+                    queue_id: r.u64()?,
+                    name: r.string()?,
+                    error: ErrorCode(r.u16()?),
+                    base_offset: r.u64()?,
+                })
+            })?;
+            r.tags()?;
+            Ok(PublishResult { error, routed })
+        })?;
+        r.tags()?;
+        Ok(PublishResponse { throttle_ms, entries })
+    }
+}
+
 /// Subscribes to a queue; deliveries follow as pushes on this connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscribeRequest {

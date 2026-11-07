@@ -268,6 +268,43 @@ public sealed interface Response {
     }
 
     /**
+     * What became of each published message, in the request's order (ADR 0079).
+     *
+     * @param throttleMs how long the client should wait before its next request, a {@code u32}
+     * @param entries per message
+     */
+    record Publish(long throttleMs, List<PublishResult> entries) implements Response {
+        /** Creates the response. */
+        public Publish {
+            entries = List.copyOf(entries);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u32(throttleMs);
+            w.array(entries, (w1, e) -> {
+                w1.u16(e.error().code());
+                w1.array(e.routed(), (w2, q) -> w2.u64(q.queueId()).string(q.name()).u16(q.error().code()).u64(q.baseOffset()));
+                w1.noTags();
+            });
+            w.noTags();
+        }
+
+        static Publish read(Reader r) {
+            long throttle = r.u32();
+            List<PublishResult> entries = r.array(4, r1 -> {
+                ErrorCode error = new ErrorCode(r1.u16());
+                List<RoutedMessage> routed =
+                        r1.array(20, r2 -> new RoutedMessage(r2.u64(), r2.string(), new ErrorCode(r2.u16()), r2.u64()));
+                r1.tags();
+                return new PublishResult(error, routed);
+            });
+            r.tags();
+            return new Publish(throttle, entries);
+        }
+    }
+
+    /**
      * Only an outcome, for {@code Ack}, {@code Nack}, {@code Unsubscribe}, {@code Bind} and {@code Unbind}. The
      * leader hint is the structure's block of tagged fields.
      *

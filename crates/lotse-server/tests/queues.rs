@@ -292,7 +292,8 @@ async fn producer(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBoo
             // A mandatory message for a key nothing is bound to.
             1 if rt.chance(1, 5) => {
                 match client.publish("direct", "nobody", OutMessage::value(value.clone()), true).await {
-                    Err(ClientError::Unroutable { .. }) => {}
+                    // Refused, or no node answered in time (ADR 0079).
+                    Err(ClientError::Unroutable { .. } | ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
                     other => panic!("a mandatory message for no queue was not refused: {other:?}"),
                 }
                 out.lock().unwrap().not_written.extend(QUEUES.map(|q| (q.to_string(), value.clone())));
@@ -318,12 +319,23 @@ async fn producer(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBoo
                         }
                         for (q, e) in failed {
                             match e {
-                                ClientError::GaveUp(..) => out.lock().unwrap().not_written.push((q, value.clone())),
+                                // Definitely not written: the node gave up
+                                // or a leader refused it (ADR 0079).
+                                ClientError::GaveUp(..) | ClientError::Broker { .. } => {
+                                    out.lock().unwrap().not_written.push((q, value.clone()))
+                                }
                                 ClientError::Unknown(_) => {}
                                 e => panic!("unexpected publish error for {q}: {e}"),
                             }
                         }
                     }
+                    // No node took the publish: written nowhere.
+                    Err(ClientError::GaveUp(..)) => {
+                        let mut o = out.lock().unwrap();
+                        o.not_written.extend(expected_route(&key).into_iter().map(|q| (q, value.clone())));
+                    }
+                    // A node may have written it to any of its queues.
+                    Err(ClientError::Unknown(_)) => {}
                     Err(e) => panic!("unexpected publish error: {e}"),
                 }
             }

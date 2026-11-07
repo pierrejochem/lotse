@@ -8,7 +8,7 @@ use bytes::Bytes;
 use lotse_client::{Client, ClientConfig, ClientError};
 use lotse_proto::*;
 use lotse_record::{BatchBuilder, BatchOptions};
-use lotse_rt::{Conn, Listener, Net, Spawn};
+use lotse_rt::{Clock, Conn, Listener, Net, Spawn};
 use lotse_sim::{Sim, SimRuntime};
 
 /// A broker that answers everything a transaction needs, except produce,
@@ -118,12 +118,23 @@ fn a_transaction_with_an_unknown_write_cannot_be_committed() {
 }
 
 /// A broker with a fanout exchange to queues `a` (written) and `b` (never
-/// written: its partition has no leader that takes the produce).
+/// written: its partition has no leader that takes the produce). A
+/// `Publish` (ADR 0079) it answers the same way the first time, and
+/// swallows after that, so its answer is lost; `publishes` counts them.
 async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
+    fanout_broker_counting(rt, end_called, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await
+}
+
+async fn fanout_broker_counting(
+    rt: SimRuntime,
+    end_called: Arc<AtomicBool>,
+    publishes: Arc<std::sync::atomic::AtomicUsize>,
+) {
     let listener = rt.listen("b1:9000", lotse_rt::Link::Client).await.unwrap();
     loop {
         let Ok((conn, _)) = listener.accept().await else { return };
         let end_called = end_called.clone();
+        let publishes = publishes.clone();
         drop(rt.spawn(async move {
             while let Ok(Some(frame)) = conn.recv().await {
                 let (h, req) = decode_request(frame).unwrap();
@@ -212,6 +223,25 @@ async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                             }],
                         })
                     }
+                    Request::Publish(p) => {
+                        assert_eq!((p.entries.len(), p.entries[0].exchange_id), (1, 3));
+                        if publishes.fetch_add(1, Ordering::Relaxed) > 0 {
+                            continue;
+                        }
+                        let routed = vec![
+                            RoutedMessage { queue_id: 1, name: "a".into(), error: ErrorCode::NONE, base_offset: 5 },
+                            RoutedMessage {
+                                queue_id: 2,
+                                name: "b".into(),
+                                error: ErrorCode::NOT_LEADER,
+                                base_offset: 0,
+                            },
+                        ];
+                        Response::Publish(PublishResponse {
+                            throttle_ms: 0,
+                            entries: vec![PublishResult { error: ErrorCode::NONE, routed }],
+                        })
+                    }
                     other => panic!("unexpected request {other:?}"),
                 };
                 if conn.send(encode_response(h.correlation_id, &resp)).await.is_err() {
@@ -220,6 +250,28 @@ async fn fanout_broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
             }
         }));
     }
+}
+
+/// A `Publish` whose answer is lost is not sent again: the node may have
+/// written it, and a second one could write it twice (ADR 0079).
+#[test]
+fn a_publish_whose_answer_is_lost_is_not_sent_again() {
+    Sim::new(3).run(|rt| async move {
+        let publishes = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        drop(rt.spawn(fanout_broker_counting(rt.node("b1"), Arc::new(AtomicBool::new(false)), publishes.clone())));
+        let client = Client::new(
+            rt.node("c1"),
+            ClientConfig {
+                request_timeout: Duration::from_millis(100),
+                retry_for: Duration::from_millis(500),
+                ..ClientConfig::new(vec!["b1:9000".into()])
+            },
+        );
+        let res = client.publish("x", "", lotse_client::OutMessage::value("v"), false).await;
+        assert!(matches!(res, Err(ClientError::Unknown(_))), "{res:?}");
+        assert_eq!(publishes.load(Ordering::Relaxed), 2, "one publish, not sent again");
+        drop(client);
+    });
 }
 
 /// A message published in a transaction reaches all its queues or none:
@@ -245,7 +297,8 @@ fn a_transaction_with_a_partial_publish_cannot_be_committed() {
         assert!(matches!(txn.commit().await, Err(ClientError::MustAbort(_))));
         assert!(!committed.load(Ordering::Relaxed), "the coordinator was never asked to commit");
 
-        // Without a transaction the same publish says which queue holds it.
+        // Without a transaction a node routes the same publish (ADR 0079)
+        // and says which queue holds it.
         let plain = Client::new(
             rt.node("c2"),
             ClientConfig {
@@ -258,10 +311,161 @@ fn a_transaction_with_a_partial_publish_cannot_be_committed() {
         match plain.publish("x", "", lotse_client::OutMessage::value("v"), false).await {
             Err(ClientError::NotAllWritten { written, failed }) => {
                 assert_eq!(written, vec![("a".to_string(), 5)]);
-                assert!(matches!(&failed[..], [(q, ClientError::GaveUp(..))] if q == "b"), "{failed:?}");
+                assert!(
+                    matches!(&failed[..], [(q, ClientError::Broker { code: ErrorCode::NOT_LEADER, .. })] if q == "b"),
+                    "{failed:?}"
+                );
             }
             other => panic!("expected a partial publish, got {other:?}"),
         }
         drop((client, plain));
+    });
+}
+
+/// A broker for stream `s` that hands out a new producer id each time and
+/// notes each produce's producer id and sequence; the first produce it
+/// swallows, the others it answers.
+async fn noting_broker(rt: SimRuntime, seen: Arc<std::sync::Mutex<Vec<(u64, i32)>>>) {
+    let listener = rt.listen("b1:9000", lotse_rt::Link::Client).await.unwrap();
+    let ids = Arc::new(std::sync::atomic::AtomicU64::new(10));
+    loop {
+        let Ok((conn, _)) = listener.accept().await else { return };
+        let (seen, ids) = (seen.clone(), ids.clone());
+        drop(rt.spawn(async move {
+            while let Ok(Some(frame)) = conn.recv().await {
+                let (h, req) = decode_request(frame).unwrap();
+                let resp = match req {
+                    Request::Metadata(_) => Response::Metadata(MetadataResponse {
+                        brokers: vec![Broker { node_id: 1, host: "b1".into(), port: 9000, rack: String::new() }],
+                        resources: vec![ResourceMetadata {
+                            error: ErrorCode::NONE,
+                            name: "s".into(),
+                            tenant: "default".into(),
+                            resource_id: 7,
+                            kind: kind::STREAM,
+                            partitions: vec![PartitionMetadata {
+                                partition: 0,
+                                leader: 1,
+                                leader_term: 1,
+                                voters: vec![1],
+                            }],
+                            exchange: None,
+                        }],
+                    }),
+                    Request::FindCoordinator(_) => Response::FindCoordinator(FindCoordinatorResponse {
+                        error: ErrorCode::NONE,
+                        node_id: 1,
+                        host: "b1".into(),
+                        port: 9000,
+                        error_msg: None,
+                    }),
+                    Request::InitProducer(_) => Response::InitProducer(InitProducerResponse {
+                        error: ErrorCode::NONE,
+                        producer_id: ids.fetch_add(1, Ordering::Relaxed),
+                        producer_epoch: 0,
+                        leader_hint: None,
+                    }),
+                    Request::Produce(p) => {
+                        let (b, _) = lotse_record::Batch::parse(&p.resources[0].partitions[0].batch).unwrap();
+                        let first = {
+                            let mut s = seen.lock().unwrap();
+                            s.push((b.producer_id(), b.base_sequence()));
+                            s.len() == 1
+                        };
+                        if first {
+                            continue;
+                        }
+                        Response::Produce(ProduceResponse {
+                            throttle_ms: 0,
+                            resources: vec![ProduceResourceResponse {
+                                resource_id: 7,
+                                partitions: vec![ProducePartitionResponse {
+                                    partition: 0,
+                                    error: ErrorCode::NONE,
+                                    base_offset: 0,
+                                    append_ts: -1,
+                                    error_msg: None,
+                                    leader_hint: None,
+                                }],
+                            }],
+                        })
+                    }
+                    other => panic!("unexpected request {other:?}"),
+                };
+                if conn.send(encode_response(h.correlation_id, &resp)).await.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+}
+
+/// A produce dropped before its answer came may have been written. The
+/// next batch must not carry the same producer id and sequence, or the
+/// leader would take it for the dropped one and answer with that one's
+/// offset, writing nothing (found by the queue simulation: a node drops
+/// a publish's write at its deadline, ADR 0079).
+#[test]
+fn a_produce_dropped_before_its_answer_leaves_no_sequence_behind() {
+    Sim::new(1).run(|rt| async move {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        drop(rt.spawn(noting_broker(rt.node("b1"), seen.clone())));
+        let client = Client::new(
+            rt.node("c1"),
+            ClientConfig {
+                request_timeout: Duration::from_secs(10),
+                retry_for: Duration::from_secs(10),
+                ..ClientConfig::new(vec!["b1:9000".into()])
+            },
+        );
+        {
+            let mut produce = std::pin::pin!(client.produce("s", 0, batch()));
+            let mut deadline = std::pin::pin!(rt.sleep(Duration::from_millis(100)));
+            std::future::poll_fn(|cx| {
+                use std::future::Future;
+                assert!(produce.as_mut().poll(cx).is_pending(), "the broker never answers the first produce");
+                deadline.as_mut().poll(cx)
+            })
+            .await;
+        }
+        client.produce("s", 0, batch()).await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_ne!(seen[0], seen[1], "the second batch took the dropped one's producer id and sequence");
+        drop(client);
+    });
+}
+
+/// Within a transaction a dropped produce leaves the transaction to be
+/// aborted: the next batch would otherwise take its sequence.
+#[test]
+fn a_transaction_whose_produce_was_dropped_cannot_go_on() {
+    Sim::new(1).run(|rt| async move {
+        let end_called = Arc::new(AtomicBool::new(false));
+        drop(rt.spawn(broker(rt.node("b1"), end_called.clone())));
+        let client = Client::new(
+            rt.node("c1"),
+            ClientConfig {
+                request_timeout: Duration::from_secs(10),
+                retry_for: Duration::from_secs(10),
+                transactional_id: Some("t".into()),
+                ..ClientConfig::new(vec!["b1:9000".into()])
+            },
+        );
+        let mut txn = client.begin_transaction().await.unwrap();
+        {
+            let mut produce = std::pin::pin!(txn.produce("s", 0, batch()));
+            let mut deadline = std::pin::pin!(rt.sleep(Duration::from_millis(100)));
+            std::future::poll_fn(|cx| {
+                use std::future::Future;
+                assert!(produce.as_mut().poll(cx).is_pending(), "the broker never answers a produce");
+                deadline.as_mut().poll(cx)
+            })
+            .await;
+        }
+        assert!(matches!(txn.produce("s", 0, batch()).await, Err(ClientError::MustAbort(_))), "no more writes");
+        assert!(matches!(txn.commit().await, Err(ClientError::MustAbort(_))));
+        assert!(!end_called.load(Ordering::Relaxed), "the coordinator was never asked to commit");
+        drop(client);
     });
 }
