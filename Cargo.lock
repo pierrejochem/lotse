@@ -874,6 +874,7 @@ dependencies = [
  "crc32c",
  "lotse-auth",
  "lotse-record",
+ "lotse-route",
  "thiserror 2.0.21",
 ]
 

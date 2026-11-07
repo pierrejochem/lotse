@@ -10,7 +10,7 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 
 ## Status
 
-Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch) and queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers). Transactions, consumer groups, exchanges, the rest of admin and the Kotlin layer follow.
+Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction) and consumer groups. Declaring exchanges and bindings, the rest of admin and the Kotlin layer follow.
 
 ### Producing and reading a stream
 
@@ -78,8 +78,49 @@ try (var client = new LotseClient(config)) {
 - `nack(job, true)` only works for a message of the current subscription, on its connection. After the subscription ended the broker has already taken the message back, and the call does nothing.
 - `poll` and `next` are for one thread; `ack`, `nack` and `close` may be called from any thread. `close` hands back the messages the consumer received but did not hand out. Messages it handed out stay with it until acknowledged or until the client's connection closes.
 - A dead-lettered message carries where it came from: `delivery.deadLetter()` has the reason (`max-deliveries` or `expired`), the source queue, its id, the offset there, the delivery count and the ack floor.
-- Exclusive and single-active subscriptions, delayed requeue and acknowledging within a transaction are refused by the broker so far and are not offered.
+- `ackIn(txn, delivery)` acknowledges within a transaction; see below. Delayed requeue (ADR 0077) and the standby answer of a single-active queue (ADR 0076) are not offered yet: on such a queue a second consumer simply waits for messages.
 
+### Transactions
+
+```java
+var config = ClientConfig.builder("127.0.0.1:9092")
+        .plaintextOnLoopback()
+        .transactionalId("billing-1")       // one running client per id; a new one fences the old
+        .build();
+try (var client = new LotseClient(config);
+        var group = client.joinGroup("billing", List.of("orders"), GroupConfig.builder().autoCommit(false).build())) {
+    while (true) {
+        List<GroupRecord> records = group.poll(Duration.ofMillis(500));   // heartbeats too: call it often
+        if (records.isEmpty()) {
+            continue;
+        }
+        try (Transaction txn = client.beginTransaction()) {
+            for (GroupRecord r : records) {
+                txn.produce("invoices", 0, OutMessage.value(invoiceFor(r.record())));
+                txn.publish("events", "invoice.created", OutMessage.value("..."), false);
+            }
+            txn.sendOffsets(group);           // the group's offsets commit with the output, or not at all
+            txn.commit();
+        } catch (ClientException e) {
+            group.rewind();                   // read again from the committed offsets
+        }
+    }
+}
+```
+
+- What a transaction writes becomes visible to read_committed readers together when it commits, and never if it aborts. One transaction at a time per client: `beginTransaction` waits for the open one.
+- After an error that may have left something written, the transaction only aborts: every other call throws `ClientException.MustAbort`. `GaveUp` and `UnknownStream` prove nothing was written and leave it open.
+- A transaction closed without `commit` or `abort` (as above, after an exception) is aborted by the coordinator; the client's next transaction starts with a fresh producer id.
+- `publish` in a transaction is routed by this client, by the bindings metadata gave within `metadataMaxAge`, and reaches every queue or none.
+- `consumer.ackIn(txn, delivery)` acknowledges a queue message within the transaction: the commit settles it, an abort gives it back.
+
+### Consumer groups
+
+- `joinGroup(group, streams, config)` or `joinGroupMatching(group, regex, config)`. Partitions arrive with the first `poll` calls, and `poll` returns the records of one owned partition at a time, in offset order.
+- **The member heartbeats only from `poll`.** Call it more often than the session timeout (default 45 s), or the member loses its partitions and joins again. The rules are the Rust client's, listed in `PROTOCOL.md`.
+- With auto-commit (default) a revoked partition's position is committed before it is released, and `close` commits and leaves. Without it, commit with `commit()` or with a transaction (`sendOffsets`).
+- `GroupConfig.startFrom` says where a partition without a committed offset starts: `OffsetAt.EARLIEST` (default), `LATEST` or `time(ms)`. `instanceId` keeps a member's partitions across a restart within the session timeout; a second instance with the same id fences the first, whose `poll` then throws `FENCED_INSTANCE_ID`.
+- A `GroupConsumer` is for one thread.
 
 ### Connecting
 
@@ -124,7 +165,7 @@ LOTSE_BIN=/path/to/lotse make sdk-test   # also the tests that need real certifi
 make sdk-vectors         # regenerate sdk/conformance after changing the protocol
 ```
 
-`make sdk-test` needs a JDK 17 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce and fetch rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
+`make sdk-test` needs a JDK 17 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce, fetch, transaction and group rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
 
 ## Conformance
 

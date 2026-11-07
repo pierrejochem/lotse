@@ -282,7 +282,7 @@ public final class Messages {
      * A match on one header of a binding.
      *
      * @param key the header's name
-     * @param value the value to match, or {@code null} to match any
+     * @param value the value to match, or {@code null} to match a header whose value is null
      */
     public record HeaderMatch(ByteString key, ByteString value) {
         /** Creates a match. */

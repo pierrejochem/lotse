@@ -28,6 +28,7 @@ public final class ClientConfig {
     private final boolean idempotent;
     private final Duration txnTimeout;
     private final String producerName;
+    private final String transactionalId;
     private final Duration metadataMaxAge;
     private final String tenant;
     private final Credentials credentials;
@@ -43,6 +44,7 @@ public final class ClientConfig {
         this.idempotent = b.idempotent;
         this.txnTimeout = b.txnTimeout;
         this.producerName = b.producerName;
+        this.transactionalId = b.transactionalId;
         this.metadataMaxAge = b.metadataMaxAge;
         this.tenant = b.tenant;
         this.credentials = b.credentials;
@@ -104,6 +106,11 @@ public final class ClientConfig {
         return producerName;
     }
 
+    /** The transactional id, or {@code null}: {@link LotseClient#beginTransaction} needs one. */
+    public String transactionalId() {
+        return transactionalId;
+    }
+
     /**
      * How long exchange bindings learnt from metadata are used before they are asked for again. Routes of streams
      * do not expire by age: they are used until a request fails, as in the Rust client.
@@ -145,6 +152,7 @@ public final class ClientConfig {
         private boolean idempotent = true;
         private Duration txnTimeout = Duration.ofSeconds(60);
         private String producerName;
+        private String transactionalId;
         private Duration metadataMaxAge = Duration.ofSeconds(30);
         private String tenant = DEFAULT_TENANT;
         private Credentials credentials;
@@ -209,6 +217,20 @@ public final class ClientConfig {
                 throw new IllegalArgumentException("a producer name is not empty and has no NUL");
             }
             this.producerName = name;
+            return this;
+        }
+
+        /**
+         * The transactional id for {@link LotseClient#beginTransaction} (ADR 0029). The first transaction gets the
+         * producer id from the coordinator under it, which fences an earlier client with the same id; an
+         * unfinished transaction of that client is aborted. One client instance per id. It lives in the configured
+         * tenant (ADR 0062). Default none: no transactions.
+         */
+        public Builder transactionalId(String id) {
+            if (id != null && (id.isEmpty() || id.indexOf('\0') >= 0)) {
+                throw new IllegalArgumentException("a transactional id is not empty and has no NUL");
+            }
+            this.transactionalId = id;
             return this;
         }
 

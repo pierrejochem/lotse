@@ -39,6 +39,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -79,7 +80,7 @@ public final class LotseClient implements AutoCloseable {
 
     private record PartitionKey(String stream, int partition) {}
 
-    private record ProducerIds(long producerId, int epoch) {}
+    record ProducerIds(long producerId, int epoch) {}
 
     /** The producer id this client writes with. */
     private static final class Session {
@@ -107,6 +108,13 @@ public final class LotseClient implements AutoCloseable {
     private final Map<Long, Address> brokers = new TreeMap<>();
     private final Map<PartitionKey, Route> routes = new HashMap<>();
     private final Map<Long, String> names = new HashMap<>();
+    /** Exchanges by name, and when metadata said so ({@link System#nanoTime}). Guarded by {@link #state}. */
+    private final Map<String, Exchange> exchanges = new HashMap<>();
+    private final Map<String, Long> exchangesAt = new HashMap<>();
+
+    /** One transaction at a time; the producer id and epoch for the next one, {@code null} to ask anew. */
+    private final Semaphore txnTurn = new Semaphore(1, true);
+    private final AtomicReference<ProducerIds> txnProducer = new AtomicReference<>();
 
     private final Object sessionLock = new Object();
     private Session session;
@@ -243,6 +251,10 @@ public final class LotseClient implements AutoCloseable {
                     continue;
                 }
                 names.put(r.resourceId(), r.name());
+                if (r.exchange() != null) {
+                    exchanges.put(r.name(), Exchange.of(r.name(), r.resourceId(), r.exchange()));
+                    exchangesAt.put(r.name(), System.nanoTime());
+                }
                 for (PartitionMetadata p : r.partitions()) {
                     routes.put(
                             new PartitionKey(r.name(), (int) p.partition()),
@@ -475,7 +487,7 @@ public final class LotseClient implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> produceBatch(stream, partition, batch), executor);
     }
 
-    private static ByteString build(List<OutMessage> messages) {
+    static ByteString build(List<OutMessage> messages) {
         if (messages.isEmpty()) {
             throw new IllegalArgumentException("there is no message to produce");
         }
@@ -573,7 +585,7 @@ public final class LotseClient implements AutoCloseable {
         return new Stamp(s.producerId, s.epoch, s.next.getOrDefault(key, 0));
     }
 
-    private ProduceResult produceOnce(String stream, int partition, ByteString batch, boolean idempotent, String txnId) {
+    ProduceResult produceOnce(String stream, int partition, ByteString batch, boolean idempotent, String txnId) {
         // An idempotent batch may be sent again whatever happened to it.
         Routed routed = route(stream, partition);
         Request.Produce req = new Request.Produce(
@@ -662,12 +674,12 @@ public final class LotseClient implements AutoCloseable {
         throw Attempt.retry(why);
     }
 
-    private void forgetCoordinator() {
+    void forgetCoordinator() {
         coordinatorAddress = null;
     }
 
     /** One request to the coordinator; failures become {@code Attempt}s (every coordinator request may be repeated). */
-    private Response callCoordinator(String key, Request req) {
+    Response callCoordinator(String key, Request req) {
         Address addr = coordinator(key);
         try {
             return call(addr, req);
@@ -677,7 +689,7 @@ public final class LotseClient implements AutoCloseable {
         }
     }
 
-    private ProducerIds initProducerOnce(String txn) {
+    ProducerIds initProducerOnce(String txn) {
         Request init = new Request.InitProducer(txn, Math.min(cfg.txnTimeout().toMillis(), U32_MAX), cfg.tenant());
         Response resp = callCoordinator(txn == null ? "" : txn, init);
         if (!(resp instanceof Response.InitProducer r)) {
@@ -692,6 +704,189 @@ public final class LotseClient implements AutoCloseable {
             throw Attempt.retry(r.error().toString());
         }
         throw Attempt.fail(new ClientException.Broker(r.error(), null));
+    }
+
+    // ---- transactions (ADR 0029) ----
+
+    /**
+     * Starts a transaction for the configured transactional id ({@link ClientConfig.Builder#transactionalId}),
+     * getting its producer id from the coordinator first, which fences any older client with the same id. One
+     * transaction at a time per client: a second call waits until the first ends. End it with {@link
+     * Transaction#commit} or {@link Transaction#abort}; closed without either, the next transaction gets a fresh
+     * producer id, and the coordinator aborts what was left open.
+     *
+     * @throws ClientException.NotTransactional no transactional id is configured
+     */
+    public Transaction beginTransaction() {
+        checkOpen();
+        String txnId = cfg.transactionalId();
+        if (txnId == null) {
+            throw new ClientException.NotTransactional();
+        }
+        try {
+            txnTurn.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ClientException.GaveUp(Duration.ZERO, "interrupted while waiting for the open transaction");
+        }
+        try {
+            ProducerIds ids = txnProducer.get();
+            if (ids == null) {
+                ids = retrying(() -> initProducerOnce(txnId));
+                txnProducer.set(ids);
+            }
+            return new Transaction(this, txnId, ids.producerId(), ids.epoch());
+        } catch (RuntimeException e) {
+            txnTurn.release();
+            throw e;
+        }
+    }
+
+    /** A transaction ended: {@code next} is the producer id for the next one, {@code null} to ask anew. */
+    void transactionEnded(ProducerIds next) {
+        txnProducer.set(next);
+        txnTurn.release();
+    }
+
+    // ---- exchanges routed by the client, in a transaction (ADR 0032) ----
+
+    /** The exchange as metadata last said within {@code metadataMaxAge}, asking for it otherwise. */
+    Exchange exchange(String name) {
+        synchronized (state) {
+            Long at = exchangesAt.get(name);
+            if (at != null && System.nanoTime() - at < cfg.metadataMaxAge().toNanos()) {
+                return exchanges.get(name);
+            }
+        }
+        // learn() keeps the exchange and the queues bound to it.
+        Response.Metadata m = metadata(name);
+        if (find(m.resources(), name) == null) {
+            // Declared a moment ago: not every broker knows it yet.
+            metadataFromAll(name);
+        }
+        synchronized (state) {
+            Exchange x = exchanges.get(name);
+            if (x == null) {
+                throw new ClientException.UnknownStream(name, 0);
+            }
+            return x;
+        }
+    }
+
+    /** The queues {@code message} goes to, by name, sorted. With {@code mandatory}, a message no queue takes is refused. */
+    List<String> routeMessage(String exchange, String routingKey, OutMessage message, boolean mandatory) {
+        Exchange x = exchange(exchange);
+        TreeSet<Long> ids = x.route(routingKey, message.headers());
+        if (ids.isEmpty() && mandatory) {
+            throw new ClientException.Unroutable(exchange, routingKey);
+        }
+        List<String> queues = new ArrayList<>();
+        synchronized (state) {
+            for (long id : ids) {
+                String n = names.get(id);
+                if (n == null) {
+                    throw new ClientException.UnknownStream(
+                            "queue " + Long.toUnsignedString(id) + " bound to " + exchange, 0);
+                }
+                queues.add(n);
+            }
+        }
+        Collections.sort(queues);
+        return queues;
+    }
+
+    // ---- consumer groups (ADR 0033) ----
+
+    /**
+     * Joins {@code group} to read {@code streams}; partitions arrive with the first calls to {@link
+     * GroupConsumer#poll}.
+     */
+    public GroupConsumer joinGroup(String group, List<String> streams, GroupConfig config) {
+        checkOpen();
+        // Learn the streams' ids (and names) first.
+        metadata(streams.toArray(new String[0]));
+        return new GroupConsumer(this, group, List.copyOf(streams), null, config);
+    }
+
+    /**
+     * Joins {@code group} to read every stream of the tenant whose whole name matches the regular expression {@code
+     * pattern} and that this principal may read (ADR 0073). The coordinator matches it with every heartbeat, so
+     * streams created later join in.
+     */
+    public GroupConsumer joinGroupMatching(String group, String pattern, GroupConfig config) {
+        checkOpen();
+        metadata();
+        return new GroupConsumer(this, group, List.of(), pattern, config);
+    }
+
+    /** The id of a stream this client has looked up, or {@code null}. */
+    Long streamId(String stream) {
+        synchronized (state) {
+            for (Map.Entry<Long, String> e : names.entrySet()) {
+                if (e.getValue().equals(stream)) {
+                    return e.getKey();
+                }
+            }
+            return null;
+        }
+    }
+
+    /** The name of a resource this client has looked up, or {@code null}. */
+    String streamName(long id) {
+        synchronized (state) {
+            return names.get(id);
+        }
+    }
+
+    ClientConfig config() {
+        return cfg;
+    }
+
+    // ---- list offsets (ADR 0059) ----
+
+    /**
+     * Where {@code at} falls in a partition, as a read_committed reader sees it (ADR 0059): {@link OffsetAt#EARLIEST}
+     * is the first offset still stored, {@link OffsetAt#LATEST} the offset after the last one it may read, and
+     * {@link OffsetAt#time} the first offset of the first batch with a record at or after that time, or the latest
+     * offset if there is none yet.
+     */
+    public long listOffset(String stream, int partition, OffsetAt at) {
+        checkOpen();
+        return retrying(() -> listOffsetOnce(stream, partition, at));
+    }
+
+    private long listOffsetOnce(String stream, int partition, OffsetAt at) {
+        Routed routed = route(stream, partition);
+        Request req = new Request.ListOffsets(
+                Messages.Isolation.COMMITTED,
+                List.of(new Messages.ListOffsetsResource(
+                        routed.route().resourceId(), List.of(new Messages.ListOffsetsPartition(partition, at.timestamp())))));
+        Response resp;
+        try {
+            resp = call(routed.address(), req);
+        } catch (CallFailure e) {
+            forget(stream, partition);
+            throw e.toAttempt();
+        }
+        if (!(resp instanceof Response.ListOffsets r)) {
+            throw Attempt.retry("unexpected response " + resp);
+        }
+        if (r.resources().isEmpty() || r.resources().get(0).partitions().isEmpty()) {
+            throw Attempt.retry("empty list-offsets response");
+        }
+        Messages.ListOffsetsPartitionResponse p = r.resources().get(0).partitions().get(0);
+        ErrorCode code = p.error();
+        if (code.isOk()) {
+            return p.offset();
+        }
+        if (code.retriable()) {
+            redirect(stream, partition, p.leaderHint());
+            throw Attempt.retry(code.toString());
+        }
+        if (code.equals(ErrorCode.UNKNOWN_RESOURCE)) {
+            forget(stream, partition);
+        }
+        throw Attempt.fail(new ClientException.Broker(code, null));
     }
 
     // ---- fetch ----

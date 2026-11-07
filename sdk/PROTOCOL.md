@@ -254,7 +254,7 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 
 ### Settling
 
-- **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null (an ack in a transaction, ADR 0075, is not in this SDK yet). An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
+- **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null outside a transaction (see below for one inside). An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
 - **Nack without requeue** discards the message (or dead-letters it, if the queue's limits say so) and is sent like an ack.
 - **Nack with requeue** is sent **on the subscription's own connection**: the broker takes back only what that connection holds. `delay_ms` is the ms the message waits before it is delivered again (ADR 0077; refused without `requeue`); the Java client sends 0. A producer delays a message with the header `x-lotse-delay-ms` (decimal ms up to 4294967295), counted from the leader's append time; messages of a queue carry that time as their batch's base timestamp. If the subscription has ended or the connection fails, the message has gone back already, and the call does nothing. The Java client also does nothing for a message of an earlier subscription, rather than ask the new connection for something it does not hold.
 
@@ -270,6 +270,34 @@ Send `Unsubscribe(subscription_id)` and then, for the messages received but not 
 
 A queue with limits (`max.deliveries`, `message.ttl.ms`) and a `dead.letter.queue` moves a message there as a one-record batch with the original key, value, headers and timestamp, and these headers (UTF-8 text, decimal numbers; they describe the latest move and replace those a message arrived with): `x-lotse-dead-letter-reason` (`max-deliveries` or `expired`), `-queue` (source queue name), `-queue-id`, `-offset`, `-deliveries` and `-floor` (the source's ack floor when it was sent). A client reads them like any header; the Java client offers them typed as `Delivery.deadLetter()`.
 
+## Client behaviour: transactions
+
+A client configured with a transactional id runs one transaction at a time (ADR 0029):
+
+1. **Begin.** The first transaction asks the coordinator `InitProducer(txn_id)` for a producer id and epoch. That fences an earlier client with the same id and aborts what it left open. Later transactions reuse the id with the epoch the last `EndTxn` answer gave. After a transaction that was left open, or an `EndTxn` that failed, the next one asks `InitProducer` again.
+2. **Add.** Before the first batch to a partition (a queue is partition 0), send `AddPartitionsToTxn` to the coordinator, once per partition per transaction. A retriable error means: forget the coordinator and try again.
+3. **Produce.** Stamp the batch with the producer id, epoch and a sequence per partition starting at 0 in each transaction, set the transactional bit, and send it with `txn_id` set. Retry an unknown outcome with the same bytes, as for an idempotent produce. On success the sequence advances by the record count.
+4. **Must abort.** After any error except "no broker in time" (`GaveUp`) and "no such stream" the transaction may hold a write nobody knows, so only an abort is left. That includes a call that ends before its outcome is known. A client refuses further writes and the commit, without asking the coordinator.
+5. **End.** `EndTxn(commit)` to the coordinator. A lost request or a retriable error may have been decided already: retry, and report `Unknown` if time runs out. A transaction that added no partition ends without `EndTxn`.
+
+**Publishing in a transaction** is routed by the client (ADR 0032): read the exchange's type and bindings from `Metadata` (kept for `metadata_max_age`), pick the queues as `routing.txt` describes, and produce the message to each of them in the transaction. If a write fails after some queues have it, only an abort is left.
+
+**Acking a queue message in a transaction** (ADR 0075): add the queue to the transaction, then send `Ack` with `txn_id`, the producer id and the epoch **on the subscription's own connection**, since only the connection that holds a message can ack it so. A lost answer is sent again on the same connection. A connection that broke means the message went back: `MESSAGE_NOT_HELD`, which also comes when another transaction holds it. Any error leaves only an abort.
+
+**Offsets in a transaction:** `AddOffsetsToTxn` to the coordinator, with the group, member id, member epoch and positions; it answers like `CommitOffsets`. A refusal (a fenced member, say) or an unknown outcome leaves only an abort.
+
+## Client behaviour: consumer groups
+
+A member heartbeats with `GroupHeartbeat` to the coordinator (ADR 0033). The Rust and Java clients heartbeat only from their `poll`: a caller that takes longer than the session timeout between polls loses its partitions.
+
+- **Join** with member id `""`, epoch 0, and the subscribed stream ids, or the pattern instead (ADR 0073), and the instance id if any (ADR 0072). Later heartbeats carry the member id and epoch the answer gave, the owned partitions, and no subscription.
+- **When.** The next heartbeat is due after `min(heartbeat_interval_ms, session_timeout / 3)`, counted from when the last one was sent; after a failure, after one backoff.
+- **Assignment.** An answer with an assignment replaces the target. A partition no longer in it is not read from that moment on. With auto-commit its position is committed, and the next heartbeat goes out at once, reporting it released. Only then may another member get it. New partitions start without a position.
+- **Positions.** A partition without one asks `OffsetFetch` with `require_stable = 1`, so an offset an open transaction holds waits. `NO_OFFSET` starts at 0, or where the member was told to start (`ListOffsets` with `-1` or a time). An `OFFSET_OUT_OF_RANGE` whose log start is past the position goes on from the log start.
+- **Lost.** When no heartbeat has succeeded for the session timeout, counted from when the last successful one was sent, every partition is dropped at once, without a commit, and the member joins again. `UNKNOWN_MEMBER_ID` and `FENCED_MEMBER_EPOCH` mean the same. `FENCED_INSTANCE_ID` means a newer instance took the place: stop, and do not join again.
+- **Commit** sends `CommitOffsets` with the member id and epoch; a retriable error is retried as maybe done.
+- **Leave** with epoch `-1` after committing, if auto-commit is on.
+
 ## Conformance vectors
 
 `sdk/conformance/*` is written by `cargo run -p lotse-proto --features samples --example vectors` (`make sdk-vectors`). One vector per line, `#` for comments.
@@ -284,6 +312,7 @@ A queue with limits (`max.deliveries`, `message.ttl.ms`) and a `dead.letter.queu
 | `batch-ops.txt` | `op arguments input output`: an in-place edit and its result |
 | `fetch-records.hex` | several batches in a row |
 | `varints.txt`, `crc32c.txt`, `error-codes.txt` | fixed cases, including CRC32C of `123456789` = `E3069283` |
+| `routing.txt` | `label type bindings routing_key headers queues`: exchange routing as `lotse-route` does it; the header of the file explains the fields |
 | `scram.txt` | `label user_hex password salt_hex iterations client_nonce server_nonce` and the five messages, `stored_key server_key`; the password is `=` and its hex |
 
 A decoder passes when it reads every vector and writes it again to the same bytes, refuses each vector cut at every length and with one byte added, and agrees with the field files.

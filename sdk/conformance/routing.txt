@@ -1,0 +1,45 @@
+# Exchange routing (lotse-route). Bindings are - for none, or queue_id,key,all|any,headers joined by ;
+# with key written as =hex. Headers are - for none, or name_hex:value joined by +, value - for null or
+# =hex. Routing key =hex. Queues: the ids a message goes to, ascending, joined by , or - for none.
+# label type bindings routing_key headers queues
+topic-00 1 1,=612e622e63,all,- =612e622e63 - 1
+topic-01 1 1,=612e622e63,all,- =612e62 - -
+topic-02 1 1,=612e2a2e63,all,- =612e622e63 - 1
+topic-03 1 1,=612e2a2e63,all,- =612e63 - -
+topic-04 1 1,=612e2a,all,- =612e622e63 - -
+topic-05 1 1,=612e23,all,- =61 - 1
+topic-06 1 1,=612e23,all,- =612e622e63 - 1
+topic-07 1 1,=232e63,all,- =63 - 1
+topic-08 1 1,=232e63,all,- =612e622e63 - 1
+topic-09 1 1,=232e63,all,- =612e62 - -
+topic-10 1 1,=612e232e63,all,- =612e63 - 1
+topic-11 1 1,=612e232e63,all,- =612e782e792e63 - 1
+topic-12 1 1,=23,all,- = - 1
+topic-13 1 1,=23,all,- =616e797468696e672e61742e616c6c - 1
+topic-14 1 1,=2a,all,- = - -
+topic-15 1 1,=2a,all,- =61 - 1
+topic-16 1 1,=2a2e23,all,- =61 - 1
+topic-17 1 1,=232e23,all,- =612e62 - 1
+topic-18 1 1,=232e2a2e23,all,- = - -
+topic-19 1 1,=,all,- = - 1
+topic-20 1 1,=,all,- =61 - -
+topic-21 1 1,=612e2e62,all,- =612e2e62 - 1
+topic-22 1 1,=612e2a2e62,all,- =612e2e62 - 1
+topic-23 1 1,=61,all,- =612e - -
+direct-hit 0 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =65752e6f7264657273 - 1
+direct-wildcard-is-literal 0 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =617369612e6f7264657273 - -
+direct-case 0 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =45552e6f7264657273 - -
+topic-once-per-queue 1 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =75732e6f7264657273 - 1,2
+topic-one 1 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =617369612e6f7264657273 - 1
+fanout-all 2 1,=65752e6f7264657273,all,-;2,=75732e6f7264657273,all,-;1,=2a2e6f7264657273,all,- =7768617465766572 - 1,2
+fanout-none-bound 2 - =6b - -
+headers-both 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 726567696f6e:=6575+74696572:=676f6c64 1,2,4
+headers-one 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 726567696f6e:=6575+74696572:=73696c766572 2,4
+headers-order 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 74696572:=676f6c64+78:-+726567696f6e:=6575 1,2,4
+headers-null-is-not-a-value 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 726567696f6e:- 4
+headers-null-matches-null 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 666c6167:- 3,4
+headers-value-is-not-null 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 666c6167:= 4
+headers-empty-value 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 726567696f6e:= 4
+headers-none 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 - 4
+headers-name-case 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 526567696f6e:=6575 4
+headers-repeated 3 1,=,all,726567696f6e:=6575+74696572:=676f6c64;2,=,any,726567696f6e:=6575+74696572:=676f6c64;3,=,all,666c6167:-;4,=,all,-;5,=,any,- =69676e6f726564 726567696f6e:=7573+726567696f6e:=6575 2,4

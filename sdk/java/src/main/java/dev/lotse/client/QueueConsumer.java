@@ -330,6 +330,65 @@ public final class QueueConsumer implements AutoCloseable {
     }
 
     /**
+     * Acknowledges a message within a transaction (ADR 0075): the transaction holds it until it ends, the commit
+     * settles it, and an abort gives it back to be delivered again; until then no one else receives it. Adds the
+     * queue to the transaction first. The ack goes on the subscription's own connection, since only a message that
+     * connection holds can be acknowledged so; any error leaves the transaction to be aborted. {@code MESSAGE_NOT_HELD}
+     * means the message has gone back, or another transaction holds it.
+     */
+    public void ackIn(Transaction txn, Delivery delivery) {
+        txn.add(queue, 0);
+        try {
+            ackInOnce(txn, delivery);
+        } catch (ClientException e) {
+            txn.mustAbort(e.getMessage());
+            throw e;
+        }
+    }
+
+    private void ackInOnce(Transaction txn, Delivery delivery) {
+        Sub on;
+        long queueId;
+        synchronized (mu) {
+            on = sub;
+            queueId = resourceId;
+        }
+        // The messages are the subscription's connection's: on another one they are not held.
+        if (on == null) {
+            throw new ClientException.Broker(
+                    ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+        }
+        Request req = new Request.Ack(
+                queueId,
+                txn.txnId(),
+                OffsetRanges.of(new long[] {delivery.offset()}),
+                client.config().tenant(),
+                txn.producerId(),
+                txn.epoch());
+        client.retrying(() -> {
+            Response resp;
+            try {
+                resp = client.callOn(on.conn, req);
+            } catch (CallFailure e) {
+                switch (e.kind) {
+                    // Sent again on the same connection: the leader takes a retry for what the transaction holds.
+                    case LOST -> throw Attempt.retryMaybeDone(e.getMessage());
+                    case NOT_SENT -> throw Attempt.fail(new ClientException.Broker(
+                            ErrorCode.MESSAGE_NOT_HELD, "the connection broke; the message went back"));
+                    default -> throw e.toAttempt();
+                }
+            }
+            if (resp instanceof Response.Outcome o) {
+                if (o.error().isOk()) {
+                    return null;
+                }
+                throw Attempt.fail(new ClientException.Broker(o.error(), null));
+            }
+            throw Attempt.retryMaybeDone("unexpected response " + resp);
+        });
+    }
+
+    /**
      * Rejects a message. With {@code requeue} it is delivered again, to any consumer; without it, it is discarded
      * like an acknowledged one (or dead-lettered, if the queue has a dead-letter queue and the limits say so).
      */

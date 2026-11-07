@@ -28,6 +28,7 @@
 //! scram.txt         <label> <user hex> <password> <salt hex> <iterations> <client nonce> <server nonce>
 //!                   <client first hex> <server first hex> <client final hex> <server final hex>
 //!                   <stored key hex> <server key hex>
+//! routing.txt       <label> <exchange type code> <bindings> <routing key> <headers> <queues>
 //! ```
 
 use std::fmt::Write as _;
@@ -242,10 +243,131 @@ fn compacted_batches() -> Vec<(String, Bytes)> {
     ]
 }
 
+/// Headers as `-` for none, or `<name hex>:<value>` joined by `+`, the
+/// value written as [`nullable`].
+fn headers_text(h: &[(Bytes, Option<Bytes>)]) -> String {
+    if h.is_empty() {
+        return "-".into();
+    }
+    h.iter().map(|(k, v)| format!("{}:{}", hex(k), nullable(v.as_deref()))).collect::<Vec<_>>().join("+")
+}
+
+/// Exchange routing, as `lotse-route` does it for the broker and the Rust
+/// client, so that every SDK routes a transactional publish alike.
+fn routing() -> Vec<String> {
+    use lotse_route::{Binding, Exchange, ExchangeKind};
+    let h = |k: &str, v: Option<&str>| (Bytes::from(k.to_string()), v.map(|v| Bytes::from(v.to_string())));
+    type Headers = Vec<(Bytes, Option<Bytes>)>;
+    let mut cases: Vec<(String, ExchangeKind, Vec<Binding>, &str, Headers)> = Vec::new();
+    // Topic patterns, one binding each.
+    for (i, (pattern, key)) in [
+        ("a.b.c", "a.b.c"),
+        ("a.b.c", "a.b"),
+        ("a.*.c", "a.b.c"),
+        ("a.*.c", "a.c"),
+        ("a.*", "a.b.c"),
+        ("a.#", "a"),
+        ("a.#", "a.b.c"),
+        ("#.c", "c"),
+        ("#.c", "a.b.c"),
+        ("#.c", "a.b"),
+        ("a.#.c", "a.c"),
+        ("a.#.c", "a.x.y.c"),
+        ("#", ""),
+        ("#", "anything.at.all"),
+        ("*", ""),
+        ("*", "a"),
+        ("*.#", "a"),
+        ("#.#", "a.b"),
+        ("#.*.#", ""),
+        ("", ""),
+        ("", "a"),
+        ("a..b", "a..b"),
+        ("a.*.b", "a..b"),
+        ("a", "a."),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cases.push((format!("topic-{i:02}"), ExchangeKind::Topic, vec![Binding::key(1, pattern)], key, vec![]));
+    }
+    let bound = vec![Binding::key(1, "eu.orders"), Binding::key(2, "us.orders"), Binding::key(1, "*.orders")];
+    cases.push(("direct-hit".into(), ExchangeKind::Direct, bound.clone(), "eu.orders", vec![]));
+    cases.push(("direct-wildcard-is-literal".into(), ExchangeKind::Direct, bound.clone(), "asia.orders", vec![]));
+    cases.push(("direct-case".into(), ExchangeKind::Direct, bound.clone(), "EU.orders", vec![]));
+    cases.push(("topic-once-per-queue".into(), ExchangeKind::Topic, bound.clone(), "us.orders", vec![]));
+    cases.push(("topic-one".into(), ExchangeKind::Topic, bound.clone(), "asia.orders", vec![]));
+    cases.push(("fanout-all".into(), ExchangeKind::Fanout, bound, "whatever", vec![]));
+    cases.push(("fanout-none-bound".into(), ExchangeKind::Fanout, vec![], "k", vec![]));
+    let all = Binding {
+        queue_id: 1,
+        key: String::new(),
+        headers: vec![h("region", Some("eu")), h("tier", Some("gold"))],
+        match_all: true,
+    };
+    let any = Binding { match_all: false, queue_id: 2, ..all.clone() };
+    let null = Binding { queue_id: 3, key: String::new(), headers: vec![h("flag", None)], match_all: true };
+    let empty_all = Binding { queue_id: 4, key: String::new(), headers: vec![], match_all: true };
+    let empty_any = Binding { queue_id: 5, key: String::new(), headers: vec![], match_all: false };
+    let hx = vec![all, any, null, empty_all, empty_any];
+    for (label, headers) in [
+        ("headers-both", vec![h("region", Some("eu")), h("tier", Some("gold"))]),
+        ("headers-one", vec![h("region", Some("eu")), h("tier", Some("silver"))]),
+        ("headers-order", vec![h("tier", Some("gold")), h("x", None), h("region", Some("eu"))]),
+        ("headers-null-is-not-a-value", vec![h("region", None)]),
+        ("headers-null-matches-null", vec![h("flag", None)]),
+        ("headers-value-is-not-null", vec![h("flag", Some(""))]),
+        ("headers-empty-value", vec![h("region", Some(""))]),
+        ("headers-none", vec![]),
+        ("headers-name-case", vec![h("Region", Some("eu"))]),
+        ("headers-repeated", vec![h("region", Some("us")), h("region", Some("eu"))]),
+    ] {
+        cases.push((label.into(), ExchangeKind::Headers, hx.clone(), "ignored", headers));
+    }
+    cases
+        .into_iter()
+        .map(|(label, kind, bindings, key, headers)| {
+            let x = Exchange { name: "x".into(), resource_id: 9, kind, bindings: bindings.clone() };
+            let queues = x.route(key, headers.iter().map(|(k, v)| (&k[..], v.as_deref())));
+            let bindings = if bindings.is_empty() {
+                "-".to_string()
+            } else {
+                bindings
+                    .iter()
+                    .map(|b| {
+                        let m = if b.match_all { "all" } else { "any" };
+                        format!("{},{},{m},{}", b.queue_id, nullable(Some(b.key.as_bytes())), headers_text(&b.headers))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            let queues = if queues.is_empty() {
+                "-".to_string()
+            } else {
+                queues.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            };
+            format!(
+                "{label} {} {bindings} {} {} {queues}",
+                kind.code(),
+                nullable(Some(key.as_bytes())),
+                headers_text(&headers)
+            )
+        })
+        .collect()
+}
+
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("usage: vectors <output directory>"));
     std::fs::create_dir_all(&dir).expect("creating the output directory");
     let out = Out { dir };
+    out.write(
+        "routing.txt",
+        "Exchange routing (lotse-route). Bindings are - for none, or queue_id,key,all|any,headers joined by ;\n\
+         with key written as =hex. Headers are - for none, or name_hex:value joined by +, value - for null or\n\
+         =hex. Routing key =hex. Queues: the ids a message goes to, ascending, joined by , or - for none.\n\
+         label type bindings routing_key headers queues",
+        &routing(),
+    );
 
     let requests: Vec<String> = samples::requests()
         .iter()

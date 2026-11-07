@@ -16,6 +16,8 @@ thiserror.workspace = true
 crc32c.workspace = true
 # The SCRAM exchanges in the conformance vectors come from the broker's own implementation.
 lotse-auth.workspace = true
+# Exchange routing in the conformance vectors comes from the client's and the broker's routing.
+lotse-route.workspace = true
 
 [features]
 # Sample messages for the conformance vectors (sdk/conformance); tests have them anyway.
