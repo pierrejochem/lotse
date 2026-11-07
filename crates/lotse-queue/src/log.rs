@@ -23,6 +23,10 @@
 //! again. Only an unsettled message that no other transaction holds can be
 //! held, so of two transactions that ack the same message the log's order
 //! picks one; the leader tells the other one's client, which must abort.
+//!
+//! A requeueing nack with a delay (ADR 0077) writes a TIMER batch: the
+//! message's delivery count and the time it may go out again, which every
+//! replica keeps until the message is settled, so a new leader waits too.
 
 use std::collections::BTreeMap;
 
@@ -46,6 +50,9 @@ pub struct QueueLog {
     /// Messages transactional acks hold, per producer: the epoch of the
     /// ack, and the offsets.
     held: BTreeMap<u64, (u16, RangeSet)>,
+    /// Unsettled messages a requeueing nack delayed (ADR 0077): not
+    /// delivered before this, ms since the epoch by the leader's clock.
+    due: BTreeMap<u64, i64>,
 }
 
 /// A claimed message that is to be forwarded.
@@ -129,7 +136,17 @@ impl QueueLog {
                     }
                 }
             }
-            BatchKind::Timer => self.settled.insert(first, next),
+            BatchKind::Timer => {
+                self.settled.insert(first, next);
+                for t in lotse_record::timers(batch)? {
+                    if !self.settled.contains(t.offset) {
+                        let c = self.counts.entry(t.offset).or_insert(0);
+                        *c = (*c).max(t.delivery_count);
+                        // The newest nack's delay counts, later or not.
+                        self.due.insert(t.offset, t.due_ms);
+                    }
+                }
+            }
             BatchKind::DeadLetter => self.take_dead_letters(batch)?,
             BatchKind::Retire => {
                 self.settled.insert(first, next);
@@ -212,6 +229,16 @@ impl QueueLog {
         for o in gone {
             self.counts.remove(&o);
         }
+        let gone: Vec<u64> = self.due.range(from..to).map(|(o, _)| *o).collect();
+        for o in gone {
+            self.due.remove(&o);
+        }
+    }
+
+    /// When a requeueing nack lets `offset` go out again, if it delayed
+    /// it and the message is unsettled: ms since the epoch.
+    pub fn due_at(&self, offset: u64) -> Option<i64> {
+        self.due.get(&offset).copied().filter(|_| !self.settled.contains(offset))
     }
 
     /// Whether `offset` will never be delivered again.
@@ -300,14 +327,22 @@ impl QueueLog {
             b.put_u64_le(s.floor);
             s.taken.encode(&mut b);
         }
-        // Written only when there is something, so a state without held
-        // messages reads as before.
-        if !self.held.is_empty() {
+        // Trailing sections, written up to the last that holds something,
+        // so a state without them reads as before: held messages (ADR
+        // 0075), then due times (ADR 0077).
+        if !self.held.is_empty() || !self.due.is_empty() {
             b.put_u32_le(self.held.len() as u32);
             for (p, (epoch, offsets)) in &self.held {
                 b.put_u64_le(*p);
                 b.put_u16_le(*epoch);
                 offsets.encode(&mut b);
+            }
+        }
+        if !self.due.is_empty() {
+            b.put_u32_le(self.due.len() as u32);
+            for (o, at) in &self.due {
+                b.put_u64_le(*o);
+                b.put_i64_le(*at);
             }
         }
         b.freeze()
@@ -377,9 +412,21 @@ impl QueueLog {
                 held.insert(p, (epoch, RangeSet::decode(&mut b)?));
             }
         }
+        let mut due = BTreeMap::new();
+        if b.has_remaining() {
+            if b.remaining() < 4 {
+                return Err(short());
+            }
+            for _ in 0..b.get_u32_le() {
+                if b.remaining() < 16 {
+                    return Err(short());
+                }
+                due.insert(b.get_u64_le(), b.get_i64_le());
+            }
+        }
         if b.has_remaining() {
             return Err("queue state has trailing bytes".into());
         }
-        Ok(QueueLog { settled, counts, pending, owed, sources, held })
+        Ok(QueueLog { settled, counts, pending, owed, sources, held, due })
     }
 }

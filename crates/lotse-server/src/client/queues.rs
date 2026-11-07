@@ -453,7 +453,9 @@ impl Clients {
             Ok(x) => x,
             Err((e, h)) => return answer(&outbox, correlation_id, e, h),
         };
-        if req.delay_ms != 0 || !valid(&req.ranges, replica.raft_ref().last_index()) {
+        // A delay is for a message that goes back (ADR 0077).
+        let delayed = req.delay_ms != 0 && !req.requeue;
+        if delayed || !valid(&req.ranges, replica.raft_ref().last_index()) {
             return answer(&outbox, correlation_id, ErrorCode::INVALID_REQUEST, None);
         }
         if !req.requeue {
@@ -482,7 +484,19 @@ impl Clients {
         let q = replica.queue().expect("a queue group");
         let d = &self.queues[&g].dispatcher;
         let counts: Vec<(u64, u16)> = taken.iter().map(|&o| (o, d.count_to_persist(q, o))).collect();
-        let batch = lotse_record::queue_state_batch(&counts).expect("counts fit a batch");
+        // With a delay, the time it may go out again is written with its
+        // count, so that every replica, and so a new leader, knows it.
+        let batch = if req.delay_ms == 0 {
+            lotse_record::queue_state_batch(&counts)
+        } else {
+            let due_ms = (view.unix_ms as i64).saturating_add(i64::from(req.delay_ms));
+            let timers: Vec<lotse_record::Timer> = counts
+                .iter()
+                .map(|&(offset, delivery_count)| lotse_record::Timer { offset, delivery_count, due_ms })
+                .collect();
+            lotse_record::timer_batch(&timers)
+        }
+        .expect("counts fit a batch");
         let what = QueueBatch { release: taken, ..QueueBatch::new(batch) };
         self.write_queue(Some((outbox, correlation_id)), g, replica, what, view.now);
     }
@@ -674,6 +688,32 @@ impl Clients {
     }
 }
 
+/// The messages among `here` (all in `batch`) that may not go out yet at
+/// `now_ms`, with when they may: the delay their producer asked for,
+/// counted from the leader's append time, or a requeueing nack's, whichever
+/// is later (ADR 0077).
+fn waiting(q: &QueueLog, batch: &Batch, here: &[u64], now_ms: i64) -> Result<Vec<(u64, i64)>, Error> {
+    let mut asked = BTreeMap::new();
+    // Only as produced: a dead letter, or one requeued back, does not wait
+    // a second time.
+    if batch.attributes().kind == lotse_record::BatchKind::Data {
+        for r in batch.records()? {
+            let ms = lotse_record::delay::of(&r);
+            if ms > 0 && here.contains(&r.offset) {
+                asked.insert(r.offset, batch.base_timestamp().saturating_add(ms as i64));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for &o in here {
+        let at = asked.get(&o).copied().max(q.due_at(o));
+        if let Some(at) = at.filter(|at| *at > now_ms) {
+            out.push((o, at));
+        }
+    }
+    Ok(out)
+}
+
 /// When deliveries happen, and what the queue allows.
 #[derive(Clone, Copy)]
 struct Due {
@@ -695,6 +735,7 @@ async fn deliver<R: Runtime, S: StateMachine>(
     skip: &std::collections::BTreeSet<u64>,
 ) -> Result<(u64, u64, bool), Error> {
     let Due { now, unix_ms, limits } = due;
+    s.dispatcher.wake(unix_ms as i64);
     let mut skip = skip.clone();
     let mut late = false;
     let q: &QueueLog = replica.queue().expect("a queue group");
@@ -735,6 +776,21 @@ async fn deliver<R: Runtime, S: StateMachine>(
                 (late, skipped) = (true, true);
                 continue;
             }
+            // Messages that wait for their time (ADR 0077) are left out.
+            let waiting = waiting(q, &batch, here, unix_ms as i64)?;
+            let here: Vec<u64> = if waiting.is_empty() {
+                here.to_vec()
+            } else {
+                for &(o, at) in &waiting {
+                    s.dispatcher.defer(o, at);
+                }
+                skipped = true;
+                here.iter().copied().filter(|o| !waiting.iter().any(|(w, _)| w == o)).collect()
+            };
+            if here.is_empty() {
+                continue;
+            }
+            let here = &here[..];
             for (id, deliveries) in s.dispatcher.assign(q, here, raw.len() as u32, now) {
                 delivered += deliveries.len();
                 let push = DeliverPush {

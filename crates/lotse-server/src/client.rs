@@ -496,7 +496,7 @@ impl Clients {
                         out.error_msg = Some("transactional batches go with a transactional id, and only they".into());
                     }
                     Some((g, replica)) => {
-                        let batch = stamped_for_ttl(&p.batch, g, view);
+                        let batch = stamped_for_queue(&p.batch, g, view);
                         match (req.txn_id.as_ref(), replica.opens_txn(&batch)) {
                             // The producer's first batch of a transaction
                             // here: only if the coordinator knows of it
@@ -691,11 +691,12 @@ fn settle_markers<R: Runtime, S: StateMachine>(
 /// The fate of the entry proposed at `last` in `term`, once this node knows
 /// it: `NONE` (written), `NOT_LEADER` (replaced, not written), or
 /// `REQUEST_TIMED_OUT` (unknown: compacted). `None` while undecided here.
-/// The batch as the leader of a queue with a message TTL appends it: its
-/// timestamps moved to the leader's clock, so that a message's age does not
-/// depend on its producer's clock (ADR 0055). Other batches are as they came.
-fn stamped_for_ttl(batch: &Bytes, group: GroupId, view: &ClusterView<'_>) -> Bytes {
-    if !view.queues.iter().any(|q| q.group == group && q.limits.message_ttl_ms > 0) {
+/// The batch as the leader of a queue appends it: its timestamps moved to
+/// the leader's clock, so that a message's age (ADR 0055) and its delay (ADR
+/// 0077) do not depend on its producer's clock. Stream batches are as they
+/// came.
+fn stamped_for_queue(batch: &Bytes, group: GroupId, view: &ClusterView<'_>) -> Bytes {
+    if !view.queues.iter().any(|q| q.group == group) {
         return batch.clone();
     }
     let mut copy = bytes::BytesMut::from(&batch[..]);

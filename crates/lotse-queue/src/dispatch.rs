@@ -32,6 +32,11 @@
 //! once no message is out with anyone: none in flight, none held back for a
 //! count, none held by a transaction. Messages the last one had come back
 //! first, so the queue's order holds across the handover.
+//!
+//! A message that must wait (ADR 0077: a delay its producer asked for, or
+//! a requeueing nack's) is **deferred**: left out until its time, then
+//! delivered before anything new. The caller works out the time from the
+//! log, so a new leader defers the same messages again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -89,6 +94,8 @@ pub struct Dispatcher {
     /// Subscriptions that became active since the caller last asked.
     activated: Vec<SubscriptionId>,
     next_order: u64,
+    /// Messages that wait, and until when (ms since the epoch).
+    deferred: BTreeMap<u64, i64>,
 }
 
 /// A message a transactional ack took.
@@ -125,6 +132,7 @@ impl Dispatcher {
             active: None,
             activated: Vec::new(),
             next_order: 0,
+            deferred: BTreeMap::new(),
         }
     }
 
@@ -288,6 +296,7 @@ impl Dispatcher {
         self.in_flight.retain(|o, _| !queue.is_settled(*o));
         self.redeliver.retain(|o| !queue.is_settled(*o));
         self.extra.retain(|o, _| !queue.is_settled(*o));
+        self.deferred.retain(|o, _| !queue.is_settled(*o));
         // A held message whose transaction aborted goes out again.
         let mut back = Vec::new();
         self.held.retain(|o, h| {
@@ -320,6 +329,28 @@ impl Dispatcher {
         self.subs.retain(|id, s| !s.closing || in_flight.values().any(|f| f.sub == *id));
     }
 
+    /// Leaves `offset` out until `due_ms` (ms since the epoch).
+    pub fn defer(&mut self, offset: u64, due_ms: i64) {
+        self.redeliver.remove(&offset);
+        self.deferred.insert(offset, due_ms);
+    }
+
+    /// Deferred messages whose time has come go out again, before anything
+    /// new. Returns the earliest time one still waits for, if one does.
+    pub fn wake(&mut self, now_ms: i64) -> Option<i64> {
+        let due: Vec<u64> = self.deferred.iter().filter(|(_, at)| **at <= now_ms).map(|(o, _)| *o).collect();
+        for o in due {
+            self.deferred.remove(&o);
+            self.redeliver.insert(o);
+        }
+        self.deferred.values().min().copied()
+    }
+
+    /// Whether `offset` waits for its time.
+    pub fn is_deferred(&self, offset: u64) -> bool {
+        self.deferred.contains_key(&offset)
+    }
+
     /// Credit for messages left over all open subscriptions; with a single
     /// active consumer, the active one's.
     pub fn open_credit(&self) -> u64 {
@@ -341,7 +372,7 @@ impl Dispatcher {
             .redeliver
             .iter()
             .copied()
-            .filter(|o| *o < limit && !skip.contains(o) && !self.held.contains_key(o))
+            .filter(|o| *o < limit && !skip.contains(o) && !self.held.contains_key(o) && !self.deferred.contains_key(o))
             .take(max)
             .collect();
         let mut o = queue.next_unsettled(self.cursor);
@@ -351,7 +382,10 @@ impl Dispatcher {
             if let Some(producer) = queue.held_by(o).filter(|_| !self.held.contains_key(&o)) {
                 self.held.insert(o, Hold { producer, applied: true });
             }
-            let free = !self.in_flight.contains_key(&o) && !self.redeliver.contains(&o) && !self.held.contains_key(&o);
+            let free = !self.in_flight.contains_key(&o)
+                && !self.redeliver.contains(&o)
+                && !self.held.contains_key(&o)
+                && !self.deferred.contains_key(&o);
             if free && !skip.contains(&o) {
                 out.push(o);
             }

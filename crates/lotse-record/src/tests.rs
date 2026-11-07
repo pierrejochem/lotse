@@ -437,3 +437,28 @@ fn retire_batches_round_trip() {
     assert_eq!(retire(&done).unwrap(), Retire::Done(vec![4, 9]));
     assert!(ack_ranges(&done).is_err(), "kinds are not confused");
 }
+
+#[test]
+fn timer_batches_round_trip_and_the_delay_header_reads_only_numbers() {
+    let t = vec![
+        Timer { offset: 4, delivery_count: 2, due_ms: 1_700_000_000_000 },
+        Timer { offset: 9, delivery_count: 65_535, due_ms: -1 },
+    ];
+    let (batch, _) = Batch::parse(&timer_batch(&t).unwrap()).unwrap();
+    assert_eq!(batch.attributes().kind, BatchKind::Timer);
+    assert_eq!(timers(&batch).unwrap(), t);
+    assert!(queue_state_counts(&batch).is_err(), "kinds are not confused");
+    let record = |value: Option<&'static [u8]>| Record {
+        offset: 0,
+        timestamp: 0,
+        key: None,
+        value: None,
+        headers: vec![Header { key: Bytes::from_static(delay::HEADER), value: value.map(Bytes::from_static) }],
+    };
+    assert_eq!(delay::of(&record(Some(b"1500"))), 1500);
+    for bad in [&b"-5"[..], b"1.5", b"soon", b"", b"4294967296"] {
+        assert_eq!(delay::of(&record(Some(bad))), 0, "{bad:?} is no delay");
+    }
+    assert_eq!(delay::of(&record(None)), 0);
+    assert_eq!(delay::of(&record(Some(b"4294967295"))), delay::MAX_MS);
+}

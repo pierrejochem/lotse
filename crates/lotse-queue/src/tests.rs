@@ -610,3 +610,66 @@ fn a_standby_waits_until_the_messages_of_a_timed_out_consumer_are_back() {
     d.release([0, 1, 2]);
     assert_eq!(d.hand_over(&q), Some(2));
 }
+
+fn timer(base: u64, timers: &[(u64, u16, i64)]) -> Batch {
+    let t: Vec<lotse_record::Timer> = timers
+        .iter()
+        .map(|&(offset, delivery_count, due_ms)| lotse_record::Timer { offset, delivery_count, due_ms })
+        .collect();
+    stamped(lotse_record::timer_batch(&t).unwrap(), base)
+}
+
+#[test]
+fn a_delayed_requeue_keeps_its_count_and_time_until_the_message_settles() {
+    let mut q = queue(3);
+    q.apply(&timer(3, &[(0, 1, 5_000), (1, 2, 7_000)])).unwrap();
+    assert!(q.is_settled(3), "a timer batch is no message");
+    assert_eq!((q.due_at(0), q.due_at(1), q.due_at(2)), (Some(5_000), Some(7_000), None));
+    assert_eq!(q.delivery_count(1), 2);
+    // A later nack's time counts, later or earlier.
+    q.apply(&timer(4, &[(1, 3, 6_000)])).unwrap();
+    assert_eq!((q.due_at(1), q.delivery_count(1)), (Some(6_000), 3));
+    let old = QueueLog::decode(queue(3).encode()).unwrap();
+    assert_eq!(old, queue(3), "a state without times reads as before");
+    let back = QueueLog::decode(q.encode()).unwrap();
+    assert_eq!(back, q, "times survive a snapshot");
+    q.apply(&ack(5, &[(0, 1)])).unwrap();
+    assert_eq!(q.due_at(0), None, "settled: no time left");
+    assert_ne!(QueueLog::decode(q.encode()).unwrap().due_at(1), None);
+    let bytes = q.encode();
+    assert!(QueueLog::decode(bytes.slice(..bytes.len() - 1)).is_err());
+}
+
+#[test]
+fn a_deferred_message_waits_and_then_goes_first() {
+    let q = queue(4);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 1, 10, 1 << 20);
+    d.defer(1, 1_000);
+    let c = d.candidates(&q, 4, 10, &Default::default());
+    assert_eq!(c, vec![0, 2, 3], "it waits");
+    d.assign(&q, &c, 100, at(0));
+    assert_eq!(d.wake(999), Some(1_000));
+    assert!(d.candidates(&q, 4, 10, &Default::default()).is_empty(), "not yet");
+    assert_eq!(d.wake(1_000), None);
+    assert!(!d.is_deferred(1));
+    assert_eq!(d.candidates(&q, 4, 10, &Default::default()), vec![1], "past the cursor, it still comes");
+    // Released while it waits (another write about it decided), it still
+    // waits.
+    d.defer(1, 2_000);
+    d.release([1]);
+    assert!(d.candidates(&q, 4, 10, &Default::default()).is_empty(), "deferred wins until its time");
+    d.wake(2_000);
+    assert_eq!(d.candidates(&q, 4, 10, &Default::default()), vec![1]);
+}
+
+#[test]
+fn a_settled_message_leaves_no_time_behind() {
+    let mut q = queue(3);
+    q.apply(&timer(3, &[(0, 1, 5_000), (1, 1, 5_000)])).unwrap();
+    q.apply(&ack(4, &[(0, 2)])).unwrap();
+    let mut plain = queue(3);
+    plain.apply(&timer(3, &[])).unwrap();
+    plain.apply(&ack(4, &[(0, 2)])).unwrap();
+    assert_eq!(q.encode(), plain.encode(), "no time of a settled message in the snapshot");
+}

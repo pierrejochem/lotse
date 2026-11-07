@@ -1409,3 +1409,214 @@ async fn run_line(rt: SimRuntime) {
 fn a_single_active_consumer_hands_over_in_order_under_faults() {
     check_seeds(10, |seed| Sim::new(seed).run(run_line));
 }
+
+// ---------------------------------------------------------------------------
+// Delayed delivery (ADR 0077).
+
+/// A message whose producer asks the queue to wait `ms` before delivering it.
+fn delayed(value: &str, ms: u64) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    let delay = ms.to_string();
+    b.push(0, None, Some(value.as_bytes()), &[(lotse_record::delay::HEADER, Some(delay.as_bytes()))]);
+    b.finish().unwrap()
+}
+
+#[test]
+fn delayed_messages_wait_for_their_time_across_a_failover() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::classic()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            // A publish delay holds one message back while the next goes.
+            let t0 = rt.now();
+            c.produce("jobs", 0, delayed("later", 2_000)).await.expect("written");
+            c.produce("jobs", 0, message("now")).await.expect("written");
+            let mut sub = c.subscribe("jobs", 10).await.expect("subscribed");
+            let m = sub.next(Duration::from_secs(1)).await.unwrap().expect("the undelayed one");
+            assert_eq!(value_of(&m), "now");
+            sub.ack(&m).await.unwrap();
+            let m = sub.next(Duration::from_secs(5)).await.unwrap().expect("the delayed one, in time");
+            assert_eq!(value_of(&m), "later");
+            assert!(rt.now() - t0 >= Duration::from_secs(2), "delivered after {:?}", rt.now() - t0);
+            sub.ack(&m).await.unwrap();
+
+            // A delayed requeue survives a failover: the new leader waits too.
+            c.produce("jobs", 0, message("retry")).await.expect("written");
+            let m = sub.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            let t1 = rt.now();
+            sub.nack_after(&m, Duration::from_secs(3)).await.expect("given back for later");
+            let meta = c.metadata(&["jobs"]).await.unwrap();
+            let leader = meta.resources.iter().find(|r| r.name == "jobs").unwrap().partitions[0].leader;
+            w.crash(u64::from(leader), false).await;
+            let again = sub.next(Duration::from_secs(15)).await.unwrap().expect("delivered again");
+            assert_eq!(value_of(&again), "retry");
+            assert!(rt.now() - t1 >= Duration::from_secs(3), "redelivered after {:?}", rt.now() - t1);
+            assert_eq!(again.delivery_count, 2);
+            sub.ack(&again).await.unwrap();
+            drop(sub);
+            w.start(u64::from(leader)).await;
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+// A producer writes messages to `jobs`, many asking for a delay of up to
+// 1.5 s; consumers take them, ack most, give some back with a delay or
+// without, and drop their subscriptions, while nodes crash and hosts are
+// partitioned. Afterwards the network heals and a last consumer takes what
+// is left.
+//
+// Checked: no message is received before the time its producer asked for
+// (its produce request was sent before the leader appended it, so its due
+// time is later than that plus the delay); and nothing is lost. Times are
+// whole ms of the wall clock, as the leader stamps them: a delay is a
+// number of ms from an append time in ms.
+
+const MAX_DELAY_MS: u64 = 1_500;
+
+#[derive(Default)]
+struct DelayOutcomes {
+    /// Value -> when the produce request was sent (Unix ms) and the delay
+    /// it asked for.
+    sent: BTreeMap<String, (u64, u64)>,
+    produced: BTreeSet<String>,
+    acked: BTreeSet<String>,
+    maybe_acked: BTreeSet<String>,
+    /// Receipts before their time: (value, how many ms early).
+    early: Vec<(String, u64)>,
+    delayed_received: u64,
+}
+
+async fn delay_producer(rt: SimRuntime, out: Arc<Mutex<DelayOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    let mut n = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let value = format!("d-{n}");
+        n += 1;
+        let ms = if rt.chance(1, 2) { rt.below(MAX_DELAY_MS) } else { 0 };
+        out.lock().unwrap().sent.insert(value.clone(), (unix_ms(&rt), ms));
+        let batch = if ms > 0 { delayed(&value, ms) } else { message(&value) };
+        if client.produce("jobs", 0, batch).await.is_ok() {
+            out.lock().unwrap().produced.insert(value);
+        }
+        rt.sleep(TICK * (2 + rt.below(6) as u32)).await;
+    }
+}
+
+fn received(out: &Mutex<DelayOutcomes>, rt: &SimRuntime, m: &lotse_client::Message) {
+    let v = value_of(m);
+    let mut o = out.lock().unwrap();
+    let (sent, ms) = o.sent[&v];
+    let (due, now) = (sent + ms, unix_ms(rt));
+    if ms > 0 {
+        o.delayed_received += 1;
+    }
+    if now < due {
+        o.early.push((v, due - now));
+    }
+}
+
+fn unix_ms(rt: &SimRuntime) -> u64 {
+    rt.unix_time().as_millis() as u64
+}
+
+async fn delay_consumer(rt: SimRuntime, out: Arc<Mutex<DelayOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(mut c) = client.subscribe("jobs", 1 + rt.below(4) as u32).await else { continue };
+        for _ in 0..1 + rt.below(30) {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match c.next(TICK * 20).await {
+                Ok(Some(m)) => {
+                    received(&out, &rt, &m);
+                    let v = value_of(&m);
+                    match rt.below(10) {
+                        0 => {
+                            let _ = c.nack_after(&m, Duration::from_millis(rt.below(1_000))).await;
+                        }
+                        1 => {
+                            let _ = c.nack(&m, true).await;
+                        }
+                        _ => {
+                            let res = c.ack(&m).await;
+                            let mut o = out.lock().unwrap();
+                            match res {
+                                Ok(()) => o.acked.insert(v),
+                                Err(_) => o.maybe_acked.insert(v),
+                            };
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+        if rt.chance(1, 2) {
+            c.close().await;
+        }
+    }
+}
+
+async fn run_delays(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::classic()).await;
+    let out = Arc::new(Mutex::new(DelayOutcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tasks = vec![
+        rt.spawn(delay_producer(rt.node("p"), out.clone(), stop.clone())),
+        rt.spawn(delay_consumer(rt.node("c1"), out.clone(), stop.clone())),
+        rt.spawn(delay_consumer(rt.node("c2"), out.clone(), stop.clone())),
+    ];
+    faults(&rt, &mut w, &["p", "c1", "c2"], Duration::from_secs(5)).await;
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        t.await;
+    }
+    rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
+    let last = Client::new(rt.node("last"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
+    let mut c = last.subscribe("jobs", 50).await.expect("the healed cluster takes a subscription");
+    let mut drained = BTreeSet::new();
+    let mut quiet_since = rt.now();
+    // Longer than any delay, so a message that waits is not taken for lost.
+    while rt.now() - quiet_since < Duration::from_millis(MAX_DELAY_MS) + ACK_TIMEOUT * 4 {
+        let Some(m) = c.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+        quiet_since = rt.now();
+        received(&out, &rt, &m);
+        c.ack(&m).await.expect("the healed cluster takes acks");
+        drained.insert(value_of(&m));
+    }
+    drop(c);
+    let out = std::mem::take(&mut *out.lock().unwrap());
+    if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        eprintln!(
+            "stats: produced {} acked {} drained {} delayed received {}",
+            out.produced.len(),
+            out.acked.len(),
+            drained.len(),
+            out.delayed_received
+        );
+    }
+    assert!(out.early.is_empty(), "received before their time: {:?}", out.early);
+    for v in &out.produced {
+        assert!(
+            out.acked.contains(v) || out.maybe_acked.contains(v) || drained.contains(v),
+            "{v} was produced and neither acknowledged nor delivered at the end"
+        );
+    }
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn delayed_messages_never_arrive_early_under_faults() {
+    check_seeds(10, |seed| Sim::new(seed).run(run_delays));
+}

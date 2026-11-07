@@ -124,7 +124,14 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     async fn subscribe_once(&self) -> Result<(Sub<R::Conn>, u64), Attempt> {
         let c = self.client;
         let (route, addr) = c.route(&self.queue, 0).await?;
-        let conn = c.connection(&addr).await.map_err(|e| Attempt::Retry(e.to_string()))?;
+        let conn = match c.connection(&addr).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                // The leader it knew may be gone: ask again where it is.
+                c.forget(&self.queue, 0);
+                return Err(Attempt::Retry(e.to_string()));
+            }
+        };
         let req = Request::Subscribe(SubscribeRequest {
             queue_id: route.resource_id,
             consumer_tag: String::new(),
@@ -321,10 +328,23 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     /// Rejects a message: with `requeue` it is delivered again (to any
     /// consumer), without it is discarded like an acknowledged one.
     pub async fn nack(&self, message: &Message, requeue: bool) -> Result<(), ClientError> {
-        let offset = message.offset();
         if !requeue {
-            return self.client.retrying(|| self.settle_once(offset, Some(false))).await;
+            return self.client.retrying(|| self.settle_once(message.offset(), Some(false))).await;
         }
+        self.requeue(message.offset(), 0).await
+    }
+
+    /// Gives a message back to be delivered again, to any consumer, once
+    /// `delay` has passed (ADR 0077): a retry with backoff. Rounded down to
+    /// whole ms, at most about 49 days; a delay of 0 is [`Consumer::nack`]
+    /// with `requeue`. If the subscription has ended, the message went back
+    /// with it, without a delay.
+    pub async fn nack_after(&self, message: &Message, delay: Duration) -> Result<(), ClientError> {
+        let ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+        self.requeue(message.offset(), ms).await
+    }
+
+    async fn requeue(&self, offset: u64, delay_ms: u32) -> Result<(), ClientError> {
         // Only the subscription's connection can give a message back; if it
         // is gone, so is the message (it went back with the subscription).
         let Some(sub) = &self.sub else { return Ok(()) };
@@ -332,7 +352,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             queue_id: self.resource_id,
             ranges: vec![(offset, offset + 1)],
             requeue: true,
-            delay_ms: 0,
+            delay_ms,
         });
         match sub.conn.call(&req, &self.client.rt, self.client.cfg.request_timeout).await {
             Ok(Response::Outcome(r)) if !r.error.retriable() && r.error != ErrorCode::NONE => {

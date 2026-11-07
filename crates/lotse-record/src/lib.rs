@@ -959,6 +959,70 @@ pub fn queue_state_counts(batch: &Batch) -> Result<Vec<(u64, u16)>, Error> {
     Ok(out)
 }
 
+/// A message a requeueing nack delays (ADR 0077): its delivery count so
+/// far and when it may go out again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timer {
+    /// The message.
+    pub offset: u64,
+    /// Its delivery count, as a QUEUE_STATE batch would persist it.
+    pub delivery_count: u16,
+    /// Not delivered before this, ms since the epoch by the leader's clock.
+    pub due_ms: i64,
+}
+
+/// A TIMER batch: delivery counts with due times, in one record.
+pub fn timer_batch(timers: &[Timer]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    varint::put_i64(&mut value, timers.len() as i64);
+    for t in timers {
+        varint::put_i64(&mut value, t.offset as i64);
+        varint::put_i64(&mut value, i64::from(t.delivery_count));
+        varint::put_i64(&mut value, t.due_ms);
+    }
+    queue_batch(BatchKind::Timer, &value)
+}
+
+/// The timers of a TIMER batch.
+pub fn timers(batch: &Batch) -> Result<Vec<Timer>, Error> {
+    let value = queue_value(batch, BatchKind::Timer)?;
+    let mut rest = &value[..];
+    let mut next = || -> Result<i64, Error> {
+        let (v, n) = varint::get_i64(rest)?;
+        rest = &rest[n..];
+        Ok(v)
+    };
+    let count = next()?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let offset = u64::try_from(next()?).map_err(|_| Error::Malformed("negative offset"))?;
+        let delivery_count = u16::try_from(next()?).map_err(|_| Error::Malformed("delivery count out of range"))?;
+        out.push(Timer { offset, delivery_count, due_ms: next()? });
+    }
+    if !rest.is_empty() {
+        return Err(Error::Malformed("trailing bytes in timer batch"));
+    }
+    Ok(out)
+}
+
+/// The header a producer sets on a message that must wait before a queue
+/// delivers it (ADR 0077): decimal ms, counted from when the queue's
+/// leader appended the batch. A value that is not a number from 0 to
+/// [`delay::MAX_MS`] is no delay.
+pub mod delay {
+    /// The header's name.
+    pub const HEADER: &[u8] = b"x-lotse-delay-ms";
+    /// The longest delay: about 49 days, as for a nack's.
+    pub const MAX_MS: u64 = u32::MAX as u64;
+
+    /// The delay a record asks for, in ms; 0 for none.
+    pub fn of(record: &crate::Record) -> u64 {
+        let Some(h) = record.headers.iter().find(|h| h.key.as_ref() == HEADER) else { return 0 };
+        let Some(v) = &h.value else { return 0 };
+        std::str::from_utf8(v).ok().and_then(|t| t.parse::<u64>().ok()).filter(|ms| *ms <= MAX_MS).unwrap_or(0)
+    }
+}
+
 fn queue_batch(kind: BatchKind, value: &[u8]) -> Result<Bytes, Error> {
     let mut b = BatchBuilder::new(BatchOptions {
         attributes: Attributes { compression: Compression::None, transactional: false, control: false, kind },
