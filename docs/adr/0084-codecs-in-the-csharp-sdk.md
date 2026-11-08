@@ -1,6 +1,6 @@
 # 84. Codecs in the C# SDK
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-08
 
 ## Context

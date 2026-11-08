@@ -87,7 +87,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 | 0081 | [User guides with mdBook on GitHub Pages](0081-user-guides-with-mdbook-on-github-pages.md) | Accepted |
 | 0083 | [Client SDKs for C# and Node.js](0083-client-sdks-for-csharp-and-nodejs.md) | Accepted |
-| 0084 | [Codecs in the C# SDK](0084-codecs-in-the-csharp-sdk.md) | Proposed |
-| 0085 | [Codecs in the Node.js SDK](0085-codecs-in-the-nodejs-sdk.md) | Proposed |
+| 0084 | [Codecs in the C# SDK](0084-codecs-in-the-csharp-sdk.md) | Accepted |
+| 0085 | [Codecs in the Node.js SDK](0085-codecs-in-the-nodejs-sdk.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
