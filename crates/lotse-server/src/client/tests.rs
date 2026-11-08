@@ -1780,6 +1780,79 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
     });
 }
 
+/// A member that joins naming a stream this coordinator node has not applied
+/// yet keeps that subscription: the client names its streams only when it
+/// joins, so once the node knows the stream (its creation applied), the
+/// member's next heartbeat brings it the partitions.
+#[test]
+fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
+    Sim::new(9).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "c", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![2, 3] }];
+        let addrs = BTreeMap::new();
+        let start = rt.now();
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let heartbeat =
+            async |clients: &mut Clients, groups: &mut Groups, known: bool, ms: u64, member: &str, epoch| {
+                let view = ClusterView {
+                    streams: if known { &streams } else { &[] },
+                    queues: &[],
+                    exchanges: &[],
+                    deleted: &NOTHING_DELETED,
+                    group_session: Duration::from_secs(10),
+                    group_heartbeat: Duration::from_millis(100),
+                    admin: AdminView::default(),
+                    client_addrs: &addrs,
+                    coordinator: Some(G),
+                    node: NodeView::default(),
+                    now: start + Duration::from_millis(ms),
+                    unix_ms: 0,
+                    access: &OPEN,
+                };
+                let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                    tenant: lotse_proto::DEFAULT_TENANT.into(),
+                    group_id: "g".into(),
+                    member_id: member.into(),
+                    member_epoch: epoch,
+                    rebalance_timeout_ms: 100,
+                    subscribed: (epoch == 0).then(|| vec![7]),
+                    owned: None,
+                    instance_id: None,
+                    subscribed_pattern: None,
+                });
+                let header =
+                    RequestHeader { api_key: ApiKey::GROUP_HEARTBEAT, api_version: 0, correlation_id: 1, flags: 0 };
+                let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+                clients.handle(req, &view, groups).await.unwrap();
+                for _ in 0..3 {
+                    groups.get_mut(&G).unwrap().process().await.unwrap();
+                    clients.after_round(&view, groups).await.unwrap();
+                }
+                match &drain(&outbox, ApiKey::GROUP_HEARTBEAT).0[..] {
+                    [Response::GroupHeartbeat(h)] => h.clone(),
+                    other => panic!("expected one heartbeat answer, got {other:?}"),
+                }
+            };
+        let a = heartbeat(&mut clients, &mut groups, false, 0, "", 0).await;
+        assert_eq!(a.error, ErrorCode::NONE);
+        assert!(a.assignment.iter().flatten().all(|r| r.partitions.is_empty()), "nothing to read yet");
+        // The node applies the stream's creation; the member sends no
+        // subscription again, and still gets the partitions.
+        let b = heartbeat(&mut clients, &mut groups, true, 100, &a.member_id, a.member_epoch).await;
+        assert_eq!(b.error, ErrorCode::NONE);
+        let r = b.assignment.expect("a new assignment");
+        assert_eq!(r.iter().map(|x| x.partitions.len()).sum::<usize>(), 2, "{r:?}");
+    });
+}
+
 /// A transactional ack (ADR 0075) waits for the coordinator when its producer
 /// has no transaction open in the queue, is refused at an epoch older than
 /// one the queue has seen, and is answered `MESSAGE_NOT_HELD` when the log

@@ -184,6 +184,25 @@ fn an_unsubscribed_consumer_keeps_its_messages_until_it_acks() {
     assert!(!d.owns(1, s), "gone once everything is acked");
 }
 
+/// What a closed consumer leaves in flight is not handed to the next
+/// subscription: only an ack, a nack from its connection, the connection
+/// closing, the ack timeout or a new leader gives it back.
+#[test]
+fn a_new_subscription_does_not_get_what_an_unsubscribed_one_holds() {
+    let q = queue(3);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe(1, 10, 1, 1 << 20);
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    let held = d.assign(&q, &c, 100, at(0));
+    assert_eq!(held[0].1.len(), 1, "credit for one");
+    d.unsubscribe(1);
+    d.subscribe(2, 20, 10, 1 << 20);
+    let c = d.candidates(&q, 3, 10, &Default::default());
+    let got = d.assign(&q, &c, 100, at(1));
+    let offsets: Vec<u64> = got.iter().flat_map(|(_, m)| m.iter().map(|x| x.offset)).collect();
+    assert_eq!(offsets, vec![1, 2], "everything but the message the first holds");
+}
+
 #[test]
 fn a_nack_takes_back_only_the_connections_own_messages() {
     let mut q = queue(4);
