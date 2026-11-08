@@ -7,4 +7,8 @@ sdk/**/build/
 .gradle/
 .vscode/
 sdk/**/bin/
+sdk/csharp/**/bin/
+sdk/csharp/**/obj/
 docs/guide/book/
+sdk/node/node_modules/
+sdk/node/dist/
