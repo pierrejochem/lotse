@@ -1106,7 +1106,7 @@ impl Clients {
                         }
                         AdminThen::AlteredQueue { resource_id, change } => match state.queues.get(resource_id) {
                             None => admin_response(ErrorCode::UNKNOWN_RESOURCE, None, None),
-                            Some(q) if change.holds_in(q) => admin_response(ErrorCode::NONE, None, None),
+                            Some(q) if !change.refused_in(q) => admin_response(ErrorCode::NONE, None, None),
                             Some(_) => {
                                 let why = "the change was refused when it applied (its dead-letter queue was deleted or no longer fits) or replaced since";
                                 admin_response(ErrorCode::INVALID_REQUEST, Some(why), None)

@@ -528,3 +528,31 @@ fn priority_levels_are_set_and_changed_survive_a_snapshot_and_sit_beside_single_
     cut.pop();
     assert!(decode_change(&cut).is_err());
 }
+
+/// Seed 1580 of the metadata simulation: two admins set a queue's ack timeout
+/// at once; the earlier change was applied and then replaced by the later,
+/// and its answer must not claim a refusal. Only a dead-letter change can be
+/// refused, and one that did not fit shows as not holding.
+#[test]
+fn only_a_dead_letter_change_can_be_reported_refused() {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&queue("dead", "t", QueueLimits::default()))).unwrap();
+    s.apply(2, &payload(&queue("work", "t", QueueLimits::default()))).unwrap();
+    let work = resource_id(2);
+    let dead = resource_id(1);
+    let timeout = |ms| QueueChange { ack_timeout_ms: Some(ms), ..Default::default() };
+    let alter = |change| Change::AlterQueue { resource_id: work, change };
+    let (first, second) = (timeout(100), timeout(200));
+    s.apply(3, &payload(&alter(first))).unwrap();
+    s.apply(4, &payload(&alter(second))).unwrap();
+    let q = &s.queues[&work];
+    assert!(!first.holds_in(q), "the first change was replaced");
+    assert!(!first.refused_in(q), "a replaced change is not a refused one");
+    // A dead-letter change that fits holds; one that does not fit is refused.
+    let fits = QueueChange { dead_letter: Some(dead), ..Default::default() };
+    s.apply(5, &payload(&alter(fits))).unwrap();
+    assert!(!fits.refused_in(&s.queues[&work]));
+    let ghost = QueueChange { dead_letter: Some(resource_id(99)), ..Default::default() };
+    s.apply(6, &payload(&alter(ghost))).unwrap();
+    assert!(ghost.refused_in(&s.queues[&work]));
+}
