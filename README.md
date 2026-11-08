@@ -4,6 +4,13 @@
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
+- **Queues and streams on one log:** RabbitMQ-style queues (acks, redelivery, dead-letter queues, delayed delivery, priorities, exchanges and bindings) and Kafka-style streams (partitions, consumer groups, retention, log compaction) share one storage engine.
+- **Replication with Raft:** every partition is a Raft group, batched per node pair; nodes can be added to and drained from a running cluster.
+- **Exactly-once:** idempotent producers, transactions and consumer group offsets committed in the same transaction.
+- **Secure by default:** TLS 1.3 on every connection, SCRAM-SHA-512, OAUTHBEARER and client certificates, tenants and roles.
+- **Tested by simulation:** deterministic simulation with crashing disks and a faulty network, thousands of seeds per CI run.
+- **Clients and console:** Rust and Java clients, a Kotlin layer, and a web console.
+
 Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues), and streams can be compacted to the newest record per key. The `lotse` binary runs a node from a cluster file, as a systemd unit, a Debian package or a container image, and nodes can be added to and drained from a running cluster.
 
 ## Documentation
