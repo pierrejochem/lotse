@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Lotse.Client\Lotse.Client.csproj" />
+    <ProjectReference Include="..\..\src\Lotse.Client.Codecs\Lotse.Client.Codecs.csproj" />
   </ItemGroup>
 
 </Project>

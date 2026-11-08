@@ -91,7 +91,7 @@ public sealed class BatchBuilder
 
     /// <summary>The encoded batch, checksum included.</summary>
     /// <exception cref="RecordFormatException">
-    /// There is no record, the batch exceeds 1 MiB, or the options ask for a codec this SDK lacks.
+    /// There is no record, the batch exceeds 1 MiB, or the options ask for a codec that is not available (ADR 0084).
     /// </exception>
     public ByteString Finish()
     {
@@ -100,17 +100,25 @@ public sealed class BatchBuilder
             throw RecordFormatException.MalformedBatch("empty batch");
         }
         Compression codec = _options.Attributes.Compression;
+        byte[] block = _body.Storage;
+        int blockLen = _body.Size;
         if (codec != Compression.None)
         {
-            throw Codecs.Unsupported(codec, "write");
+            if (blockLen > Batch.MaxRecordsLen)
+            {
+                throw new RecordFormatException(
+                    RecordFormatErrorKind.TooLarge, $"records of {blockLen} bytes exceed what a compressed batch may hold");
+            }
+            block = BlockCodecs.Compress(codec, block, 0, blockLen);
+            blockLen = block.Length;
         }
-        long total = (long)Batch.HeaderLen + _body.Size;
+        long total = (long)Batch.HeaderLen + blockLen;
         if (total > Batch.MaxBatchLen)
         {
             throw new RecordFormatException(RecordFormatErrorKind.TooLarge, $"batch of {total} bytes exceeds the limit");
         }
         byte[] buf = new byte[(int)total];
-        Buffer.BlockCopy(_body.Storage, 0, buf, Batch.HeaderLen, _body.Size);
+        Buffer.BlockCopy(block, 0, buf, Batch.HeaderLen, blockLen);
         Batch.PutU32(buf, 8, (uint)(total - Batch.LenPrefix));
         buf[20] = Batch.Magic;
         Batch.PutU16(buf, 25, (ushort)_options.Attributes.ToBits());

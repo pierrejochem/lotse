@@ -185,10 +185,13 @@ public sealed class Batch : IEquatable<Batch>
     public uint RecordCount => GetU32(_bytes.Storage, _bytes.Offset + 61);
 
     /// <summary>
-    /// Decodes the records. The block must not be compressed in this version of the SDK: a compressed batch fails
-    /// with <see cref="RecordFormatErrorKind.UnsupportedCompression"/>.
+    /// Decodes the records. A compressed block is decompressed first, each time this is called; its codec comes from
+    /// the package <c>Lotse.Client.Codecs</c> or <see cref="CompressionCodecs.Register"/> (ADR 0084).
     /// </summary>
-    /// <exception cref="RecordFormatException">The records are damaged or need a codec this SDK lacks.</exception>
+    /// <exception cref="RecordFormatException">
+    /// The records are damaged, or the block is compressed with a codec that is not available
+    /// (<see cref="RecordFormatErrorKind.UnsupportedCompression"/>, naming the package to add).
+    /// </exception>
     public List<BatchRecord> Records()
     {
         bool compacted = IsCompacted;
@@ -197,13 +200,21 @@ public sealed class Batch : IEquatable<Batch>
             // Compaction writes an emptied batch's block plain, as nothing.
             return new List<BatchRecord>();
         }
-        if (_attributes.Compression != Compression.None)
+        byte[] a;
+        int pos;
+        int end;
+        if (_attributes.Compression == Compression.None)
         {
-            Codecs.Decompress(_attributes.Compression);
+            a = _bytes.Storage;
+            pos = _bytes.Offset + HeaderLen;
+            end = _bytes.Offset + _bytes.Size;
         }
-        byte[] a = _bytes.Storage;
-        int pos = _bytes.Offset + HeaderLen;
-        int end = _bytes.Offset + _bytes.Size;
+        else
+        {
+            a = BlockCodecs.Decompress(_attributes.Compression, _bytes.Storage, _bytes.Offset + HeaderLen, _bytes.Size - HeaderLen);
+            pos = 0;
+            end = a.Length;
+        }
 
         ulong baseOffset = BaseOffset;
         long baseTs = BaseTimestamp;

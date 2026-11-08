@@ -45,14 +45,6 @@ public class CompactedConformanceTests
             Assert.Equal(e.Value.Count, b.RecordCount);
             Assert.Equal(e.Value.Span, b.Span);
             Assert.Equal(unchecked(b.BaseOffset + (ulong)b.Span), b.NextOffset);
-            if (b.Attributes.Compression != Compression.None && b.RecordCount > 0)
-            {
-                // Without a codec the records of a compressed block cannot be read; the error names the codec.
-                Assert.Equal(
-                    RecordFormatErrorKind.UnsupportedCompression,
-                    Assert.Throws<RecordFormatException>(() => b.Records()).Kind);
-                continue;
-            }
             Assert.Equal(
                 expected.GetValueOrDefault(label, new List<string>()),
                 BatchConformanceTests.Lines(label, b.Records()));

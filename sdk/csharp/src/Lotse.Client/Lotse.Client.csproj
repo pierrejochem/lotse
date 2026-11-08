@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Lotse.Client.Tests" />
+    <InternalsVisibleTo Include="Lotse.Client.NoCodecs.Tests" />
   </ItemGroup>
 
 </Project>
