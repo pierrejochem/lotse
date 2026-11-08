@@ -5,3 +5,5 @@
 # SDK build output
 sdk/**/build/
 .gradle/
+.vscode/
+sdk/**/bin/
