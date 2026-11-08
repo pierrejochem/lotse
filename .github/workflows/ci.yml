@@ -55,6 +55,7 @@ jobs:
       - run: npm run build
 
   simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,9 +71,10 @@ jobs:
           LOTSE_SIM_SEEDS: "5000"
 
   # The client simulation is the slowest, so it runs next to the others in a
-  # job of its own (ADR 0030): 2,000 seeds on pushes and pull requests, 5,000
+  # job of its own (ADR 0030): 2,000 seeds on pull requests, 5,000
   # nightly and on manual runs (ADR 0027).
   client-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -86,8 +88,9 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
 
   # The queue simulation, in a job of its own like the client simulation
-  # (ADR 0031): 2,000 seeds on pushes and pull requests, 5,000 nightly.
+  # (ADR 0031): 2,000 seeds on pull requests, 5,000 nightly.
   queue-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -101,9 +104,10 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
 
   # The consumer group simulation, in a job of its own (ADR 0033): 1,000
-  # seeds on pushes and pull requests (it is the slowest per seed), 5,000
+  # seeds on pull requests (it is the slowest per seed), 5,000
   # nightly.
   group-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -117,8 +121,9 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
 
   # The metadata simulation, in a job of its own (ADR 0034): 2,000 seeds on
-  # pushes and pull requests, 5,000 nightly.
+  # pull requests, 5,000 nightly.
   metadata-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -132,9 +137,10 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
 
   # The access simulation, in a job of its own (ADR 0039): role bindings
-  # change under load on a faulty cluster; 1,000 seeds on pushes and pull
+  # change under load on a faulty cluster; 1,000 seeds on pull
   # requests, 5,000 nightly.
   access-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -148,9 +154,10 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
 
   # The retention simulation, in a job of its own (ADR 0046): short limits
-  # and small segments under faults; 1,000 seeds on pushes and pull
+  # and small segments under faults; 1,000 seeds on pull
   # requests, 5,000 nightly.
   retention-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -164,9 +171,10 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
 
   # The compaction simulation, in a job of its own (ADR 0067): compacted
-  # streams under faults, every replica read in turn; 1,000 seeds on pushes
-  # and pull requests, 5,000 nightly.
+  # streams under faults, every replica read in turn; 1,000 seeds on pull
+  # requests, 5,000 nightly.
   compaction-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -180,9 +188,10 @@ jobs:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
 
   # The membership simulation, in a job of its own (ADR 0048): nodes added
-  # and drained under load and faults; 1,000 seeds on pushes and pull
+  # and drained under load and faults; 1,000 seeds on pull
   # requests, 5,000 nightly.
   membership-simulation:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
