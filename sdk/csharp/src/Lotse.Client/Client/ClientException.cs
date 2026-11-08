@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Lotse.Proto;
 
 namespace Lotse.Client;
@@ -131,4 +133,66 @@ public sealed class ClientAuthenticationException : ClientException
         : base("authentication failed: " + why)
     {
     }
+}
+
+/// <summary>
+/// The transaction can no longer be committed: a write's outcome is unknown, a write was refused, or the producer was
+/// fenced. Only <see cref="Transaction.AbortAsync"/> is left.
+/// </summary>
+public sealed class MustAbortException : ClientException
+{
+    /// <summary>Creates the exception.</summary>
+    public MustAbortException(string why)
+        : base("the transaction must be aborted: " + why)
+    {
+    }
+}
+
+/// <summary>No transactional id is configured (<see cref="ClientConfig.Builder.WithTransactionalId"/>).</summary>
+public sealed class NotTransactionalException : ClientException
+{
+    /// <summary>Creates the exception.</summary>
+    public NotTransactionalException()
+        : base("no transactional id is configured")
+    {
+    }
+}
+
+/// <summary>A mandatory message matched no binding.</summary>
+public sealed class UnroutableException : ClientException
+{
+    /// <summary>Creates the exception.</summary>
+    public UnroutableException(string exchange, string routingKey)
+        : base($"no queue is bound to {exchange} for routing key \"{routingKey}\"")
+    {
+        Exchange = exchange;
+        RoutingKey = routingKey;
+    }
+
+    /// <summary>The exchange.</summary>
+    public string Exchange { get; }
+
+    /// <summary>The routing key.</summary>
+    public string RoutingKey { get; }
+}
+
+/// <summary>
+/// A published message was written to some of its queues only. Each failure says whether that write is unknown
+/// (<see cref="OutcomeUnknownException"/>) or did not happen.
+/// </summary>
+public sealed class NotAllWrittenException : ClientException
+{
+    /// <summary>Creates the exception: <paramref name="written"/> names the queues that hold the message.</summary>
+    public NotAllWrittenException(IReadOnlyList<string> written, IReadOnlyList<ClientException> failures)
+        : base($"published to some queues only: written to [{string.Join(", ", written)}], failed [{string.Join("; ", failures.Select(f => f.Message))}]")
+    {
+        Written = written.ToArray();
+        Failures = failures.ToArray();
+    }
+
+    /// <summary>The queues that hold the message.</summary>
+    public IReadOnlyList<string> Written { get; }
+
+    /// <summary>Why the other queues do not.</summary>
+    public IReadOnlyList<ClientException> Failures { get; }
 }

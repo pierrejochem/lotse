@@ -37,7 +37,7 @@ namespace Lotse.Client;
 /// <see cref="OperationCanceledException"/>.
 /// </para>
 /// </summary>
-public sealed class LotseClient : IDisposable, IAsyncDisposable
+public sealed partial class LotseClient : IDisposable, IAsyncDisposable
 {
     private const uint U32Max = uint.MaxValue;
 
@@ -45,11 +45,14 @@ public sealed class LotseClient : IDisposable, IAsyncDisposable
     private readonly ConnectionPool _pool;
     private volatile bool _closed;
 
-    // Guards _brokers, _routes and _names.
+    // Guards _brokers, _routes, _names and _exchanges.
     private readonly object _state = new();
     private readonly SortedDictionary<uint, Address> _brokers = new();
     private readonly Dictionary<PartitionKey, Route> _routes = new();
     private readonly Dictionary<ulong, string> _names = new();
+
+    // Exchanges by name, and when metadata said so (Stopwatch ticks). Guarded by _state.
+    private readonly Dictionary<string, (Exchange Exchange, long At)> _exchanges = new();
 
     private readonly object _sessionLock = new();
     private Session? _session;
@@ -239,6 +242,10 @@ public sealed class LotseClient : IDisposable, IAsyncDisposable
                     continue;
                 }
                 _names[r.ResourceId] = r.Name;
+                if (r.Exchange is not null)
+                {
+                    _exchanges[r.Name] = (Exchange.Of(r.Name, r.ResourceId, r.Exchange), Stopwatch.GetTimestamp());
+                }
                 foreach (Messages.PartitionMetadata p in r.Partitions)
                 {
                     _routes[new PartitionKey(r.Name, (int)p.Partition)] = new Route(r.ResourceId, p.Leader, p.LeaderTerm);

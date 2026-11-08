@@ -4,7 +4,7 @@ A C# client for the Lotse native protocol. It follows the Java SDK rule for rule
 
 ## Status
 
-Phase 4 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, and now the queue consumer (`QueueConsumer`, `CreateQueueAsync`).
+Phase 5 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, the queue consumer (`QueueConsumer`, `CreateQueueAsync`), and now transactions (`Transaction`), publishing through exchanges, and consumer groups (`GroupConsumer`).
 
 | Namespace | What |
 | --- | --- |
@@ -12,7 +12,7 @@ Phase 4 of 8 is done: the protocol codec and record batch, connections and authe
 | `Lotse.Record` | Record batch parser and builder, in-place edits (producer, transactional bit, base timestamp), control batches, varints, CRC32C |
 | `Lotse.Net` | `Connection` (TLS 1.3 or plain TCP on loopback, pipelining, pushes, a read loop, session state), `ConnectionPool` (login, renewal, replacement), `ConnectionOptions`, `TlsConfig`, `Address`, the exceptions |
 | `Lotse.Auth` | SCRAM-SHA-512 (`ScramClient`, both ends are tested), OAUTHBEARER messages, `Credentials`, `Authenticator`, `ScramCredential` for `AlterUser` |
-| `Lotse.Client` | `LotseClient` (metadata routing, idempotent produce, read_committed fetch, `ListOffsets`, `CreateStream`, `CreateQueue`, `Subscribe`), `QueueConsumer`, `Delivery`, `DeadLetter`, `QueueOptions`, `SubscribeOptions`, `ClientConfig`, `OutMessage`, `Fetched`, `OffsetAt`, the exceptions |
+| `Lotse.Client` | `LotseClient` (metadata routing, idempotent produce, read_committed fetch, `ListOffsets`, `CreateStream`, `CreateQueue`, `Subscribe`, `BeginTransaction`, `Publish`, `DeclareExchange`, `Bind`, `Unbind`, `JoinGroup`), `Transaction`, `QueueConsumer`, `GroupConsumer`, `GroupConfig`, `GroupRecord`, `Published`, `Delivery`, `DeadLetter`, `QueueOptions`, `SubscribeOptions`, `ClientConfig`, `OutMessage`, `Fetched`, `OffsetAt`, the exceptions |
 
 Two packages, two projects:
 
@@ -21,7 +21,7 @@ Two packages, two projects:
 | `src/Lotse.Client` (`Lotse.Client`) | Everything above | none beyond the base class library |
 | `src/Lotse.Client.Codecs` (`Lotse.Client.Codecs`) | zstd and LZ4 for compressed batches, optional ([ADR 0084](../../docs/adr/0084-codecs-in-the-csharp-sdk.md)) | ZstdSharp.Port 0.8.6, K4os.Compression.LZ4.Streams 1.3.8 |
 
-Not yet: acking within a transaction, transactions, consumer groups, the other admin calls, examples.
+Not yet: the other admin calls (deletes, settings, purge and requeue, users, tenants, roles, nodes, pins, partitions, sessions, metrics), examples.
 
 ## Streams
 
@@ -102,7 +102,99 @@ await foreach (Delivery delivery in consumer.DeliveriesAsync(cancellationToken))
 - **Closing.** `Dispose` and `DisposeAsync` send `Unsubscribe` and then one requeueing `Nack` for what the consumer holds and has not handed out, on the subscription's connection and without waiting for an answer; `DisposeAsync` completes when both are written. This also covers what was pushed and not read yet, which the Java and Rust consumers leave with the broker until the ack timeout. Messages already handed out stay with the consumer until acked or until the client's connection closes. A task waiting in `PollAsync` or `NextAsync` gets `ObjectDisposedException`; acking after closing still works.
 - **Cancelling a subscribe.** If a token is cancelled while the answer to `Subscribe` is outstanding, the client closes that connection: the broker may have subscribed, and nobody would read the pushes.
 
-`QueueOptions` sets the replication (3 by default), `ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, the dead-letter queue, `single.active.consumer` (ADR 0076) and `priority.levels` (1 to 10, ADR 0078); `WithSetting(key, value)` passes any other setting through. A message gets its priority from the header `x-lotse-priority` and a delay from `x-lotse-delay-ms` (ADR 0077); both are plain headers on `OutMessage`. Acking within a transaction (ADR 0075) comes with the transactions in phase 5.
+`QueueOptions` sets the replication (3 by default), `ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, the dead-letter queue, `single.active.consumer` (ADR 0076) and `priority.levels` (1 to 10, ADR 0078); `WithSetting(key, value)` passes any other setting through. A message gets its priority from the header `x-lotse-priority` and a delay from `x-lotse-delay-ms` (ADR 0077); both are plain headers on `OutMessage`. Acking within a transaction (ADR 0075) is `AckInAsync`, below.
+
+## Transactions
+
+```csharp
+ClientConfig config = ClientConfig.CreateBuilder("127.0.0.1:9092")
+    .PlaintextOnLoopback()
+    .WithTransactionalId("order-worker-1")                  // lives in the configured tenant (ADR 0062)
+    .Build();
+using var client = new LotseClient(config);
+
+await using Transaction txn = await client.BeginTransactionAsync();
+await txn.ProduceAsync("orders", 0, OutMessage.FromValue("order-1"));
+await txn.ProduceAsync("audit", 0, OutMessage.FromValue("order-1 seen"));
+await txn.CommitAsync();                                    // both become visible to read_committed readers, or neither
+```
+
+`BeginTransactionAsync` asks the coordinator for the producer id of the transactional id, which fences an earlier client with the same id and aborts what it left open. A client runs one transaction at a time: a second call waits for the first to end. The rules are those of `lotse-client` and the Java SDK ([`sdk/PROTOCOL.md`](../PROTOCOL.md), "Client behaviour: transactions"):
+
+- **Adding.** A partition (a queue: partition 0) is added with `AddPartitionsToTxn` once, before the first batch to it. Batches carry the producer id, the epoch, a sequence per partition counted by records, and the transactional bit; a batch whose outcome is unknown is sent again with the same bytes.
+- **Only an abort is left.** After any error except `GaveUpException` and `UnknownStreamException`, and after a call that ended without an outcome (a cancelled token, a closed client), every call but `AbortAsync` throws `MustAbortException`, and `CommitAsync` does not ask the coordinator. `IsOpen` stays true until the abort.
+- **Ending.** `CommitAsync` returns when the decision is durable. A lost request or a retriable error is asked again; if time runs out the call throws `OutcomeUnknownException`. The next transaction uses the epoch the answer raised; after a failed end it asks for a fresh producer id, which also aborts what is left open. A transaction that added nothing ends without asking the coordinator.
+- **Disposing aborts.** `await using` aborts a transaction that was neither committed nor aborted, also when the block ends with an exception or a cancellation. The abort ignores the token of the call that failed, is bounded by `RetryFor`, and does not throw: if it fails, the next transaction asks for a fresh producer id. A `Transaction` is `IAsyncDisposable` only, so a plain `using` does not compile. Not for use by several tasks at once.
+- **Publishing in a transaction** is routed by this client (ADR 0032): `txn.PublishAsync(exchange, routingKey, message, mandatory)` reads the exchange's bindings from metadata (kept for `MetadataMaxAge`; a `BindAsync` through this client refreshes them) and produces the message to every queue it goes to. The routing follows `lotse-route` and is checked against `sdk/conformance/routing.txt`. If a write fails after some queues have the message, only an abort is left.
+- **Queue acks** (ADR 0075): `consumer.AckInAsync(txn, delivery)` adds the queue, then sends the ack with the transaction's producer id and epoch over the subscription's own connection. A lost answer is sent again on that connection; a connection that broke, or another transaction that holds the message, gives `BrokerErrorException` with `MESSAGE_NOT_HELD`. Any error leaves only an abort. A commit settles the message; an abort gives it back.
+- **Offsets** (ADR 0033): `txn.SendOffsetsAsync(groupConsumer)` sends the member's positions with `AddOffsetsToTxn`. They become the group's committed offsets when the transaction commits. A refusal or an unknown outcome leaves only an abort. Unlike the Rust and Java clients, a transaction that only sent offsets is still ended at the coordinator: otherwise the offsets stay pending until the transaction times out and every reader of the group's offsets waits for them.
+
+Exactly-once consume-transform-produce from a stream:
+
+```csharp
+GroupConfig groupConfig = GroupConfig.CreateBuilder().WithAutoCommit(false).Build();
+await using GroupConsumer group = await client.JoinGroupAsync("pipeline", new[] { "orders" }, groupConfig);
+while (!stop.IsCancellationRequested)
+{
+    IReadOnlyList<GroupRecord> records = await group.PollAsync(TimeSpan.FromMilliseconds(500), stop);
+    if (records.Count == 0)
+    {
+        continue;
+    }
+    await using Transaction txn = await client.BeginTransactionAsync(stop);
+    foreach (GroupRecord r in records)
+    {
+        await txn.ProduceAsync("shipments", 0, Transform(r.Record), stop);
+    }
+    await txn.SendOffsetsAsync(group, stop);
+    await txn.CommitAsync(stop);                            // an exception above aborts; call group.Rewind() to read the records again
+}
+```
+
+From a queue, `await consumer.AckInAsync(txn, delivery)` replaces `SendOffsetsAsync`.
+
+## Publishing through exchanges
+
+```csharp
+await client.DeclareExchangeAsync("events", Messages.ExchangeType.Topic);
+await client.BindAsync("events", "audit", "order.#");
+await client.BindAsync("events", "billing", "*.paid");
+
+Published published = await client.PublishAsync("events", "order.paid", OutMessage.FromValue("o-1"), mandatory: true);
+foreach (RoutedQueue q in published.Routed)                 // in queue name order
+{
+    Console.WriteLine($"{q.Queue} {q.Offset}");
+}
+```
+
+Outside a transaction a node routes (`Publish`, ADR 0079): it applies its bindings, checks the producer role on the exchange and on every routed queue, and writes each queue. The call returns once every routed queue holds the message. A message no queue takes is dropped, or refused with `UnroutableException` when `mandatory`. `NotAllWrittenException` names the queues that hold it and why the others do not (`OutcomeUnknownException` for a write whose outcome is unknown). If the node's answer is lost the call throws `OutcomeUnknownException` and is not sent again, since the node may have written it; a token cancelled after the request was sent does the same. A name unknown to the node is looked up once more, since a deleted and declared exchange has a new id. `BindHeadersAsync` binds a headers exchange; the other admin calls come with phase 6.
+
+## Consumer groups
+
+```csharp
+GroupConfig groupConfig = GroupConfig.CreateBuilder()
+    .WithSessionTimeout(TimeSpan.FromSeconds(30))
+    .WithStartFrom(OffsetAt.Latest)                         // where a partition without a committed offset starts
+    .WithInstanceId("worker-1")                             // static membership (ADR 0072), optional
+    .Build();
+await using GroupConsumer group = await client.JoinGroupAsync("billing", new[] { "orders", "refunds" }, groupConfig);
+// or: await client.JoinGroupMatchingAsync("billing", "order.*", groupConfig);   // a regular expression (ADR 0073)
+
+await foreach (GroupRecord r in group.RecordsAsync(cancellationToken))
+{
+    Handle(r.Stream, r.Partition, r.Record);
+}
+```
+
+`PollAsync(wait)` returns the records of one owned partition, in offset order, and is the unit `RecordsAsync` repeats. The member follows `lotse-client` and the Java SDK rule for rule ([`sdk/PROTOCOL.md`](../PROTOCOL.md), "Client behaviour: consumer groups"):
+
+- **Heartbeats come from `PollAsync`.** A caller that polls less often than the session timeout loses its partitions. The next heartbeat is due after the coordinator's interval or a third of the session timeout, whichever is shorter, counted from when the last one was sent; after a failure, after one backoff.
+- **Rebalancing is cooperative.** A partition that an answer revokes is no longer read from that moment. With auto-commit its position is committed, and the next heartbeat goes out at once and reports it released; only then may another member get it. So no partition has two owners.
+- **Lost.** When no heartbeat has succeeded for the session timeout, counted from when the last successful one was sent, every partition is dropped at once without a commit, and the member joins again. A fetch that returns after that hands out nothing. `UNKNOWN_MEMBER_ID` and `FENCED_MEMBER_EPOCH` mean the same.
+- **Static members.** A member with an instance id keeps its partitions when it leaves, for the session timeout; the next instance with that id takes them over with a new member id and no rebalance. The earlier instance gets `BrokerErrorException` with `FENCED_INSTANCE_ID` from `PollAsync` and stays out.
+- **Positions.** A partition without one asks `OffsetFetch` with `require_stable`, so an offset an open transaction holds waits. `NO_OFFSET` starts at the log start, or where `WithStartFrom` says (`ListOffsets`, ADR 0059). A committed offset that retention deleted goes on from the log start. `Rewind()` forgets the positions, as after an aborted transaction.
+- **Committing.** `CommitAsync()` commits the positions; with auto-commit (the default) a revoked partition and, on dispose, every partition is committed. Turn auto-commit off when offsets go with a transaction. `DisposeAsync` commits, leaves with epoch -1, and does not throw.
+- **Tenants.** The group id lives in the configured tenant (ADR 0062).
 
 ## Connections
 
@@ -172,6 +264,8 @@ There are two test assemblies. `Lotse.Client.Tests` references the codecs packag
 
 The queue tests on three nodes drain a queue with a small credit, requeue with a count of 2, discard, hold a message back with `NackAfterAsync` and with `x-lotse-delay-ms`, let an ack time out, drop a consumer and hand its messages to the next, kill the queue's leader in the middle of consuming 60 messages, retire a message into a dead-letter queue by `max.deliveries` and by `message.ttl.ms` with its origin headers, hand a single active queue to a standby when the active consumer ends or disappears, deliver by priority, and give back on close what was pushed and not read. The unit tests run the consumer against scripted brokers that push to it (`FakeNode.Conn`).
 
+The transaction tests on three nodes check what read_committed readers see while a transaction is open, committed and aborted (across two partitions, and after an exception in the block), a producer fenced by a newer epoch, a cancelled produce, exactly-once consume-transform-produce from a stream (with an abort in the middle) and from a queue, offsets that an aborted transaction does not commit, an abort that gives a message back, the `MESSAGE_NOT_HELD` of a second transaction, a publish routed by the client that is atomic across two queues, and a publish through a topic exchange routed by a node. A forwarding node in the test process drops the answer to a publish: the call is `OutcomeUnknownException`, and the real node holds the message once. The group tests run two members that share four partitions without ever owning one together, a static member taken over by its next instance while the earlier one is fenced, a pattern that picks up a stream created later, and `StartFrom` with a commit across members. The unit tests run both against scripted brokers.
+
 The three-node stream tests create streams, produce and read back, look up offsets by start, end and time, kill the leader of a partition in the middle of 150 idempotent produces (every message once, in order, with its own offset), follow a failover, produce without idempotence, send the same sequence to a node twice, and round-trip zstd and LZ4 batches through a node, which refuses a block it cannot decode.
 
-Safety rules that the tests break on purpose (ADR 0010): the SCRAM server signature, the strict server nonce and the iteration bounds, no transport by default, plain TCP only on loopback, correlation by id, the error flag becoming `BrokerException`, the limit on kept pushes, renewal at four fifths, the lifetime counted from before the login, replacing an ended session, certificate checking, TLS 1.3 only, the client certificate and the end at certificate expiry; and, for the stream client, the sequence advancing by the record count and per partition, an unknown outcome retried with the same bytes when idempotent and never otherwise, the session started over after an unknown outcome, an out-of-order sequence, a fenced producer or a cancelled produce, produces to one partition one at a time, the leader term sent with a fetch, the isolation of fetch and `ListOffsets`, skipping aborted transactions (from their first offset, sorted, ended only by their producer's abort marker, control batches never shown), following a leader hint only when its term is not older and it names another leader, dropping the route on `UNKNOWN_RESOURCE`, the newest id winning the merge, asking a partition's voters, a refusal after a lost attempt becoming `OutcomeUnknownException`, the tenant, `OFFSET_OUT_OF_RANGE` not retried, and, for the codecs, the decompression limit (removed and off by one, and kept by the SDK against a codec that ignores it), the builder's limit, the builder compressing, decompression running, a missing codec named and not reported as damage, and a codec that is not there not being called available., and, for the queue consumer, the credit threshold (rounded up, at least, reset after each refill, bytes counted once), handing out only the offsets in a push's list with the count it gives, ranges sorted, deduplicated and joined, a requeue on the subscription's own connection and not for a message of an ended subscription, the delay, an ack retried after a lost answer and after `NOT_LEADER` but not after a refusal, asking to be told when active, the standby answer and the activation push, resubscribing after a push error or a broken connection (and not while messages are held), the leader hint and the dropped route, what close sends and in which order, giving back unread pushes, waking a waiting task, and ending the connection of a cancelled subscribe.
+Safety rules that the tests break on purpose (ADR 0010): the SCRAM server signature, the strict server nonce and the iteration bounds, no transport by default, plain TCP only on loopback, correlation by id, the error flag becoming `BrokerException`, the limit on kept pushes, renewal at four fifths, the lifetime counted from before the login, replacing an ended session, certificate checking, TLS 1.3 only, the client certificate and the end at certificate expiry; and, for the stream client, the sequence advancing by the record count and per partition, an unknown outcome retried with the same bytes when idempotent and never otherwise, the session started over after an unknown outcome, an out-of-order sequence, a fenced producer or a cancelled produce, produces to one partition one at a time, the leader term sent with a fetch, the isolation of fetch and `ListOffsets`, skipping aborted transactions (from their first offset, sorted, ended only by their producer's abort marker, control batches never shown), following a leader hint only when its term is not older and it names another leader, dropping the route on `UNKNOWN_RESOURCE`, the newest id winning the merge, asking a partition's voters, a refusal after a lost attempt becoming `OutcomeUnknownException`, the tenant, `OFFSET_OUT_OF_RANGE` not retried, and, for the codecs, the decompression limit (removed and off by one, and kept by the SDK against a codec that ignores it), the builder's limit, the builder compressing, decompression running, a missing codec named and not reported as damage, and a codec that is not there not being called available., and, for the queue consumer, the credit threshold (rounded up, at least, reset after each refill, bytes counted once), handing out only the offsets in a push's list with the count it gives, ranges sorted, deduplicated and joined, a requeue on the subscription's own connection and not for a message of an ended subscription, the delay, an ack retried after a lost answer and after `NOT_LEADER` but not after a refusal, asking to be told when active, the standby answer and the activation push, resubscribing after a push error or a broken connection (and not while messages are held), the leader hint and the dropped route, what close sends and in which order, giving back unread pushes, waking a waiting task, and ending the connection of a cancelled subscribe; and, for transactions, groups and publishing, the epoch the end raises and the producer id asked afresh after a failed end, aborting on dispose, only an abort left after an error, an unknown write, a refused write, a refused offset and a call that ended without an outcome, the sequence counted by records and per partition, the transactional bit, a partition added once, the commit flag, one transaction at a time, ending a transaction that only sent offsets, offsets that go with the transaction and not on their own, the ack on the subscription's own connection and its `MESSAGE_NOT_HELD`, a publish that reached some queues only, a publish whose answer is lost not being sent again, the routing of topic (`#`, the empty key), headers (all and any, null values) and the binding refresh, a revoked partition released at once and only after its commit, dropping everything at the session timeout and after a slow fetch, a member rejoining after `UNKNOWN_MEMBER_ID`, staying out after `FENCED_INSTANCE_ID`, the start offset, the log start and `require_stable`.

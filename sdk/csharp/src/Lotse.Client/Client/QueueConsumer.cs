@@ -440,6 +440,80 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
+    /// Acknowledges a message within a transaction (ADR 0075): the queue joins the transaction, the leader takes the
+    /// message out of flight, and the transaction holds it. The commit settles it; an abort gives it back. This goes over
+    /// the subscription's own connection, since only the connection that holds a message can ack it so, so only a
+    /// message of the current subscription can be acknowledged this way. Any error leaves the transaction to be aborted.
+    /// <c>MESSAGE_NOT_HELD</c> means the message has gone back, or another transaction holds it.
+    /// </summary>
+    /// <exception cref="BrokerErrorException">With <c>MESSAGE_NOT_HELD</c> or another refusal.</exception>
+    public async Task AckInAsync(Transaction txn, Delivery delivery, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(txn);
+        ArgumentNullException.ThrowIfNull(delivery);
+        await txn.AddAsync(_queue, 0, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await AckInOnceAsync(txn, delivery, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is ClientException or OperationCanceledException or ObjectDisposedException)
+        {
+            txn.MustAbort(e.Message);
+            throw;
+        }
+    }
+
+    private async Task AckInOnceAsync(Transaction txn, Delivery delivery, CancellationToken ct)
+    {
+        Sub? on;
+        ulong queueId;
+        lock (_mu)
+        {
+            on = _sub;
+            queueId = _resourceId;
+        }
+        // The messages are the subscription's connection's: on another one they are not held.
+        if (on is null)
+        {
+            throw new BrokerErrorException(ErrorCode.MessageNotHeld, "the subscription ended; the message went back");
+        }
+        var req = new Request.Ack(
+            queueId, txn.TxnId, OffsetRanges.Of(new[] { delivery.Offset }), _client.Config.Tenant, txn.ProducerId, txn.Epoch);
+        await _client.RetryingAsync(
+            async () =>
+            {
+                Response resp;
+                try
+                {
+                    resp = await _client.CallOnAsync(on.Conn, req, ct).ConfigureAwait(false);
+                }
+                catch (CallFailure e)
+                {
+                    switch (e.Outcome)
+                    {
+                        // Sent again on the same connection: the leader takes a retry for what the transaction holds.
+                        case CallFailure.Kind.Lost:
+                            throw Attempt.RetryMaybeDone(e.Message);
+                        case CallFailure.Kind.NotSent:
+                            throw Attempt.Fail(new BrokerErrorException(ErrorCode.MessageNotHeld, "the connection broke; the message went back"));
+                        default:
+                            throw e.ToAttempt();
+                    }
+                }
+                if (resp is Response.Outcome o)
+                {
+                    if (o.Error.IsOk)
+                    {
+                        return 0;
+                    }
+                    throw Attempt.Fail(new BrokerErrorException(o.Error, null));
+                }
+                throw Attempt.RetryMaybeDone("unexpected response " + resp);
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Acknowledges several messages in as few ranges as their offsets allow. The outcome of an ack that was lost is
     /// retried: settling twice is harmless.
     /// </summary>
