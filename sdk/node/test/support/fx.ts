@@ -10,6 +10,7 @@ import {
   type Response,
   ResourceKind,
 } from "../../src/index.js";
+import { Batch, BatchBuilder } from "../../src/index.js";
 import type { FakeNode } from "./fake-node.js";
 
 type Of<T extends Response["type"]> = Extract<Response, { type: T }>;
@@ -153,4 +154,15 @@ export function bytesOf(r: Request): Uint8Array {
 /** A queue: a resource of kind queue with one partition, 0. */
 export function queue(name: string, id: bigint | number, ...partitions: PartitionMetadata[]): ResourceMetadata {
   return { ...stream(name, id, ...partitions), kind: ResourceKind.QUEUE };
+}
+
+/** A batch of data records at `base`, as the broker stores it. */
+export function data(base: number | bigint, ...values: string[]): Uint8Array {
+  const b = new BatchBuilder();
+  for (const v of values) {
+    b.push(1_000n, null, Buffer.from(v));
+  }
+  const bytes = b.finish();
+  Batch.stamp(bytes, BigInt(base), 1n);
+  return bytes;
 }

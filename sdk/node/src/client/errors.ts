@@ -101,3 +101,51 @@ export class ConsumerClosedError extends ClientError {
     super("the consumer is closed");
   }
 }
+
+/** The transaction can no longer be committed (a write's outcome is unknown, or the producer was fenced): abort it. */
+export class MustAbortError extends ClientError {
+  constructor(why: string) {
+    super(`the transaction must be aborted: ${why}`);
+  }
+}
+
+/** The transaction has ended, by `commit`, `abort` or `abandon`, or was ended by its signal. */
+export class TransactionEndedError extends ClientError {
+  constructor() {
+    super("the transaction has ended");
+  }
+}
+
+/** No transactional id is configured (`ClientOptions.transactionalId`). */
+export class NotTransactionalError extends ClientError {
+  constructor() {
+    super("no transactional id is configured");
+  }
+}
+
+/** A mandatory message matched no binding. */
+export class UnroutableError extends ClientError {
+  constructor(
+    readonly exchange: string,
+    readonly routingKey: string,
+  ) {
+    super(`no queue is bound to ${exchange} for routing key "${routingKey}"`);
+  }
+}
+
+/**
+ * A published message was written to some of its queues only. Each failure says whether that write is unknown
+ * (`UnknownOutcomeError`) or did not happen.
+ */
+export class NotAllWrittenError extends ClientError {
+  constructor(
+    /** The queues that hold the message. */
+    readonly written: readonly string[],
+    /** Why the other queues do not. */
+    readonly failures: readonly ClientError[],
+  ) {
+    super(
+      `published to some queues only: written to [${written.join(", ")}], failed [${failures.map((f) => f.message).join("; ")}]`,
+    );
+  }
+}

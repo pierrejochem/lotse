@@ -40,6 +40,17 @@ export interface ClientOptions {
    * with transactional ids; one client instance per name. Default none: a fresh id per client.
    */
   readonly producerName?: string;
+  /**
+   * The transactional id (ADR 0029), in the configured tenant (ADR 0062). With it `beginTransaction` works: the producer id
+   * comes from the coordinator under the id, and a newer client with the same id fences this one. One client instance
+   * per id. Default none.
+   */
+  readonly transactionalId?: string;
+  /**
+   * How long a transaction's publish uses the exchange's bindings it has read before it asks again. Default 30 000. A
+   * `bind` or `unbind` by this client makes it ask again at once.
+   */
+  readonly metadataMaxAgeMs?: number;
   /** The tenant resources created by this client go to, and the one its producer names live in (ADR 0062). Default `default`. */
   readonly tenant?: string;
   /** For the TCP connect and the TLS handshake together. Default 10 000. */
@@ -56,6 +67,8 @@ export interface ClientConfig {
   readonly idempotent: boolean;
   readonly txnTimeoutMs: number;
   readonly producerName: string | null;
+  readonly transactionalId: string | null;
+  readonly metadataMaxAgeMs: number;
   readonly tenant: string;
   readonly connection: ConnectionOptions;
 }
@@ -75,6 +88,9 @@ export function resolveClientOptions(o: ClientOptions): ClientConfig {
   if (o.producerName !== undefined && (o.producerName.length === 0 || o.producerName.includes("\0"))) {
     throw new RangeError("a producer name is not empty and has no NUL");
   }
+  if (o.transactionalId !== undefined && (o.transactionalId.length === 0 || o.transactionalId.includes("\0"))) {
+    throw new RangeError("a transactional id is not empty and has no NUL");
+  }
   const requestTimeoutMs = positive("requestTimeoutMs", o.requestTimeoutMs, 10_000);
   const connection: ConnectionOptions = {
     requestTimeoutMs,
@@ -91,6 +107,8 @@ export function resolveClientOptions(o: ClientOptions): ClientConfig {
     idempotent: o.idempotent ?? true,
     txnTimeoutMs: positive("txnTimeoutMs", o.txnTimeoutMs, 60_000),
     producerName: o.producerName ?? null,
+    transactionalId: o.transactionalId ?? null,
+    metadataMaxAgeMs: positive("metadataMaxAgeMs", o.metadataMaxAgeMs, 30_000),
     tenant: o.tenant ?? DEFAULT_TENANT,
     connection,
   };

@@ -4,19 +4,24 @@ import { type Address, addressKey, formatAddress } from "../net/address.js";
 import type { Connection } from "../net/connection.js";
 import { BrokerError, ConnectionError, InsecureTransportError } from "../net/errors.js";
 import { ConnectionPool } from "../net/pool.js";
-import { describeError, ErrorCode, isRetriable } from "../proto/error-code.js";
+import { describeError, ErrorCode, type ErrorCodeValue, isRetriable } from "../proto/error-code.js";
 import {
   CoordinatorType,
+  ExchangeType,
   Isolation,
+  type HeaderMatch,
   type LeaderHint,
+  type PublishEntry,
+  type PublishResult,
   type ResourceMetadata,
+  ResourceKind,
 } from "../proto/messages.js";
 import type { Request } from "../proto/request.js";
 import type { Response } from "../proto/response.js";
 import { Batch } from "../record/batch.js";
 import { RecordFormatError } from "../record/errors.js";
-import type { BatchRecord } from "../record/types.js";
-import { compareU64, U32_MAX } from "../record/unsigned.js";
+import type { BatchRecord, Header } from "../record/types.js";
+import { compareU64, U32_MAX, u64ToString } from "../record/unsigned.js";
 import { Attempt, CallFailure } from "./attempt.js";
 import { type ClientConfig, type ClientOptions, resolveClientOptions } from "./config.js";
 import {
@@ -25,16 +30,24 @@ import {
   ClientClosedError,
   ClientError,
   GaveUpError,
+  NotAllWrittenError,
+  NotTransactionalError,
   OffsetOutOfRangeError,
   ResourceExistsError,
   UnknownOutcomeError,
   UnknownStreamError,
+  UnroutableError,
 } from "./errors.js";
+import { Exchange } from "./exchange.js";
 import { Fetched } from "./fetched.js";
-import { buildBatch, type OutMessage, type ProduceResult } from "./messages.js";
+import { type GroupConfig } from "./group-config.js";
+import { type GroupHost, GroupConsumer } from "./group-consumer.js";
+import { buildBatch, type OutHeader, type OutMessage, type ProduceResult } from "./messages.js";
 import { Mutex } from "./mutex.js";
 import { OffsetAt } from "./offset-at.js";
 import { type QueueHost, QueueConsumer } from "./queue-consumer.js";
+import type { Published, PublishOptions, RoutedQueue } from "./published.js";
+import { type ProducerIds, Transaction, type TransactionHost, type TransactionOptions } from "./transaction.js";
 import { queueConfigs, type QueueOptions, resolveCredit, type SubscribeOptions } from "./queue-options.js";
 
 /** One partition's place in the cluster, as metadata last said. */
@@ -54,11 +67,6 @@ interface Session {
   readonly producerId: bigint;
   readonly epoch: number;
   readonly next: Map<string, number>;
-}
-
-interface ProducerIds {
-  readonly producerId: bigint;
-  readonly epoch: number;
 }
 
 interface Stamp {
@@ -141,6 +149,16 @@ export class LotseClient {
 
   private readonly brokers = new Map<number, Address>();
   private readonly routes = new Map<string, Route>();
+  /** The names of the resources this client has looked up, by id, and their newest ids by name. */
+  private readonly names = new Map<bigint, string>();
+  private readonly idsByName = new Map<string, bigint>();
+  /** Exchanges by name, and when metadata said so (ADR 0032). */
+  private readonly exchanges = new Map<string, { exchange: Exchange; at: number }>();
+  private readonly exchangeIds = new Map<string, bigint>();
+
+  /** One transaction at a time; the producer id and epoch for the next one, `null` to ask anew. */
+  private readonly txnTurn = new Mutex();
+  private txnProducer: ProducerIds | null = null;
 
   private session: Session | null = null;
   private coordinatorAddress: Address | null = null;
@@ -257,6 +275,15 @@ export class LotseClient {
     for (const r of m.resources) {
       if (r.error !== ErrorCode.NONE) {
         continue;
+      }
+      this.names.set(r.resourceId, r.name);
+      // A name deleted and made again has a higher id, and a broker that lags may still report the old one.
+      const known = this.idsByName.get(r.name);
+      if (known === undefined || compareU64(known, r.resourceId) <= 0) {
+        this.idsByName.set(r.name, r.resourceId);
+      }
+      if (r.exchange !== null) {
+        this.exchanges.set(r.name, { exchange: Exchange.of(r.name, r.resourceId, r.exchange), at: nowMs() });
       }
       for (const p of r.partitions) {
         this.routes.set(routeKey(r.name, p.partition), { resourceId: r.resourceId, leader: p.leader, term: p.leaderTerm });
@@ -570,12 +597,13 @@ export class LotseClient {
     batch: Uint8Array,
     idempotent: boolean,
     signal?: AbortSignal,
+    txnId: string | null = null,
   ): Promise<ProduceResult> {
     // An idempotent batch may be sent again whatever happened to it.
     const routed = await this.route(stream, partition, signal);
     const req: Request = {
       type: "Produce",
-      txnId: null,
+      txnId,
       timeoutMs: Math.min(this.cfg.produceTimeoutMs, U32_MAX),
       resources: [{ resourceId: routed.route.resourceId, partitions: [{ partition, batch }] }],
       tenant: this.cfg.tenant,
@@ -1020,6 +1048,7 @@ export class LotseClient {
 
   private queueHost(): QueueHost {
     return {
+      tenant: this.cfg.tenant,
       retrying: (attempt, signal) => this.retrying(attempt, signal),
       route: (queue, partition, signal) => this.route(queue, partition, signal),
       connect: (address) => this.connect(address),
@@ -1028,6 +1057,413 @@ export class LotseClient {
       forget: (queue, partition) => this.forget(queue, partition),
       redirect: (queue, partition, hint) => this.redirect(queue, partition, hint),
     };
+  }
+
+  // ---- transactions (ADR 0029) ----
+
+  /**
+   * Starts a transaction for the configured transactional id (`ClientOptions.transactionalId`), getting its producer id
+   * from the coordinator first, which fences any older client with the same id. One transaction at a time per client: a
+   * second call waits until the first ends. End it with `commit` or `abort`; a transaction left open is aborted by
+   * `await using`, or, with `abandon`, by the coordinator, and the next transaction then gets a fresh producer id.
+   *
+   * @throws NotTransactionalError no transactional id is configured
+   * @throws GaveUpError no coordinator answered in time, or `signal` fired while waiting for the open transaction
+   */
+  async beginTransaction(options: TransactionOptions = {}): Promise<Transaction> {
+    this.checkOpen();
+    const txnId = this.cfg.transactionalId;
+    if (txnId === null) {
+      throw new NotTransactionalError();
+    }
+    const signal = options.signal;
+    const guard = abortGuard(signal);
+    let release: () => void;
+    try {
+      try {
+        release = await this.txnTurn.acquire(guard?.promise);
+      } catch (e) {
+        if (e === ABORTED) {
+          throw new GaveUpError(0, "aborted while waiting for the open transaction");
+        }
+        throw e;
+      }
+    } finally {
+      guard?.dispose();
+    }
+    try {
+      let ids = this.txnProducer;
+      if (ids === null) {
+        ids = await this.retrying(() => this.initProducerOnce(txnId), signal);
+        this.txnProducer = ids;
+      }
+      if (signal?.aborted === true) {
+        throw new GaveUpError(0, "aborted");
+      }
+      return new Transaction(this.transactionHost(), txnId, ids.producerId, ids.epoch, release, signal);
+    } catch (e) {
+      release();
+      throw e;
+    }
+  }
+
+  private transactionHost(): TransactionHost {
+    return {
+      tenant: this.cfg.tenant,
+      retrying: (attempt, signal, mayHaveChanged) => this.retrying(attempt, signal, mayHaveChanged),
+      produceOnce: (stream, partition, batch, idempotent, signal, txnId) =>
+        this.produceOnce(stream, partition, batch, idempotent, signal, txnId),
+      route: (name, partition, signal) => this.route(name, partition, signal),
+      callCoordinator: (key, request) => this.callCoordinator(key, request),
+      forgetCoordinator: () => {
+        this.coordinatorAddress = null;
+      },
+      transactionEnded: (next) => {
+        this.txnProducer = next;
+      },
+      routeMessage: (exchange, routingKey, headers, mandatory) => this.routeMessage(exchange, routingKey, headers, mandatory),
+      streamId: (name) => this.idsByName.get(name),
+    };
+  }
+
+  // ---- exchanges routed by the client, in a transaction (ADR 0032) ----
+
+  /** The exchange as metadata last said within `metadataMaxAgeMs`, asking for it otherwise. */
+  private async exchange(name: string): Promise<Exchange> {
+    const known = this.exchanges.get(name);
+    if (known !== undefined) {
+      if (nowMs() - known.at < this.cfg.metadataMaxAgeMs) {
+        return known.exchange;
+      }
+      this.exchanges.delete(name);
+    }
+    // learn() keeps the exchange and the queues bound to it.
+    const m = await this.metadataWith(undefined, [name]);
+    if (find(m.resources, name) === undefined) {
+      // Declared a moment ago: not every broker knows it yet.
+      await this.metadataFromAll([name]);
+    }
+    const x = this.exchanges.get(name);
+    if (x === undefined) {
+      throw new UnknownStreamError(name, 0);
+    }
+    return x.exchange;
+  }
+
+  /** The queues a message goes to, by name, sorted. With `mandatory`, a message no queue takes is refused. */
+  private async routeMessage(
+    exchange: string,
+    routingKey: string,
+    headers: readonly Header[],
+    mandatory: boolean,
+  ): Promise<string[]> {
+    const x = await this.exchange(exchange);
+    const ids = x.route(routingKey, headers);
+    if (ids.length === 0 && mandatory) {
+      throw new UnroutableError(exchange, routingKey);
+    }
+    const queues: string[] = [];
+    for (const id of ids) {
+      const n = this.names.get(id);
+      if (n === undefined) {
+        throw new UnknownStreamError(`queue ${u64ToString(id)} bound to ${exchange}`, 0);
+      }
+      queues.push(n);
+    }
+    return queues.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  // ---- consumer groups (ADR 0033) ----
+
+  /**
+   * Joins `group` to read `streams`; partitions arrive with the first calls to `GroupConsumer.poll`.
+   *
+   * @throws GaveUpError if no broker answers within `retryForMs`
+   */
+  async joinGroup(
+    group: string,
+    streams: readonly string[],
+    config?: GroupConfig,
+    options: CallOptions = {},
+  ): Promise<GroupConsumer> {
+    this.checkOpen();
+    // Learn the streams' ids (and names) first.
+    await this.metadataWith(options.signal, streams);
+    return new GroupConsumer(this.groupHost(), group, [...streams], null, config);
+  }
+
+  /**
+   * Joins `group` to read every stream of the tenant whose whole name matches the regular expression `pattern` and that
+   * this principal may read (ADR 0073). The coordinator matches it with every heartbeat, so streams created later join in.
+   */
+  async joinGroupMatching(
+    group: string,
+    pattern: string,
+    config?: GroupConfig,
+    options: CallOptions = {},
+  ): Promise<GroupConsumer> {
+    this.checkOpen();
+    await this.metadataWith(options.signal, []);
+    return new GroupConsumer(this.groupHost(), group, [], pattern, config);
+  }
+
+  private groupHost(): GroupHost {
+    return {
+      tenant: this.cfg.tenant,
+      backoffMs: this.cfg.backoffMs,
+      retrying: (attempt, signal, mayHaveChanged) => this.retrying(attempt, signal, mayHaveChanged),
+      callCoordinator: (key, request) => this.callCoordinator(key, request),
+      forgetCoordinator: () => {
+        this.coordinatorAddress = null;
+      },
+      streamId: (name) => this.idsByName.get(name),
+      streamName: (id) => this.names.get(id),
+      metadata: () => this.metadataWith(undefined, []),
+      listOffset: (stream, partition, at) => this.listOffset(stream, partition, at),
+      fetch: (stream, partition, offset, maxWaitMs, options) => this.fetch(stream, partition, offset, maxWaitMs, options),
+    };
+  }
+
+  // ---- publishing through exchanges (ADR 0079) ----
+
+  /**
+   * Publishes a message to an exchange, which routes it to queues by `routingKey` (and headers). A node routes it by the
+   * bindings it knows and writes it to each queue, if this client's roles allow every one of them. Resolves once every
+   * routed queue holds it; a message no queue takes is dropped, or refused with `UnroutableError` when `mandatory`. If
+   * some queues could not be written, `NotAllWrittenError` says which hold it. If the node's answer is lost, the call
+   * rejects with `UnknownOutcomeError`: the publish is not sent again, since the node may have written it. A publish
+   * given up by its signal after it was sent is unknown the same way.
+   */
+  async publish(
+    exchange: string,
+    routingKey: string,
+    message: OutMessage,
+    options: PublishOptions = {},
+  ): Promise<Published> {
+    this.checkOpen();
+    const batch = buildBatch([message]);
+    const mandatory = options.mandatory === true;
+    // A name deleted and made again has a new id: ask once more.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) {
+        this.exchangeIds.delete(exchange);
+      }
+      const id = await this.exchangeId(exchange, options.signal);
+      const r = await this.publishOnce({ exchangeId: id, routingKey, mandatory, batch }, options.signal);
+      const code = r.error;
+      if (code === ErrorCode.NONE) {
+        return this.published(r);
+      }
+      if (code === ErrorCode.UNKNOWN_RESOURCE && attempt === 0) {
+        continue;
+      }
+      if (code === ErrorCode.UNKNOWN_RESOURCE) {
+        throw new UnknownStreamError(exchange, 0);
+      }
+      if (code === ErrorCode.UNROUTABLE) {
+        throw new UnroutableError(exchange, routingKey);
+      }
+      throw new BrokerResponseError(code, null);
+    }
+    throw new Error("the second attempt returns");
+  }
+
+  /** The exchange's id, from metadata the first time. */
+  private async exchangeId(exchange: string, signal?: AbortSignal): Promise<bigint> {
+    const known = this.exchangeIds.get(exchange);
+    if (known !== undefined) {
+      return known;
+    }
+    const m = await this.metadataWith(signal, [exchange]);
+    const r = find(m.resources, exchange, false);
+    if (r === undefined || r.error !== ErrorCode.NONE || r.kind !== ResourceKind.EXCHANGE) {
+      throw new UnknownStreamError(exchange, 0);
+    }
+    this.exchangeIds.set(exchange, r.resourceId);
+    return r.resourceId;
+  }
+
+  /** One `Publish` to the first node that takes it. It is never sent twice once a node may have it. */
+  private async publishOnce(entry: PublishEntry, signal?: AbortSignal): Promise<PublishResult> {
+    const req: Request = {
+      type: "Publish",
+      txnId: null,
+      timeoutMs: Math.min(this.cfg.requestTimeoutMs, U32_MAX),
+      entries: [entry],
+    };
+    const start = nowMs();
+    let why = "no broker known";
+    const guard = abortGuard(signal);
+    try {
+      for (;;) {
+        for (const addr of this.candidates()) {
+          if (signal?.aborted === true) {
+            throw new GaveUpError(nowMs() - start, "aborted");
+          }
+          try {
+            const sending = this.call(addr, req);
+            let r: Response;
+            if (guard === null) {
+              r = await sending;
+            } else {
+              sending.catch(() => {}); // abandoned, it may still fail
+              r = await Promise.race([sending, guard.promise]);
+            }
+            if (r.type === "Publish" && r.entries.length === 1) {
+              return r.entries[0] as PublishResult;
+            }
+            why = `unexpected response ${r.type}`;
+          } catch (e) {
+            if (e === ABORTED) {
+              throw new UnknownOutcomeError("the publish was given up after it was sent");
+            }
+            if (!(e instanceof CallFailure)) {
+              throw e;
+            }
+            switch (e.kind) {
+              case "DENIED":
+                throw new ClientAuthenticationError(e.message);
+              case "REFUSED":
+                throw new BrokerResponseError(e.code as ErrorCodeValue, e.message);
+              case "LOST":
+                // The node may have written it: not sent again.
+                throw new UnknownOutcomeError(`${formatAddress(addr)}: ${e.message}`);
+              case "NOT_SENT":
+                why = `${formatAddress(addr)}: ${e.describe()}`;
+                break;
+            }
+          }
+        }
+        if (nowMs() - start >= this.cfg.retryForMs) {
+          throw new GaveUpError(this.cfg.retryForMs, why);
+        }
+        if (!(await this.pause(signal))) {
+          throw new GaveUpError(nowMs() - start, "aborted");
+        }
+      }
+    } finally {
+      guard?.dispose();
+    }
+  }
+
+  /** A routed message's outcome by queue name. */
+  private published(result: PublishResult): Published {
+    // The node names each queue: this client may never have seen one bound and deleted between two of its lookups. Only a
+    // queue the node no longer knows comes without a name.
+    const written: RoutedQueue[] = [];
+    const failures: ClientError[] = [];
+    for (const q of result.routed) {
+      const name = q.name !== "" ? q.name : (this.names.get(q.queueId) ?? `queue ${u64ToString(q.queueId)}`);
+      if (q.error === ErrorCode.NONE) {
+        written.push({ queue: name, offset: q.baseOffset });
+      } else if (q.error === ErrorCode.REQUEST_TIMED_OUT) {
+        failures.push(new UnknownOutcomeError(`${name}: the write's outcome is unknown`));
+      } else {
+        failures.push(new BrokerResponseError(q.error, name));
+      }
+    }
+    written.sort((a, b) => (a.queue < b.queue ? -1 : a.queue > b.queue ? 1 : 0));
+    if (failures.length > 0) {
+      throw new NotAllWrittenError(
+        written.map((w) => w.queue),
+        failures,
+      );
+    }
+    return { routed: written };
+  }
+
+  // ---- exchanges and bindings (ADR 0034) ----
+
+  /**
+   * Declares an exchange in the configured tenant and returns its id. A declare whose outcome is unknown is retried and may
+   * then fail with `ResourceExistsError`, as for `createStream`.
+   *
+   * @param type one of `ExchangeType`: `DIRECT`, `TOPIC`, `FANOUT` or `HEADERS`
+   * @throws RangeError for an unknown type
+   */
+  async declareExchange(name: string, type: number, options: CallOptions = {}): Promise<bigint> {
+    this.checkOpen();
+    if (!Object.values(ExchangeType).includes(type as 0)) {
+      throw new RangeError(`unknown exchange type ${type}`);
+    }
+    return this.create(
+      name,
+      { type: "DeclareExchange", name, tenant: this.cfg.tenant, exchangeType: type, configs: [] },
+      options.signal,
+    );
+  }
+
+  /** Binds `queue` to `exchange` with a binding key (direct and topic exchanges). */
+  bind(exchange: string, queue: string, key: string, options: CallOptions = {}): Promise<void> {
+    return this.binding(exchange, queue, key, [], true, false, options.signal);
+  }
+
+  /**
+   * Binds `queue` to a headers exchange: all of `headers` must match (`matchAll`), or any one. A header with a `null` value
+   * matches only a header whose value is null.
+   */
+  bindHeaders(
+    exchange: string,
+    queue: string,
+    headers: readonly OutHeader[],
+    matchAll: boolean,
+    options: CallOptions = {},
+  ): Promise<void> {
+    const matches: HeaderMatch[] = headers.map((h) => ({
+      key: typeof h.name === "string" ? Buffer.from(h.name, "utf8") : h.name,
+      value: h.value === null ? null : typeof h.value === "string" ? Buffer.from(h.value, "utf8") : h.value,
+    }));
+    return this.binding(exchange, queue, "", matches, matchAll, false, options.signal);
+  }
+
+  /** Removes a binding made by `bind`. */
+  unbind(exchange: string, queue: string, key: string, options: CallOptions = {}): Promise<void> {
+    return this.binding(exchange, queue, key, [], true, true, options.signal);
+  }
+
+  private async binding(
+    exchange: string,
+    queue: string,
+    key: string,
+    headerMatch: HeaderMatch[],
+    matchAll: boolean,
+    unbind: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.checkOpen();
+    const m = await this.metadataFromAll([exchange, queue]);
+    const x = find(m, exchange);
+    const q = find(m, queue);
+    if (x === undefined || q === undefined) {
+      throw new UnknownStreamError(`${exchange} or ${queue}`, 0);
+    }
+    const body = { exchangeId: x.resourceId, queueId: q.resourceId, bindingKey: key, headerMatch, matchAll };
+    const req: Request = unbind ? { type: "Unbind", ...body } : { type: "Bind", ...body };
+    await this.retrying(
+      async () => {
+        const r = await this.callAdmin(req);
+        if (r.type !== "Outcome") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint);
+      },
+      signal,
+      true,
+    );
+    // A transaction's publish routes by the bindings this client has seen: see the new ones.
+    this.exchanges.delete(exchange);
+  }
+
+  /** An admin answer: retriable errors follow the leader hint and may have been carried out; others fail. */
+  private adminAnswer(error: ErrorCodeValue, hint: LeaderHint | null): void {
+    if (error === ErrorCode.NONE) {
+      return;
+    }
+    if (isRetriable(error)) {
+      this.metadataLeader = hint === null ? null : hint.leader;
+      throw Attempt.retryMaybeDone(describeError(error));
+    }
+    throw Attempt.fail(new BrokerResponseError(error, null));
   }
 
   // ---- one request to one broker ----

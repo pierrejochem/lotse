@@ -14,10 +14,12 @@ import { Attempt, CallFailure } from "./attempt.js";
 import { Delivery } from "./delivery.js";
 import { BrokerResponseError, ConsumerClosedError, GaveUpError } from "./errors.js";
 import { Mutex } from "./mutex.js";
+import type { Transaction } from "./transaction.js";
 import { offsetRanges } from "./offset-ranges.js";
 
 /** What a consumer needs from the client that made it. */
 export interface QueueHost {
+  readonly tenant: string;
   retrying<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   route(queue: string, partition: number, signal?: AbortSignal): Promise<{ route: { resourceId: bigint }; address: Address }>;
   connect(address: Address): Promise<Connection>;
@@ -417,6 +419,70 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     if (list.length > 0) {
       await this.settle(offsetRanges(list.map((d) => d.offset)), false, options.signal);
     }
+  }
+
+  /**
+   * Acknowledges a message within a transaction (ADR 0075): the queue joins the transaction, the leader takes the message
+   * out of flight and the transaction holds it, so that the commit settles it and an abort gives it back; no one else
+   * receives it meanwhile. Only a message this subscription holds can be acknowledged so, and the request goes on the
+   * subscription's own connection. Any error leaves the transaction to be aborted. `MESSAGE_NOT_HELD` (a
+   * `BrokerResponseError`) means the message has gone back, or another transaction holds it.
+   */
+  async ackIn(txn: Transaction, delivery: Delivery, options: ConsumerCallOptions = {}): Promise<void> {
+    await txn.inTurn(async () => {
+      await txn.add(this.queue, 0, options.signal);
+      try {
+        await this.ackInOnce(txn, delivery, options.signal);
+      } catch (e) {
+        txn.mustAbort((e as Error).message);
+        throw e;
+      }
+    });
+  }
+
+  private async ackInOnce(txn: Transaction, delivery: Delivery, signal?: AbortSignal): Promise<void> {
+    // The messages are the subscription's connection's: on another one they are not held.
+    const on = this.sub;
+    if (on === null) {
+      throw new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+    }
+    const req: Request = {
+      type: "Ack",
+      queueId: this.resourceId,
+      txnId: txn.txnId,
+      ranges: offsetRanges([delivery.offset]),
+      tenant: this.host.tenant,
+      producerId: txn.producerId,
+      producerEpoch: txn.epoch,
+    };
+    await this.host.retrying(async () => {
+      let resp: Response;
+      try {
+        resp = await this.host.callOn(on.conn, req);
+      } catch (e) {
+        if (e instanceof CallFailure) {
+          switch (e.kind) {
+            // Sent again on the same connection: the leader takes a retry for what the transaction holds.
+            case "LOST":
+              throw Attempt.retryMaybeDone(e.message);
+            case "NOT_SENT":
+              throw Attempt.fail(
+                new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, "the connection broke; the message went back"),
+              );
+            default:
+              throw e.toAttempt();
+          }
+        }
+        throw e;
+      }
+      if (resp.type === "Outcome") {
+        if (resp.error === ErrorCode.NONE) {
+          return;
+        }
+        throw Attempt.fail(new BrokerResponseError(resp.error, null));
+      }
+      throw Attempt.retryMaybeDone(`unexpected response ${resp.type}`);
+    }, signal);
   }
 
   /**

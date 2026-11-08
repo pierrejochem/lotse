@@ -80,6 +80,16 @@ export class PlainCluster {
     this.processes.delete(id);
   }
 
+  /** Stops a node's process without ending it (SIGSTOP): it keeps its sockets and answers nothing until `resume`. */
+  pause(id: number): void {
+    this.processes.get(id)?.kill("SIGSTOP");
+  }
+
+  /** Lets a paused node go on (SIGCONT). */
+  resume(id: number): void {
+    this.processes.get(id)?.kill("SIGCONT");
+  }
+
   async stop(): Promise<void> {
     await Promise.all([...this.processes.keys()].map((id) => this.kill(id)));
   }
