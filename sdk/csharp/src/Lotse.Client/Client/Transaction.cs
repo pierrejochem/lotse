@@ -177,6 +177,7 @@ public sealed class Transaction : IAsyncDisposable
         {
             return;
         }
+        bool mayHold = _coordinatorMayHold;
         try
         {
             await _client.RetryingAsync(() => AddPartitionOnceAsync(name, partition, ct), ct).ConfigureAwait(false);
@@ -184,6 +185,14 @@ public sealed class Transaction : IAsyncDisposable
         catch (ClientException e)
         {
             Poison(e);
+            if (e is GaveUpException or UnknownStreamException)
+            {
+                // Nothing was written, and the call is not known to have reached the coordinator for good. Ending the
+                // transaction there can be refused with INVALID_TXN_STATE while the previous one is still completing,
+                // which is how the Rust client and the Java SDK have it: only offsets (SendOffsetsAsync) and an add
+                // that was cancelled mid-call make the coordinator's hold certain enough to end it.
+                _coordinatorMayHold = mayHold;
+            }
             throw;
         }
         _added.Add(key);
@@ -210,7 +219,8 @@ public sealed class Transaction : IAsyncDisposable
             Epoch,
             new[] { new Messages.TxnResource(routed.Route.ResourceId, new[] { (uint)partition }) },
             _client.Config.Tenant);
-        // From here on the coordinator may hold the partition, whatever becomes of the call.
+        // From here on the coordinator may hold the partition, whatever becomes of the call (AddAsync takes this back
+        // when the call only gave up).
         _coordinatorMayHold = true;
         if (await _client.CallCoordinatorAsync(TxnId, req, ct).ConfigureAwait(false) is not Response.AddPartitionsToTxn r)
         {
@@ -242,9 +252,10 @@ public sealed class Transaction : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(consumer);
         CheckUsable();
-        // From here on the coordinator may hold the offsets, so the transaction must be ended there even if no
-        // partition was added: otherwise the offsets stay pending until the transaction times out, and every reader of
-        // the group's offsets waits for them. (The Rust and Java clients skip the end here.)
+        // From here on the coordinator may hold the offsets, also if the answer is lost, so the transaction must be
+        // ended there even if no partition was added: otherwise the offsets stay pending until the transaction times
+        // out, and every reader of the group's offsets waits for them. Set before the call, as in the Rust client and
+        // the Java SDK.
         _coordinatorMayHold = true;
         var req = new Request.AddOffsetsToTxn(
             TxnId,

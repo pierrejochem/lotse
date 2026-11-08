@@ -354,6 +354,38 @@ public sealed class TransactionTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAddThatGaveUpDoesNotEndTheTransactionWhileTheLastOneIsCompleting()
+    {
+        // The coordinator as the server has it (coord.rs): after EndTxn the decision is being completed (markers are
+        // written) and the epoch is already raised. Until then it refuses AddPartitionsToTxn with
+        // CONCURRENT_TRANSACTIONS, which is retriable, and an EndTxn of the next transaction with INVALID_TXN_STATE.
+        bool completing = false;
+        _endTxn = r =>
+        {
+            if (completing)
+            {
+                return new Response.EndTxn(ErrorCode.InvalidTxnState, 0, 0);
+            }
+            completing = true;
+            return new Response.EndTxn(ErrorCode.None, r.ProducerId, (ushort)(r.ProducerEpoch + 1));
+        };
+        _addError = _ => completing ? ErrorCode.ConcurrentTransactions : ErrorCode.None;
+        LotseClient lotse = Client();
+        await using (Transaction first = await lotse.BeginTransactionAsync())
+        {
+            await first.ProduceAsync("s", 0, OutMessage.FromValue("a"));
+            await first.CommitAsync();
+        }
+        await using Transaction second = await lotse.BeginTransactionAsync();
+        // Nothing was written to the partition: the add gave up, so the transaction stays open ...
+        await Assert.ThrowsAsync<GaveUpException>(() => second.ProduceAsync("s", 0, OutMessage.FromValue("b")));
+        Assert.Single(Produced(StreamId));
+        // ... and, as nothing is at the coordinator that this client knows of, commits without asking it.
+        await second.CommitAsync();
+        Assert.Single(_node.Requests<Request.EndTxn>());
+    }
+
+    [Fact]
     public async Task AFencedProducerCannotAddPartitions()
     {
         _addError = _ => ErrorCode.ProducerFenced;

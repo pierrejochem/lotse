@@ -427,6 +427,25 @@ describe("a consumer group member against a scripted broker", () => {
     assert.equal(node.count("CommitOffsets"), 0, "not committed on their own");
   });
 
+  test("a transaction that only sent offsets is ended at the coordinator", async () => {
+    // The coordinator holds the offsets as pending until it hears, so a commit without a partition added still sends
+    // EndTxn (the same for an abort after offsets that were refused).
+    const g = await join({ autoCommit: false });
+    await g.poll(WAIT);
+    const txn = await (client as LotseClient).beginTransaction();
+    await txn.sendOffsets(g);
+    await txn.commit();
+    assert.equal(node.count("AddPartitionsToTxn"), 0);
+    assert.equal(node.requests("EndTxn").length, 1);
+    assert.equal(node.requests("EndTxn")[0]?.commit, true);
+    commitError = ErrorCode.FENCED_MEMBER_EPOCH;
+    const refused = await (client as LotseClient).beginTransaction();
+    await assert.rejects(refused.sendOffsets(g), BrokerResponseError);
+    await refused.abort();
+    assert.equal(node.requests("EndTxn").length, 2);
+    assert.equal(node.requests("EndTxn")[1]?.commit, false);
+  });
+
   test("refused offsets leave the transaction only an abort", async () => {
     const g = await join({ autoCommit: false });
     await g.poll(WAIT);

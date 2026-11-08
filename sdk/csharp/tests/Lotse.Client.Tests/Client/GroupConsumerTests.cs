@@ -401,6 +401,28 @@ public sealed class GroupConsumerTests : IDisposable
     }
 
     [Fact]
+    public async Task ATransactionThatOnlySentOffsetsIsEnded()
+    {
+        // The coordinator holds the offsets as pending until it hears, so a commit without a partition added still
+        // sends EndTxn (the same for an abort after offsets whose answer was refused).
+        await using GroupConsumer g = await Client().JoinGroupAsync("g", new[] { "s" }, GroupConfig.CreateBuilder().WithAutoCommit(false).Build());
+        await g.PollAsync(Wait);
+        await using (Transaction txn = await _client!.BeginTransactionAsync())
+        {
+            await txn.SendOffsetsAsync(g);
+            await txn.CommitAsync();
+        }
+        Assert.Empty(_node.Requests<Request.AddPartitionsToTxn>());
+        Assert.True(Assert.Single(_node.Requests<Request.EndTxn>()).Commit);
+        _commitError = ErrorCode.FencedMemberEpoch;
+        await using Transaction refused = await _client!.BeginTransactionAsync();
+        await Assert.ThrowsAsync<BrokerErrorException>(() => refused.SendOffsetsAsync(g));
+        await refused.AbortAsync();
+        Assert.Equal(2, _node.Requests<Request.EndTxn>().Count);
+        Assert.False(_node.Requests<Request.EndTxn>()[1].Commit);
+    }
+
+    [Fact]
     public async Task RefusedOffsetsLeaveTheTransactionOnlyAnAbort()
     {
         await using GroupConsumer g = await Client().JoinGroupAsync("g", new[] { "s" }, GroupConfig.CreateBuilder().WithAutoCommit(false).Build());

@@ -82,6 +82,13 @@ export class Transaction {
   /** Why only an abort is left, or `null`. */
   private poisoned: string | null = null;
   private ended = false;
+  /**
+   * Offsets were sent (the call may have reached the coordinator although its answer was lost): the coordinator holds
+   * them as pending until the transaction ends, so it must be ended there even when no partition was added. Not set by
+   * an add that only gave up: nothing was written, and an `EndTxn` can be refused with `INVALID_TXN_STATE` while the
+   * previous transaction is still completing.
+   */
+  private coordinatorMayHold = false;
   private releaseTurn: (() => void) | null;
   private readonly signal: AbortSignal | undefined;
   private readonly onSignal: (() => void) | null;
@@ -343,6 +350,8 @@ export class Transaction {
         resources: offsetResources(this.host, consumer.positionEntries()),
         tenant: this.host.tenant,
       };
+      // From here on the coordinator may hold the offsets, also if the answer is lost.
+      this.coordinatorMayHold = true;
       try {
         await this.host.retrying(() => commitOnce(this.host, this.txnId, req), signal, true);
       } catch (e) {
@@ -380,7 +389,7 @@ export class Transaction {
   private async end(commit: boolean, signal: AbortSignal | undefined): Promise<void> {
     this.ended = true;
     this.detach();
-    if (this.added.size === 0) {
+    if (this.added.size === 0 && !this.coordinatorMayHold) {
       this.finish({ producerId: this.producerId, epoch: this.epoch });
       return;
     }

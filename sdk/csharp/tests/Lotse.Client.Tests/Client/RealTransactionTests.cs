@@ -326,6 +326,43 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         Assert.Equal(3, await CountAsync(again));
     }
 
+    [LotseFact]
+    public async Task OffsetsSentWithoutAnyWriteAreCommittedWithTheTransaction()
+    {
+        LotseClient admin = NewClient();
+        await RealWaits.CreateStreamEverywhereAsync(_cluster, admin, "offsets-only-in", 1);
+        for (int i = 0; i < 2; i++)
+        {
+            await admin.ProduceAsync("offsets-only-in", 0, OutMessage.FromValue("m" + i));
+        }
+        LotseClient worker = NewClient("offsets-only-worker");
+        GroupConfig config = GroupConfig.CreateBuilder().WithAutoCommit(false).Build();
+        await using (GroupConsumer g = await worker.JoinGroupAsync("offsets-only-group", new[] { "offsets-only-in" }, config))
+        {
+            int seen = 0;
+            DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+            while (seen < 2)
+            {
+                Assert.True(DateTime.UtcNow < deadline, "no records");
+                seen += (await g.PollAsync(TimeSpan.FromMilliseconds(300))).Count;
+            }
+            // No produce, no partition added: only the offsets. The commit must still reach the coordinator, or the
+            // offsets stay pending and the next member waits until the transaction times out.
+            await using Transaction txn = await worker.BeginTransactionAsync();
+            await txn.SendOffsetsAsync(g);
+            await txn.CommitAsync();
+        }
+        await admin.ProduceAsync("offsets-only-in", 0, OutMessage.FromValue("m2"));
+        await using GroupConsumer next = await admin.JoinGroupAsync("offsets-only-group", new[] { "offsets-only-in" }, config);
+        var values = new List<string>();
+        DateTime end = DateTime.UtcNow.AddSeconds(30);
+        while (values.Count == 0 && DateTime.UtcNow < end)
+        {
+            values.AddRange((await next.PollAsync(TimeSpan.FromMilliseconds(300))).Select(r => r.Record.Value!.ToUtf8()));
+        }
+        Assert.Equal(new[] { "m2" }, values);
+    }
+
     private static async Task<int> CountAsync(GroupConsumer g)
     {
         int seen = 0;

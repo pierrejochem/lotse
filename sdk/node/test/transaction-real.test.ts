@@ -281,6 +281,26 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     return d as Delivery;
   }
 
+  test("offsets sent without any write are committed with the transaction", async () => {
+    await client.createStream("offsets-only-in", 1, 3);
+    await client.produce("offsets-only-in", 0, { value: "m0" });
+    await client.produce("offsets-only-in", 0, { value: "m1" });
+    const lotse = newClient({ transactionalId: "offsets-only-worker" });
+    const g = await lotse.joinGroup("offsets-only-group", ["offsets-only-in"], { autoCommit: false });
+    assert.equal((await drain(g, 2)).length, 2);
+    // No produce, no partition added: only the offsets. The commit must still reach the coordinator, or the offsets
+    // stay pending and the next member waits until the transaction times out.
+    const txn = await lotse.beginTransaction();
+    await txn.sendOffsets(g);
+    await txn.commit();
+    await g.close();
+    await client.produce("offsets-only-in", 0, { value: "m2" });
+    const next = await newClient().joinGroup("offsets-only-group", ["offsets-only-in"], { autoCommit: false });
+    const got = await drain(next, 1, 30_000);
+    assert.deepEqual(got.map((r) => text(r.record)), ["m2"]);
+    await next.close();
+  });
+
   test("consume-transform-produce from a queue is exactly once; an aborted ack gives the message back", async () => {
     await client.createQueue("eq-in");
     await client.createStream("eq-out", 1, 3);

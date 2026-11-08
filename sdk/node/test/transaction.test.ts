@@ -279,6 +279,44 @@ describe("transactions against a scripted broker", () => {
     assert.equal(ends()[0]?.commit, true);
   });
 
+  test("an add that gave up does not end the transaction while the last one is completing", async () => {
+    // The coordinator as the server has it (coord.rs): after EndTxn the decision is being completed and the epoch is
+    // already raised. Until then it refuses AddPartitionsToTxn with CONCURRENT_TRANSACTIONS (retriable) and an EndTxn
+    // of the next transaction with INVALID_TXN_STATE.
+    let completing = false;
+    endTxn = (r) => {
+      if (completing) {
+        return { type: "EndTxn", error: ErrorCode.INVALID_TXN_STATE, producerId: 0n, producerEpoch: 0 };
+      }
+      completing = true;
+      return { type: "EndTxn", error: ErrorCode.NONE, producerId: r.producerId, producerEpoch: r.producerEpoch + 1 };
+    };
+    node.on((n, request, peer) => {
+      if (request.type === "AddPartitionsToTxn" && completing) {
+        return {
+          type: "AddPartitionsToTxn",
+          resources: request.resources.map((r) => ({
+            resourceId: r.resourceId,
+            partitions: r.partitions.map((p) => ({ partition: p, error: ErrorCode.CONCURRENT_TRANSACTIONS })),
+          })),
+        };
+      }
+      const answer = answerOf(n, request, peer);
+      return answer === SILENT ? null : answer;
+    });
+    const lotse = open();
+    const first = await lotse.beginTransaction();
+    await first.produce("s", 0, { value: "a" });
+    await first.commit();
+    const second = await lotse.beginTransaction();
+    // Nothing was written to the partition: the add gave up, so the transaction stays open ...
+    await assert.rejects(second.produce("s", 0, { value: "b" }), GaveUpError);
+    assert.equal(produced(STREAM_ID).length, 1);
+    // ... and commits without asking the coordinator.
+    await second.commit();
+    assert.equal(ends().length, 1);
+  });
+
   test("a lost end is asked again and counts as decided", async () => {
     let n = 0;
     endTxn = (r) =>
