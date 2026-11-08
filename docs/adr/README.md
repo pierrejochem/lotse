@@ -87,5 +87,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 | 0081 | [User guides with mdBook on GitHub Pages](0081-user-guides-with-mdbook-on-github-pages.md) | Accepted |
 | 0082 | [Simulations run on pull requests; merging needs a green CI](0082-simulations-run-on-pull-requests-and-merging-needs-green.md) | Accepted; amends 0027 and 0030 |
+| 0087 | [Group subscriptions are kept as named](0087-group-subscriptions-are-kept-as-named.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
