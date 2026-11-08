@@ -957,6 +957,54 @@ public sealed class LotseClient : IDisposable, IAsyncDisposable
             name, new Request.CreateStream(name, _cfg.Tenant, (uint)partitions, (byte)replication, list), cancellationToken);
     }
 
+    /// <summary>
+    /// Creates a queue in the configured tenant and returns its id. A create whose outcome is unknown is retried and
+    /// may then fail with <see cref="ResourceExistsException"/>, as for <see cref="CreateStreamAsync"/>.
+    /// </summary>
+    /// <param name="name">The name.</param>
+    /// <param name="options">Replication, limits and the dead-letter queue; <c>null</c> for <see cref="QueueOptions.Defaults"/>.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task<ulong> CreateQueueAsync(string name, QueueOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(name);
+        QueueOptions o = options ?? QueueOptions.Defaults;
+        return CreateAsync(
+            name,
+            new Request.CreateQueue(
+                name, _cfg.Tenant, (byte)o.PriorityLevels, o.SingleActiveConsumer, o.DeadLetterQueue, (byte)o.Replication, o.Configs()),
+            cancellationToken);
+    }
+
+    // ---- queues ----
+
+    /// <summary>
+    /// Subscribes to a queue. The consumer is connected to the queue's leader when this returns. Messages are produced to
+    /// a queue with <see cref="ProduceAsync(string, int, OutMessage, CancellationToken)"/> to partition 0.
+    /// </summary>
+    /// <param name="queue">The queue.</param>
+    /// <param name="options">The credit; <c>null</c> for <see cref="SubscribeOptions.Default"/>.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    /// <exception cref="UnknownStreamException">The queue does not exist.</exception>
+    /// <exception cref="GaveUpException">No leader can be reached within <see cref="ClientConfig.RetryFor"/>.</exception>
+    public async Task<QueueConsumer> SubscribeAsync(
+        string queue, SubscribeOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(queue);
+        var consumer = new QueueConsumer(this, queue, (options ?? SubscribeOptions.Default).Credit);
+        try
+        {
+            await consumer.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            consumer.Dispose();
+            throw;
+        }
+        return consumer;
+    }
+
     /// <summary>Sends a create request to the metadata leader and returns the id of what was created.</summary>
     internal Task<ulong> CreateAsync(string name, Request req, CancellationToken ct) =>
         RetryingAsync(
@@ -1137,6 +1185,12 @@ public sealed class LotseClient : IDisposable, IAsyncDisposable
             Interlocked.Exchange(ref _fatal, new ClientAuthenticationException(f.Message));
         }
     }
+
+    /// <summary>Closes a connection that must not be trusted any more, and forgets it.</summary>
+    internal void DiscardConnection(Connection c) => _pool.Discard(c);
+
+    /// <summary>How long a request waits for its response; the consumer bounds its fire-and-forget writes with it.</summary>
+    internal TimeSpan RequestTimeout => _cfg.RequestTimeout;
 
     private void CheckOpen()
     {

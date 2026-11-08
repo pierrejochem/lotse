@@ -19,6 +19,56 @@ internal sealed class FakeNode : IDisposable
     /// <summary>What a test does with a request. Return <c>null</c> to stay silent; throw <see cref="Drop"/> to close the connection.</summary>
     internal delegate Task<Response?> Handler(FakeNode node, Request request);
 
+    /// <summary>Like <see cref="Handler"/>, and told which connection the request came on.</summary>
+    internal delegate Task<Response?> ConnHandler(FakeNode node, Conn conn, Request request);
+
+    /// <summary>One accepted connection: what came on it, and a way to push to it or drop it.</summary>
+    internal sealed class Conn
+    {
+        private readonly Socket _socket;
+        private readonly NetworkStream _stream;
+        private readonly object _write = new();
+        private readonly ConcurrentQueue<Request> _received = new();
+
+        internal Conn(Socket socket, NetworkStream stream)
+        {
+            _socket = socket;
+            _stream = stream;
+        }
+
+        internal void Received(Request r) => _received.Enqueue(r);
+
+        internal List<Request> Requests() => _received.ToList();
+
+        internal List<T> Requests<T>()
+            where T : Request => _received.OfType<T>().ToList();
+
+        /// <summary>Sends a push to the client.</summary>
+        internal void Push(Frames.DeliverPush push) => Write(Frames.WithLengthPrefix(Frames.EncodePush(push)));
+
+        internal void Write(byte[] wire)
+        {
+            lock (_write)
+            {
+                _stream.Write(wire);
+                _stream.Flush();
+            }
+        }
+
+        /// <summary>Closes the connection, as a broker that died.</summary>
+        internal void Drop()
+        {
+            try
+            {
+                _socket.Close();
+            }
+            catch (Exception)
+            {
+                // closing
+            }
+        }
+    }
+
     /// <summary>Close the connection without answering.</summary>
     internal sealed class Drop : Exception
     {
@@ -31,12 +81,13 @@ internal sealed class FakeNode : IDisposable
     private readonly TcpListener _server;
     private readonly ConcurrentQueue<Request> _received = new();
     private readonly ConcurrentBag<Socket> _sockets = new();
-    private volatile Handler _handler;
+    private readonly ConcurrentQueue<Conn> _conns = new();
+    private volatile ConnHandler _handler;
 
     internal FakeNode(uint id)
     {
         Id = id;
-        _handler = (node, request) => throw new InvalidOperationException($"node {node.Id} was not expected to get {request}");
+        _handler = (node, _, request) => throw new InvalidOperationException($"node {node.Id} was not expected to get {request}");
         _server = new TcpListener(IPAddress.Loopback, 0);
         _server.Start();
         // Read once: a stopped listener no longer knows its port.
@@ -52,15 +103,25 @@ internal sealed class FakeNode : IDisposable
 
     internal FakeNode On(Func<FakeNode, Request, Response?> handler)
     {
-        _handler = (n, r) => Task.FromResult(handler(n, r));
+        _handler = (n, _, r) => Task.FromResult(handler(n, r));
         return this;
     }
 
     internal FakeNode OnAsync(Handler handler)
     {
-        _handler = handler;
+        _handler = (n, _, r) => handler(n, r);
         return this;
     }
+
+    /// <summary>Handles requests knowing the connection they came on (for pushes and per-connection checks).</summary>
+    internal FakeNode OnConn(Func<FakeNode, Conn, Request, Response?> handler)
+    {
+        _handler = (n, c, r) => Task.FromResult(handler(n, c, r));
+        return this;
+    }
+
+    /// <summary>The connections accepted so far, in order.</summary>
+    internal List<Conn> Conns() => _conns.ToList();
 
     /// <summary>Every request this node received, in arrival order.</summary>
     internal List<Request> Requests() => _received.ToList();
@@ -96,6 +157,8 @@ internal sealed class FakeNode : IDisposable
         try
         {
             await using var stream = new NetworkStream(socket, ownsSocket: false);
+            var conn = new Conn(socket, stream);
+            _conns.Enqueue(conn);
             byte[] prefix = new byte[4];
             while (true)
             {
@@ -104,7 +167,8 @@ internal sealed class FakeNode : IDisposable
                 await stream.ReadExactlyAsync(frame);
                 Frames.DecodedRequest decoded = Frames.DecodeRequest(frame);
                 _received.Enqueue(decoded.Request);
-                _ = Task.Run(() => Answer(socket, stream, write, decoded));
+                conn.Received(decoded.Request);
+                _ = Task.Run(() => Answer(conn, socket, stream, write, decoded));
             }
         }
         catch (Exception)
@@ -113,21 +177,17 @@ internal sealed class FakeNode : IDisposable
         }
     }
 
-    private async Task Answer(Socket socket, NetworkStream stream, object write, Frames.DecodedRequest decoded)
+    private async Task Answer(Conn conn, Socket socket, NetworkStream stream, object write, Frames.DecodedRequest decoded)
     {
         try
         {
-            Response? response = await _handler(this, decoded.Request);
+            Response? response = await _handler(this, conn, decoded.Request);
             if (response is null)
             {
                 return;
             }
             byte[] wire = Frames.WithLengthPrefix(Frames.EncodeResponse(decoded.Header.CorrelationId, response));
-            lock (write)
-            {
-                stream.Write(wire);
-                stream.Flush();
-            }
+            conn.Write(wire);
         }
         catch (Exception)
         {

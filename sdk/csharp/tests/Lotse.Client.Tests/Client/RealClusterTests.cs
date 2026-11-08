@@ -16,6 +16,7 @@ namespace Lotse.Client.Tests.Client;
 /// produces, fetches, and keeps going when the leader of a partition is killed. Skipped, with a message, when
 /// <c>LOTSE_BIN</c> is not set.
 /// </summary>
+[Collection("real cluster")]
 public sealed class RealClusterTests : IClassFixture<RealCluster>, IAsyncLifetime
 {
     private readonly RealCluster _cluster;
