@@ -34,6 +34,8 @@ import { Fetched } from "./fetched.js";
 import { buildBatch, type OutMessage, type ProduceResult } from "./messages.js";
 import { Mutex } from "./mutex.js";
 import { OffsetAt } from "./offset-at.js";
+import { type QueueHost, QueueConsumer } from "./queue-consumer.js";
+import { queueConfigs, type QueueOptions, resolveCredit, type SubscribeOptions } from "./queue-options.js";
 
 /** One partition's place in the cluster, as metadata last said. */
 interface Route {
@@ -972,6 +974,60 @@ export class LotseClient {
       // The request may have arrived: a retry finds what it did.
       throw Attempt.retryMaybeDone(e.describe());
     }
+  }
+
+  /**
+   * Creates a queue in the configured tenant and returns its id. A create whose outcome is unknown is retried and may then
+   * fail with `ResourceExistsError`, as for `createStream`. A queue is a resource with one partition, 0: produce to it
+   * with `produce(name, 0, ...)`.
+   *
+   * @throws RangeError for a setting out of range
+   */
+  async createQueue(name: string, options: QueueOptions & CallOptions = {}): Promise<bigint> {
+    this.checkOpen();
+    const { replication, configs } = queueConfigs(options);
+    return this.create(
+      name,
+      {
+        type: "CreateQueue",
+        name,
+        tenant: this.cfg.tenant,
+        priorityLevels: 1,
+        singleActive: false,
+        dlq: options.deadLetterQueue ?? null,
+        replication,
+        configs,
+      },
+      options.signal,
+    );
+  }
+
+  // ---- queues ----
+
+  /**
+   * Subscribes to a queue. The consumer is connected to the queue's leader when this resolves; messages are produced to a
+   * queue with `produce` to partition 0.
+   *
+   * @throws UnknownStreamError if the queue does not exist
+   * @throws GaveUpError if no leader can be reached within `retryForMs`
+   */
+  async subscribe(queue: string, options: SubscribeOptions & CallOptions = {}): Promise<QueueConsumer> {
+    this.checkOpen();
+    const consumer = new QueueConsumer(this.queueHost(), queue, resolveCredit(options));
+    await consumer.start(options.signal);
+    return consumer;
+  }
+
+  private queueHost(): QueueHost {
+    return {
+      retrying: (attempt, signal) => this.retrying(attempt, signal),
+      route: (queue, partition, signal) => this.route(queue, partition, signal),
+      connect: (address) => this.connect(address),
+      call: (address, request) => this.call(address, request),
+      callOn: (connection, request) => this.callOn(connection, request),
+      forget: (queue, partition) => this.forget(queue, partition),
+      redirect: (queue, partition, hint) => this.redirect(queue, partition, hint),
+    };
   }
 
   // ---- one request to one broker ----

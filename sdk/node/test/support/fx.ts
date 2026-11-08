@@ -149,3 +149,8 @@ export function bytesOf(r: Request): Uint8Array {
   }
   return p.batch;
 }
+
+/** A queue: a resource of kind queue with one partition, 0. */
+export function queue(name: string, id: bigint | number, ...partitions: PartitionMetadata[]): ResourceMetadata {
+  return { ...stream(name, id, ...partitions), kind: ResourceKind.QUEUE };
+}

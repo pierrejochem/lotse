@@ -94,3 +94,10 @@ export class ClientClosedError extends ClientError {
     super("the client is closed");
   }
 }
+
+/** The queue consumer was closed. */
+export class ConsumerClosedError extends ClientError {
+  constructor() {
+    super("the consumer is closed");
+  }
+}

@@ -5,6 +5,7 @@ export {
   ClientAuthenticationError,
   ClientClosedError,
   ClientError,
+  ConsumerClosedError,
   GaveUpError,
   OffsetOutOfRangeError,
   ResourceExistsError,
@@ -14,3 +15,7 @@ export {
 export { Fetched } from "./fetched.js";
 export { type Bytes, buildBatch, type OutHeader, type OutMessage, type ProduceResult } from "./messages.js";
 export { OffsetAt } from "./offset-at.js";
+export { type DeadLetter, Delivery } from "./delivery.js";
+export { offsetRanges } from "./offset-ranges.js";
+export { type ConsumerCallOptions, QueueConsumer } from "./queue-consumer.js";
+export { DEFAULT_CREDIT, type QueueOptions, type SubscribeOptions } from "./queue-options.js";

@@ -4,7 +4,7 @@ A client for the Lotse native protocol in TypeScript, for Node.js 20 and later. 
 
 ## Status
 
-Phase 3 of 8 is done: the stream client. It creates streams, produces idempotently, reads committed records, and finds offsets. There is no queue client, transaction, consumer group or further admin call yet.
+Phase 4 of 8 is done: the stream client and the queue consumer. The client creates streams and queues, produces idempotently, reads committed records, finds offsets, and consumes queues with credit, acks, nacks, delayed requeues, standbys of a single active consumer and dead-letter headers. There is no transaction, consumer group, publish through an exchange or further admin call yet.
 
 | Module | What |
 | --- | --- |
@@ -12,7 +12,7 @@ Phase 3 of 8 is done: the stream client. It creates streams, produces idempotent
 | `src/record` | Record batch: parse, build, in-place edits (`stamp`, `setProducer`, `setTransactional`, `setBaseTimestamp`), control batches, CRC32C, varints |
 | `src/net` | `Connection` (TLS 1.3 or plain TCP on loopback, pipelining, pushes, session state), `ConnectionPool`, `TlsConfig`, `Address`, errors |
 | `src/auth` | `ScramClient` (SCRAM-SHA-512), `ScramCredential` (the `AlterUser` credential), OAUTHBEARER messages, `authenticate` |
-| `src/client` | `LotseClient`: metadata routing with leader hints, idempotent `produce`, read_committed `fetch`, `listOffset`, `createStream`, `readRecords`; `Fetched`, `OffsetAt`, `OutMessage`, the errors |
+| `src/client` | `LotseClient`: metadata routing with leader hints, idempotent `produce`, read_committed `fetch`, `listOffset`, `createStream`, `createQueue`, `readRecords`, `subscribe`; `QueueConsumer`, `Delivery`, `QueueOptions`, `SubscribeOptions`, `Fetched`, `OffsetAt`, `OutMessage`, the errors |
 
 ## Connections
 
@@ -72,6 +72,36 @@ The client follows `lotse-client` and the Java client rule for rule; [`../PROTOC
 - **Messages.** `OutMessage` takes `string` (UTF-8) or `Uint8Array` for keys, values and header values; `null` and empty differ. The timestamp defaults to the time of the call: a message stamped 0 is old at once to the stream's retention.
 - **Errors** extend `ClientError`: `BrokerResponseError` (with `code`), `OffsetOutOfRangeError`, `UnknownOutcomeError`, `GaveUpError`, `UnknownStreamError`, `ResourceExistsError`, `ClientAuthenticationError`, `ClientClosedError`. Only `UnknownOutcomeError` needs a decision: the write may or may not have happened.
 
+## Queues
+
+```ts
+const id = await client.createQueue("jobs", { ackTimeoutMs: 30_000, maxDeliveries: 5, deadLetterQueue: "jobs-dead" });
+await client.produce("jobs", 0, { value: "work" }); // a queue is a resource with one partition, 0
+
+const consumer = await client.subscribe("jobs", { credit: 16 });
+for await (const d of consumer) {
+  try {
+    await handle(d.text());
+    await consumer.ack(d);
+  } catch {
+    await consumer.nackAfter(d, 5_000); // back in the queue after 5 s
+  }
+}
+consumer.close();
+```
+
+The consumer follows `lotse-client` and the Java `QueueConsumer` rule for rule; [`../PROTOCOL.md`](../PROTOCOL.md) lists them under "Client behaviour: queues".
+
+- **Credit.** `credit` (default 64, at least 1) is how many messages the leader may push before they are counted as used. At most that many wait unprocessed in the client. After a message is handed out and half the credit (rounded up) is used, the consumer sends the used messages and bytes back as new credit.
+- **Reading.** `next()` waits for a message, `poll(waitMs)` resolves `null` when none came, and `for await (const d of consumer)` yields until the consumer is closed. Leaving the loop does not close the consumer. A signal in the options ends `poll` with `null`, ends the iterator, and makes `next` reject with `GaveUpError`. Reads called together take turns.
+- **A `Delivery`** has `offset`, `deliveryCount` (this delivery included; more than 1 means an earlier one was not acknowledged; a lower bound, since a failover can start it over), `timestamp`, `key`, `value`, `headers`, `text()` and `deadLetter()`, which reads the `x-lotse-dead-letter-*` headers of a message the broker moved from another queue (`reason`, `queue`, `queueId`, `offset`, `deliveries`, `floor`).
+- **Settling.** `ack(delivery | deliveries)` names offsets as `[from, to)` ranges, sorted as `u64`, and is retried: settling twice is harmless, and a message that went to someone else meanwhile is still settled. `nack(d, false)` discards (or dead-letters) like an ack. `nack(d, true)` and `nackAfter(d, delayMs)` (ADR 0077) give the message back on the subscription's own connection and are not retried; if the subscription has ended, the message went back with it and the call does nothing.
+- **Ending and subscribing again.** A push with an error, a broken connection, a leader change or an ack timeout ends the subscription. The consumer hands out what it holds and subscribes again on its next read, following a leader hint. Messages it held may meanwhile have gone to others, so they can arrive twice, with a higher `deliveryCount`.
+- **Single active consumer** (ADR 0076). The consumer asks to be told when its turn comes. `consumer.isStandby` is true while it waits; the broker pushes nothing until then, and the flag clears on the next read that sees the activation or a message.
+- **Closing.** `close()` sends `Unsubscribe` and returns the messages received but not handed out, buffered or still unread, with one requeueing `Nack`; it does not wait for answers. Messages already handed out stay with the consumer until acknowledged or until the connection closes. A read that waits rejects with `ConsumerClosedError`.
+- **`createQueue(name, options)`** takes `replication` (default 3), `ackTimeoutMs`, `maxDeliveries`, `messageTtlMs`, `deadLetterQueue`, `singleActiveConsumer`, `priorityLevels` (2 to 10, ADR 0078; a message's level is its `x-lotse-priority` header) and `settings`, a map for any other key. The named options become the settings `ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, `single.active.consumer` and `priority.levels`. A key given twice, or a value out of range, is a `RangeError` before anything is sent. A producer delays one message with the header `x-lotse-delay-ms` (ADR 0077).
+- Exclusive subscriptions are not offered: the broker refuses them.
+
 ## Authentication
 
 `scramCredentials(user, password)` and `oauthBearerCredentials(() => token)` (the function is called for every authentication, renewals included, and may be async). A client certificate is part of `TlsConfig`.
@@ -106,6 +136,6 @@ npm test        # compiles to dist/, then runs node:test on dist/test
 
 or `make sdk-node-test` from the repository root. The tests decode every vector in `sdk/conformance` and write it again to identical bytes, refuse each vector cut at every length and with one byte added, and check the fixed cases for CRC32C, varints, error codes and in-place batch edits. Set `LOTSE_CONFORMANCE` to read the vectors from another directory.
 
-The client tests run against scripted brokers in the test process (routing, hints, idempotent retries, read_committed, signals, `createStream`) and, with `LOTSE_BIN`, against three real nodes on loopback (create, produce, read back, `ListOffsets`, compressed batches, a leader killed in the middle of a produce, a failover, a named producer fenced) and one TLS node. The lz4 codec has its own tests (`lz4.test.ts`); the zstd tests are skipped, with the reason, on a Node.js without zstd in `node:zlib`.
+The client tests run against scripted brokers in the test process (routing, hints, idempotent retries, read_committed, signals, `createStream`, and the queue consumer: credit, settling, standbys, ending and subscribing again, closing, `createQueue`) and, with `LOTSE_BIN`, against three real nodes on loopback (create, produce, read back, `ListOffsets`, compressed batches, a leader killed in the middle of a produce, a failover, a named producer fenced; queues: consuming, ack, requeue, `nackAfter`, ack timeout, a vanished consumer, dead letters, a single active consumer taking over, priorities, a leader killed mid-consumption) and one TLS node. The lz4 codec has its own tests (`lz4.test.ts`); the zstd tests are skipped, with the reason, on a Node.js without zstd in `node:zlib`.
 
-The connection tests run against a fake broker in the test process (plain TCP and TLS), with a fake clock for sessions; SCRAM is checked against `conformance/scram.txt` and a server written for the tests from the RFC. The tests that need real certificates or a real node (`tls`, `real-node`, `client-real`) use the `lotse` executable: set `LOTSE_BIN`, or build `lotse-node` so that `/tmp/cargo-target/debug/lotse` (or `$CARGO_TARGET_DIR/debug/lotse`) exists. Without one they are skipped and say so. They start one TLS node with sessions limited to 4 s and one plain-TCP node with authentication off, and the stream client tests three more, so the suite takes about 25 s with `LOTSE_BIN` set. The certificate expiry test needs `openssl` 3.4 or later and is skipped without it.
+The connection tests run against a fake broker in the test process (plain TCP and TLS), with a fake clock for sessions; SCRAM is checked against `conformance/scram.txt` and a server written for the tests from the RFC. The tests that need real certificates or a real node (`tls`, `real-node`, `client-real`) use the `lotse` executable: set `LOTSE_BIN`, or build `lotse-node` so that `/tmp/cargo-target/debug/lotse` (or `$CARGO_TARGET_DIR/debug/lotse`) exists. Without one they are skipped and say so. They start one TLS node with sessions limited to 4 s and one plain-TCP node with authentication off, and the stream client tests three more, so the suite takes about 45 s with `LOTSE_BIN` set. The certificate expiry test needs `openssl` 3.4 or later and is skipped without it.
