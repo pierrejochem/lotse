@@ -49,7 +49,7 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 # Configuration files of the console and the node binary.
 toml = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-jsonwebtoken = { version = "9", default-features = false }
+jsonwebtoken = { version = "10", default-features = false }
 # Roots for fetching an identity provider's keys over HTTPS.
 webpki-roots = "1"
 # Signing test tokens (lotse-auth's testing feature) and sealing console sessions; already in the tree through rustls.
