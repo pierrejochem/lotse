@@ -40,6 +40,7 @@ jobs:
         with:
           tool: mdbook
       - run: mdbook build docs/guide
+      - run: python3 docs/guide/sitemap.py
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/guide/book
