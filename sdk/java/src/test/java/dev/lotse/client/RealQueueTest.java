@@ -196,6 +196,29 @@ class RealQueueTest {
     }
 
     @Test
+    void closingGivesBackWhatWasPushedButNotHandedOut() throws Exception {
+        client.createQueue("give-back");
+        produce("give-back", 3);
+        settled("give-back");
+        long kept;
+        QueueConsumer first = client.subscribe("give-back", SubscribeOptions.withCredit(10));
+        kept = take(first).offset(); // the other two are pushed, some of them perhaps still unread
+        Thread.sleep(300);
+        first.close();
+        Set<Long> offsets = new HashSet<>();
+        try (QueueConsumer next = client.subscribe("give-back", SubscribeOptions.withCredit(10))) {
+            for (int i = 0; i < 2; i++) {
+                Delivery d = next.poll(Duration.ofSeconds(10));
+                assertNotNull(d, "given back at once, not after the ack timeout");
+                offsets.add(d.offset());
+                next.ack(d);
+            }
+        }
+        assertEquals(2, offsets.size());
+        assertTrue(!offsets.contains(kept), "the one handed out stays with the first consumer");
+    }
+
+    @Test
     void killingTheLeaderMidConsumptionLosesNothing() throws Exception {
         client.createQueue("failover");
         int total = 60;

@@ -505,6 +505,10 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
         }
         let c = self.client;
         let positions = consumer.positions();
+        // From here on the coordinator may hold the offsets, also if the
+        // answer is lost: the transaction has to be ended there even when
+        // no partition was added.
+        self.coordinator_may_hold = true;
         let req = Request::AddOffsetsToTxn(AddOffsetsToTxnRequest {
             txn_id: self.txn_id.clone(),
             tenant: c.cfg.tenant.clone(),

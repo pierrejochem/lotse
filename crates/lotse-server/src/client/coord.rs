@@ -462,6 +462,7 @@ impl Clients {
         });
         let mut jobs = Vec::new();
         let mut timed_out = Vec::new();
+        let mut completions = Vec::new();
         let state: Vec<(String, TxnMeta)> =
             replica.coordinator().iter().map(|(id, m)| (id.clone(), m.clone())).collect();
         self.ongoing_since.retain(|id, _| state.iter().any(|(i, m)| i == id && m.phase == Phase::Ongoing));
@@ -481,6 +482,15 @@ impl Clients {
                     if self.jobs.contains_key(&txn_id) || self.busy.contains(&Busy::Txn(txn_id.clone())) {
                         continue;
                     }
+                    // No partition to write a marker to (a transaction that
+                    // only sent group offsets): complete it here. A job with
+                    // nothing to do reports at once and is started again at
+                    // every round until the completion is applied, which
+                    // keeps a node busy without letting time pass.
+                    if m.partitions.is_empty() {
+                        completions.push((txn_id, m));
+                        continue;
+                    }
                     let cancel = Signal::default();
                     self.jobs.insert(txn_id.clone(), (term, cancel.clone()));
                     jobs.push(MarkerJob {
@@ -494,6 +504,9 @@ impl Clients {
                     });
                 }
             }
+        }
+        for (txn_id, m) in completions {
+            self.complete(replica, view.now, &txn_id, m);
         }
         for (txn_id, m) in timed_out {
             // Abort with a higher epoch: the producer is fenced everywhere the
@@ -557,13 +570,25 @@ impl Clients {
             return;
         }
         let Some(m) = replica.coordinator().get(txn_id).cloned() else { return };
+        self.complete(replica, view.now, txn_id, m);
+    }
+
+    /// Writes the completion of a decided transaction whose markers are all
+    /// written (or that has none to write).
+    fn complete<R: Runtime, S: StateMachine>(
+        &mut self,
+        replica: &mut Replica<R, S>,
+        now: Instant,
+        txn_id: &str,
+        m: TxnMeta,
+    ) {
         let phase = match m.phase {
             Phase::PrepareCommit => Phase::CompleteCommit,
             Phase::PrepareAbort => Phase::CompleteAbort,
             _ => return,
         };
         let meta = TxnMeta { phase, partitions: BTreeSet::new(), offsets: Default::default(), ..m };
-        self.write(replica, view.now, txn_id, &meta, None, Then::Nothing);
+        self.write(replica, now, txn_id, &meta, None, Then::Nothing);
     }
 }
 

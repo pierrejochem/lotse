@@ -439,3 +439,53 @@ fn a_new_group_starts_where_it_is_told() {
 fn value_of(r: lotse_client::GroupRecord) -> String {
     String::from_utf8(r.record.value.expect("a value").to_vec()).unwrap()
 }
+
+/// A transaction that only sent group offsets still has to be ended: the
+/// coordinator holds them as pending until then, and the next member of the
+/// group waits for the end (or the transaction's timeout, far away here)
+/// before it learns where to start.
+#[test]
+fn a_transaction_that_only_sent_offsets_commits_them() {
+    check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let _w = World::new(rt.clone()).await;
+            let producer = Client::new(rt.clone(), client_config());
+            let processor = Client::new(
+                rt.clone(),
+                ClientConfig {
+                    transactional_id: Some("tx-offsets".into()),
+                    txn_timeout: Duration::from_secs(60),
+                    ..client_config()
+                },
+            );
+            for value in ["a", "b"] {
+                producer.produce("in", 0, message(value)).await.expect("produced");
+            }
+            let cfg = GroupConfig { auto_commit: false, ..GroupConfig::default() };
+            let mut first = processor.join_group("offsets-only", &["in"], cfg.clone()).await.expect("joined");
+            let mut seen = Vec::new();
+            for _ in 0..100 {
+                seen.extend(first.poll(TICK * 20).await.expect("polled").into_iter().map(value_of));
+                if seen.len() >= 2 {
+                    break;
+                }
+            }
+            assert_eq!(seen, ["a", "b"]);
+            // No produce, no partition added: only the offsets.
+            let mut txn = processor.begin_transaction().await.expect("began");
+            txn.send_offsets(&first).await.expect("offsets sent");
+            txn.commit().await.expect("committed");
+            first.close().await;
+            producer.produce("in", 0, message("c")).await.expect("produced");
+            let mut second = producer.join_group("offsets-only", &["in"], cfg).await.expect("joined");
+            let mut next = Vec::new();
+            for _ in 0..250 {
+                next.extend(second.poll(TICK * 20).await.expect("polled").into_iter().map(value_of));
+                if !next.is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(next, ["c"], "the committed offsets are the group's: only what came after");
+        })
+    });
+}

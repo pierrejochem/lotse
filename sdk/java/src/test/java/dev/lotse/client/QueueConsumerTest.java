@@ -834,6 +834,36 @@ class QueueConsumerTest {
     }
 
     @Test
+    void closeGivesBackWhatWasPushedButNotRead() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        AtomicLong sub = new AtomicLong();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                where.set(conn);
+                sub.set(nextSub.incrementAndGet());
+                return new Response.Subscribe(ErrorCode.NONE, sub.get(), null);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        QueueConsumer c = client.subscribe("jobs", SubscribeOptions.withCredit(10));
+        where.get().push(pushAll(sub.get(), 10, 2));
+        assertEquals(10, take(c).offset()); // 11 is buffered; the push below is not read at all
+        where.get().push(pushAll(sub.get(), 20, 2));
+        Thread.sleep(150);
+        c.close();
+        await(() -> a.count(Request.Unsubscribe.class) == 1);
+        Thread.sleep(150);
+        List<Request.Nack> nacks = where.get().requests(Request.Nack.class);
+        assertEquals(1, nacks.size());
+        assertEquals(true, nacks.get(0).requeue());
+        assertEquals(
+                List.of(new Range(11, 12), new Range(20, 22)),
+                nacks.get(0).ranges(),
+                "the buffered message and both unread ones go back");
+    }
+
+    @Test
     void closeWithNothingBufferedOnlyUnsubscribes() throws Exception {
         script(a, this::plain);
         connect(a);
