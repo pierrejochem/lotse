@@ -211,7 +211,6 @@ impl Clients {
         }
         let term = replica.raft_ref().term();
         let mut g = replica.coordinator().groups().groups.get(&req.group_id).cloned().unwrap_or_default();
-        let known: BTreeSet<u64> = view.streams.iter().map(|s| s.resource_id).collect();
         let tenant = super::ids::split(&req.group_id).0.to_string();
         // The pattern this heartbeat subscribes by: the one it sends when
         // joining, otherwise the member's own (ADR 0073).
@@ -227,7 +226,12 @@ impl Clients {
                     return outbox.push(id, &Response::Refused { code: ErrorCode::INVALID_REQUEST, message: why });
                 }
             },
-            None => req.subscribed.as_ref().map(|s| s.iter().copied().filter(|r| known.contains(r)).collect()),
+            // Kept as named, also what this node has not applied yet: the
+            // client names its streams only when it joins, so a stream the
+            // node learns of later must still reach the member. Retargeting
+            // gives an unknown stream no partitions, and the next heartbeat
+            // spreads them once the stream is known.
+            None => req.subscribed.as_ref().map(|s| s.iter().copied().collect()),
         };
         let mut changed = false;
         // A stream that got more partitions (ADR 0074): spread them too.
