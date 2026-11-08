@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.2.20"
+    kotlin("jvm") version "2.4.21"
     `java-library`
 }
 
@@ -13,7 +13,7 @@ repositories {
 dependencies {
     // The Java core (substituted by the included build) and coroutines: the layer's only dependencies.
     api("dev.lotse:lotse-client:0.0.1")
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
