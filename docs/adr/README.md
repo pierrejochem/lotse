@@ -86,5 +86,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0079 | [Publish: routed by the node](0079-publish-routed-by-the-node.md) | Accepted |
 | 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 | 0081 | [User guides with mdBook on GitHub Pages](0081-user-guides-with-mdbook-on-github-pages.md) | Accepted |
+| 0083 | [Client SDKs for C# and Node.js](0083-client-sdks-for-csharp-and-nodejs.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
