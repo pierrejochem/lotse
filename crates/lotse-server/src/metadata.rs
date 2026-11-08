@@ -295,6 +295,14 @@ impl QueueChange {
         self.ack_timeout_ms.is_none_or(|v| q.ack_timeout_ms == v) && self.applied_to(q.limits) == q.limits
     }
 
+    /// Whether the change, decided and applied, was refused rather than
+    /// applied and perhaps replaced since. Only a dead-letter queue can make
+    /// `apply` refuse; any other change always applies, so a queue that no
+    /// longer shows it was overwritten by a later change, which is no error.
+    pub(crate) fn refused_in(&self, q: &DynQueue) -> bool {
+        self.dead_letter.is_some() && !self.holds_in(q)
+    }
+
     /// `l` with this change.
     pub(crate) fn applied_to(&self, mut l: QueueLimits) -> QueueLimits {
         l.max_deliveries = self.max_deliveries.unwrap_or(l.max_deliveries);
