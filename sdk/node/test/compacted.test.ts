@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Compression } from "../src/record/attributes.js";
 import { Batch } from "../src/record/batch.js";
+import { codecAvailable } from "../src/record/codecs.js";
 import { putU32 } from "../src/record/bytes.js";
 import { crc32c } from "../src/record/crc32c.js";
 import { RecordFormatError } from "../src/record/errors.js";
@@ -27,10 +29,6 @@ function vectors(): Map<string, Vector> {
   );
 }
 
-function isUnsupportedCodec(e: unknown): boolean {
-  return e instanceof RecordFormatError && e.kind === "UNSUPPORTED_COMPRESSION";
-}
-
 test("compacted batches read with their gaps", () => {
   const expected = new Map<string, string[]>();
   for (const v of lines("compacted-records.txt")) {
@@ -46,9 +44,9 @@ test("compacted batches read with their gaps", () => {
     assert.equal(b.recordCount, vec.count, label);
     assert.equal(b.span, vec.span, label);
     assert.equal(b.nextOffset, b.baseOffset + BigInt(b.span), label);
-    if (b.attributes.compression !== 0 && vec.count > 0) {
-      // The record block is one zstd or lz4 frame, which phase 1 cannot open.
-      assert.throws(() => b.records(), isUnsupportedCodec, label);
+    if (b.attributes.compression === Compression.ZSTD && vec.count > 0 && !codecAvailable(Compression.ZSTD)) {
+      // The record block is one zstd frame, and this Node.js has no zstd (ADR 0085): the failure is the named one.
+      assert.throws(() => b.records(), (e: unknown) => e instanceof RecordFormatError && e.kind === "UNSUPPORTED_COMPRESSION", label);
       continue;
     }
     const got = b.records().map((r, i) => recordLine(label, i, r));

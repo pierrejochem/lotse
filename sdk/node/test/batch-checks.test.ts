@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { type Attributes, attributesFromBits, attributesToBits, BatchKind, Compression } from "../src/record/attributes.js";
 import { Batch, HEADER_LEN, LEN_PREFIX, MAX_BATCH_LEN } from "../src/record/batch.js";
 import { BatchBuilder } from "../src/record/builder.js";
+import { codecAvailable } from "../src/record/codecs.js";
 import { putI64, putU16, putU32 } from "../src/record/bytes.js";
 import { crc32c } from "../src/record/crc32c.js";
 import { RecordFormatError, type RecordFormatKind } from "../src/record/errors.js";
@@ -191,12 +192,16 @@ test("a negative record length is refused", () => {
 });
 
 test("a compressed batch parses before its block is decoded", () => {
-  // The header is checked without the codec; the block only when the records are read.
+  // The header is checked without the codec; the block only when the records are read. A plain block marked as
+  // compressed is no frame: damage where the codec is there, a missing codec where it is not.
   const b = sample();
   putU16(b, 25, 1);
   const batch = Batch.parse(sum(b)).batch;
   assert.equal(batch.attributes.compression, Compression.ZSTD);
-  assert.equal(kindOf(() => batch.records()), "UNSUPPORTED_COMPRESSION");
+  assert.equal(kindOf(() => batch.records()), codecAvailable(Compression.ZSTD) ? "MALFORMED" : "UNSUPPORTED_COMPRESSION");
+  const lz4 = sample();
+  putU16(lz4, 25, 2);
+  assert.equal(kindOf(() => Batch.parse(sum(lz4)).batch.records()), "MALFORMED");
 });
 
 test("an empty builder and an oversized batch are refused", () => {

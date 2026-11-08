@@ -1,6 +1,7 @@
 export * from "./attributes.js";
 export { Batch, HEADER_LEN, LEN_PREFIX, MAGIC, MAX_BATCH_LEN, MAX_RECORDS_LEN, CRC_START } from "./batch.js";
 export { BatchBuilder, DEFAULT_BATCH_OPTIONS, type BatchOptions } from "./builder.js";
+export { type BlockCodec, codecAvailable, registerCodec } from "./codecs.js";
 export { concat, equalBytes, fromHex, toHex } from "./bytes.js";
 export { crc32c } from "./crc32c.js";
 export { RecordFormatError, type RecordFormatKind } from "./errors.js";
