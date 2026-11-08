@@ -1,0 +1,59 @@
+name: docs
+
+# The guides (ADR 0081): built on every pull request that touches them, so a
+# broken include or link fails review, and deployed to GitHub Pages from main.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/guide/**"
+      - "sdk/PROTOCOL.md"
+      - "sdk/java/src/examples/**"
+      - "sdk/kotlin/src/examples/**"
+      - "packaging/deb/cluster.toml.example"
+      - "console/lotse-console.example.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/guide/**"
+      - "sdk/PROTOCOL.md"
+      - "sdk/java/src/examples/**"
+      - "sdk/kotlin/src/examples/**"
+      - "packaging/deb/cluster.toml.example"
+      - "console/lotse-console.example.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+      - run: mdbook build docs/guide
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/guide/book
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

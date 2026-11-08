@@ -1,0 +1,19 @@
+[book]
+title = "Lotse guides"
+description = "Setup, administration, development and use of the Lotse message broker."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/lotse/"
+git-repository-url = "https://github.com/pierrejochem/lotse"
+edit-url-template = "https://github.com/pierrejochem/lotse/edit/main/docs/guide/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/lotse.css"]
+
+[output.html.search]
+enable = true

@@ -27,7 +27,7 @@ A message broker in Rust: RabbitMQ-style reliable queues and Kafka-style persist
 | `packaging/` | `Dockerfile` (static build on distroless), `Dockerfile.prebuilt` (the release image), `systemd/lotse@.service` and `lotse.sysusers`, `deb/` (package scripts, example cluster file); `.github/workflows/release.yml` builds releases on `v*` tags |
 | `sdk/` | Client SDKs ([ADR 0056](docs/adr/0056-client-sdks-for-the-jvm.md)): `PROTOCOL.md` the protocol for implementers, `conformance/` golden vectors written by `crates/lotse-proto/examples/vectors.rs` (never edit by hand: `make sdk-vectors`), `java/` the Java 17 client (Gradle, no runtime dependencies but the optional codecs; `dev.lotse.proto`, `record`, `net`, `auth` and `client`: streams, queues, publishing, transactions, consumer groups and admin), `kotlin/` the Kotlin layer on it (`dev.lotse.kotlin`: `suspend` on `Dispatchers.IO`, flows, `transaction { }`; [ADR 0080](docs/adr/0080-kotlin-layer-on-dispatchers-io.md)) |
 | `console/web` | Console frontend: React 18, TypeScript, Radix primitives, TanStack Query, generated OpenAPI client |
-| `docs/` | Design document, ADRs, architecture, brand, console screenshots and mockups |
+| `docs/` | Design document, ADRs, architecture, brand, console screenshots and mockups; `docs/guide/` the setup, administration, development and use guides (mdBook, published on GitHub Pages by `.github/workflows/docs.yml`; [ADR 0081](docs/adr/0081-user-guides-with-mdbook-on-github-pages.md)) |
 | `agents/` | Tool-neutral descriptions of the project's coding agents |
 
 ## Commands
@@ -48,6 +48,7 @@ docker build -f packaging/Dockerfile -t lotse .             # the image
 cd console/web && npm run api                              # after changing an API type in Rust: regenerate openapi.json + TS client
 cd console/web && npm run typecheck && npm test
 make sdk-test                                              # vectors drift check, then the Java SDK and Kotlin layer tests (needs a JDK 17+; LOTSE_BIN=<lotse executable> adds the TLS and real-node tests)
+mdbook build docs/guide                                    # the guides (cargo install mdbook); output in docs/guide/book
 make sdk-vectors                                           # after changing a message or the batch format: regenerate sdk/conformance
 cargo clippy -p lotse-proto --all-targets --features samples -- -D warnings   # also lints the vectors example
 ```

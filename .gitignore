@@ -7,3 +7,4 @@ sdk/**/build/
 .gradle/
 .vscode/
 sdk/**/bin/
+docs/guide/book/

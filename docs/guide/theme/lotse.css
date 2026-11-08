@@ -1,0 +1,14 @@
+/* Lotse brand tokens (docs/brand/tokens.json) on top of the mdBook themes. */
+:root {
+  --lotse-ink: #0F2B3D;
+  --lotse-signal: #C8322B;
+}
+.light, .rust {
+  --links: #0F2B3D;
+  --sidebar-active: #C8322B;
+  --inline-code-color: #0F2B3D;
+}
+.navy, .coal, .ayu {
+  --sidebar-active: #E5645D;
+}
+code, pre { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
