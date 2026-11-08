@@ -380,6 +380,19 @@ class GroupConsumerTest {
     }
 
     @Test
+    void aTransactionThatOnlySentOffsetsIsEndedAtTheCoordinator() {
+        GroupConsumer g = client().joinGroup("g", List.of("s"), GroupConfig.builder().autoCommit(false).build());
+        g.poll(WAIT);
+        try (Transaction txn = client.beginTransaction()) {
+            txn.sendOffsets(g); // no produce, no partition added
+            txn.commit();
+        }
+        // Without the end the offsets stay pending until the transaction times out, and the group waits for them.
+        assertEquals(1, node.requests(Request.EndTxn.class).size());
+        assertTrue(node.requests(Request.EndTxn.class).get(0).commit());
+    }
+
+    @Test
     void refusedOffsetsLeaveTheTransactionOnlyAnAbort() {
         GroupConsumer g = client().joinGroup("g", List.of("s"), GroupConfig.builder().autoCommit(false).build());
         g.poll(WAIT);

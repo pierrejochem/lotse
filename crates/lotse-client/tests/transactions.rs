@@ -117,6 +117,23 @@ fn a_transaction_with_an_unknown_write_cannot_be_committed() {
     });
 }
 
+/// A transaction that attempted nothing has nothing at the coordinator.
+#[test]
+fn an_empty_transaction_is_not_ended() {
+    Sim::new(1).run(|rt| async move {
+        let end_called = Arc::new(AtomicBool::new(false));
+        drop(rt.spawn(broker(rt.node("b1"), end_called.clone())));
+        let client = Client::new(
+            rt.node("c1"),
+            ClientConfig { transactional_id: Some("t".into()), ..ClientConfig::new(vec!["b1:9000".into()]) },
+        );
+        let txn = client.begin_transaction().await.unwrap();
+        txn.commit().await.expect("committed");
+        assert!(!end_called.load(Ordering::Relaxed));
+        drop(client);
+    });
+}
+
 /// A broker with a fanout exchange to queues `a` (written) and `b` (never
 /// written: its partition has no leader that takes the produce). A
 /// `Publish` (ADR 0079) it answers the same way the first time, and

@@ -236,4 +236,43 @@ class RealClusterTest {
         List<String> values = readAll("plain", 0, 5).stream().map(r -> r.value().toUtf8()).toList();
         assertEquals(List.of("p-0", "p-1", "p-2", "p-3", "p-4"), values);
     }
+
+    @Test
+    @Order(100)
+    void aTransactionThatOnlySentOffsetsCommitsThemAtOnce() throws Exception {
+        client.createStream("offsets-only", 1, 3);
+        for (String v : List.of("a", "b")) {
+            client.produce("offsets-only", 0, OutMessage.value(v));
+        }
+        GroupConfig manual = GroupConfig.builder().autoCommit(false).build();
+        try (LotseClient processor = new LotseClient(ClientConfig.builder(cluster.bootstrap())
+                .plaintextOnLoopback()
+                .transactionalId("tx-offsets-only")
+                .requestTimeout(Duration.ofSeconds(5))
+                .retryFor(Duration.ofSeconds(60))
+                .build())) {
+            GroupConsumer first = processor.joinGroup("offsets-only", List.of("offsets-only"), manual);
+            int seen = 0;
+            long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+            while (seen < 2 && System.nanoTime() < deadline) {
+                seen += first.poll(Duration.ofMillis(200)).size();
+            }
+            assertEquals(2, seen);
+            try (Transaction txn = processor.beginTransaction()) {
+                txn.sendOffsets(first); // no produce, no partition added
+                txn.commit();
+            }
+            first.close();
+        }
+        client.produce("offsets-only", 0, OutMessage.value("c"));
+        // Not ended, the offsets would stay pending for the transaction's timeout and the group would read nothing.
+        try (GroupConsumer next = client.joinGroup("offsets-only", List.of("offsets-only"), manual)) {
+            List<String> got = new ArrayList<>();
+            long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+            while (got.isEmpty() && System.nanoTime() < deadline) {
+                next.poll(Duration.ofMillis(200)).forEach(r -> got.add(r.record().value().toUtf8()));
+            }
+            assertEquals(List.of("c"), got, "only what came after the committed offsets");
+        }
+    }
 }

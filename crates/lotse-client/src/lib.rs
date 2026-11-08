@@ -739,6 +739,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             epoch,
             next: BTreeMap::new(),
             added: std::collections::BTreeSet::new(),
+            coordinator_may_hold: false,
             poisoned: None,
             ended: false,
         })
@@ -1478,6 +1479,10 @@ pub struct Transaction<'a, R: Net + Clock + Spawn + Rng> {
     epoch: u16,
     next: BTreeMap<(String, u32), i32>,
     added: std::collections::BTreeSet<(String, u32)>,
+    /// Offsets were sent: the coordinator may hold them although no
+    /// partition was added. The transaction must then be ended, or the
+    /// offsets stay pending until it times out and block the group.
+    coordinator_may_hold: bool,
     /// Why only an abort is left.
     poisoned: Option<String>,
     ended: bool,
@@ -1607,7 +1612,7 @@ impl<R: Net + Clock + Spawn + Rng> Transaction<'_, R> {
     async fn end(mut self, commit: bool) -> Result<(), ClientError> {
         let c = self.client;
         self.ended = true;
-        if self.added.is_empty() {
+        if self.added.is_empty() && !self.coordinator_may_hold {
             return Ok(());
         }
         let req = Request::EndTxn(lotse_proto::EndTxnRequest {
