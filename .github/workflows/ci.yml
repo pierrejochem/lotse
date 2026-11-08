@@ -23,6 +23,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -57,6 +60,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
       - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may --skip nodes_come_and_go_without_losing_anything --skip compaction_keeps_each_keys_newest_record
@@ -72,6 +78,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test clients
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
@@ -84,6 +93,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test queues
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
@@ -97,6 +109,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test groups
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
@@ -109,6 +124,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test metadata
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
@@ -122,6 +140,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test access_sim
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
@@ -135,6 +156,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test retention
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
@@ -148,6 +172,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test compaction
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
@@ -161,6 +188,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo test -p lotse-server --release --test membership
         env:
           LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
@@ -173,7 +203,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install --locked cargo-deb
+        with:
+          shared-key: release
+          save-if: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
       - run: cargo deb -p lotse-node
       - run: sudo dpkg -i target/debian/*.deb
       - run: lotse --version && getent passwd lotse
@@ -190,6 +225,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
