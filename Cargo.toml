@@ -39,7 +39,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem",
 time = { version = "0.3", default-features = false, features = ["std"] }
 tracing = "0.1"
 # Authentication in lotse-auth: SCRAM-SHA-512 and JWT validation.
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 base64 = "0.22"
