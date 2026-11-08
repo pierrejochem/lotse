@@ -260,7 +260,7 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 
 ### Closing
 
-Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out, one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
+Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out (the ones parsed into the buffer and those in pushes that arrived but were not read yet, which the node holds in flight just the same), one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
 
 ### Publishing through an exchange
 
