@@ -1,14 +1,12 @@
 name: ci
 
+# Every push to main and every pull request: format, lint and tests, the web
+# app, the packaging and the SDK. The simulations at depth run in the release
+# workflow, before anything is released (ADR 0088).
 on:
   push:
     branches: [main]
   pull_request:
-  # Nightly: the client, queue, group, metadata, access, retention,
-  # compaction and membership simulations at full depth (ADRs 0027, 0031,
-  # 0033, 0034, 0039, 0046, 0048, 0067).
-  schedule:
-    - cron: "17 2 * * *"
   workflow_dispatch:
 
 env:
@@ -54,156 +52,6 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Many more seeds than the default test run. A failure prints the seed;
-      # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
-      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may --skip nodes_come_and_go_without_losing_anything --skip compaction_keeps_each_keys_newest_record
-        env:
-          LOTSE_SIM_SEEDS: "5000"
-
-  # The client simulation is the slowest, so it runs next to the others in a
-  # job of its own (ADR 0030): 2,000 seeds on pull requests, 5,000
-  # nightly and on manual runs (ADR 0027).
-  client-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test clients
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
-
-  # The queue simulation, in a job of its own like the client simulation
-  # (ADR 0031): 2,000 seeds on pull requests, 5,000 nightly.
-  queue-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test queues
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
-
-  # The consumer group simulation, in a job of its own (ADR 0033): 1,000
-  # seeds on pull requests (it is the slowest per seed), 5,000
-  # nightly.
-  group-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test groups
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
-
-  # The metadata simulation, in a job of its own (ADR 0034): 2,000 seeds on
-  # pull requests, 5,000 nightly.
-  metadata-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test metadata
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '2000' }}
-
-  # The access simulation, in a job of its own (ADR 0039): role bindings
-  # change under load on a faulty cluster; 1,000 seeds on pull
-  # requests, 5,000 nightly.
-  access-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test access_sim
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
-
-  # The retention simulation, in a job of its own (ADR 0046): short limits
-  # and small segments under faults; 1,000 seeds on pull
-  # requests, 5,000 nightly.
-  retention-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test retention
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
-
-  # The compaction simulation, in a job of its own (ADR 0067): compacted
-  # streams under faults, every replica read in turn; 1,000 seeds on pull
-  # requests, 5,000 nightly.
-  compaction-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test compaction
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
-
-  # The membership simulation, in a job of its own (ADR 0048): nodes added
-  # and drained under load and faults; 1,000 seeds on pull
-  # requests, 5,000 nightly.
-  membership-simulation:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: false
-      - run: cargo test -p lotse-server --release --test membership
-        env:
-          LOTSE_SIM_SEEDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5000' || '1000' }}
-
   # The packaging (ADR 0049): the image builds from source and the binary in
   # it starts; the Debian package builds and holds the unit.
   packaging:
@@ -214,7 +62,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
-          save-if: false
+          # No nightly run fills the release cache any more: main's packaging does.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deb
