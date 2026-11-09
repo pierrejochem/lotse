@@ -63,7 +63,19 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
 
         internal ChannelReader<object> Events => _events.Reader;
 
-        internal void Add(object ev) => _events.Writer.TryWrite(ev);
+        private long _pushed;
+
+        /// <summary>Messages the node pushed to this subscription so far, whether read from the events or not; for tests.</summary>
+        internal long Pushed => Interlocked.Read(ref _pushed);
+
+        internal void Add(object ev)
+        {
+            if (ev is Frames.DeliverPush { Error.IsOk: true } p)
+            {
+                Interlocked.Add(ref _pushed, p.Deliveries.Count);
+            }
+            _events.Writer.TryWrite(ev);
+        }
 
         public void OnPush(Frames.DeliverPush push) => Add(push);
 
@@ -769,6 +781,18 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
 
     /// <summary>Handles a push as if the reading task had taken it from <paramref name="subscription"/>'s events; for tests.</summary>
     internal void HandleForTests(object subscription, Frames.DeliverPush push) => Handle((Sub)subscription, push);
+
+    /// <summary>How many messages the node has pushed to this consumer's current subscription; for tests.</summary>
+    internal long PushedForTests
+    {
+        get
+        {
+            lock (_mu)
+            {
+                return _sub?.Pushed ?? 0;
+            }
+        }
+    }
 
     /// <summary>The address this consumer's subscription is on, or <c>null</c>; for tests.</summary>
     internal Address? SubscribedAddress

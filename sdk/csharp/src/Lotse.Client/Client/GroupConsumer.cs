@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -48,7 +47,8 @@ public sealed class GroupConsumer : IAsyncDisposable
     private readonly string[] _streams;
     private readonly string? _pattern; // subscribed by pattern instead (ADR 0073)
     private readonly GroupConfig _cfg;
-    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly TimeProvider _time;
+    private readonly long _started;
     private string _memberId = string.Empty;
     private int _epoch;
 
@@ -68,7 +68,11 @@ public sealed class GroupConsumer : IAsyncDisposable
         _streams = streams;
         _pattern = pattern;
         _cfg = cfg;
+        _time = client.Config.Time;
+        _started = _time.GetTimestamp();
     }
+
+    private TimeSpan Now => _time.GetElapsedTime(_started);
 
     private static ClientException FencedInstance() =>
         new BrokerErrorException(ErrorCode.FencedInstanceId, "another member joined with this instance id");
@@ -153,7 +157,7 @@ public sealed class GroupConsumer : IAsyncDisposable
         {
             throw FencedInstance();
         }
-        TimeSpan now = _clock.Elapsed;
+        TimeSpan now = Now;
         if (_lastOk is TimeSpan ok && now - ok >= _cfg.SessionTimeout)
         {
             // The coordinator may have given everything away by now.
@@ -168,7 +172,7 @@ public sealed class GroupConsumer : IAsyncDisposable
         TimeSpan untilHeartbeat = Max(TimeSpan.Zero, _nextHeartbeat - now);
         if (ready.Count == 0)
         {
-            TimeSpan pause = Min(Max(TimeSpan.Zero, _nextHeartbeat - _clock.Elapsed), wait);
+            TimeSpan pause = Min(Max(TimeSpan.Zero, _nextHeartbeat - Now), wait);
             await Task.Delay(Max(pause, OneMillisecond), cancellationToken).ConfigureAwait(false);
             return Array.Empty<GroupRecord>();
         }
@@ -200,7 +204,7 @@ public sealed class GroupConsumer : IAsyncDisposable
             }
             return Array.Empty<GroupRecord>();
         }
-        if (_lastOk is not TimeSpan sent || _clock.Elapsed - sent >= _cfg.SessionTimeout)
+        if (_lastOk is not TimeSpan sent || Now - sent >= _cfg.SessionTimeout)
         {
             Lost();
             return Array.Empty<GroupRecord>();
@@ -269,7 +273,7 @@ public sealed class GroupConsumer : IAsyncDisposable
     /// <summary>One heartbeat. Only what retrying cannot fix (a refusal, a login that fails) is an error.</summary>
     private async Task HeartbeatAsync(CancellationToken ct)
     {
-        TimeSpan sent = _clock.Elapsed;
+        TimeSpan sent = Now;
         bool joining = _memberId.Length == 0;
         var ids = new List<ulong>();
         foreach (string s in _streams)
@@ -412,7 +416,7 @@ public sealed class GroupConsumer : IAsyncDisposable
                     // the next owner starts from the last commit
                 }
             }
-            _nextHeartbeat = _clock.Elapsed;
+            _nextHeartbeat = Now;
         }
         foreach (Part p in target)
         {
