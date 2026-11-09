@@ -14,6 +14,12 @@ The overview shows the cluster at a glance: nodes, groups, throughput and latenc
 
 ![Cluster overview](../images/overview.png)
 
+## Nodes
+
+The nodes page lists each node with its state, replicas and leaders, and shows a rolling upgrade while one runs.
+
+![Nodes](../images/nodes.png)
+
 ## Streams
 
 The list shows each stream with its partitions, replication and rates. The detail page shows its partitions, where their leaders are, retention, and a message browser.
@@ -48,9 +54,33 @@ The message browser shows messages of a stream or queue without taking them from
 
 ## Tenants and access
 
-The tenant page lists tenants and the role bindings that apply to them: who holds which of the six roles, on which name prefix. The page is read-only; bindings are changed through the admin calls of the client.
+The tenant page lists tenants and the role bindings that apply to them: who holds which of the six roles, on which name prefix.
 
 ![Tenants](../images/tenants.png)
+
+## Users and access
+
+The *Users and access* page manages who may sign in and what they may do, as you: every change is a request the cluster checks against your roles, and the console adds no rights of its own ([ADR 0089](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0089-console-users-and-access.md)). Only cluster admins can use it.
+
+**Users** lists the SCRAM users and where each comes from. *Add user* and *Set password* turn the password into a salted key in your browser and send only the key; the console never sees the password. *Delete* asks you to type the name again.
+
+![Users](../images/users.png)
+
+**Role bindings** shows every binding over all tenants with its source, and adds or removes bindings for users and identity provider groups. Bindings from the node configuration are read only.
+
+![Role bindings](../images/bindings.png)
+
+**Sessions** ends the sessions of a user or an identity provider group. Type the name again to confirm.
+
+### Client certificates
+
+**Certificates** lists the client certificates the nodes accepted, with the principal, when they expire and their state: valid, expiring within 30 days, expired or revoked. *Revoke* refuses a certificate on every node at once and ends the connections that showed it; type the serial again to confirm ([ADR 0090](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0090-revoking-client-certificates-in-the-metadata-group.md), [ADR 0091](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0091-client-certificate-inventory.md)).
+
+![Certificates](../images/certificates.png)
+
+*Request certificate* asks the CA holder for a new client certificate. Your browser makes the key and the signing request; the private key is saved as a file once and never reaches the console. The CA holder signs the request with `lotse certs --sign`, and the signed certificate can then be downloaded from the list ([ADR 0092](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0092-requesting-and-signing-client-certificates.md)).
+
+![Request a certificate](../images/request-certificate.png)
 
 ## When something is missing
 
