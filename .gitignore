@@ -14,3 +14,4 @@ sdk/node/node_modules/
 sdk/node/dist/
 
 /graphify-out/
+/.openidea/
