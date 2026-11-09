@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   BrokerResponseError,
   ClientClosedError,
+  CertificateRequestState,
   CertificateState,
   type CertificateEntry,
+  type CertificateRequestEntry,
   ConfigSource,
   ErrorCode,
   type ErrorCodeValue,
@@ -57,6 +59,8 @@ function notLeader(r: Request): Response {
       return { type: "DescribeUsers", error, leaderHint, users: [] };
     case "DescribeCertificates":
       return { type: "DescribeCertificates", error, leaderHint, nowMs: 0n, certificates: [] };
+    case "DescribeCertificateRequests":
+      return { type: "DescribeCertificateRequests", error, leaderHint, nowMs: 0n, requests: [] };
     case "DescribeTenants":
       return { type: "DescribeTenants", error, leaderHint, tenants: [] };
     case "DescribeRoleBindings":
@@ -369,6 +373,49 @@ describe("admin calls against scripted brokers", () => {
     assert.equal(a.requests().filter((r) => r.type.startsWith("Describe")).length, 1, "node 1 was asked once, then node 2 directly");
   });
 
+  test("certificate requests are made, listed and answered through the leader", async () => {
+    const entry: CertificateRequestEntry = {
+      id: Buffer.alloc(32, 3),
+      principal: "alice",
+      csr: Buffer.from([1, 2, 3]),
+      requestedBy: "admin",
+      requestedAtMs: 1_750_000_000_000n,
+      expiresAtMs: 1_750_600_000_000n,
+      state: CertificateRequestState.SIGNED,
+      certificate: Buffer.from([9, 9]),
+      signedAtMs: 1_750_100_000_000n,
+    };
+    serve((r) => {
+      switch (r.type) {
+        case "RequestCertificate":
+        case "RecordCertificate":
+          return admin(ErrorCode.NONE, null, null);
+        case "DescribeCertificateRequests":
+          return { type: "DescribeCertificateRequests", error: ErrorCode.NONE, leaderHint: null, nowMs: 1_750_000_000_001n, requests: [entry] };
+        default:
+          throw new Error(`unexpected ${r.type}`);
+      }
+    });
+    await client.requestCertificate("alice", Uint8Array.of(1, 2, 3));
+    assert.deepEqual(b.requests("RequestCertificate"), [
+      { type: "RequestCertificate", principal: "alice", csr: Buffer.from([1, 2, 3]) },
+    ]);
+    assert.deepEqual(await client.describeCertificateRequests(), { requests: [entry], nowMs: 1_750_000_000_001n });
+    const id = new Uint8Array(32).fill(3);
+    await client.recordCertificate(id, Uint8Array.of(9, 9), new Uint8Array(32), Uint8Array.of(0x7f), 5, 6n);
+    assert.deepEqual(b.requests("RecordCertificate"), [
+      {
+        type: "RecordCertificate",
+        id: Buffer.from(id),
+        certificate: Buffer.from([9, 9]),
+        issuer: Buffer.alloc(32),
+        serial: Buffer.from([0x7f]),
+        notBeforeMs: 5n,
+        notAfterMs: 6n,
+      },
+    ]);
+  });
+
   test("a role binding goes out as every field, removals beside additions", async () => {
     serve(() => ok());
     const add: RoleBinding[] = [
@@ -561,6 +608,9 @@ describe("admin calls against scripted brokers", () => {
       client.revokeSessions("u"),
       client.revokeCertificate(new Uint8Array(32), Uint8Array.of(1), 0, ""),
       client.describeCertificates(),
+      client.requestCertificate("u", Uint8Array.of(1)),
+      client.describeCertificateRequests(),
+      client.recordCertificate(new Uint8Array(32), Uint8Array.of(1), new Uint8Array(32), Uint8Array.of(1), 0, 0),
       client.addNode(5, "p", "c"),
       client.removeNode(5),
       client.describeNodes(),

@@ -935,6 +935,66 @@ public abstract record Request
         }
     }
 
+    /// <summary>Asks for a certificate: a signing request the requester made, whose private key stays with them (ADR 0092).</summary>
+    /// <param name="Principal">The principal the certificate will name: its common name.</param>
+    /// <param name="Csr">A PKCS#10 certificate signing request in DER form.</param>
+    public sealed record RequestCertificate(string Principal, ByteString Csr) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RequestCertificate;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.String(Principal).Bytes(Csr).NoTags();
+
+        internal static RequestCertificate Read(Reader r)
+        {
+            var x = new RequestCertificate(r.String(), r.Bytes());
+            r.Tags();
+            return x;
+        }
+    }
+
+    /// <summary>Lists the certificate requests (cluster admin, ADR 0092).</summary>
+    public sealed record DescribeCertificateRequests : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeCertificateRequests;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.NoTags();
+
+        internal static DescribeCertificateRequests Read(Reader r)
+        {
+            r.Tags();
+            return new DescribeCertificateRequests();
+        }
+    }
+
+    /// <summary>The CA holder records the certificate it signed for a request (ADR 0092).</summary>
+    /// <param name="Id">The request it answers: SHA-256 of its signing request.</param>
+    /// <param name="Certificate">The signed certificate, DER.</param>
+    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Serial">The serial number, big-endian.</param>
+    /// <param name="NotBeforeMs">First millisecond it is valid in.</param>
+    /// <param name="NotAfterMs">Millisecond it stops being valid in.</param>
+    public sealed record RecordCertificate(
+        ByteString Id, ByteString Certificate, ByteString Issuer, ByteString Serial, ulong NotBeforeMs, ulong NotAfterMs) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RecordCertificate;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) =>
+            w.Bytes(Id).Bytes(Certificate).Bytes(Issuer).Bytes(Serial).U64(NotBeforeMs).U64(NotAfterMs).NoTags();
+
+        internal static RecordCertificate Read(Reader r)
+        {
+            var x = new RecordCertificate(r.Bytes(), r.Bytes(), r.Bytes(), r.Bytes(), r.U64(), r.U64());
+            r.Tags();
+            return x;
+        }
+    }
+
     /// <summary>Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091).</summary>
     public sealed record DescribeCertificates : Request
     {

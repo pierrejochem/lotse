@@ -17,6 +17,7 @@ export const keys = {
   users: (c: string) => ['users', c] as const,
   bindings: (c: string) => ['bindings', c] as const,
   certificates: (c: string) => ['certificates', c] as const,
+  certificateRequests: (c: string) => ['certificate-requests', c] as const,
   metrics: (c: string, s: string, r: Range) => ['metrics', c, s, r] as const,
 };
 
@@ -232,6 +233,24 @@ export const useCertificates = (cluster: string) =>
     queryKey: keys.certificates(cluster),
     queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/certificates', path(cluster))),
   });
+
+/** Requests for client certificates, newest first, with the certificate of each signed one; cluster admins only (ADR 0092). */
+export const useCertificateRequests = (cluster: string) =>
+  useQuery({
+    queryKey: keys.certificateRequests(cluster),
+    queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/certificate-requests', path(cluster))),
+    refetchInterval: 30_000,
+  });
+
+/** Asks for a client certificate with a signing request made in the browser (ADR 0092). */
+export function useRequestCertificate(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: S['RequestCertificate']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/certificate-requests', { ...path(cluster), body })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.certificateRequests(cluster) }),
+  });
+}
 
 /** Revokes one client certificate by issuer and serial; `confirm` is the serial typed again (ADR 0090). */
 export function useRevokeCertificate(cluster: string) {

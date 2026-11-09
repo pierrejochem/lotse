@@ -1223,6 +1223,87 @@ public sealed interface Request {
     }
 
     /**
+     * {@code RequestCertificate} (55): asks the CA holder for a client certificate (cluster admin, ADR 0092). The
+     * request's id is the SHA-256 of {@code csr}, so the same request twice is one request. Answered with
+     * {@link Response.Admin}.
+     *
+     * @param principal the principal the certificate will name: its common name
+     * @param csr a PKCS#10 signing request in DER form; its private key never reaches the cluster
+     */
+    record RequestCertificate(String principal, ByteString csr) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.REQUEST_CERTIFICATE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.string(principal).bytes(csr).noTags();
+        }
+
+        static RequestCertificate read(Reader r) {
+            RequestCertificate x = new RequestCertificate(r.string(), r.bytes());
+            r.tags();
+            return x;
+        }
+    }
+
+    /** Lists the certificate requests (cluster admin, ADR 0092). */
+    record DescribeCertificateRequests() implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_CERTIFICATE_REQUESTS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.noTags();
+        }
+
+        static DescribeCertificateRequests read(Reader r) {
+            r.tags();
+            return new DescribeCertificateRequests();
+        }
+    }
+
+    /**
+     * {@code RecordCertificate} (57): records the certificate the CA holder signed for a request (cluster admin,
+     * ADR 0092). Answered with {@link Response.Admin}.
+     *
+     * @param id the request it answers: SHA-256 of its signing request
+     * @param certificate the signed certificate, DER
+     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param serial the serial number, big-endian
+     * @param notBeforeMs first millisecond it is valid in, a {@code u64}
+     * @param notAfterMs millisecond it stops being valid in, a {@code u64}
+     */
+    record RecordCertificate(
+            ByteString id,
+            ByteString certificate,
+            ByteString issuer,
+            ByteString serial,
+            long notBeforeMs,
+            long notAfterMs)
+            implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.RECORD_CERTIFICATE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.bytes(id).bytes(certificate).bytes(issuer).bytes(serial).u64(notBeforeMs).u64(notAfterMs).noTags();
+        }
+
+        static RecordCertificate read(Reader r) {
+            RecordCertificate x = new RecordCertificate(
+                    r.bytes(), r.bytes(), r.bytes(), r.bytes(), r.u64(), r.u64());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code RecordCertificates} (54): a node reports client certificates it accepted. Internal: only broker nodes
      * may send it, so the client has no call for it; the codec exists for the golden vectors. Answered with
      * {@link Response.Admin}.

@@ -10,6 +10,7 @@
 pub mod api;
 pub mod assets;
 pub mod auth;
+pub mod certs;
 pub mod cli;
 pub mod cluster;
 pub mod config;
@@ -90,6 +91,10 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/sessions/revoke", post(api::revoke_sessions))
         .route("/clusters/{cluster}/certificates", get(api::certificates))
         .route("/clusters/{cluster}/certificates/revoke", post(api::revoke_certificate))
+        .route(
+            "/clusters/{cluster}/certificate-requests",
+            get(api::certificate_requests).post(api::request_certificate),
+        )
         .route("/clusters/{cluster}/metrics", get(api::metrics))
         .route("/ws", get(ws::upgrade))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::session_layer));

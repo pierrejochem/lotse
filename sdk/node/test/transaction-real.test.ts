@@ -92,7 +92,8 @@ describe("transactions, publishing and groups against three real nodes", { skip 
       await new Promise((r) => setTimeout(r, 100));
       got = await committed(c, stream, partition);
     }
-    assert.deepEqual(got, expected, message);
+    if (message === undefined) assert.deepEqual(got, expected);
+    else assert.deepEqual(got, expected, message);
   }
 
   /** The data records, transactional or not, that are in the partition whatever happened to them. */

@@ -1434,6 +1434,66 @@ public final class LotseClient implements AutoCloseable {
         });
     }
 
+    /**
+     * The certificate requests, newest first (cluster admin, ADR 0092).
+     *
+     * @param nowMs the answering node's clock in milliseconds since the Unix epoch
+     * @param requests the requests
+     */
+    public record CertificateRequests(long nowMs, List<Messages.CertificateRequestEntry> requests) {
+        /** Creates the result. */
+        public CertificateRequests {
+            requests = List.copyOf(requests);
+        }
+    }
+
+    /**
+     * Asks the CA holder for a client certificate (cluster admin). The request's id is the SHA-256 of {@code csr},
+     * so the same request sent twice is one request.
+     *
+     * @param principal the principal the certificate will name: its common name
+     * @param csr a PKCS#10 signing request in DER form; the private key stays with the requester
+     */
+    public void requestCertificate(String principal, byte[] csr) {
+        checkOpen();
+        adminChange(new Request.RequestCertificate(principal, ByteString.copyOf(csr)));
+    }
+
+    /** The certificate requests, newest first (cluster admin). */
+    public CertificateRequests describeCertificateRequests() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeCertificateRequests());
+            if (!(r instanceof Response.DescribeCertificateRequests d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return new CertificateRequests(d.nowMs(), d.requests());
+        });
+    }
+
+    /**
+     * Records the certificate the CA holder signed for a request (cluster admin).
+     *
+     * @param id the request it answers: SHA-256 of its signing request
+     * @param certificate the signed certificate, DER
+     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param serial the serial number, big-endian
+     * @param notBeforeMs first millisecond it is valid in
+     * @param notAfterMs millisecond it stops being valid in
+     */
+    public void recordCertificate(
+            byte[] id, byte[] certificate, byte[] issuer, byte[] serial, long notBeforeMs, long notAfterMs) {
+        checkOpen();
+        adminChange(new Request.RecordCertificate(
+                ByteString.copyOf(id),
+                ByteString.copyOf(certificate),
+                ByteString.copyOf(issuer),
+                ByteString.copyOf(serial),
+                notBeforeMs,
+                notAfterMs));
+    }
+
     /** Creates a tenant. */
     public void createTenant(String name) {
         checkOpen();

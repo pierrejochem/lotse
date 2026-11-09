@@ -62,7 +62,7 @@ export class FakeBroker {
       const peer = new Peer(socket);
       b.peers.push(peer);
       let buf = Buffer.alloc(0);
-      socket.on("data", (chunk) => {
+      socket.on("data", (chunk: Buffer) => {
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 4) {
           const len = buf.readUInt32BE(0);

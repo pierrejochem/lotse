@@ -160,6 +160,14 @@ export interface DescribeCertificatesResponse {
   readonly nowMs: bigint;
   readonly certificates: readonly m.CertificateEntry[];
 }
+export interface DescribeCertificateRequestsResponse {
+  readonly type: "DescribeCertificateRequests";
+  readonly error: ErrorCodeValue;
+  readonly leaderHint: m.LeaderHint | null;
+  /** The answering node's clock, ms since the Unix epoch. */
+  readonly nowMs: bigint;
+  readonly requests: readonly m.CertificateRequestEntry[];
+}
 export interface DescribeTenantsResponse {
   readonly type: "DescribeTenants";
   readonly error: ErrorCodeValue;
@@ -233,6 +241,7 @@ export type Response =
   | SaslAuthenticateResponse
   | DescribeUsersResponse
   | DescribeCertificatesResponse
+  | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
   | DescribeRoleBindingsResponse
   | WhoAmIResponse
@@ -415,6 +424,23 @@ export function writeResponse(w: Writer, res: Response): void {
       w.u16(res.error);
       m.putHint(w, res.leaderHint);
       w.array(res.users, (w1, u) => w1.string(u.name).string(u.mechanism).u32(u.iterations).u8(u.source));
+      return;
+    case "DescribeCertificateRequests":
+      w.u16(res.error);
+      m.putHint(w, res.leaderHint);
+      w.u64(res.nowMs);
+      w.array(res.requests, (w1, c) =>
+        w1
+          .bytes(c.id)
+          .string(c.principal)
+          .bytes(c.csr)
+          .string(c.requestedBy)
+          .u64(c.requestedAtMs)
+          .u64(c.expiresAtMs)
+          .u8(c.state)
+          .bytes(c.certificate)
+          .u64(c.signedAtMs),
+      );
       return;
     case "DescribeCertificates":
       w.u16(res.error);
@@ -640,6 +666,8 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.REVOKE_SESSIONS:
     case ApiKey.REVOKE_CERTIFICATE:
     case ApiKey.RECORD_CERTIFICATES:
+    case ApiKey.REQUEST_CERTIFICATE:
+    case ApiKey.RECORD_CERTIFICATE:
     case ApiKey.CREATE_PARTITIONS:
       return { type: "Admin", error: r.u16(), errorMsg: r.optString(), leaderHint: m.getHint(r) };
     case ApiKey.DESCRIBE_NODES: {
@@ -687,6 +715,24 @@ export function readResponse(apiKey: number, r: Reader): Response {
         source: r1.u8(),
       }));
       return { type: "DescribeUsers", error, leaderHint, users };
+    }
+    case ApiKey.DESCRIBE_CERTIFICATE_REQUESTS: {
+      const error = r.u16();
+      const leaderHint = m.getHint(r);
+      const nowMs = r.u64();
+      // 4 + 2 + 4 + 2 + 2 * 8 + 1 + 4 + 8 bytes at least.
+      const requests = r.array(41, (r1) => ({
+        id: r1.bytes(),
+        principal: r1.string(),
+        csr: r1.bytes(),
+        requestedBy: r1.string(),
+        requestedAtMs: r1.u64(),
+        expiresAtMs: r1.u64(),
+        state: r1.u8(),
+        certificate: r1.bytes(),
+        signedAtMs: r1.u64(),
+      }));
+      return { type: "DescribeCertificateRequests", error, leaderHint, nowMs, requests };
     }
     case ApiKey.DESCRIBE_CERTIFICATES: {
       const error = r.u16();

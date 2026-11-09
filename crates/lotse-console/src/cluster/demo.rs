@@ -59,6 +59,9 @@ struct State {
     revoked: BTreeSet<(bool, String)>,
     /// Certificates revoked here: issuer and serial.
     revoked_certs: BTreeMap<([u8; 32], Vec<u8>), (u64, String)>,
+    /// Certificate requests made here, newest last: principal, signing
+    /// request and the time. The demo has no CA holder, so they stay pending.
+    cert_requests: Vec<(String, Vec<u8>, u64)>,
 }
 
 /// Users the demo cluster starts with, as `(name, configured)`.
@@ -1135,6 +1138,67 @@ impl Cluster for DemoCluster {
             .collect();
         certificates.sort_by_key(|c| c.not_after_ms);
         Ok(CertificatesView { certificates, now_ms: now })
+    }
+
+    async fn certificate_requests(&self, who: &Identity) -> ApiResult<CertificateRequestsView> {
+        const DAY: u64 = 86_400_000;
+        let now = crate::time::now_ms();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        // Sample data: one request waiting, one signed (its certificate is a
+        // placeholder, not one a node would accept).
+        let mut requests = vec![
+            CertificateRequestRow {
+                id: hex(&[0x11; 32]),
+                principal: "reporting-job".into(),
+                requested_by: who.principal.clone(),
+                requested_at_ms: now.saturating_sub(DAY),
+                expires_at_ms: now + 6 * DAY,
+                state: "pending".into(),
+                key_fingerprint: hex(&[0xa7; 32]),
+                certificate: String::new(),
+                signed_at_ms: 0,
+            },
+            CertificateRequestRow {
+                id: hex(&[0x22; 32]),
+                principal: "ingest-service".into(),
+                requested_by: who.principal.clone(),
+                requested_at_ms: now.saturating_sub(3 * DAY),
+                expires_at_ms: now + 4 * DAY,
+                state: "signed".into(),
+                key_fingerprint: hex(&[0x3c; 32]),
+                certificate: crate::certs::pem(b"sample certificate of the demo cluster"),
+                signed_at_ms: now.saturating_sub(2 * DAY),
+            },
+        ];
+        for (principal, csr, at) in &self.lock().cert_requests {
+            requests.push(CertificateRequestRow {
+                id: hex(&<sha2::Sha256 as sha2::Digest>::digest(csr)),
+                principal: principal.clone(),
+                requested_by: who.principal.clone(),
+                requested_at_ms: *at,
+                expires_at_ms: at + 7 * DAY,
+                state: "pending".into(),
+                key_fingerprint: crate::certs::key_fingerprint(csr).unwrap_or_default(),
+                certificate: String::new(),
+                signed_at_ms: 0,
+            });
+        }
+        requests.sort_by_key(|r| std::cmp::Reverse(r.requested_at_ms));
+        Ok(CertificateRequestsView { requests, now_ms: now })
+    }
+
+    async fn request_certificate(&self, _who: &Identity, principal: &str, csr: Vec<u8>) -> ApiResult<()> {
+        let ok = |c: char| c.is_ascii_alphanumeric() || "._-@".contains(c);
+        if principal.is_empty() || principal.len() > 128 || !principal.chars().all(ok) || principal.starts_with('.') {
+            return Err(ApiError::BadRequest(
+                "The cluster refused the request: a principal is letters, digits, `.`, `_`, `-` and `@`.".into(),
+            ));
+        }
+        if csr.is_empty() {
+            return Err(ApiError::BadRequest("The cluster refused the request: the signing request is empty.".into()));
+        }
+        self.lock().cert_requests.push((principal.to_owned(), csr, crate::time::now_ms()));
+        Ok(())
     }
 
     async fn revoke_certificate(

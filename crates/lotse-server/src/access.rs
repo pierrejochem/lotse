@@ -271,7 +271,10 @@ impl Access {
             | Request::MoveLeader(_)
             | Request::RevokeSessions(_)
             | Request::RevokeCertificate(_)
-            | Request::DescribeCertificates(_) => admin(),
+            | Request::DescribeCertificates(_)
+            | Request::RequestCertificate(_)
+            | Request::DescribeCertificateRequests(_)
+            | Request::RecordCertificate(_) => admin(),
             Request::DescribeNodes(_) => {
                 if self.sees_cluster(p) {
                     Ok(())

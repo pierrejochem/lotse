@@ -16,10 +16,12 @@
 
 use std::path::{Path, PathBuf};
 
+use rcgen::PublicKeyData as _;
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyIdMethod, KeyPair, KeyUsagePurpose, RevokedCertParams, SanType, SerialNumber,
 };
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
 use crate::config::{ClusterFile, host_of};
@@ -55,6 +57,9 @@ pub enum CertError {
     /// A certificate to revoke that this cluster's CA did not issue.
     #[error("{0} was not issued by the cluster's CA")]
     NotOurs(String),
+    /// A signing request that this command will not sign.
+    #[error("the signing request is refused: {0}")]
+    BadRequest(String),
     /// A principal name that would not make a file name.
     #[error("{0:?} is not a principal name this command takes: letters, digits, `.`, `_`, `-` and `@` only")]
     BadName(String),
@@ -91,8 +96,14 @@ pub struct Revoked {
 }
 
 struct Ca {
-    cert: rcgen::Certificate,
-    key: KeyPair,
+    /// The CA as rcgen signs with it: its name, usages and key.
+    issuer: rcgen::Issuer<'static, KeyPair>,
+}
+
+impl Ca {
+    fn issuer(&self) -> &rcgen::Issuer<'static, KeyPair> {
+        &self.issuer
+    }
 }
 
 /// The CA key's path: the CA certificate's, with `.key`.
@@ -144,10 +155,7 @@ pub fn node_certs(file: &ClusterFile, days: u32) -> Result<Vec<Outcome>, CertErr
 /// `<out>/<principal>.pem` and `.key`, valid for `days`. Never over
 /// existing files.
 pub fn client_cert(file: &ClusterFile, principal: &str, out_dir: &Path, days: u32) -> Result<Vec<Outcome>, CertError> {
-    let ok = |c: char| c.is_ascii_alphanumeric() || "._-@".contains(c);
-    if principal.is_empty() || !principal.chars().all(ok) || principal.starts_with('.') {
-        return Err(CertError::BadName(principal.into()));
-    }
+    check_name(principal)?;
     let ca_path = PathBuf::from(file.tls.ca.as_deref().ok_or(CertError::NoTls)?);
     if !ca_path.exists() || !ca_key_path(&ca_path).exists() {
         return Err(CertError::NoCa(ca_key_path(&ca_path).display().to_string()));
@@ -167,6 +175,104 @@ pub fn client_cert(file: &ClusterFile, principal: &str, out_dir: &Path, days: u3
     write(&cert, &pem, false)?;
     write(&key, &key_pem, true)?;
     Ok(vec![Outcome::Wrote(cert), Outcome::Wrote(key)])
+}
+
+fn check_name(principal: &str) -> Result<(), CertError> {
+    let ok = |c: char| c.is_ascii_alphanumeric() || "._-@".contains(c);
+    if principal.is_empty() || principal.len() > 128 || !principal.chars().all(ok) || principal.starts_with('.') {
+        return Err(CertError::BadName(principal.into()));
+    }
+    Ok(())
+}
+
+/// A signing request that was read and found fit to sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsrInfo {
+    /// SHA-256 of the public key, hex: what the requester can compare with
+    /// their own key before the CA holder signs.
+    pub key_fingerprint: String,
+}
+
+/// What `sign_csr` made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signed {
+    /// The certificate, PEM.
+    pub pem: String,
+    /// The certificate, DER: what the cluster records.
+    pub der: Vec<u8>,
+    /// SHA-256 of the issuer's name as the certificate carries it: how a
+    /// node tells issuers apart (ADR 0090).
+    pub issuer: [u8; 32],
+    /// The serial number, big-endian.
+    pub serial: Vec<u8>,
+    /// First millisecond it is valid in, since the Unix epoch.
+    pub not_before_ms: u64,
+    /// Millisecond it ends in.
+    pub not_after_ms: u64,
+}
+
+/// Reads a PKCS#10 signing request (DER) for `principal` and checks what the
+/// CA holder is about to put a name to: the request is signed with the key
+/// it names (so the requester holds it), the key is ECDSA P-256, and the
+/// request's own name, if it has one, is the principal. Everything else the
+/// request asks for (extensions, alternative names, a CA flag) is ignored:
+/// the certificate is made from the key and the principal only.
+pub fn read_csr(der: &[u8], principal: &str) -> Result<CsrInfo, CertError> {
+    check_name(principal)?;
+    let csr = parse_csr(der)?;
+    let names: Vec<_> = csr.params.distinguished_name.iter().collect();
+    for (ty, value) in names {
+        if *ty == DnType::CommonName && !matches!(value, rcgen::DnValue::Utf8String(v) if v == principal) {
+            return Err(CertError::BadRequest(format!("its name is not {principal}")));
+        }
+    }
+    Ok(CsrInfo { key_fingerprint: hex(&Sha256::digest(csr.public_key.der_bytes())) })
+}
+
+fn parse_csr(der: &[u8]) -> Result<rcgen::CertificateSigningRequestParams, CertError> {
+    let csr = rcgen::CertificateSigningRequestParams::from_der(&der.into())
+        .map_err(|e| CertError::BadRequest(format!("not a PKCS#10 request signed by its own key ({e})")))?;
+    if csr.public_key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {
+        return Err(CertError::BadRequest("the key is not ECDSA P-256".into()));
+    }
+    Ok(csr)
+}
+
+/// Signs the request `der` with the cluster's CA as a client certificate for
+/// `principal`, valid for `days`. Nothing is written.
+pub fn sign_csr(file: &ClusterFile, der: &[u8], principal: &str, days: u32) -> Result<Signed, CertError> {
+    read_csr(der, principal)?;
+    let csr = parse_csr(der)?;
+    let ca_path = PathBuf::from(file.tls.ca.as_deref().ok_or(CertError::NoTls)?);
+    if !ca_path.exists() || !ca_key_path(&ca_path).exists() {
+        return Err(CertError::NoCa(ca_key_path(&ca_path).display().to_string()));
+    }
+    let ca = load_or_make_ca(&ca_path, &mut Vec::new())?;
+    let params = client_params(principal, days);
+    let cert = params.signed_by(&csr.public_key, ca.issuer()).map_err(|e| cert_err(principal, e))?;
+    let bytes = cert.der().to_vec();
+    let (_, parsed) = x509_parser::parse_x509_certificate(&bytes).map_err(|e| cert_err(principal, e))?;
+    let millis = |t: x509_parser::time::ASN1Time| u64::try_from(t.timestamp()).unwrap_or(0) * 1000;
+    Ok(Signed {
+        pem: cert.pem(),
+        issuer: Sha256::digest(parsed.issuer().as_raw()).into(),
+        serial: parsed.raw_serial().to_vec(),
+        not_before_ms: millis(parsed.validity().not_before),
+        not_after_ms: millis(parsed.validity().not_after),
+        der: bytes,
+    })
+}
+
+/// Writes a signed certificate as `<dir>/<principal>.pem`, never over a file.
+pub fn write_certificate(dir: &Path, principal: &str, pem: &str) -> Result<PathBuf, CertError> {
+    check_name(principal)?;
+    let path = dir.join(format!("{principal}.pem"));
+    write(&path, pem, false)?;
+    Ok(path)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Adds the certificate in the PEM file `cert` to the revocation list
@@ -259,7 +365,7 @@ fn revocation_list(ca: &Ca, revoked: Vec<RevokedCertParams>, number: u64) -> Res
         revoked_certs: revoked,
         key_identifier_method: KeyIdMethod::Sha256,
     };
-    let list = params.signed_by(&ca.cert, &ca.key).map_err(|e| cert_err("the revocation list", e))?;
+    let list = params.signed_by(ca.issuer()).map_err(|e| cert_err("the revocation list", e))?;
     list.pem().map_err(|e| cert_err("the revocation list", e))
 }
 
@@ -280,11 +386,10 @@ fn load_or_make_ca(path: &Path, out: &mut Vec<Outcome>) -> Result<Ca, CertError>
         }
         // Signing needs the CA as rcgen sees it: its name and key, which
         // is all that ends up in what it issues.
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem).map_err(|e| cert_err("the CA certificate", e))?;
-        let cert = params.self_signed(&key).map_err(|e| cert_err("the CA certificate", e))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| cert_err("the CA certificate", e))?;
         out.push(Outcome::Kept(path.to_path_buf()));
         out.push(Outcome::Kept(key_path));
-        return Ok(Ca { cert, key });
+        return Ok(Ca { issuer });
     }
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
@@ -297,7 +402,7 @@ fn load_or_make_ca(path: &Path, out: &mut Vec<Outcome>) -> Result<Ca, CertError>
     write(&key_path, &key.serialize_pem(), true)?;
     out.push(Outcome::Wrote(path.to_path_buf()));
     out.push(Outcome::Wrote(key_path));
-    Ok(Ca { cert, key })
+    Ok(Ca { issuer: rcgen::Issuer::new(params, key) })
 }
 
 /// From a little before now, for clocks slightly behind, to `days` ahead.
@@ -325,8 +430,20 @@ fn issue(
     };
     params.use_authority_key_identifier_extension = true;
     let key = KeyPair::generate().map_err(|e| cert_err(common_name, e))?;
-    let cert = params.signed_by(&key, &ca.cert, &ca.key).map_err(|e| cert_err(common_name, e))?;
+    let cert = params.signed_by(&key, ca.issuer()).map_err(|e| cert_err(common_name, e))?;
     Ok((cert.pem(), key.serialize_pem()))
+}
+
+/// What a client certificate is: a name, a validity, and use for client
+/// authentication only; nothing a requester can add to it.
+fn client_params(principal: &str, days: u32) -> CertificateParams {
+    let mut params = CertificateParams::default();
+    (params.not_before, params.not_after) = validity(days);
+    params.distinguished_name.push(DnType::CommonName, principal);
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    params
 }
 
 fn san(host: &str) -> Result<SanType, CertError> {
