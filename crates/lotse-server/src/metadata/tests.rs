@@ -510,6 +510,74 @@ fn the_certificate_inventory_merges_reports_and_forgets_the_long_expired() {
 }
 
 #[test]
+fn certificate_requests_are_signed_once_lapse_and_survive_a_snapshot() {
+    use crate::metadata::{CertKey, REQUEST_TTL_MS, SIGNED_KEEP_MS};
+    let day = 24 * 3_600_000;
+    let request = |id: u8, at_ms: u64| Change::RequestCertificate {
+        id: [id; 32],
+        principal: "alice".into(),
+        csr: vec![id; 8],
+        requested_by: "admin".into(),
+        at_ms,
+    };
+    let cert = CertKey { issuer: [1; 32], serial: vec![0x42] };
+    let sign = |id: u8, certificate: u8, at_ms: u64| Change::RecordCertificate {
+        id: [id; 32],
+        certificate: vec![certificate; 4],
+        cert: cert.clone(),
+        not_before_ms: 1_000,
+        not_after_ms: 400 * day,
+        at_ms,
+    };
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&request(1, day))).unwrap();
+    // The same request again changes nothing, not even who asked first.
+    let again = Change::RequestCertificate {
+        id: [1; 32],
+        principal: "mallory".into(),
+        csr: vec![9; 8],
+        requested_by: "other".into(),
+        at_ms: 2 * day,
+    };
+    s.apply(2, &payload(&again)).unwrap();
+    assert_eq!(s.cert_requests[&[1; 32]].requested_by, "admin");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // Signing joins the inventory, with no node having seen it, and takes
+    // the certificate once: a second answer does not replace the first.
+    s.apply(3, &payload(&sign(1, 7, 3 * day))).unwrap();
+    s.apply(4, &payload(&sign(1, 8, 3 * day))).unwrap();
+    assert_eq!(s.cert_requests[&[1; 32]].signed.as_ref().unwrap().certificate, vec![7; 4]);
+    let seen = &s.certs[&cert];
+    assert_eq!((seen.principal.as_str(), seen.first_seen_ms, seen.last_seen_ms), ("alice", 0, 0));
+    // A node's first sight then sets the time, though 0 stands for none.
+    let sighting = SeenCert {
+        principal: "alice".into(),
+        not_before_ms: 1_000,
+        not_after_ms: 400 * day,
+        first_seen_ms: 5 * day,
+        last_seen_ms: 5 * day,
+    };
+    s.apply(5, &payload(&Change::RecordCertificates { seen: vec![(cert.clone(), sighting)], at_ms: 5 * day })).unwrap();
+    assert_eq!((s.certs[&cert].first_seen_ms, s.certs[&cert].last_seen_ms), (5 * day, 5 * day));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // An answer to a request nobody made, or one that lapsed, is nothing.
+    s.apply(6, &payload(&sign(9, 1, 6 * day))).unwrap();
+    assert!(!s.cert_requests.contains_key(&[9; 32]));
+    s.apply(7, &payload(&request(2, 10 * day))).unwrap();
+    let lapsed = 10 * day + REQUEST_TTL_MS + 1;
+    s.apply(8, &payload(&sign(2, 1, lapsed))).unwrap();
+    assert!(!s.cert_requests.contains_key(&[2; 32]), "an unsigned request is forgotten after its seven days");
+    // A signed one stays for the keep time after signing, then goes.
+    assert!(s.cert_requests.contains_key(&[1; 32]));
+    s.apply(9, &payload(&request(3, 3 * day + SIGNED_KEEP_MS + 1))).unwrap();
+    assert!(!s.cert_requests.contains_key(&[1; 32]));
+    assert!(s.cert_requests.contains_key(&[3; 32]));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
 fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
     let mut s = MetadataState::default();
     let create = Change::CreateStream {

@@ -117,6 +117,12 @@ public record ApiKey(int id) {
      * exists so the golden vectors round-trip; the client has no call for it.
      */
     public static final ApiKey RECORD_CERTIFICATES = new ApiKey(54);
+    /** Asks the CA holder for a client certificate (cluster admin, ADR 0092). */
+    public static final ApiKey REQUEST_CERTIFICATE = new ApiKey(55);
+    /** Lists the certificate requests (cluster admin, ADR 0092). */
+    public static final ApiKey DESCRIBE_CERTIFICATE_REQUESTS = new ApiKey(56);
+    /** Records the certificate the CA holder signed for a request (cluster admin, ADR 0092). */
+    public static final ApiKey RECORD_CERTIFICATE = new ApiKey(57);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -146,7 +152,8 @@ public record ApiKey(int id) {
             range(DESCRIBE_ROLE_BINDINGS), range(WHO_AM_I), range(ADD_NODE), range(REMOVE_NODE),
             range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER), range(REVOKE_SESSIONS),
             range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(DESCRIBE_CERTIFICATES),
-            range(RECORD_CERTIFICATES), range(PUBLISH));
+            range(RECORD_CERTIFICATES), range(REQUEST_CERTIFICATE), range(DESCRIBE_CERTIFICATE_REQUESTS),
+            range(RECORD_CERTIFICATE), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

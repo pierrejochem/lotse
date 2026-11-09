@@ -3478,6 +3478,16 @@ pub mod certificate_state {
     pub const REVOKED: u8 = 3;
 }
 
+/// Where a certificate request stands (ADR 0092).
+pub mod certificate_request_state {
+    /// Waiting for the CA holder.
+    pub const PENDING: u8 = 0;
+    /// Signed; the certificate is in the entry.
+    pub const SIGNED: u8 = 1;
+    /// Unsigned past its seven days.
+    pub const EXPIRED: u8 = 2;
+}
+
 /// Lists the client certificates the cluster has seen or had revoked
 /// (cluster admin, ADR 0091).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3627,6 +3637,167 @@ impl RecordCertificatesRequest {
         })?;
         r.tags()?;
         Ok(RecordCertificatesRequest { certificates })
+    }
+}
+
+/// Asks the CA holder for a client certificate (cluster admin, ADR 0092).
+/// Answered with [`AdminResponse`]. The request's id is the SHA-256 of
+/// `csr`, so the same request sent twice is one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestCertificateRequest {
+    /// The principal the certificate will name: its common name.
+    pub principal: String,
+    /// A PKCS#10 certificate signing request in DER form, made by the
+    /// requester; its private key never reaches the cluster.
+    pub csr: Bytes,
+}
+
+impl RequestCertificateRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.principal);
+        w.bytes(&self.csr);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let principal = r.string()?;
+        let csr = r.bytes()?;
+        r.tags()?;
+        Ok(RequestCertificateRequest { principal, csr })
+    }
+}
+
+/// Lists the certificate requests (cluster admin, ADR 0092).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeCertificateRequestsRequest;
+
+impl DescribeCertificateRequestsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeCertificateRequestsRequest)
+    }
+}
+
+/// One certificate request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateRequestEntry {
+    /// SHA-256 of the signing request (32 bytes).
+    pub id: Bytes,
+    /// The principal asked for.
+    pub principal: String,
+    /// The signing request, DER.
+    pub csr: Bytes,
+    /// Who asked.
+    pub requested_by: String,
+    /// When, ms since the Unix epoch.
+    pub requested_at_ms: u64,
+    /// When an unsigned request lapses, ms since the Unix epoch.
+    pub expires_at_ms: u64,
+    /// [`certificate_request_state`].
+    pub state: u8,
+    /// The signed certificate, DER; empty until signed.
+    pub certificate: Bytes,
+    /// When it was signed, ms since the Unix epoch; 0 if not yet.
+    pub signed_at_ms: u64,
+}
+
+/// The requests, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeCertificateRequestsResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The answering node's clock, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// The requests.
+    pub requests: Vec<CertificateRequestEntry>,
+}
+
+impl DescribeCertificateRequestsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.u64(self.now_ms);
+        w.array(&self.requests, |w, c| {
+            w.bytes(&c.id);
+            w.string(&c.principal);
+            w.bytes(&c.csr);
+            w.string(&c.requested_by);
+            w.u64(c.requested_at_ms);
+            w.u64(c.expires_at_ms);
+            w.u8(c.state);
+            w.bytes(&c.certificate);
+            w.u64(c.signed_at_ms);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeCertificateRequestsResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            now_ms: r.u64()?,
+            // 4 + 2 + 4 + 2 + 2 * 8 + 1 + 4 + 8 bytes at least.
+            requests: r.array(41, |r| {
+                Ok(CertificateRequestEntry {
+                    id: r.bytes()?,
+                    principal: r.string()?,
+                    csr: r.bytes()?,
+                    requested_by: r.string()?,
+                    requested_at_ms: r.u64()?,
+                    expires_at_ms: r.u64()?,
+                    state: r.u8()?,
+                    certificate: r.bytes()?,
+                    signed_at_ms: r.u64()?,
+                })
+            })?,
+        })
+    }
+}
+
+/// The CA holder records the certificate it signed for a request
+/// (cluster admin, ADR 0092). Answered with [`AdminResponse`]. The broker
+/// does not read the certificate: the facts beside it are the CA holder's
+/// word, and a certificate is only ever as good as its signature at the
+/// handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordCertificateRequest {
+    /// The request it answers: SHA-256 of its signing request.
+    pub id: Bytes,
+    /// The signed certificate, DER.
+    pub certificate: Bytes,
+    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    pub issuer: Bytes,
+    /// The serial number, big-endian.
+    pub serial: Bytes,
+    /// First millisecond it is valid in.
+    pub not_before_ms: u64,
+    /// Millisecond it stops being valid in.
+    pub not_after_ms: u64,
+}
+
+impl RecordCertificateRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.bytes(&self.id);
+        w.bytes(&self.certificate);
+        w.bytes(&self.issuer);
+        w.bytes(&self.serial);
+        w.u64(self.not_before_ms);
+        w.u64(self.not_after_ms);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RecordCertificateRequest {
+            id: r.bytes()?,
+            certificate: r.bytes()?,
+            issuer: r.bytes()?,
+            serial: r.bytes()?,
+            not_before_ms: r.u64()?,
+            not_after_ms: r.u64()?,
+        };
+        r.tags()?;
+        Ok(req)
     }
 }
 

@@ -481,6 +481,41 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         .await
     }
 
+    /// Asks the CA holder for a client certificate for `principal`, with a
+    /// PKCS#10 signing request in DER form (ADR 0092). The private key stays
+    /// with whoever made the request. Needs the cluster-admin role.
+    pub async fn request_certificate(&self, principal: &str, csr: Vec<u8>) -> Result<(), ClientError> {
+        self.admin_change(Request::RequestCertificate(lotse_proto::RequestCertificateRequest {
+            principal: principal.into(),
+            csr: csr.into(),
+        }))
+        .await
+    }
+
+    /// The certificate requests, newest first (ADR 0092). Needs the
+    /// cluster-admin role.
+    pub async fn describe_certificate_requests(
+        &self,
+    ) -> Result<lotse_proto::DescribeCertificateRequestsResponse, ClientError> {
+        let req = Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeCertificateRequests(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Records the certificate the CA holder signed for a request (ADR 0092).
+    /// Needs the cluster-admin role.
+    pub async fn record_certificate(&self, req: lotse_proto::RecordCertificateRequest) -> Result<(), ClientError> {
+        self.admin_change(Request::RecordCertificate(req)).await
+    }
+
     /// Adds and removes role bindings; removals first.
     pub async fn alter_role_bindings(
         &self,

@@ -22,6 +22,7 @@ bytes.workspace = true
 crc32c.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 lotse-sim.workspace = true

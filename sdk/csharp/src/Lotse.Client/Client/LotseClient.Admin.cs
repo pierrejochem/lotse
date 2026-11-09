@@ -415,6 +415,72 @@ public sealed partial class LotseClient
             cancellationToken);
     }
 
+    /// <summary>
+    /// Asks for a certificate with a PKCS#10 signing request the requester made; its private key never reaches the
+    /// cluster. The request's id is the SHA-256 of <paramref name="csr"/>, so asking twice is one request. Needs the
+    /// cluster-admin role.
+    /// </summary>
+    /// <param name="principal">The principal the certificate will name: its common name.</param>
+    /// <param name="csr">The signing request in DER form.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task RequestCertificateAsync(string principal, byte[] csr, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(principal);
+        ArgumentNullException.ThrowIfNull(csr);
+        return AdminChangeAsync(new Request.RequestCertificate(principal, ByteString.CopyOf(csr)), cancellationToken);
+    }
+
+    /// <summary>
+    /// The certificate requests, newest first, with the answering node's clock. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<Messages.CertificateRequests> DescribeCertificateRequestsAsync(CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return await RetryingAsync<Messages.CertificateRequests>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(new Request.DescribeCertificateRequests(), cancellationToken).ConfigureAwait(false);
+                if (r is not Response.DescribeCertificateRequests d)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(d.Error, d.LeaderHint, null);
+                return new Messages.CertificateRequests(d.NowMs, d.Requests);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The CA holder records the certificate it signed for a request. The broker does not read the certificate: the
+    /// facts beside it are the CA holder's word. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="id">The request it answers: SHA-256 of its signing request (32 bytes).</param>
+    /// <param name="certificate">The signed certificate, DER.</param>
+    /// <param name="issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="serial">The serial number, big-endian.</param>
+    /// <param name="notBeforeMs">First millisecond it is valid in, since the epoch.</param>
+    /// <param name="notAfterMs">Millisecond it stops being valid in, since the epoch.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task RecordCertificateAsync(
+        byte[] id, byte[] certificate, byte[] issuer, byte[] serial, long notBeforeMs, long notAfterMs,
+        CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(id);
+        ArgumentNullException.ThrowIfNull(certificate);
+        ArgumentNullException.ThrowIfNull(issuer);
+        ArgumentNullException.ThrowIfNull(serial);
+        ArgumentOutOfRangeException.ThrowIfNegative(notBeforeMs);
+        ArgumentOutOfRangeException.ThrowIfNegative(notAfterMs);
+        return AdminChangeAsync(
+            new Request.RecordCertificate(
+                ByteString.CopyOf(id), ByteString.CopyOf(certificate), ByteString.CopyOf(issuer), ByteString.CopyOf(serial),
+                (ulong)notBeforeMs, (ulong)notAfterMs),
+            cancellationToken);
+    }
+
     // ---- nodes, pins and partitions ----
 
     /// <summary>

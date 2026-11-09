@@ -389,6 +389,19 @@ pub fn requests() -> Vec<Request> {
             ],
         }),
         Request::RecordCertificates(RecordCertificatesRequest { certificates: Vec::new() }),
+        Request::RequestCertificate(RequestCertificateRequest {
+            principal: "alice".into(),
+            csr: Bytes::from_static(&[0x30, 0x82, 0x01, 0x02, 0x03]),
+        }),
+        Request::DescribeCertificateRequests(DescribeCertificateRequestsRequest),
+        Request::RecordCertificate(RecordCertificateRequest {
+            id: Bytes::from_static(&[5; 32]),
+            certificate: Bytes::from_static(&[0x30, 0x82, 0x04, 0x05]),
+            issuer: Bytes::from_static(&[7; 32]),
+            serial: Bytes::from_static(&[0x01, 0xab, 0xcd]),
+            not_before_ms: 1_700_000_000_000,
+            not_after_ms: 1_800_000_000_000,
+        }),
     ]
 }
 
@@ -797,6 +810,46 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         (
             ApiKey::RECORD_CERTIFICATES,
             Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::REQUEST_CERTIFICATE,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::RECORD_CERTIFICATE,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::DESCRIBE_CERTIFICATE_REQUESTS,
+            Response::DescribeCertificateRequests(DescribeCertificateRequestsResponse {
+                error: ErrorCode::NONE,
+                leader_hint: Some(LeaderHint { leader: 1, term: 2 }),
+                now_ms: 1_750_000_000_000,
+                requests: vec![
+                    CertificateRequestEntry {
+                        id: Bytes::from_static(&[5; 32]),
+                        principal: "alice".into(),
+                        csr: Bytes::from_static(&[0x30, 0x82, 0x01, 0x02, 0x03]),
+                        requested_by: "admin".into(),
+                        requested_at_ms: 1_749_000_000_000,
+                        expires_at_ms: 1_749_604_800_000,
+                        state: certificate_request_state::SIGNED,
+                        certificate: Bytes::from_static(&[0x30, 0x82, 0x04, 0x05]),
+                        signed_at_ms: 1_749_100_000_000,
+                    },
+                    CertificateRequestEntry {
+                        id: Bytes::from_static(&[6; 32]),
+                        principal: "bob".into(),
+                        csr: Bytes::from_static(&[0x30, 0x01]),
+                        requested_by: "admin".into(),
+                        requested_at_ms: 1_749_200_000_000,
+                        expires_at_ms: 1_749_804_800_000,
+                        state: certificate_request_state::PENDING,
+                        certificate: Bytes::new(),
+                        signed_at_ms: 0,
+                    },
+                ],
+            }),
         ),
         (
             ApiKey::DESCRIBE_TENANTS,

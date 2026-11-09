@@ -1035,6 +1035,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utoipa",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]
@@ -1052,6 +1053,7 @@ dependencies = [
 name = "lotse-node"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "bytes",
  "lotse-client",
  "lotse-log",
@@ -1062,6 +1064,7 @@ dependencies = [
  "lotse-server",
  "rcgen",
  "serde",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -1167,6 +1170,7 @@ dependencies = [
  "lotse-sim",
  "regex",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "tokio",
 ]

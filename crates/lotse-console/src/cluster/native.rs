@@ -1067,6 +1067,36 @@ impl Cluster for NativeCluster {
         Ok(CertificatesView { certificates, now_ms: d.now_ms })
     }
 
+    async fn certificate_requests(&self, who: &Identity) -> ApiResult<CertificateRequestsView> {
+        let d = self.seat(who).client.describe_certificate_requests().await.map_err(failed)?;
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let requests = d
+            .requests
+            .iter()
+            .map(|r| CertificateRequestRow {
+                id: hex(&r.id),
+                principal: r.principal.clone(),
+                requested_by: r.requested_by.clone(),
+                requested_at_ms: r.requested_at_ms,
+                expires_at_ms: r.expires_at_ms,
+                state: match r.state {
+                    lotse_proto::certificate_request_state::SIGNED => "signed",
+                    lotse_proto::certificate_request_state::EXPIRED => "expired",
+                    _ => "pending",
+                }
+                .into(),
+                key_fingerprint: crate::certs::key_fingerprint(&r.csr).unwrap_or_default(),
+                certificate: if r.certificate.is_empty() { String::new() } else { crate::certs::pem(&r.certificate) },
+                signed_at_ms: r.signed_at_ms,
+            })
+            .collect();
+        Ok(CertificateRequestsView { requests, now_ms: d.now_ms })
+    }
+
+    async fn request_certificate(&self, who: &Identity, principal: &str, csr: Vec<u8>) -> ApiResult<()> {
+        self.seat(who).client.request_certificate(principal, csr).await.map_err(|e| refused("the request", e))
+    }
+
     async fn revoke_certificate(
         &self,
         who: &Identity,

@@ -22,6 +22,7 @@ lotse-rt.workspace = true
 bytes.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true
+sha2.workspace = true
 time.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -31,6 +32,7 @@ tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 
 [dev-dependencies]
+base64.workspace = true
 lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 
 [lints]

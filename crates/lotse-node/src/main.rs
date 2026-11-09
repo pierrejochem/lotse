@@ -16,6 +16,7 @@ usage:
   lotse certs --config <cluster.toml> [--days <n>]
   lotse certs --config <cluster.toml> --client <principal> --out <dir> [--days <n>]
   lotse certs --config <cluster.toml> --revoke <cert.pem>
+  lotse certs --config <cluster.toml> --sign [--request <id>] [--yes] [--out <dir>] [--days <n>] <admin>
   lotse check --config <cluster.toml>
   lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port>] <admin>
   lotse node remove --config <cluster.toml> --node <id> <admin>
@@ -32,7 +33,12 @@ certs  makes the cluster's CA and every node's certificate where [tls] says,
        are valid for --days (default 365), a new CA for 3650. --revoke adds
        a certificate to the revocation list [tls] crl names; copy the list
        to every node, which picks it up within 10 s, as it does renewed
-       certificates.
+       certificates. --sign, on the machine with the CA key, lists the
+       certificate requests cluster admins made in the console, shows each
+       one's principal and key fingerprint, signs those you confirm (--yes
+       with --request <id>, the id or its first digits, signs without
+       asking) and records the certificates in the cluster; --out also
+       writes each as <principal>.pem.
 check  reads the file and says what it describes, and which certificates
        expire within 30 days.
 node   adds a node (addresses from its [[node]] entry unless given), drains
@@ -54,6 +60,9 @@ struct Args {
     user: Option<String>,
     days: Option<u32>,
     revoke: Option<PathBuf>,
+    sign: bool,
+    request: Option<String>,
+    yes: bool,
 }
 
 fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -80,6 +89,9 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
                 a.days = Some(days.ok_or_else(|| format!("--days {v}: a number of days, at least 1"))?);
             }
             "--revoke" => a.revoke = Some(PathBuf::from(value()?)),
+            "--sign" => a.sign = true,
+            "--request" => a.request = Some(value()?.to_lowercase()),
+            "--yes" => a.yes = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -177,6 +189,12 @@ async fn shutdown() {
 
 fn certs(a: &Args) -> Result<(), String> {
     let file = load(a)?;
+    if a.sign {
+        if a.client.is_some() || a.revoke.is_some() {
+            return Err("--sign goes alone".into());
+        }
+        return sign(&file, a);
+    }
     if let Some(cert) = &a.revoke {
         if a.client.is_some() || a.days.is_some() {
             return Err("--revoke goes alone".into());
@@ -211,6 +229,98 @@ fn certs(a: &Args) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `lotse certs --sign`: the pending requests, signed as the CA holder
+/// confirms and recorded in the cluster as the admin the flags name.
+fn sign(file: &ClusterFile, a: &Args) -> Result<(), String> {
+    if a.yes && a.request.is_none() {
+        return Err("--yes needs --request <id>: it signs that request without asking, never all of them".into());
+    }
+    let identity = match (&a.cert, &a.key) {
+        (Some(c), Some(k)) => Some((c.clone(), k.clone())),
+        (None, None) => None,
+        _ => return Err("--cert and --key go together".into()),
+    };
+    let scram = match &a.user {
+        Some(u) => {
+            let password = std::env::var("LOTSE_PASSWORD").map_err(|_| "--user needs LOTSE_PASSWORD")?;
+            Some((u.clone(), password))
+        }
+        None => None,
+    };
+    let days = a.days.unwrap_or(certs::LEAF_DAYS);
+    let client = lotse_node::admin_client(file, identity, scram).map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let listed = client.describe_certificate_requests().await.map_err(|e| e.to_string())?;
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let pending: Vec<_> = listed
+            .requests
+            .iter()
+            .filter(|r| r.state == lotse_proto::certificate_request_state::PENDING)
+            .filter(|r| a.request.as_ref().is_none_or(|p| hex(&r.id).starts_with(p.as_str())))
+            .collect();
+        if pending.is_empty() {
+            println!("no certificate requests are waiting");
+            return Ok(());
+        }
+        if a.request.is_some() && pending.len() > 1 {
+            return Err(format!("--request matches {} requests: give more digits of the id", pending.len()));
+        }
+        let mut signed = 0;
+        for r in pending {
+            let id = hex(&r.id);
+            let info = match certs::read_csr(&r.csr, &r.principal) {
+                Ok(info) => info,
+                Err(e) => {
+                    println!("{}  {}: skipped, {e}", &id[..12], r.principal);
+                    continue;
+                }
+            };
+            println!(
+                "request {}  principal {}  asked by {}\n  key fingerprint {}",
+                &id[..12],
+                r.principal,
+                r.requested_by,
+                info.key_fingerprint
+            );
+            if !a.yes && !confirm(&format!("sign a client certificate for {} valid for {days} days?", r.principal))? {
+                println!("  left for later");
+                continue;
+            }
+            let made = certs::sign_csr(file, &r.csr, &r.principal, days).map_err(|e| e.to_string())?;
+            client
+                .record_certificate(lotse_proto::RecordCertificateRequest {
+                    id: r.id.clone(),
+                    certificate: made.der.clone().into(),
+                    issuer: made.issuer.to_vec().into(),
+                    serial: made.serial.clone().into(),
+                    not_before_ms: made.not_before_ms,
+                    not_after_ms: made.not_after_ms,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("  signed: serial {}; recorded, the requester can download it in the console", hex(&made.serial));
+            if let Some(dir) = &a.out {
+                let path = certs::write_certificate(dir, &r.principal, &made.pem).map_err(|e| e.to_string())?;
+                println!("  wrote {}", path.display());
+            }
+            signed += 1;
+        }
+        println!("{signed} signed");
+        Ok(())
+    })
+}
+
+/// Asks on the terminal; anything but `y` or `yes` is no.
+fn confirm(question: &str) -> Result<bool, String> {
+    use std::io::Write as _;
+    print!("  {question} [y/N] ");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 fn check(a: &Args) -> Result<(), String> {
