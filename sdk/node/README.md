@@ -4,7 +4,7 @@ A client for the Lotse native protocol in TypeScript, for Node.js 20 and later. 
 
 ## Status
 
-Phase 6 of 8 is done: the admin calls, on top of transactions, publishing and consumer groups. The client creates streams and queues, produces idempotently, reads committed records, finds offsets, consumes queues with credit, acks, nacks, delayed requeues, standbys of a single active consumer and dead-letter headers, runs transactions (produce, publish, queue acks, group offsets), publishes through exchanges, declares and binds exchanges, joins consumer groups, and administers a cluster: deletes, settings, purge and requeue, users, tenants, role bindings, nodes, pinned leaders, partitions, revoked sessions and node metrics.
+Phase 7 of 8 is done: the examples, on top of the admin calls, transactions, publishing and consumer groups. The client creates streams and queues, produces idempotently, reads committed records, finds offsets, consumes queues with credit, acks, nacks, delayed requeues, standbys of a single active consumer and dead-letter headers, runs transactions (produce, publish, queue acks, group offsets), publishes through exchanges, declares and binds exchanges, joins consumer groups, and administers a cluster: deletes, settings, purge and requeue, users, tenants, role bindings, nodes, pinned leaders, partitions, revoked sessions and node metrics.
 
 | Module | What |
 | --- | --- |
@@ -93,7 +93,7 @@ consumer.close();
 The consumer follows `lotse-client` and the Java `QueueConsumer` rule for rule; [`../PROTOCOL.md`](../PROTOCOL.md) lists them under "Client behaviour: queues".
 
 - **Credit.** `credit` (default 64, at least 1) is how many messages the leader may push before they are counted as used. At most that many wait unprocessed in the client. After a message is handed out and half the credit (rounded up) is used, the consumer sends the used messages and bytes back as new credit.
-- **Reading.** `next()` waits for a message, `poll(waitMs)` resolves `null` when none came, and `for await (const d of consumer)` yields until the consumer is closed. Leaving the loop does not close the consumer. A signal in the options ends `poll` with `null`, ends the iterator, and makes `next` reject with `GaveUpError`. Reads called together take turns.
+- **Reading.** `next()` waits for a message, `poll(waitMs)` resolves `null` when none came, and `for await (const d of consumer)` yields until the consumer is closed. Leaving the loop does not close the consumer. A signal in the options of `poll`, `next` or `deliveries({ signal })` ends `poll` with `null`, ends that iterator, and makes `next` reject with `GaveUpError`. A signal given to `subscribe` only gives up the subscribing; `for await (const d of consumer)` without options has no signal, so leave that loop with `break` or use `deliveries({ signal })`. Reads called together take turns.
 - **A `Delivery`** has `offset`, `deliveryCount` (this delivery included; more than 1 means an earlier one was not acknowledged; a lower bound, since a failover can start it over), `timestamp`, `key`, `value`, `headers`, `text()` and `deadLetter()`, which reads the `x-lotse-dead-letter-*` headers of a message the broker moved from another queue (`reason`, `queue`, `queueId`, `offset`, `deliveries`, `floor`).
 - **Settling.** `ack(delivery | deliveries)` names offsets as `[from, to)` ranges, sorted as `u64`, and is retried: settling twice is harmless, and a message that went to someone else meanwhile is still settled. `nack(d, false)` discards (or dead-letters) like an ack. `nack(d, true)` and `nackAfter(d, delayMs)` (ADR 0077) give the message back on the subscription's own connection and are not retried; if the subscription has ended, the message went back with it and the call does nothing.
 - **Ending and subscribing again.** A push with an error, a broken connection, a leader change or an ack timeout ends the subscription. The consumer hands out what it holds and subscribes again on its next read, following a leader hint. Messages it held may meanwhile have gone to others, so they can arrive twice, with a higher `deliveryCount`.
@@ -220,11 +220,33 @@ zstd and lz4 are read and written ([ADR 0085](../../docs/adr/0085-codecs-in-the-
 - **zstd** is `node:zlib`'s, which has it from Node.js 22.15 and 23.8 and in 24. On Node.js 20 and earlier 22 versions, reading or building a zstd batch rejects with `RecordFormatError` of kind `UNSUPPORTED_COMPRESSION`, naming the codec and what to do. To read zstd there anyway, give the SDK a codec of your own: `registerCodec(Compression.ZSTD, { compress, decompress })` with functions from a package you choose; `registerCodec(Compression.ZSTD, undefined)` removes it.
 - A block is at most 16 MiB once decompressed; one byte more is `TOO_LARGE`. A block that does not decode is `MALFORMED`. A compacted batch with no records reads as empty whatever its codec, because compaction writes no block for it.
 
+## Examples
+
+`examples/` holds four programs and a helper, written to run against a cluster. They are compiled by the same `tsc` run as the library, so `npm test` fails when one no longer fits the API. They mirror the Java examples ([`../java/src/examples`](../java/src/examples)) with the same scenarios and the same output.
+
+| Script | What |
+| --- | --- |
+| `npm run example:stream` | Creates the stream `example-orders` (2 partitions), writes ten messages by customer key and reads them back. |
+| `npm run example:queue` | Work queue `example-jobs` with the dead-letter queue `example-jobs-dead`: `job-3` fails every time and is requeued with `nackAfter` after 1 s; after three deliveries it arrives in the dead-letter queue with the reason `max-deliveries`. |
+| `npm run example:exactly-once` | A group member reads `example-orders` (run the stream example first), writes an invoice for each order to `example-invoices`, and commits the invoices and the group's offsets in one transaction with `sendOffsets`. A failed transaction is aborted and the member reads the same orders again. It stops after 20 s. |
+| `npm run example:idiomatic` | The Node.js shape: `await using` for a transaction (one committed, one left without `commit` and aborted at the end of its scope), `for await` over `readRecords` and over a queue consumer. Needs nothing from the other examples. |
+
+Each script compiles with `tsc` and then runs `node dist/examples/<name>.js`, so after `npm run build` you can run that file directly. Every example closes its client and ends by itself. The resources are created if they are missing and kept, so the examples can run again; the idiomatic example adds a committed ledger record on each run.
+
+The connection settings come from the environment, with the same names as the Java examples (`examples/env.ts`):
+
+| Variable | Meaning |
+| --- | --- |
+| `LOTSE_BOOTSTRAP` | Brokers, `host:port` separated by commas. Default `127.0.0.1:9092`. |
+| `LOTSE_CA` | PEM file of the cluster's CA. Without it the examples use plain TCP, which the client allows on loopback only. |
+| `LOTSE_CERT`, `LOTSE_KEY` | A client certificate and its PKCS#8 key, with `LOTSE_CA`. |
+| `LOTSE_USER`, `LOTSE_PASSWORD` | A SCRAM-SHA-512 login, if the cluster asks for one. |
+
 ## Tests
 
 ```sh
 npm ci
-npm test        # compiles to dist/, then runs node:test on dist/test
+npm test        # compiles the library, tests and examples to dist/, then runs node:test on dist/test
 ```
 
 or `make sdk-node-test` from the repository root. The tests decode every vector in `sdk/conformance` and write it again to identical bytes, refuse each vector cut at every length and with one byte added, and check the fixed cases for CRC32C, varints, error codes and in-place batch edits. Set `LOTSE_CONFORMANCE` to read the vectors from another directory.
