@@ -286,3 +286,23 @@ mod roles {
         assert_eq!(Role::from_code(6), None);
     }
 }
+
+/// The console's browser derives credentials with WebCrypto
+/// (`console/web/src/scramCredential.ts`, ADR 0089). Both sides check the
+/// same literals, computed outside this code base with PBKDF2-HMAC-SHA-512
+/// and HMAC-SHA-512, so a drift in either one fails a test.
+#[test]
+fn the_credential_matches_the_browsers_vector() {
+    use base64::Engine as _;
+    let salt: Vec<u8> = (0..16).collect();
+    let c = ScramCredential::new("correct horse battery staple", &salt, MIN_ITERATIONS);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    assert_eq!(
+        b64.encode(&c.stored_key),
+        "133LyyyTZ9u5IxaWPaWk5l5TKP2fEQFyDZSCuv3A0BNEgOl12WJueHXEA4U0zvd8TvaaXp8dVHFJTV2VvQOaAg=="
+    );
+    assert_eq!(
+        b64.encode(&c.server_key),
+        "g8+8PdM5XuazUPbNGNF2tHolTXi0sKq726W8O6Rxo6ojgek5eSxEeRvKezIBKIr9zgQiZ0TMBHNhodkJr8OyFw=="
+    );
+}

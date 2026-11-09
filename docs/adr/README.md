@@ -92,5 +92,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0085 | [Codecs in the Node.js SDK](0085-codecs-in-the-nodejs-sdk.md) | Accepted |
 | 0087 | [Group subscriptions are kept as named](0087-group-subscriptions-are-kept-as-named.md) | Accepted |
 | 0088 | [Simulations gate the release, not the pull request](0088-simulations-gate-the-release.md) | Accepted; changes 0082 |
+| 0089 | [Console users and access](0089-console-users-and-access.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

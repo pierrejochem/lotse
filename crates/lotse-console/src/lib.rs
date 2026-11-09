@@ -27,7 +27,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 
 use crate::auth::{AuthConfig, Sessions};
 use crate::cluster::Cluster;
@@ -83,6 +83,11 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/queues/{name}/requeue", post(api::requeue))
         .route("/clusters/{cluster}/leaders", post(api::move_leader))
         .route("/clusters/{cluster}/tenants", get(api::tenants))
+        .route("/clusters/{cluster}/users", get(api::users).post(api::create_user))
+        .route("/clusters/{cluster}/users/{name}/credential", put(api::set_credential))
+        .route("/clusters/{cluster}/users/{name}", delete(api::delete_user))
+        .route("/clusters/{cluster}/bindings", get(api::bindings).post(api::add_binding).delete(api::remove_binding))
+        .route("/clusters/{cluster}/sessions/revoke", post(api::revoke_sessions))
         .route("/clusters/{cluster}/metrics", get(api::metrics))
         .route("/ws", get(ws::upgrade))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::session_layer));

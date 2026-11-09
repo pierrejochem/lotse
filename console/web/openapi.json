@@ -32,6 +32,162 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/bindings": {
+      "get": {
+        "tags": [],
+        "summary": "Role bindings: all for a cluster admin, one's own for everyone else.",
+        "operationId": "bindings",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindingsView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "summary": "Adds a role binding.",
+        "operationId": "add_binding",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindingRow"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "summary": "Removes a role binding.",
+        "operationId": "remove_binding",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindingRow"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/leaders": {
       "post": {
         "tags": [],
@@ -538,6 +694,66 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/sessions/revoke": {
+      "post": {
+        "tags": [],
+        "summary": "Ends the sessions of a user or an IdP group that began before now.\nDestructive: the body names the subject again.",
+        "operationId": "revoke_sessions",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeSessions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/streams": {
       "get": {
         "tags": [],
@@ -791,6 +1007,252 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/users": {
+      "get": {
+        "tags": [],
+        "summary": "SCRAM users. The broker lets only cluster admins list them.",
+        "operationId": "users",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsersView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "summary": "Creates a user with a credential the browser derived.",
+        "operationId": "create_user",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/users/{name}": {
+      "delete": {
+        "tags": [],
+        "summary": "Deletes a user. Destructive: the body names the user again.",
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/users/{name}/credential": {
+      "put": {
+        "tags": [],
+        "summary": "Sets a new password for a user, as a derived credential.",
+        "operationId": "set_credential",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me": {
       "get": {
         "tags": [],
@@ -911,6 +1373,64 @@
               "null"
             ],
             "description": "Explanation of a handover in progress."
+          }
+        }
+      },
+      "BindingRow": {
+        "type": "object",
+        "description": "A role binding with its tenant, prefix and where it comes from.",
+        "required": [
+          "subject_kind",
+          "subject",
+          "role",
+          "tenant",
+          "prefix"
+        ],
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "description": "Name prefix the binding covers; empty means every name."
+          },
+          "role": {
+            "type": "string",
+            "description": "`cluster-admin`, `cluster-viewer`, `tenant-admin`, `producer`,\n`consumer` or `viewer`."
+          },
+          "source": {
+            "type": "string",
+            "description": "`configuration` (read only) or `runtime`. Ignored in requests."
+          },
+          "subject": {
+            "type": "string",
+            "description": "User name or group name."
+          },
+          "subject_kind": {
+            "type": "string",
+            "description": "`user` or `group` (a group at the identity provider)."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Tenant; empty for the two cluster-wide roles."
+          }
+        }
+      },
+      "BindingsView": {
+        "type": "object",
+        "description": "The role bindings screen.",
+        "required": [
+          "bindings",
+          "can_edit"
+        ],
+        "properties": {
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BindingRow"
+            },
+            "description": "Every binding the caller may see: all of them for a cluster admin,\nthe caller's own for everyone else."
+          },
+          "can_edit": {
+            "type": "boolean",
+            "description": "Whether the caller may change bindings."
           }
         }
       },
@@ -1039,6 +1559,57 @@
           }
         }
       },
+      "CreateUser": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Credential",
+            "description": "The credential."
+          },
+          {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "New user name."
+              }
+            }
+          }
+        ],
+        "description": "Request to create a user with a credential."
+      },
+      "Credential": {
+        "type": "object",
+        "description": "A SCRAM credential derived in the browser (ADR 0089). There is no\npassword field: the console never sees one.",
+        "required": [
+          "salt",
+          "iterations",
+          "stored_key",
+          "server_key"
+        ],
+        "properties": {
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PBKDF2 iterations; the broker refuses fewer than its minimum.",
+            "minimum": 0
+          },
+          "salt": {
+            "type": "string",
+            "description": "Salt, base64."
+          },
+          "server_key": {
+            "type": "string",
+            "description": "`ServerKey`, base64."
+          },
+          "stored_key": {
+            "type": "string",
+            "description": "`H(ClientKey)`, base64."
+          }
+        }
+      },
       "DeadLetter": {
         "type": "object",
         "description": "A dead-lettered message.",
@@ -1075,6 +1646,19 @@
           "reason": {
             "type": "string",
             "description": "Why it was dead-lettered."
+          }
+        }
+      },
+      "DeleteUser": {
+        "type": "object",
+        "description": "Request to delete a user. Destructive: names the user again.",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "The user's name, typed again."
           }
         }
       },
@@ -2176,6 +2760,29 @@
           "catching_up"
         ]
       },
+      "RevokeSessions": {
+        "type": "object",
+        "description": "Request to revoke the sessions of a user or an IdP group (ADR 0070).\nDestructive: names the subject again.",
+        "required": [
+          "subject",
+          "group",
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "The subject's name, typed again."
+          },
+          "group": {
+            "type": "boolean",
+            "description": "`true` for a group at the identity provider."
+          },
+          "subject": {
+            "type": "string",
+            "description": "User name or group name."
+          }
+        }
+      },
       "RoleBinding": {
         "type": "object",
         "description": "A role binding.",
@@ -2702,6 +3309,60 @@
           "status": {
             "$ref": "#/components/schemas/Chip",
             "description": "Status chip."
+          }
+        }
+      },
+      "UserRow": {
+        "type": "object",
+        "description": "A SCRAM user. Key material never leaves the cluster, so a row says only\nhow the user is stored.",
+        "required": [
+          "name",
+          "mechanism",
+          "iterations",
+          "source",
+          "roles"
+        ],
+        "properties": {
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PBKDF2 iterations of the stored credential.",
+            "minimum": 0
+          },
+          "mechanism": {
+            "type": "string",
+            "description": "`SCRAM-SHA-512`."
+          },
+          "name": {
+            "type": "string",
+            "description": "User name, the principal in role bindings."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Bindings that name this user, as `role (tenant)` texts."
+          },
+          "source": {
+            "type": "string",
+            "description": "`configuration` (read only) or `runtime`."
+          }
+        }
+      },
+      "UsersView": {
+        "type": "object",
+        "description": "The users screen.",
+        "required": [
+          "users"
+        ],
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRow"
+            },
+            "description": "SCRAM users, by name."
           }
         }
       }

@@ -48,12 +48,78 @@ struct State {
     requeued: BTreeSet<String>,
     /// Partitions pinned to a node, by resource and partition.
     pins: BTreeMap<(String, u32), String>,
+    /// Users created or changed here, by name, with their iterations; the
+    /// demo's sample users are `SAMPLE_USERS`. Deleted names are in `gone`.
+    users: BTreeMap<String, u32>,
+    gone: BTreeSet<String>,
+    /// Bindings added and removed here, over `sample_bindings`.
+    added: Vec<BindingRow>,
+    removed: Vec<BindingRow>,
+    /// Subjects whose sessions were revoked: `(group, name)`.
+    revoked: BTreeSet<(bool, String)>,
+}
+
+/// Users the demo cluster starts with, as `(name, configured)`.
+const SAMPLE_USERS: [(&str, bool); 3] = [("pierre", true), ("ingest-service", false), ("billing-reader", false)];
+
+const ROLES: [&str; 6] = ["cluster-admin", "cluster-viewer", "tenant-admin", "producer", "consumer", "viewer"];
+
+fn binding(kind: &str, subject: &str, role: &str, tenant: &str, prefix: &str, source: &str) -> BindingRow {
+    BindingRow {
+        subject_kind: kind.into(),
+        subject: subject.into(),
+        role: role.into(),
+        tenant: tenant.into(),
+        prefix: prefix.into(),
+        source: source.into(),
+    }
+}
+
+fn sample_bindings() -> Vec<BindingRow> {
+    vec![
+        binding("user", "pierre", "cluster-admin", "", "", "configuration"),
+        binding("group", "platform-team", "cluster-viewer", "", "", "runtime"),
+        binding("user", "ingest-service", "producer", "payments", "events.", "runtime"),
+        binding("user", "billing-reader", "consumer", "payments", "", "runtime"),
+    ]
+}
+
+/// A binding as the broker keys it: cluster-wide roles have no tenant.
+fn normalised(b: &BindingRow) -> ApiResult<BindingRow> {
+    if !["user", "group"].contains(&b.subject_kind.as_str()) {
+        return Err(ApiError::BadRequest(format!("\"{}\" is not a subject kind: use user or group.", b.subject_kind)));
+    }
+    if !ROLES.contains(&b.role.as_str()) {
+        return Err(ApiError::BadRequest(format!("\"{}\" is not a role.", b.role)));
+    }
+    let wide = b.role.starts_with("cluster-");
+    if !wide && b.tenant.is_empty() {
+        return Err(ApiError::BadRequest(format!("The role {} needs a tenant.", b.role)));
+    }
+    let mut n = b.clone();
+    n.source = "runtime".into();
+    if wide {
+        n.tenant.clear();
+        n.prefix.clear();
+    }
+    Ok(n)
 }
 
 impl DemoCluster {
     /// A demo cluster called `id`.
     pub fn new(id: impl Into<String>) -> Self {
         DemoCluster { id: id.into(), started: Instant::now(), state: Mutex::new(State::default()) }
+    }
+
+    /// The sample bindings and what was added or removed since.
+    fn bindings_of(&self, st: &State) -> Vec<BindingRow> {
+        let key = |x: &BindingRow| {
+            (x.subject_kind.clone(), x.subject.clone(), x.role.clone(), x.tenant.clone(), x.prefix.clone())
+        };
+        let mut all: Vec<BindingRow> =
+            sample_bindings().into_iter().filter(|b| !st.removed.iter().any(|r| key(r) == key(b))).collect();
+        all.extend(st.added.iter().cloned());
+        all
     }
 
     fn secs(&self) -> f64 {
@@ -916,6 +982,95 @@ impl Cluster for DemoCluster {
                 Ok(())
             }
         }
+    }
+    async fn users(&self, _who: &Identity) -> ApiResult<UsersView> {
+        let st = self.lock();
+        let bindings = self.bindings_of(&st);
+        let mut names: BTreeMap<String, (u32, bool)> = SAMPLE_USERS
+            .iter()
+            .filter(|(n, _)| !st.gone.contains(*n))
+            .map(|(n, configured)| ((*n).to_string(), (4096, *configured)))
+            .collect();
+        for (n, it) in &st.users {
+            names.entry(n.clone()).and_modify(|e| e.0 = *it).or_insert((*it, false));
+        }
+        let users = names
+            .into_iter()
+            .map(|(name, (iterations, configured))| UserRow {
+                roles: bindings
+                    .iter()
+                    .filter(|b| b.subject_kind == "user" && b.subject == name)
+                    .map(|b| if b.tenant.is_empty() { b.role.clone() } else { format!("{} ({})", b.role, b.tenant) })
+                    .collect(),
+                name,
+                mechanism: "SCRAM-SHA-512".into(),
+                iterations,
+                source: if configured { "configuration" } else { "runtime" }.into(),
+            })
+            .collect();
+        Ok(UsersView { users })
+    }
+
+    async fn set_user_credential(&self, _who: &Identity, name: &str, credential: &Credential) -> ApiResult<()> {
+        if credential.iterations < 4096 {
+            return Err(ApiError::BadRequest("The cluster refused the password: too few iterations.".into()));
+        }
+        if SAMPLE_USERS.iter().any(|(n, configured)| *n == name && *configured) {
+            return Err(ApiError::BadRequest(format!("{name} comes from the configuration and cannot be changed.")));
+        }
+        let mut st = self.lock();
+        st.gone.remove(name);
+        st.users.insert(name.into(), credential.iterations);
+        Ok(())
+    }
+
+    async fn delete_user(&self, _who: &Identity, name: &str) -> ApiResult<()> {
+        let mut st = self.lock();
+        if SAMPLE_USERS.iter().any(|(n, configured)| *n == name && *configured) {
+            return Err(ApiError::BadRequest(format!("{name} comes from the configuration and cannot be deleted.")));
+        }
+        let known = st.users.remove(name).is_some() || SAMPLE_USERS.iter().any(|(n, _)| *n == name);
+        if !known || st.gone.contains(name) {
+            return Err(ApiError::NotFound(format!("There is no user \"{name}\" on this cluster.")));
+        }
+        st.gone.insert(name.into());
+        Ok(())
+    }
+
+    async fn bindings(&self, _who: &Identity) -> ApiResult<BindingsView> {
+        let st = self.lock();
+        Ok(BindingsView { bindings: self.bindings_of(&st), can_edit: true })
+    }
+
+    async fn alter_binding(&self, _who: &Identity, binding: &BindingRow, add: bool) -> ApiResult<()> {
+        let b = normalised(binding)?;
+        let same = |x: &BindingRow| {
+            (&x.subject_kind, &x.subject, &x.role, &x.tenant, &x.prefix)
+                == (&b.subject_kind, &b.subject, &b.role, &b.tenant, &b.prefix)
+        };
+        let mut st = self.lock();
+        if add {
+            st.removed.retain(|x| !same(x));
+            if !sample_bindings().iter().any(&same) && !st.added.iter().any(&same) {
+                st.added.push(b);
+            }
+        } else {
+            if sample_bindings().iter().any(|x| same(x) && x.source == "configuration") {
+                return Err(ApiError::BadRequest(
+                    "That binding comes from the configuration and cannot be removed.".into(),
+                ));
+            }
+            st.added.retain(|x| !same(x));
+            if sample_bindings().iter().any(&same) {
+                st.removed.push(b);
+            }
+        }
+        Ok(())
+    }
+
+    async fn revoke_sessions(&self, _who: &Identity, subject: &str, group: bool) -> ApiResult<()> {
+        self.lock().revoked.insert((group, subject.into()));
+        Ok(())
     }
 }
 

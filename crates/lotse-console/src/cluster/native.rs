@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use lotse_client::{Client, ClientConfig, ClientError, Credentials, DEFAULT_TENANT};
 use lotse_proto::{
     DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind, principal_kind,
@@ -963,6 +965,84 @@ impl Cluster for NativeCluster {
         Ok(Visibility { resources, cluster_wide: seat.sees_cluster().await? })
     }
 
+    async fn users(&self, who: &Identity) -> ApiResult<UsersView> {
+        let seat = self.seat(who);
+        let users = seat.client.describe_users().await.map_err(failed)?;
+        // A viewer of bindings may be unable to read them; the user list is
+        // the screen's point, so a refusal there only leaves `roles` empty.
+        let bindings = seat.client.describe_role_bindings().await.map(|b| b.into_iter().map(|(b, _)| b).collect());
+        let bindings: Vec<RoleBindingData> = bindings.unwrap_or_default();
+        let rows = users
+            .into_iter()
+            .map(|u| {
+                let roles = bindings
+                    .iter()
+                    .filter(|b| b.subject_kind == subject_kind::USER && b.subject == u.name)
+                    .map(|b| {
+                        if cluster_wide(b.role) {
+                            role_name(b.role).into()
+                        } else {
+                            format!("{} ({})", role_name(b.role), b.tenant)
+                        }
+                    })
+                    .collect();
+                UserRow {
+                    name: u.name,
+                    mechanism: u.mechanism,
+                    iterations: u.iterations,
+                    source: source_name(u.source).into(),
+                    roles,
+                }
+            })
+            .collect();
+        Ok(UsersView { users: rows })
+    }
+
+    async fn set_user_credential(&self, who: &Identity, name: &str, credential: &Credential) -> ApiResult<()> {
+        let decode = |what: &str, v: &str| {
+            BASE64.decode(v).map_err(|_| ApiError::BadRequest(format!("The {what} is not valid base64.")))
+        };
+        let credential = lotse_proto::ScramCredentialData {
+            iterations: credential.iterations,
+            salt: bytes::Bytes::from(decode("salt", &credential.salt)?),
+            stored_key: bytes::Bytes::from(decode("stored key", &credential.stored_key)?),
+            server_key: bytes::Bytes::from(decode("server key", &credential.server_key)?),
+        };
+        self.seat(who).client.set_user_credential(name, credential).await.map_err(|e| refused("the password", e))
+    }
+
+    async fn delete_user(&self, who: &Identity, name: &str) -> ApiResult<()> {
+        self.seat(who).client.delete_user(name).await.map_err(|e| refused("the delete", e))
+    }
+
+    async fn bindings(&self, who: &Identity) -> ApiResult<BindingsView> {
+        let seat = self.seat(who);
+        match seat.client.describe_role_bindings().await {
+            Ok(all) => Ok(BindingsView {
+                bindings: all.iter().map(|(b, source)| binding_data_row(b, *source)).collect(),
+                can_edit: true,
+            }),
+            Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. }) => {
+                let own = seat.client.who_am_i().await.map_err(failed)?.bindings;
+                Ok(BindingsView {
+                    bindings: own.iter().map(|b| binding_data_row(b, lotse_proto::config_source::DYNAMIC)).collect(),
+                    can_edit: false,
+                })
+            }
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    async fn alter_binding(&self, who: &Identity, binding: &BindingRow, add: bool) -> ApiResult<()> {
+        let data = binding_data(binding)?;
+        let (add_list, remove_list) = if add { (vec![data], vec![]) } else { (vec![], vec![data]) };
+        self.seat(who).client.alter_role_bindings(add_list, remove_list).await.map_err(|e| refused("the binding", e))
+    }
+
+    async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()> {
+        self.seat(who).client.revoke_sessions(subject, group).await.map_err(|e| refused("the revocation", e))
+    }
+
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         Err(ApiError::BadRequest(format!("No upgrade is running on {}: it has no operator yet.", self.id)))
     }
@@ -973,9 +1053,8 @@ fn cluster_wide(r: u8) -> bool {
     r == role::CLUSTER_ADMIN || r == role::CLUSTER_VIEWER
 }
 
-/// A binding as the tenants screen lists it.
-fn binding_row(b: &RoleBindingData) -> RoleBinding {
-    let name = |r: u8| match r {
+fn role_name(r: u8) -> &'static str {
+    match r {
         role::CLUSTER_ADMIN => "cluster-admin",
         role::TENANT_ADMIN => "tenant-admin",
         role::PRODUCER => "producer",
@@ -983,7 +1062,54 @@ fn binding_row(b: &RoleBindingData) -> RoleBinding {
         role::VIEWER => "viewer",
         role::CLUSTER_VIEWER => "cluster-viewer",
         _ => "unknown",
+    }
+}
+
+fn source_name(source: u8) -> &'static str {
+    if source == lotse_proto::config_source::STATIC { "configuration" } else { "runtime" }
+}
+
+/// A binding as the role bindings screen lists it.
+fn binding_data_row(b: &RoleBindingData, source: u8) -> BindingRow {
+    BindingRow {
+        subject_kind: if b.subject_kind == subject_kind::GROUP { "group" } else { "user" }.into(),
+        subject: b.subject.clone(),
+        role: role_name(b.role).into(),
+        tenant: b.tenant.clone(),
+        prefix: b.prefix.clone(),
+        source: source_name(source).into(),
+    }
+}
+
+/// A request's binding as the broker takes it. Cluster-wide roles carry no
+/// tenant and no prefix.
+fn binding_data(b: &BindingRow) -> ApiResult<RoleBindingData> {
+    let subject_kind = match b.subject_kind.as_str() {
+        "user" => subject_kind::USER,
+        "group" => subject_kind::GROUP,
+        other => return Err(ApiError::BadRequest(format!("\"{other}\" is not a subject kind: use user or group."))),
     };
+    let role =
+        [role::CLUSTER_ADMIN, role::CLUSTER_VIEWER, role::TENANT_ADMIN, role::PRODUCER, role::CONSUMER, role::VIEWER]
+            .into_iter()
+            .find(|r| role_name(*r) == b.role)
+            .ok_or_else(|| ApiError::BadRequest(format!("\"{}\" is not a role.", b.role)))?;
+    let wide = cluster_wide(role);
+    if !wide && b.tenant.is_empty() {
+        return Err(ApiError::BadRequest(format!("The role {} needs a tenant.", b.role)));
+    }
+    Ok(RoleBindingData {
+        subject_kind,
+        subject: b.subject.clone(),
+        role,
+        tenant: if wide { String::new() } else { b.tenant.clone() },
+        prefix: if wide { String::new() } else { b.prefix.clone() },
+    })
+}
+
+/// A binding as the tenants screen lists it.
+fn binding_row(b: &RoleBindingData) -> RoleBinding {
+    let name = role_name;
     RoleBinding {
         principal: b.subject.clone(),
         auth: if b.subject_kind == subject_kind::GROUP { "group" } else { "user" }.into(),

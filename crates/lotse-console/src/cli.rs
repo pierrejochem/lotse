@@ -103,6 +103,39 @@ pub fn read(stream: &str, partition: u32, offset: u64, count: u32, isolation: Is
     format!("lotse-cli read {stream} --partition {partition} --offset {offset} --count {count} --isolation {iso}")
 }
 
+/// `lotse-cli user set-password …`.
+pub fn set_user_password(name: &str) -> String {
+    format!("lotse-cli user set-password {name}")
+}
+
+/// `lotse-cli user delete …`.
+pub fn delete_user(name: &str) -> String {
+    format!("lotse-cli user delete {name}")
+}
+
+/// `lotse-cli role bind …`, or `unbind`.
+pub fn bind(b: &crate::model::BindingRow, add: bool) -> String {
+    let mut cmd = format!(
+        "lotse-cli role {} --{} {} --role {}",
+        if add { "bind" } else { "unbind" },
+        b.subject_kind,
+        b.subject,
+        b.role
+    );
+    if !b.tenant.is_empty() {
+        cmd += &format!(" --tenant {}", b.tenant);
+    }
+    if !b.prefix.is_empty() {
+        cmd += &format!(" --prefix {}", b.prefix);
+    }
+    cmd
+}
+
+/// `lotse-cli session revoke …`.
+pub fn revoke_sessions(subject: &str, group: bool) -> String {
+    format!("lotse-cli session revoke {}{subject}", if group { "--group " } else { "" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

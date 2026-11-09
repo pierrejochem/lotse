@@ -101,6 +101,7 @@ function Nav({ cluster }: { cluster: string }) {
         <div className="nav-group">
           <span className="label">Access</span>
           {item(`${base}/tenants`, 'tenants', 'Tenants and access')}
+          {item(`${base}/users`, 'users', 'Users and access')}
         </div>
       )}
       <div className="nav-foot">lotse-console 0.0.1</div>
