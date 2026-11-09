@@ -42,7 +42,7 @@ export class TlsTestServer {
           self.clientSubjects.push(`CN=${peer.subject.CN}`);
         }
         let buf = Buffer.alloc(0);
-        socket.on("data", (chunk) => {
+        socket.on("data", (chunk: Buffer) => {
           buf = Buffer.concat([buf, chunk]);
           while (buf.length >= 4) {
             const len = buf.readUInt32BE(0);
