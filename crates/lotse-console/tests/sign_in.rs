@@ -417,7 +417,10 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&console(2), "GET", "/api/v1/me", Some(&cookie), None).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "another console's key");
     assert!(r.set_cookie.is_some_and(|c| c.contains("Max-Age=0")), "and the browser forgets it");
-    let tampered = format!("{}A", &cookie[..cookie.len() - 1]);
+    // Change the last character to another one: appending "A" to a cookie
+    // that ended in "A" left it as it was, and the test failed one run in 64.
+    let last = if cookie.ends_with('A') { 'B' } else { 'A' };
+    let tampered = format!("{}{last}", &cookie[..cookie.len() - 1]);
     let r = call(&app, "GET", "/api/v1/me", Some(&tampered), None).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "a changed cookie");
 
