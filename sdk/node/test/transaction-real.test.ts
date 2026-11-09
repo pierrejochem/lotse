@@ -19,6 +19,7 @@ import {
 } from "../src/index.js";
 import { Connection } from "../src/index.js";
 import { PlainCluster } from "./support/cluster.js";
+import { isNotLeader, leaderTerm } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -339,8 +340,18 @@ describe("transactions, publishing and groups against three real nodes", { skip 
       const d = await take(c);
       const v = d.text() as string;
       const txn = await lotse.beginTransaction();
-      await txn.produce("eq-out", 0, { value: `done-${v}` });
-      await c.ackIn(txn, d);
+      try {
+        await txn.produce("eq-out", 0, { value: `done-${v}` });
+        await c.ackIn(txn, d);
+      } catch (e) {
+        // The queue's leader moved after the message was handed out: the message was not held by this transaction, and
+        // it comes again. Giving the transaction up and taking the next delivery is what a consumer does.
+        if (!isNotLeader(e)) {
+          throw e;
+        }
+        await txn.abort().catch(() => undefined);
+        continue;
+      }
       if (aborted === 0 && done.size === 2) {
         aborted++;
         await txn.abort(); // the message goes back, and the output with it is hidden
@@ -565,11 +576,30 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     assert.deepEqual((await client.publish("orders", "nothing", { value: "m-none" })).routed, []);
     await assert.rejects(client.publish("orders", "nothing", { value: "m-none" }, { mandatory: true }), UnroutableError);
 
+    const leadersBefore = [await leaderTerm(client, "orders-all"), await leaderTerm(client, "orders-eu")];
     const all = await client.subscribe("orders-all");
     const eu = await client.subscribe("orders-eu");
-    assert.deepEqual([(await take(all)).text(), (await take(all)).text()], ["m-eu", "m-us"]);
-    assert.equal((await take(eu)).text(), "m-eu");
-    assert.equal(await eu.poll(500), null);
+    // A queue whose leader moves hands out again what was not acknowledged yet, so each consumer takes and acknowledges
+    // until it has seen the expected messages, in the order they first came.
+    const firstSeen = async (c: QueueConsumer, n: number): Promise<string[]> => {
+      const seen: string[] = [];
+      while (seen.length < n) {
+        const d = await take(c);
+        const t = d.text() as string;
+        if (!seen.includes(t)) {
+          seen.push(t);
+        }
+        await c.ack(d);
+      }
+      return seen;
+    };
+    assert.deepEqual(await firstSeen(all, 2), ["m-eu", "m-us"]);
+    assert.deepEqual(await firstSeen(eu, 1), ["m-eu"]);
+    // With both leaders where they were, nothing else comes; after a move, a duplicate of what was acknowledged may.
+    const leadersAfter = [await leaderTerm(client, "orders-all"), await leaderTerm(client, "orders-eu")];
+    if (leadersAfter.join() === leadersBefore.join()) {
+      assert.equal(await eu.poll(500), null);
+    }
     all.close();
     eu.close();
 

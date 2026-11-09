@@ -11,6 +11,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
+import { leaderTerm } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -282,6 +283,7 @@ describe("queues against three real nodes", { skip }, () => {
     await client.createQueue("giveback");
     await produce("giveback", 5);
     await settled("giveback");
+    const leaderBefore = await leaderTerm(client, "giveback");
     const c1 = await client.subscribe("giveback", { credit: 5 });
     const first = await take(c1);
     await sleep(300); // the rest of the batch is buffered in c1
@@ -292,7 +294,11 @@ describe("queues against three real nodes", { skip }, () => {
       for (let i = 0; i < 4; i++) {
         rest.push(await take(c2));
       }
-      assert.ok(!rest.some((d) => d.offset === first.offset), "the one handed out stays with c1");
+      // The message stays with the connection it was handed out on, as long as its leader stays: when leadership moves,
+      // what was handed out and not acknowledged is handed out again, which is right and not asserted here.
+      if ((await leaderTerm(client, "giveback")) === leaderBefore) {
+        assert.ok(!rest.some((d) => d.offset === first.offset), "the one handed out stays with c1");
+      }
       assert.ok(rest.every((d) => d.deliveryCount >= 1));
       await c2.ack(rest);
       // Not asserted: whether the broker also takes back the message c1 had handed out. PROTOCOL.md says it stays with
