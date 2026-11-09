@@ -27,7 +27,7 @@ lotse-auth = { path = "crates/lotse-auth" }
 bytes = "1.7"
 crc32c = "0.6"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame", "std", "safe-decode", "safe-encode"] }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 thiserror = "2"
 proptest = "1.5"
 tokio = "1.40"
