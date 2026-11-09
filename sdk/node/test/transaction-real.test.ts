@@ -74,6 +74,27 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     return out;
   }
 
+  /**
+   * What a read_committed reader sees once the markers are in. EndTxn returns when the decision is durable; the markers
+   * reach the partitions after that (ADR 0029), so a reader may see too little for a moment. Wait for the expected
+   * records up to a bound, then compare, so a wrong result still fails with what was read.
+   */
+  async function assertCommitted(
+    c: LotseClient,
+    stream: string,
+    expected: string[],
+    message?: string,
+    partition = 0,
+  ): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    let got = await committed(c, stream, partition);
+    while (Date.now() < deadline && JSON.stringify(got) !== JSON.stringify(expected)) {
+      await new Promise((r) => setTimeout(r, 100));
+      got = await committed(c, stream, partition);
+    }
+    assert.deepEqual(got, expected, message);
+  }
+
   /** The data records, transactional or not, that are in the partition whatever happened to them. */
   async function everything(c: LotseClient, stream: string, partition = 0): Promise<string[]> {
     const out: string[] = [];
@@ -144,8 +165,8 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     assert.deepEqual(await committed(client, "vis", 1), []);
     assert.deepEqual(await everything(client, "vis", 0), ["c0-a", "c0-b"], "the batches are there, hidden");
     await t1.commit();
-    assert.deepEqual(await committed(client, "vis", 0), ["c0-a", "c0-b"]);
-    assert.deepEqual(await committed(client, "vis", 1), ["c1-a"]);
+    await assertCommitted(client, "vis", ["c0-a", "c0-b"], undefined, 0);
+    await assertCommitted(client, "vis", ["c1-a"], undefined, 1);
 
     const t2 = await lotse.beginTransaction();
     await t2.produce("vis", 0, { value: "gone-0" });
@@ -154,8 +175,8 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     const t3 = await lotse.beginTransaction();
     await t3.produce("vis", 0, { value: "c0-c" });
     await t3.commit();
-    assert.deepEqual(await committed(client, "vis", 0), ["c0-a", "c0-b", "c0-c"], "the aborted batch is skipped");
-    assert.deepEqual(await committed(client, "vis", 1), ["c1-a"]);
+    await assertCommitted(client, "vis", ["c0-a", "c0-b", "c0-c"], "the aborted batch is skipped", 0);
+    await assertCommitted(client, "vis", ["c1-a"], undefined, 1);
     assert.deepEqual(await everything(client, "vis", 0), ["c0-a", "c0-b", "gone-0", "c0-c"], "and still in the log");
   });
 
@@ -169,13 +190,13 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     }, /the work failed/);
     // An abandoned transaction would hold the last stable offset back: a plain record after it stays hidden until it ends.
     await client.produce("disposed", 0, { value: "plain" });
-    assert.deepEqual(await committed(client, "disposed"), ["plain"], "the transaction was ended, not left open");
+    await assertCommitted(client, "disposed", ["plain"], "the transaction was ended, not left open");
     {
       await using txn = await lotse.beginTransaction();
       await txn.produce("disposed", 0, { value: "kept" });
       await txn.commit();
     }
-    assert.deepEqual(await committed(client, "disposed"), ["plain", "kept"]);
+    await assertCommitted(client, "disposed", ["plain", "kept"]);
   });
 
   test("a producer fenced by a newer epoch cannot write or commit any more", async () => {
@@ -202,7 +223,7 @@ describe("transactions, publishing and groups against three real nodes", { skip 
       `the code was ${fencedWith.code}`,
     );
     await current.commit();
-    assert.deepEqual(await committed(client, "fenced"), ["fresh-1"], "only the newer producer's data is committed");
+    await assertCommitted(client, "fenced", ["fresh-1"], "only the newer producer's data is committed");
     // The stale transaction can only be aborted, and the abort does not get through either.
     await assert.rejects(stale.commit(), MustAbortError);
     await stale.abort().catch(() => {});
@@ -262,8 +283,9 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     }
     assert.ok(failedOnce, "the abort path ran");
     assert.equal(batchesSeen.length, 2, "the same records were read again after the abort");
-    assert.deepEqual(
-      await committed(client, "eos-out"),
+    await assertCommitted(
+      client,
+      "eos-out",
       Array.from({ length: 12 }, (_, i) => `IN-${i}`),
       "every input once, in order",
     );
@@ -327,6 +349,10 @@ describe("transactions, publishing and groups against three real nodes", { skip 
       done.add(v);
     }
     assert.equal(aborted, 1);
+    // The markers follow the commits (ADR 0029): wait until the reader sees all six, then check each came once.
+    for (let i = 0; i < 150 && (await committed(client, "eq-out")).length < 6; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     const out = await committed(client, "eq-out");
     assert.equal(out.length, 6, `each exactly once: ${out.join()}`);
     assert.deepEqual([...out].sort(), Array.from({ length: 6 }, (_, i) => `done-job-${i}`).sort());
