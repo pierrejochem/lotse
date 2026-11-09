@@ -12,3 +12,5 @@ sdk/csharp/**/obj/
 docs/guide/book/
 sdk/node/node_modules/
 sdk/node/dist/
+
+/graphify-out/
