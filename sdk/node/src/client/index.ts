@@ -1,4 +1,4 @@
-export { type CallOptions, LotseClient, mergeNewest, type ReadOptions } from "./client.js";
+export { type CallOptions, LotseClient, mergeNewest, type NodeMetrics, type ReadOptions } from "./client.js";
 export { type ClientConfig, type ClientOptions, resolveClientOptions } from "./config.js";
 export {
   BrokerResponseError,
@@ -8,6 +8,7 @@ export {
   ConsumerClosedError,
   GaveUpError,
   MustAbortError,
+  NoAnswerError,
   NotAllWrittenError,
   NotTransactionalError,
   OffsetOutOfRangeError,

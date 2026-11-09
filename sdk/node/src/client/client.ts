@@ -1,23 +1,31 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { AuthenticationError } from "../auth/errors.js";
+import { ScramCredential } from "../auth/scram-credential.js";
 import { type Address, addressKey, formatAddress } from "../net/address.js";
 import type { Connection } from "../net/connection.js";
 import { BrokerError, ConnectionError, InsecureTransportError } from "../net/errors.js";
 import { ConnectionPool } from "../net/pool.js";
 import { describeError, ErrorCode, type ErrorCodeValue, isRetriable } from "../proto/error-code.js";
 import {
+  type ConfigEntry,
   CoordinatorType,
   ExchangeType,
   Isolation,
   type HeaderMatch,
   type LeaderHint,
+  type NodeEntry,
+  type RoleBinding,
+  type SourcedBinding,
+  SubjectKind,
+  type TenantEntry,
+  type UserEntry,
   type PublishEntry,
   type PublishResult,
   type ResourceMetadata,
   ResourceKind,
 } from "../proto/messages.js";
 import type { Request } from "../proto/request.js";
-import type { Response } from "../proto/response.js";
+import type { DescribeMetricsResponse, Response, WhoAmIResponse } from "../proto/response.js";
 import { Batch } from "../record/batch.js";
 import { RecordFormatError } from "../record/errors.js";
 import type { BatchRecord, Header } from "../record/types.js";
@@ -30,6 +38,7 @@ import {
   ClientClosedError,
   ClientError,
   GaveUpError,
+  NoAnswerError,
   NotAllWrittenError,
   NotTransactionalError,
   OffsetOutOfRangeError,
@@ -73,6 +82,15 @@ interface Stamp {
   readonly producerId: bigint;
   readonly epoch: number;
   readonly sequence: number;
+}
+
+/** One node's answer to `DescribeMetrics`, from `LotseClient.nodeMetrics`: its metrics, or why there are none. */
+export interface NodeMetrics {
+  readonly nodeId: number;
+  /** What it answered, or `null`. */
+  readonly metrics: DescribeMetricsResponse | null;
+  /** Why it did not answer, or `null`: `NoAnswerError` for a node that could not be reached. */
+  readonly error: ClientError | null;
 }
 
 /** What a call may be given besides its arguments. */
@@ -1455,15 +1473,433 @@ export class LotseClient {
   }
 
   /** An admin answer: retriable errors follow the leader hint and may have been carried out; others fail. */
-  private adminAnswer(error: ErrorCodeValue, hint: LeaderHint | null): void {
+  private adminAnswer(
+    error: ErrorCodeValue,
+    hint: LeaderHint | null,
+    message: string | null = null,
+    changes = true,
+  ): void {
     if (error === ErrorCode.NONE) {
       return;
     }
     if (isRetriable(error)) {
       this.metadataLeader = hint === null ? null : hint.leader;
-      throw Attempt.retryMaybeDone(describeError(error));
+      // A read that was refused as retriable changed nothing: running out of time is "gave up", not "unknown".
+      throw changes ? Attempt.retryMaybeDone(describeError(error)) : Attempt.retry(describeError(error));
     }
-    throw Attempt.fail(new BrokerResponseError(error, null));
+    throw Attempt.fail(new BrokerResponseError(error, message));
+  }
+
+  // ---- deleting, settings, users, tenants, roles, nodes (ADR 0035, 0039, 0048, 0063 to 0065, 0070, 0074) ----
+
+  /**
+   * Deletes a stream, queue or exchange created at runtime, with its data and bindings, and returns its id. Resources
+   * from the node configuration cannot be deleted. Done once the resource is gone, even if someone else deleted it first,
+   * so a delete whose answer was lost succeeds when it is retried.
+   *
+   * @throws UnknownStreamError if no broker knows the name
+   */
+  delete(name: string, options: CallOptions = {}): Promise<bigint> {
+    return this.deleteWith(name, false, options.signal);
+  }
+
+  /**
+   * `delete`, but only if the stream or queue holds nothing (ADR 0063): no unsettled message in a queue, no record in a
+   * stream. Otherwise it fails with `BrokerResponseError` `RESOURCE_NOT_EMPTY` and nothing is deleted. An exchange holds no
+   * messages and is deleted. The check guards against mistakes, not against a producer: a message produced while the
+   * delete is under way goes with it.
+   */
+  deleteIfEmpty(name: string, options: CallOptions = {}): Promise<bigint> {
+    return this.deleteWith(name, true, options.signal);
+  }
+
+  private async deleteWith(name: string, ifEmpty: boolean, signal?: AbortSignal): Promise<bigint> {
+    this.checkOpen();
+    const id = await this.resourceId(name);
+    const req: Request = { type: "DeleteResource", resourceId: id, ifEmpty };
+    await this.retrying(
+      async () => {
+        const r = await this.callAdmin(req);
+        if (r.type !== "Admin") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        // Gone already, deleted by this request's earlier attempt or by someone else: done.
+        if (r.error === ErrorCode.UNKNOWN_RESOURCE) {
+          return;
+        }
+        this.adminAnswer(r.error, r.leaderHint, r.errorMsg);
+      },
+      signal,
+      true,
+    );
+    this.exchanges.delete(name);
+    this.exchangeIds.delete(name);
+    // A name made again gets a new id: a route to the old one would lead nowhere.
+    for (const key of [...this.routes.keys()]) {
+      if (key.startsWith(`${name}\0`)) {
+        this.routes.delete(key);
+      }
+    }
+    return id;
+  }
+
+  /**
+   * Settles every message of `queue` that is ready now: not held by a consumer, not in an open transaction (ADR 0064).
+   * Messages produced while it runs are left alone. Returns how many were purged. Needs the tenant-admin role.
+   */
+  purge(queue: string, options: CallOptions = {}): Promise<bigint> {
+    return this.queueAction(queue, false, options.signal);
+  }
+
+  /**
+   * Moves every ready message of the dead-letter queue `queue` back to the queue its dead-letter headers name, once each
+   * across failovers (ADR 0064). Messages without such headers, or whose queue is gone, stay. Returns how many were moved.
+   * Needs the tenant-admin role.
+   */
+  requeue(queue: string, options: CallOptions = {}): Promise<bigint> {
+    return this.queueAction(queue, true, options.signal);
+  }
+
+  /** Rounds: `up_to` 0 first, then the bound each answer gave, until the leader says there is no more. */
+  private async queueAction(queue: string, requeue: boolean, signal?: AbortSignal): Promise<bigint> {
+    this.checkOpen();
+    let total = 0n;
+    let upTo = 0n;
+    for (;;) {
+      const bound = upTo;
+      const step = await this.retrying(() => this.queueActionOnce(queue, requeue, bound, signal), signal, true);
+      total += step.count;
+      upTo = step.upTo;
+      if (!step.more) {
+        return total;
+      }
+    }
+  }
+
+  private async queueActionOnce(
+    queue: string,
+    requeue: boolean,
+    upTo: bigint,
+    signal?: AbortSignal,
+  ): Promise<{ count: bigint; upTo: bigint; more: boolean }> {
+    const routed = await this.route(queue, 0, signal);
+    let r: Response;
+    try {
+      r = await this.call(routed.address, { type: "QueueAction", requeue, queueId: routed.route.resourceId, upTo });
+    } catch (e) {
+      if (!(e instanceof CallFailure)) {
+        throw e;
+      }
+      this.forget(queue, 0);
+      throw e.toAttempt();
+    }
+    if (r.type !== "QueueAction") {
+      throw Attempt.retry(`unexpected response ${r.type}`);
+    }
+    if (r.error === ErrorCode.NONE) {
+      return { count: r.count, upTo: r.upTo, more: r.more };
+    }
+    if (isRetriable(r.error)) {
+      this.redirect(queue, 0, r.leaderHint);
+      // Acting again is harmless: what was done is settled.
+      throw Attempt.retryMaybeDone(describeError(r.error));
+    }
+    throw Attempt.fail(new BrokerResponseError(r.error, r.errorMsg));
+  }
+
+  /**
+   * Changes settings of a resource created at runtime: `set` gives keys new values, `reset` returns keys to their default.
+   *
+   * @throws UnknownStreamError if no broker knows the name
+   */
+  async alterConfigs(
+    name: string,
+    set: Readonly<Record<string, string>> = {},
+    reset: readonly string[] = [],
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    const id = await this.resourceId(name);
+    const configs = Object.keys(set)
+      .sort()
+      .map((key) => ({ key, value: set[key] as string }));
+    return this.adminChange({ type: "AlterConfigs", resourceId: id, set: configs, delete: reset }, options.signal);
+  }
+
+  /**
+   * A resource's settings, each with where its value comes from (`ConfigSource`). Read from the metadata leader, so
+   * changes this client made are in it.
+   *
+   * @throws UnknownStreamError if no broker knows the name
+   */
+  async describeConfigs(name: string, options: CallOptions = {}): Promise<readonly ConfigEntry[]> {
+    this.checkOpen();
+    const id = await this.resourceId(name);
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeConfigs", resourceIds: [id] });
+        if (r.type !== "DescribeConfigs") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        const first = r.resources[0];
+        if (first === undefined) {
+          throw Attempt.retry("no resource in the answer");
+        }
+        if (first.error !== ErrorCode.NONE) {
+          throw Attempt.fail(new BrokerResponseError(first.error, null));
+        }
+        return first.configs;
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * Sets `user`'s SCRAM-SHA-512 password, creating the user if needed. Only a salted credential leaves the client (a
+   * fresh 16-byte salt each time); the password does not. Needs the cluster-admin role.
+   */
+  async setUserPassword(user: string, password: string, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange(ScramCredential.forPassword(password).alterUser(user), options.signal);
+  }
+
+  /**
+   * Removes `user`'s SCRAM credential. Sessions it opened end at the latest when the node's maximum session time is up;
+   * `revokeSessions` ends them now.
+   */
+  async deleteUser(user: string, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange(ScramCredential.removal(user), options.signal);
+  }
+
+  /** The users with a SCRAM credential, configured and set at runtime. */
+  async describeUsers(options: CallOptions = {}): Promise<readonly UserEntry[]> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeUsers" });
+        if (r.type !== "DescribeUsers") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r.users;
+      },
+      options.signal,
+    );
+  }
+
+  /** Creates a tenant. Needs the cluster-admin role. */
+  async createTenant(name: string, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "CreateTenant", name }, options.signal);
+  }
+
+  /** Deletes a tenant that holds no resources, and its role bindings. */
+  async deleteTenant(name: string, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "DeleteTenant", name }, options.signal);
+  }
+
+  /** The tenants this client has a role in; all of them for a cluster admin. */
+  async describeTenants(options: CallOptions = {}): Promise<readonly TenantEntry[]> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeTenants" });
+        if (r.type !== "DescribeTenants") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r.tenants;
+      },
+      options.signal,
+    );
+  }
+
+  /** Adds and removes role bindings; removals first. */
+  async alterRoleBindings(
+    add: readonly RoleBinding[],
+    remove: readonly RoleBinding[] = [],
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "AlterRoleBindings", add, remove }, options.signal);
+  }
+
+  /** Every role binding, each with where it comes from (`ConfigSource`). */
+  async describeRoleBindings(options: CallOptions = {}): Promise<readonly SourcedBinding[]> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeRoleBindings" });
+        if (r.type !== "DescribeRoleBindings") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r.bindings;
+      },
+      options.signal,
+    );
+  }
+
+  /** Who this client acts as, and the role bindings that apply. */
+  async whoAmI(options: CallOptions = {}): Promise<WhoAmIResponse> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "WhoAmI" });
+        if (r.type !== "WhoAmI") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        return r;
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * Revokes the sessions of a user, or of every member of an IdP group (`group`) (ADR 0070): each node ends their
+   * sessions that authenticated before now, and refuses their tokens issued before now. A SCRAM user who still has the
+   * password can sign in again; change or delete the password to keep them out. Needs the cluster-admin role.
+   */
+  async revokeSessions(subject: string, group = false, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    const subjectKind = group ? SubjectKind.GROUP : SubjectKind.USER;
+    return this.adminChange({ type: "RevokeSessions", subjectKind, subject, beforeMs: 0n }, options.signal);
+  }
+
+  /**
+   * Adds node `nodeId` to the cluster, reached by nodes at `peer` and by clients at `client` (each `host:port`); start it
+   * with `join` afterwards. Ids are never used twice. Needs the cluster-admin role.
+   */
+  async addNode(nodeId: number | bigint, peer: string, client: string, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    checkNodeId(nodeId);
+    return this.adminChange({ type: "AddNode", nodeId: BigInt(nodeId), peer, client }, options.signal);
+  }
+
+  /** Starts draining a node: its replicas move to other nodes, then it leaves. `describeNodes` shows how far. */
+  async removeNode(nodeId: number | bigint, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    checkNodeId(nodeId);
+    return this.adminChange({ type: "RemoveNode", nodeId: BigInt(nodeId) }, options.signal);
+  }
+
+  /** The cluster's nodes, as the metadata group knows them. */
+  async describeNodes(options: CallOptions = {}): Promise<readonly NodeEntry[]> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeNodes" });
+        if (r.type !== "DescribeNodes") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r.nodes;
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * Pins the leader of `partition` of the stream or queue `name` to `node`, one of its voters, or unpins it with `null` so
+   * that leaders spread by themselves again (ADR 0065). The group's leader hands over shortly after; the pin stays until
+   * it is removed or the node leaves. Needs the cluster-admin role.
+   *
+   * @throws RangeError for a partition that is not a u32, or a node id that is not a positive u64
+   */
+  async moveLeader(
+    name: string,
+    partition: number,
+    node: number | bigint | null,
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    if (!Number.isInteger(partition) || partition < 0 || partition > U32_MAX) {
+      throw new RangeError(`partition must be a u32, not ${partition}`);
+    }
+    if (node !== null) {
+      checkNodeId(node);
+    }
+    const id = await this.resourceId(name);
+    return this.adminChange(
+      { type: "MoveLeader", resourceId: id, partition, nodeId: node === null ? 0n : BigInt(node) },
+      options.signal,
+    );
+  }
+
+  /**
+   * Raises the partition count of the stream `name`, created at runtime, to `count` (ADR 0074). Existing partitions stay as
+   * they are, so a key may map to another partition afterwards; consumer groups spread over the new ones on their next
+   * heartbeat. Needs the tenant-admin role.
+   *
+   * @throws RangeError for a count that is not a positive u32
+   */
+  async createPartitions(name: string, count: number, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    if (!Number.isInteger(count) || count < 1 || count > U32_MAX) {
+      throw new RangeError(`count must be a positive u32, not ${count}`);
+    }
+    const id = await this.resourceId(name);
+    return this.adminChange({ type: "CreatePartitions", resourceId: id, count }, options.signal);
+  }
+
+  /**
+   * Every node's metrics, asked of each node directly, for every node the cluster's metadata names: each with its answer,
+   * or why there is none. Counters grow from each node's start; see `DescribeMetrics`. A node that does not answer is
+   * reported, not thrown.
+   */
+  async nodeMetrics(options: CallOptions = {}): Promise<NodeMetrics[]> {
+    this.checkOpen();
+    const m = await this.metadataWith(options.signal, []);
+    const out: NodeMetrics[] = [];
+    for (const b of m.brokers) {
+      if (options.signal?.aborted === true) {
+        throw new GaveUpError(0, "aborted");
+      }
+      const addr: Address = { host: b.host, port: b.port };
+      try {
+        const r = await this.call(addr, { type: "DescribeMetrics" });
+        if (r.type !== "DescribeMetrics") {
+          out.push({ nodeId: b.nodeId, metrics: null, error: new NoAnswerError(b.nodeId, `unexpected response ${r.type}`) });
+        } else if (r.error === ErrorCode.NONE) {
+          out.push({ nodeId: b.nodeId, metrics: r, error: null });
+        } else {
+          out.push({ nodeId: b.nodeId, metrics: null, error: new BrokerResponseError(r.error, null) });
+        }
+      } catch (e) {
+        if (!(e instanceof CallFailure)) {
+          throw e;
+        }
+        out.push({ nodeId: b.nodeId, metrics: null, error: new NoAnswerError(b.nodeId, `${formatAddress(addr)}: ${e.describe()}`) });
+      }
+    }
+    return out;
+  }
+
+  /** The id of the resource called `name`, asking every broker before calling it unknown. */
+  private async resourceId(name: string): Promise<bigint> {
+    const r = find(await this.metadataFromAll([name]), name);
+    if (r === undefined) {
+      throw new UnknownStreamError(name, 0);
+    }
+    return r.resourceId;
+  }
+
+  /** An admin change answered with `AdminResponse`. */
+  private adminChange(req: Request, signal?: AbortSignal): Promise<void> {
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin(req);
+        if (r.type !== "Admin") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, r.errorMsg);
+      },
+      signal,
+      true,
+    );
   }
 
   // ---- one request to one broker ----
@@ -1561,6 +1997,13 @@ export class LotseClient {
   /** The producer id of the current session, or 0n if there is none. */
   producerId(): bigint {
     return this.session === null ? 0n : this.session.producerId;
+  }
+}
+
+/** A node id is a positive `u64`; `0` means "none" on the wire. */
+function checkNodeId(nodeId: number | bigint): void {
+  if ((typeof nodeId === "number" && !Number.isInteger(nodeId)) || BigInt(nodeId) <= 0n || BigInt(nodeId) >= 1n << 64n) {
+    throw new RangeError(`a node id is a positive u64, not ${String(nodeId)}`);
   }
 }
 
