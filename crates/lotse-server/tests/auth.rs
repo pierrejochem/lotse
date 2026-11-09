@@ -696,6 +696,93 @@ fn the_certificate_inventory_lists_what_nodes_accepted() {
     });
 }
 
+#[test]
+fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
+    use lotse_proto::certificate_request_state as state;
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let csr = vec![0x30, 0x03, 0x02, 0x01, 0x00];
+            let invalid = |r: Result<(), ClientError>| {
+                assert!(matches!(r, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. })), "{r:?}")
+            };
+
+            // Names the CA holder could not sign, and empty requests, are refused.
+            for bad in ["", ".hidden", "a b", "../x"] {
+                invalid(admin.request_certificate(bad, csr.clone()).await);
+            }
+            invalid(admin.request_certificate("alice", Vec::new()).await);
+            invalid(admin.request_certificate("alice", vec![0; 5000]).await);
+
+            // The same request twice is one request.
+            admin.request_certificate("alice", csr.clone()).await.unwrap();
+            admin.request_certificate("alice", csr.clone()).await.unwrap();
+            let listed = admin.describe_certificate_requests().await.unwrap();
+            assert_eq!(listed.requests.len(), 1, "{:?}", listed.requests);
+            let one = &listed.requests[0];
+            assert_eq!(
+                (one.principal.as_str(), one.requested_by.as_str(), one.state),
+                ("alice", "admin", state::PENDING)
+            );
+            assert_eq!(one.csr[..], csr[..]);
+            assert!(one.certificate.is_empty() && one.signed_at_ms == 0);
+            assert_eq!(one.expires_at_ms - one.requested_at_ms, 7 * 86_400_000, "seven days");
+
+            // The state holds a bounded number of requests.
+            for i in 1..256u32 {
+                admin.request_certificate("bulk", i.to_le_bytes().to_vec()).await.unwrap();
+            }
+            invalid(admin.request_certificate("bulk", vec![0xff; 8]).await);
+
+            // Only a cluster admin asks, lists or records.
+            let alice = Client::new(
+                rt.node("svc").with_identity(Some(PeerIdentity::Principal("alice".into()))),
+                ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect()),
+            );
+            let unauthorized = |r: Result<(), ClientError>| {
+                assert!(matches!(r, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{r:?}")
+            };
+            unauthorized(alice.request_certificate("alice", vec![1, 2, 3]).await);
+            unauthorized(alice.describe_certificate_requests().await.map(|_| ()));
+            let answer = lotse_proto::RecordCertificateRequest {
+                id: one.id.clone(),
+                certificate: Bytes::from_static(&[0x30, 0x00]),
+                issuer: Bytes::from_static(&[1; 32]),
+                serial: Bytes::from_static(&[0x42]),
+                not_before_ms: 1_000,
+                not_after_ms: 2_000_000_000_000,
+            };
+            unauthorized(alice.record_certificate(answer.clone()).await);
+
+            // An answer needs an open request and a sound certificate record.
+            let mut unknown = answer.clone();
+            unknown.id = Bytes::from_static(&[9; 32]);
+            invalid(admin.record_certificate(unknown).await);
+            let mut short = answer.clone();
+            short.issuer = Bytes::from_static(&[1; 31]);
+            invalid(admin.record_certificate(short).await);
+            let mut backwards = answer.clone();
+            backwards.not_after_ms = backwards.not_before_ms;
+            invalid(admin.record_certificate(backwards).await);
+
+            admin.record_certificate(answer.clone()).await.unwrap();
+            let listed = admin.describe_certificate_requests().await.unwrap();
+            let one = listed.requests.iter().find(|r| r.id == answer.id).expect("still listed");
+            assert_eq!(one.state, state::SIGNED);
+            assert_eq!(one.certificate[..], [0x30, 0x00]);
+            assert!(one.signed_at_ms > 0);
+            // A second answer finds the request closed.
+            invalid(admin.record_certificate(answer).await);
+            // The certificate is in the inventory, which no node has seen yet.
+            let inventory = admin.describe_certificates().await.unwrap();
+            let entry = inventory.certificates.iter().find(|c| c.serial[..] == [0x42]).expect("in the inventory");
+            assert_eq!((entry.principal.as_str(), entry.first_seen_ms), ("alice", 0));
+            stop(nodes).await;
+        });
+    });
+}
+
 /// An idempotent producer with a name (ADR 0071): a new instance fences
 /// the old one, and the old one stays fenced instead of fencing back.
 #[test]

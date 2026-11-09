@@ -762,6 +762,38 @@ public static class Messages
     /// <param name="Certificates">The certificates.</param>
     public sealed record CertificateInventory(ulong NowMs, IReadOnlyList<CertificateEntry> Certificates);
 
+    /// <summary>States of a certificate request in a <see cref="CertificateRequestEntry"/>.</summary>
+    public static class CertificateRequestState
+    {
+        /// <summary>Waiting for the CA holder.</summary>
+        public const byte Pending = 0;
+
+        /// <summary>Signed; the certificate is in the entry.</summary>
+        public const byte Signed = 1;
+
+        /// <summary>Unsigned past its seven days.</summary>
+        public const byte Expired = 2;
+    }
+
+    /// <summary>One certificate request.</summary>
+    /// <param name="Id">SHA-256 of the signing request (32 bytes).</param>
+    /// <param name="Principal">The principal asked for.</param>
+    /// <param name="Csr">The signing request, DER.</param>
+    /// <param name="RequestedBy">Who asked.</param>
+    /// <param name="RequestedAtMs">When, in milliseconds since the epoch.</param>
+    /// <param name="ExpiresAtMs">When an unsigned request lapses, in milliseconds since the epoch.</param>
+    /// <param name="State">See <see cref="CertificateRequestState"/>.</param>
+    /// <param name="Certificate">The signed certificate, DER; empty until signed.</param>
+    /// <param name="SignedAtMs">When it was signed, in milliseconds since the epoch; 0 if not yet.</param>
+    public sealed record CertificateRequestEntry(
+        ByteString Id, string Principal, ByteString Csr, string RequestedBy, ulong RequestedAtMs, ulong ExpiresAtMs,
+        byte State, ByteString Certificate, ulong SignedAtMs);
+
+    /// <summary>The certificate requests, newest first, with the answering node's clock.</summary>
+    /// <param name="NowMs">The node's clock in milliseconds since the epoch.</param>
+    /// <param name="Requests">The requests.</param>
+    public sealed record CertificateRequests(ulong NowMs, IReadOnlyList<CertificateRequestEntry> Requests);
+
     /// <summary>One accepted client certificate, as a node reports it (internal, ADR 0091).</summary>
     /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian.</param>

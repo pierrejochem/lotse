@@ -71,4 +71,16 @@ A cluster admin can also revoke one client certificate without the CA key and wi
 
 Every node reports the client certificates it accepts, and the cluster keeps them for 30 days after they expire. The console's *Certificates* tab lists them, by expiry, with the principal each names, when a node last accepted it (at most an hour late) and its state: valid, expiring within 30 days, expired or revoked. A cluster admin can revoke a valid or expiring one from the list. `lotse-client`'s `describe_certificates` returns the same list ([ADR 0091](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0091-client-certificate-inventory.md)). Certificates revoked only in the CRL file and node certificates are not listed.
 
+### Ask for a client certificate
+
+In the console's *Certificates* tab, *Request certificate* asks the CA holder for a client certificate for a principal. Your browser makes an ECDSA P-256 key and a signing request; the private key is saved as `<principal>.key` once and goes nowhere else, and the console and the cluster hold only the request. The request waits for 7 days.
+
+The CA holder, on the machine with the CA key, signs what is waiting:
+
+```sh
+lotse certs --config cluster.toml --sign --user admin       # password in LOTSE_PASSWORD, or --cert and --key
+```
+
+The command shows each request's principal, who asked and the fingerprint of the key, and signs those you confirm. `--request <id>` (the id or its first digits) with `--yes` signs that one without asking, never all of them; `--out <dir>` also writes each certificate as `<principal>.pem`; `--days` sets the validity (default 365). The certificate is made from the key and the principal only: whatever else a request asks for is ignored. The signed certificate is recorded in the cluster, and the console's list offers it for download; it works with the key file saved earlier ([ADR 0092](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0092-requesting-and-signing-client-certificates.md)).
+
 A revoked certificate does not end a user's other ways in. To cut off a user's sessions, see [Revoking sessions](authentication-and-roles.md#revoking-sessions).

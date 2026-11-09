@@ -1010,6 +1010,42 @@ public final class Messages {
             String reason,
             long revokedAtMs) {}
 
+    /** Where a certificate request stands (ADR 0092). */
+    public static final class CertificateRequestState {
+        /** Waiting for the CA holder. */
+        public static final int PENDING = 0;
+        /** Signed; the certificate is in the entry. */
+        public static final int SIGNED = 1;
+        /** Unsigned past its seven days. */
+        public static final int EXPIRED = 2;
+
+        private CertificateRequestState() {}
+    }
+
+    /**
+     * One certificate request.
+     *
+     * @param id SHA-256 of the signing request, 32 bytes
+     * @param principal the principal asked for
+     * @param csr the signing request, DER
+     * @param requestedBy who asked
+     * @param requestedAtMs when, milliseconds since the Unix epoch, a {@code u64}
+     * @param expiresAtMs when an unsigned request lapses, a {@code u64}
+     * @param state see {@link CertificateRequestState}
+     * @param certificate the signed certificate, DER; empty until signed
+     * @param signedAtMs when it was signed, a {@code u64}; 0 if not yet
+     */
+    public record CertificateRequestEntry(
+            ByteString id,
+            String principal,
+            ByteString csr,
+            String requestedBy,
+            long requestedAtMs,
+            long expiresAtMs,
+            int state,
+            ByteString certificate,
+            long signedAtMs) {}
+
     /**
      * One accepted client certificate, as a node reports it.
      *

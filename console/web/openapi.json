@@ -188,6 +188,104 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/certificate-requests": {
+      "get": {
+        "tags": [],
+        "summary": "The requests for client certificates, newest first, with the certificate\nof each that was signed. The broker lets only cluster admins list them.",
+        "operationId": "certificate_requests",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertificateRequestsView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "summary": "Asks the CA holder for a client certificate. The body carries a signing\nrequest made in the browser: the private key never reaches the console,\nand the CA holder signs with `lotse certs --sign`.",
+        "operationId": "request_certificate",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestCertificate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/certificates": {
       "get": {
         "tags": [],
@@ -1531,6 +1629,88 @@
           "can_edit": {
             "type": "boolean",
             "description": "Whether the caller may change bindings."
+          }
+        }
+      },
+      "CertificateRequestRow": {
+        "type": "object",
+        "description": "One request for a client certificate (ADR 0092).",
+        "required": [
+          "id",
+          "principal",
+          "requested_by",
+          "requested_at_ms",
+          "expires_at_ms",
+          "state",
+          "key_fingerprint",
+          "certificate",
+          "signed_at_ms"
+        ],
+        "properties": {
+          "certificate": {
+            "type": "string",
+            "description": "The signed certificate, PEM; empty until signed."
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an unsigned request lapses, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "SHA-256 of the signing request, 64 hex digits."
+          },
+          "key_fingerprint": {
+            "type": "string",
+            "description": "SHA-256 of the requester's public key, 64 hex digits: what\n`lotse certs --sign` shows the CA holder, to compare with the key\nthe browser made. Empty if the request cannot be read."
+          },
+          "principal": {
+            "type": "string",
+            "description": "The principal the certificate will name."
+          },
+          "requested_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "Who asked."
+          },
+          "signed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was signed; 0 if not yet.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending`, `signed` or `expired`."
+          }
+        }
+      },
+      "CertificateRequestsView": {
+        "type": "object",
+        "description": "The certificate requests screen.",
+        "required": [
+          "requests",
+          "now_ms"
+        ],
+        "properties": {
+          "now_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cluster's clock when the list was made, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CertificateRequestRow"
+            },
+            "description": "Newest first."
           }
         }
       },
@@ -2950,6 +3130,24 @@
           "in_sync",
           "catching_up"
         ]
+      },
+      "RequestCertificate": {
+        "type": "object",
+        "description": "A request for a client certificate (ADR 0092). The browser made the key\nand the signing request; the console never sees the private key.",
+        "required": [
+          "principal",
+          "csr"
+        ],
+        "properties": {
+          "csr": {
+            "type": "string",
+            "description": "The PKCS#10 signing request, DER, base64."
+          },
+          "principal": {
+            "type": "string",
+            "description": "The principal the certificate will name: letters, digits, `.`, `_`,\n`-` and `@`."
+          }
+        }
       },
       "RevokeCertificate": {
         "type": "object",

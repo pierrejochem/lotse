@@ -50,6 +50,8 @@ use crate::model::*;
         revoke_sessions,
         revoke_certificate,
         certificates,
+        certificate_requests,
+        request_certificate,
         tenants,
         metrics
     ),
@@ -436,6 +438,45 @@ pub async fn certificates(
     Path(id): Path<String>,
 ) -> ApiResult<Json<CertificatesView>> {
     Ok(Json(cluster(&st, &id)?.certificates(&who).await?))
+}
+
+/// The requests for client certificates, newest first, with the certificate
+/// of each that was signed. The broker lets only cluster admins list them.
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/certificate-requests",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, body = CertificateRequestsView), (status = 403, body = ErrorBody)))]
+pub async fn certificate_requests(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<CertificateRequestsView>> {
+    Ok(Json(cluster(&st, &id)?.certificate_requests(&who).await?))
+}
+
+/// Asks the CA holder for a client certificate. The body carries a signing
+/// request made in the browser: the private key never reaches the console,
+/// and the CA holder signs with `lotse certs --sign`.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/certificate-requests",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = RequestCertificate,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn request_certificate(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<RequestCertificate>,
+) -> ApiResult<Json<Done>> {
+    use base64::Engine as _;
+    let csr = base64::engine::general_purpose::STANDARD
+        .decode(req.csr.trim())
+        .map_err(|_| ApiError::BadRequest("The signing request is base64 of its DER form.".into()))?;
+    cluster(&st, &id)?.request_certificate(&who, &req.principal, csr).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, requested = %req.principal, "certificate requested");
+    let message = format!(
+        "Asked for a certificate for {}. The CA holder signs it with `lotse certs --sign`; the request lapses after 7 days.",
+        req.principal
+    );
+    Ok(Json(Done { message, cli: cli::sign_certificates() }))
 }
 
 /// Decodes hex, or says what is wrong with `what`.

@@ -224,6 +224,32 @@ export interface RevokeCertificateRequest {
 export interface DescribeCertificatesRequest {
   readonly type: "DescribeCertificates";
 }
+/** `RequestCertificate` (key 55): asks for a certificate with a signing request (ADR 0092). Cluster admin. */
+export interface RequestCertificateRequest {
+  readonly type: "RequestCertificate";
+  /** The principal the certificate will name: its common name. */
+  readonly principal: string;
+  /** A PKCS#10 certificate signing request in DER form. */
+  readonly csr: Uint8Array;
+}
+/** `DescribeCertificateRequests` (key 56): lists the certificate requests. Cluster admin. */
+export interface DescribeCertificateRequestsRequest {
+  readonly type: "DescribeCertificateRequests";
+}
+/** `RecordCertificate` (key 57): the CA holder records the certificate it signed for a request. Cluster admin. */
+export interface RecordCertificateRequest {
+  readonly type: "RecordCertificate";
+  /** The request it answers: SHA-256 of its signing request. */
+  readonly id: Uint8Array;
+  /** The signed certificate, DER. */
+  readonly certificate: Uint8Array;
+  /** SHA-256 of the issuer's name in DER form (32 bytes). */
+  readonly issuer: Uint8Array;
+  /** The serial number, big-endian. */
+  readonly serial: Uint8Array;
+  readonly notBeforeMs: bigint;
+  readonly notAfterMs: bigint;
+}
 /** `RecordCertificates` (key 54, internal: only broker nodes send it): certificates a node accepted. */
 export interface RecordCertificatesRequest {
   readonly type: "RecordCertificates";
@@ -334,6 +360,9 @@ export type Request =
   | RevokeCertificateRequest
   | DescribeCertificatesRequest
   | RecordCertificatesRequest
+  | RequestCertificateRequest
+  | DescribeCertificateRequestsRequest
+  | RecordCertificateRequest
   | QueueActionRequest
   | DescribeConfigsRequest
   | AlterConfigsRequest
@@ -384,6 +413,9 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
   DescribeCertificates: ApiKey.DESCRIBE_CERTIFICATES,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
+  RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
+  DescribeCertificateRequests: ApiKey.DESCRIBE_CERTIFICATE_REQUESTS,
+  RecordCertificate: ApiKey.RECORD_CERTIFICATE,
   QueueAction: ApiKey.PURGE_QUEUE, // or REQUEUE: see requestApiKey
   DescribeConfigs: ApiKey.DESCRIBE_CONFIGS,
   AlterConfigs: ApiKey.ALTER_CONFIGS,
@@ -439,6 +471,7 @@ export function writeRequest(w: Writer, req: Request): void {
     case "DescribeMetrics":
     case "DescribeUsers":
     case "DescribeCertificates":
+    case "DescribeCertificateRequests":
     case "DescribeTenants":
     case "DescribeRoleBindings":
     case "WhoAmI":
@@ -616,6 +649,18 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RevokeCertificate":
       w.bytes(req.issuer).bytes(req.serial).u64(req.notAfterMs).string(req.reason).noTags();
+      return;
+    case "RequestCertificate":
+      w.string(req.principal).bytes(req.csr).noTags();
+      return;
+    case "RecordCertificate":
+      w.bytes(req.id)
+        .bytes(req.certificate)
+        .bytes(req.issuer)
+        .bytes(req.serial)
+        .u64(req.notBeforeMs)
+        .u64(req.notAfterMs)
+        .noTags();
       return;
     case "RecordCertificates":
       w.array(req.certificates, (w1, c) =>
@@ -961,6 +1006,24 @@ export function readRequest(apiKey: number, r: Reader): Request {
       r.tags();
       return x;
     }
+    case ApiKey.REQUEST_CERTIFICATE: {
+      const x: RequestCertificateRequest = { type: "RequestCertificate", principal: r.string(), csr: r.bytes() };
+      r.tags();
+      return x;
+    }
+    case ApiKey.RECORD_CERTIFICATE: {
+      const x: RecordCertificateRequest = {
+        type: "RecordCertificate",
+        id: r.bytes(),
+        certificate: r.bytes(),
+        issuer: r.bytes(),
+        serial: r.bytes(),
+        notBeforeMs: r.u64(),
+        notAfterMs: r.u64(),
+      };
+      r.tags();
+      return x;
+    }
     case ApiKey.RECORD_CERTIFICATES: {
       // 4 + 4 + 2 + 3 * 8 bytes at least.
       const certificates = r.array(34, (r1) => ({
@@ -1035,6 +1098,9 @@ export function readRequest(apiKey: number, r: Reader): Request {
     case ApiKey.DESCRIBE_CERTIFICATES:
       r.tags();
       return { type: "DescribeCertificates" };
+    case ApiKey.DESCRIBE_CERTIFICATE_REQUESTS:
+      r.tags();
+      return { type: "DescribeCertificateRequests" };
     case ApiKey.CREATE_TENANT: {
       const x: CreateTenantRequest = { type: "CreateTenant", name: r.string() };
       r.tags();

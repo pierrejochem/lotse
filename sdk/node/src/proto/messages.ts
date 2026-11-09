@@ -503,6 +503,38 @@ export interface CertificateEntry {
   readonly revokedAtMs: bigint;
 }
 
+/** Where a certificate request stands (ADR 0092). */
+export const CertificateRequestState = {
+  /** Waiting for the CA holder. */
+  PENDING: 0,
+  /** Signed; the certificate is in the entry. */
+  SIGNED: 1,
+  /** Unsigned past its seven days. */
+  EXPIRED: 2,
+} as const;
+
+/** One certificate request (`DescribeCertificateRequests`). */
+export interface CertificateRequestEntry {
+  /** SHA-256 of the signing request (32 bytes). */
+  readonly id: Uint8Array;
+  /** The principal asked for. */
+  readonly principal: string;
+  /** The signing request, DER. */
+  readonly csr: Uint8Array;
+  /** Who asked. */
+  readonly requestedBy: string;
+  /** When, ms since the Unix epoch. */
+  readonly requestedAtMs: bigint;
+  /** When an unsigned request lapses, ms since the Unix epoch. */
+  readonly expiresAtMs: bigint;
+  /** A {@link CertificateRequestState}. */
+  readonly state: number;
+  /** The signed certificate, DER; empty until signed. */
+  readonly certificate: Uint8Array;
+  /** When it was signed, ms since the Unix epoch; 0 if not yet. */
+  readonly signedAtMs: bigint;
+}
+
 /** One accepted client certificate, as a node reports it (`RecordCertificates`, internal). */
 export interface SeenCertificate {
   readonly issuer: Uint8Array;

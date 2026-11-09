@@ -40,6 +40,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/certificate-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The requests for client certificates, newest first, with the certificate
+         *     of each that was signed. The broker lets only cluster admins list them.
+         */
+        get: operations["certificate_requests"];
+        put?: never;
+        /**
+         * Asks the CA holder for a client certificate. The body carries a signing
+         *     request made in the browser: the private key never reaches the console,
+         *     and the CA holder signs with `lotse certs --sign`.
+         */
+        post: operations["request_certificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/certificates": {
         parameters: {
             query?: never;
@@ -466,6 +491,50 @@ export interface components {
             bindings: components["schemas"]["BindingRow"][];
             /** @description Whether the caller may change bindings. */
             can_edit: boolean;
+        };
+        /** @description One request for a client certificate (ADR 0092). */
+        CertificateRequestRow: {
+            /** @description The signed certificate, PEM; empty until signed. */
+            certificate: string;
+            /**
+             * Format: int64
+             * @description When an unsigned request lapses, ms since the Unix epoch.
+             */
+            expires_at_ms: number;
+            /** @description SHA-256 of the signing request, 64 hex digits. */
+            id: string;
+            /**
+             * @description SHA-256 of the requester's public key, 64 hex digits: what
+             *     `lotse certs --sign` shows the CA holder, to compare with the key
+             *     the browser made. Empty if the request cannot be read.
+             */
+            key_fingerprint: string;
+            /** @description The principal the certificate will name. */
+            principal: string;
+            /**
+             * Format: int64
+             * @description When, ms since the Unix epoch.
+             */
+            requested_at_ms: number;
+            /** @description Who asked. */
+            requested_by: string;
+            /**
+             * Format: int64
+             * @description When it was signed; 0 if not yet.
+             */
+            signed_at_ms: number;
+            /** @description `pending`, `signed` or `expired`. */
+            state: string;
+        };
+        /** @description The certificate requests screen. */
+        CertificateRequestsView: {
+            /**
+             * Format: int64
+             * @description The cluster's clock when the list was made, ms since the Unix epoch.
+             */
+            now_ms: number;
+            /** @description Newest first. */
+            requests: components["schemas"]["CertificateRequestRow"][];
         };
         /** @description One client certificate the cluster has seen or had revoked (ADR 0091). */
         CertificateRow: {
@@ -1144,6 +1213,19 @@ export interface components {
          */
         ReplicaState: "leader" | "in_sync" | "catching_up";
         /**
+         * @description A request for a client certificate (ADR 0092). The browser made the key
+         *     and the signing request; the console never sees the private key.
+         */
+        RequestCertificate: {
+            /** @description The PKCS#10 signing request, DER, base64. */
+            csr: string;
+            /**
+             * @description The principal the certificate will name: letters, digits, `.`, `_`,
+             *     `-` and `@`.
+             */
+            principal: string;
+        };
+        /**
          * @description Request to revoke one client certificate (ADR 0090). Destructive: the
          *     serial is typed again.
          */
@@ -1559,6 +1641,78 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["BindingRow"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    certificate_requests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificateRequestsView"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    request_certificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RequestCertificate"];
             };
         };
         responses: {

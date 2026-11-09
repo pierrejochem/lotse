@@ -241,6 +241,25 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     /** The client certificates the cluster has seen or had revoked, by expiry (cluster admin, ADR 0091). */
     public suspend fun describeCertificates(): LotseClient.CertificateInventory = io { java.describeCertificates() }
 
+    /** Asks the CA holder for a client certificate; [csr] is a DER PKCS#10 request (cluster admin, ADR 0092). */
+    public suspend fun requestCertificate(principal: String, csr: ByteArray): Unit =
+        io { java.requestCertificate(principal, csr) }
+
+    /** The certificate requests, newest first (cluster admin, ADR 0092). */
+    public suspend fun describeCertificateRequests(): LotseClient.CertificateRequests =
+        io { java.describeCertificateRequests() }
+
+    /** Records the certificate the CA holder signed for the request [id] (cluster admin, ADR 0092). */
+    public suspend fun recordCertificate(
+        id: ByteArray,
+        certificate: ByteArray,
+        issuer: ByteArray,
+        serial: ByteArray,
+        notBeforeMs: Long,
+        notAfterMs: Long,
+    ): Unit =
+        io { java.recordCertificate(id, certificate, issuer, serial, notBeforeMs, notAfterMs) }
+
     /** Adds a node to the cluster. */
     public suspend fun addNode(nodeId: Long, peer: String, client: String): Unit =
         io { java.addNode(nodeId, peer, client) }

@@ -833,6 +833,51 @@ pub struct RevokeCertificate {
     pub confirm: String,
 }
 
+/// One request for a client certificate (ADR 0092).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CertificateRequestRow {
+    /// SHA-256 of the signing request, 64 hex digits.
+    pub id: String,
+    /// The principal the certificate will name.
+    pub principal: String,
+    /// Who asked.
+    pub requested_by: String,
+    /// When, ms since the Unix epoch.
+    pub requested_at_ms: u64,
+    /// When an unsigned request lapses, ms since the Unix epoch.
+    pub expires_at_ms: u64,
+    /// `pending`, `signed` or `expired`.
+    pub state: String,
+    /// SHA-256 of the requester's public key, 64 hex digits: what
+    /// `lotse certs --sign` shows the CA holder, to compare with the key
+    /// the browser made. Empty if the request cannot be read.
+    pub key_fingerprint: String,
+    /// The signed certificate, PEM; empty until signed.
+    pub certificate: String,
+    /// When it was signed; 0 if not yet.
+    pub signed_at_ms: u64,
+}
+
+/// The certificate requests screen.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CertificateRequestsView {
+    /// Newest first.
+    pub requests: Vec<CertificateRequestRow>,
+    /// The cluster's clock when the list was made, ms since the Unix epoch.
+    pub now_ms: u64,
+}
+
+/// A request for a client certificate (ADR 0092). The browser made the key
+/// and the signing request; the console never sees the private key.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct RequestCertificate {
+    /// The principal the certificate will name: letters, digits, `.`, `_`,
+    /// `-` and `@`.
+    pub principal: String,
+    /// The PKCS#10 signing request, DER, base64.
+    pub csr: String,
+}
+
 /// The role bindings screen.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BindingsView {

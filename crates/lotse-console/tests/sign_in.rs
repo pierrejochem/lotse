@@ -644,6 +644,29 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&carol_app, "GET", "/api/v1/clusters/local/certificates", None, None).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
 
+    // A certificate is asked for with a request the browser made, by a
+    // cluster admin only; it waits for the CA holder.
+    let csr = "MIHKMHICAQAwEDEOMAwGA1UEAwwFYWxpY2UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARnKUSI4DRkymlj6IpyYHjl9g4fkO/KxbIv1mwPnPz6Uzzgu6zhq+BZCN0Ag5wvdlBj3SbgAATmU4mbaITAsGl6oAAwCgYIKoZIzj0EAwIDSAAwRQIgQKvHGNTyKosN+lfdcw26mTmMr9BK5y34EAESHttDA1kCIQCFfhWHtobQFEY8SXm5AquJHSijZHVx/Xps8gbif2hQvQ==";
+    let ask = json!({"principal": "alice", "csr": csr});
+    let r = call(&carol_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(ask.clone())).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "only cluster admins ask: {r:?}");
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/certificate-requests", None, None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
+    let bad = json!({"principal": "../alice", "csr": csr});
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(bad)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "a name the CA holder could not sign: {r:?}");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(ask)).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let r = call(&admin_app, "GET", "/api/v1/clusters/local/certificate-requests", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let waiting = r.json["requests"].as_array().unwrap().iter().any(|q| {
+        q["principal"] == "alice"
+            && q["state"] == "pending"
+            && q["key_fingerprint"] == "23b66907cf9a2d8b55976d1142b8ec5c5a2b85b18685722603440f15c2da42c5"
+            && q["certificate"] == ""
+    });
+    assert!(waiting, "the request waits for the CA holder: {r:?}");
+
     // Revoking and deleting name the subject again.
     let revoke = |confirm: &str| json!({"subject": "carol", "group": false, "confirm": confirm});
     let r = call(&admin_app, "POST", "/api/v1/clusters/local/sessions/revoke", None, Some(revoke("carl"))).await;

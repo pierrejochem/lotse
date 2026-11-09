@@ -103,6 +103,21 @@ pub(crate) enum Change {
     /// the proposing leader's clock; entries whose certificate ended long
     /// before it are dropped when this applies.
     RecordCertificates { seen: Vec<(CertKey, SeenCert)>, at_ms: u64 },
+    /// A cluster admin asks the CA holder for a client certificate
+    /// (ADR 0092). `id` is the SHA-256 of `csr`. `at_ms` is the proposing
+    /// leader's clock: requests that lapsed before it are dropped when this
+    /// applies.
+    RequestCertificate { id: [u8; 32], principal: String, csr: Vec<u8>, requested_by: String, at_ms: u64 },
+    /// The CA holder records the certificate it signed for a request
+    /// (ADR 0092); it joins the inventory of [`Change::RecordCertificates`].
+    RecordCertificate {
+        id: [u8; 32],
+        certificate: Vec<u8>,
+        cert: CertKey,
+        not_before_ms: u64,
+        not_after_ms: u64,
+        at_ms: u64,
+    },
     /// New partitions for a runtime stream, one voter set each, numbered on
     /// from its last (ADR 0074).
     AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
@@ -377,6 +392,10 @@ pub(crate) struct MetadataState {
     /// The client certificates nodes accepted (ADR 0091), until they have
     /// been expired for [`CERT_KEEP_MS`].
     pub(crate) certs: BTreeMap<CertKey, SeenCert>,
+    /// Requests for client certificates (ADR 0092), by the SHA-256 of their
+    /// signing request: unsigned ones for [`REQUEST_TTL_MS`], signed ones
+    /// for [`SIGNED_KEEP_MS`] after signing.
+    pub(crate) cert_requests: BTreeMap<[u8; 32], CertRequest>,
     /// Nodes added at runtime; those from the configuration are not here.
     pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
     /// Nodes being drained.
@@ -711,7 +730,12 @@ impl MetadataState {
                     }
                     match self.certs.get_mut(&key) {
                         Some(known) => {
-                            known.first_seen_ms = known.first_seen_ms.min(c.first_seen_ms);
+                            // 0 is "no node has seen it yet", as for a certificate
+                            // recorded at signing (ADR 0092): any time beats it.
+                            known.first_seen_ms = match known.first_seen_ms {
+                                0 => c.first_seen_ms,
+                                t => t.min(c.first_seen_ms),
+                            };
                             known.last_seen_ms = known.last_seen_ms.max(c.last_seen_ms);
                         }
                         None => {
@@ -719,6 +743,34 @@ impl MetadataState {
                         }
                     }
                 }
+            }
+            Change::RequestCertificate { id, principal, csr, requested_by, at_ms } => {
+                self.prune_requests(at_ms);
+                // The same signing request is one request, and a signed one stays so.
+                self.cert_requests.entry(id).or_insert(CertRequest {
+                    principal,
+                    csr,
+                    requested_by,
+                    at_ms,
+                    signed: None,
+                });
+            }
+            Change::RecordCertificate { id, certificate, cert, not_before_ms, not_after_ms, at_ms } => {
+                self.prune_requests(at_ms);
+                // Only an open request takes a certificate, once.
+                let Some(req) = self.cert_requests.get_mut(&id).filter(|r| r.signed.is_none()) else {
+                    return Ok(());
+                };
+                req.signed = Some(SignedCert { certificate, at_ms });
+                // Known to the inventory from now on; no node has seen it yet.
+                let seen = SeenCert {
+                    principal: req.principal.clone(),
+                    not_before_ms,
+                    not_after_ms,
+                    first_seen_ms: 0,
+                    last_seen_ms: 0,
+                };
+                self.certs.entry(cert).or_insert(seen);
             }
             Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
                 // An expired certificate is refused by its validity anyway:
@@ -845,7 +897,9 @@ impl MetadataState {
             .filter(|q| q.limits.priority_levels != 0)
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
-        let sections = if !self.certs.is_empty() {
+        let sections = if !self.cert_requests.is_empty() {
+            9
+        } else if !self.certs.is_empty() {
             8
         } else if !self.revoked_certs.is_empty() {
             7
@@ -919,7 +973,23 @@ impl MetadataState {
                 put_seen(&mut b, c);
             }
         }
+        if sections >= 9 {
+            b.put_u32_le(self.cert_requests.len() as u32);
+            for (id, r) in &self.cert_requests {
+                b.put_slice(id);
+                put_request(&mut b, r);
+            }
+        }
         b.freeze()
+    }
+
+    /// Forgets requests that lapsed unsigned or were signed long ago, by the
+    /// leader's time carried in the change, so every replica forgets the same.
+    fn prune_requests(&mut self, at_ms: u64) {
+        self.cert_requests.retain(|_, r| match &r.signed {
+            Some(s) => s.at_ms.saturating_add(SIGNED_KEEP_MS) >= at_ms,
+            None => r.at_ms.saturating_add(REQUEST_TTL_MS) >= at_ms,
+        });
     }
 
     /// The state a snapshot holds.
@@ -1067,6 +1137,14 @@ impl MetadataState {
             for _ in 0..count(b)? {
                 let cert = get_cert_key(b)?;
                 s.certs.insert(cert, get_seen(b)?);
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 32)?;
+                let mut id = [0u8; 32];
+                b.copy_to_slice(&mut id);
+                s.cert_requests.insert(id, get_request(b)?);
             }
         }
         if b.has_remaining() {
@@ -1222,6 +1300,23 @@ fn change_bytes(change: &Change) -> Bytes {
                 put_cert_key(&mut b, cert);
                 put_seen(&mut b, c);
             }
+        }
+        Change::RequestCertificate { id, principal, csr, requested_by, at_ms } => {
+            b.put_u8(22);
+            b.put_slice(id);
+            b.put_u64_le(*at_ms);
+            put_str(&mut b, principal);
+            put_bytes(&mut b, csr);
+            put_str(&mut b, requested_by);
+        }
+        Change::RecordCertificate { id, certificate, cert, not_before_ms, not_after_ms, at_ms } => {
+            b.put_u8(23);
+            b.put_slice(id);
+            b.put_u64_le(*at_ms);
+            b.put_u64_le(*not_before_ms);
+            b.put_u64_le(*not_after_ms);
+            put_cert_key(&mut b, cert);
+            put_bytes(&mut b, certificate);
         }
         Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
             b.put_u8(20);
@@ -1411,6 +1506,24 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let seen =
                 (0..count(b)?).map(|_| Ok((get_cert_key(b)?, get_seen(b)?))).collect::<Result<Vec<_>, String>>()?;
             Change::RecordCertificates { seen, at_ms }
+        }
+        22 => {
+            need(b, 40)?;
+            let mut id = [0u8; 32];
+            b.copy_to_slice(&mut id);
+            let at_ms = b.get_u64_le();
+            let principal = get_str(b)?;
+            let csr = get_bytes(b)?.to_vec();
+            Change::RequestCertificate { id, principal, csr, requested_by: get_str(b)?, at_ms }
+        }
+        23 => {
+            need(b, 56)?;
+            let mut id = [0u8; 32];
+            b.copy_to_slice(&mut id);
+            let (at_ms, not_before_ms, not_after_ms) = (b.get_u64_le(), b.get_u64_le(), b.get_u64_le());
+            let cert = get_cert_key(b)?;
+            let certificate = get_bytes(b)?.to_vec();
+            Change::RecordCertificate { id, certificate, cert, not_before_ms, not_after_ms, at_ms }
         }
         20 => {
             let cert = get_cert_key(b)?;
@@ -1640,6 +1753,69 @@ fn get_seen(b: &mut &[u8]) -> Result<SeenCert, String> {
         first_seen_ms: b.get_u64_le(),
         last_seen_ms: b.get_u64_le(),
     })
+}
+
+/// How long a certificate request waits for the CA holder: 7 days.
+pub(crate) const REQUEST_TTL_MS: u64 = 7 * 24 * 3_600_000;
+
+/// How long a signed request stays, for the requester to fetch the
+/// certificate: 30 days after signing.
+pub(crate) const SIGNED_KEEP_MS: u64 = 30 * 24 * 3_600_000;
+
+/// A request for a client certificate (ADR 0092).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CertRequest {
+    /// The principal the certificate will name.
+    pub(crate) principal: String,
+    /// The PKCS#10 signing request, DER.
+    pub(crate) csr: Vec<u8>,
+    /// Who asked.
+    pub(crate) requested_by: String,
+    /// The leader's clock when it was asked, ms since the Unix epoch.
+    pub(crate) at_ms: u64,
+    /// The answer, once the CA holder signed.
+    pub(crate) signed: Option<SignedCert>,
+}
+
+/// The certificate the CA holder signed for a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignedCert {
+    /// DER.
+    pub(crate) certificate: Vec<u8>,
+    /// The leader's clock when it was recorded.
+    pub(crate) at_ms: u64,
+}
+
+fn put_request(b: &mut BytesMut, r: &CertRequest) {
+    put_str(b, &r.principal);
+    put_bytes(b, &r.csr);
+    put_str(b, &r.requested_by);
+    b.put_u64_le(r.at_ms);
+    match &r.signed {
+        None => b.put_u8(0),
+        Some(s) => {
+            b.put_u8(1);
+            put_bytes(b, &s.certificate);
+            b.put_u64_le(s.at_ms);
+        }
+    }
+}
+
+fn get_request(b: &mut &[u8]) -> Result<CertRequest, String> {
+    let principal = get_str(b)?;
+    let csr = get_bytes(b)?.to_vec();
+    let requested_by = get_str(b)?;
+    need(b, 9)?;
+    let at_ms = b.get_u64_le();
+    let signed = match b.get_u8() {
+        0 => None,
+        _ => {
+            let certificate = get_bytes(b)?.to_vec();
+            need(b, 8)?;
+            Some(SignedCert { certificate, at_ms: b.get_u64_le() })
+        }
+    };
+    Ok(CertRequest { principal, csr, requested_by, at_ms, signed })
 }
 
 fn put_cert_key(b: &mut BytesMut, k: &CertKey) {

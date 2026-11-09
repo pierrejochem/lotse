@@ -86,6 +86,9 @@ class AdminTest {
         if (r instanceof Request.DescribeCertificates) {
             return new Response.DescribeCertificates(ErrorCode.NOT_LEADER, hint, 0L, List.of());
         }
+        if (r instanceof Request.DescribeCertificateRequests) {
+            return new Response.DescribeCertificateRequests(ErrorCode.NOT_LEADER, hint, 0L, List.of());
+        }
         return new Response.Admin(ErrorCode.NOT_LEADER, null, hint);
     }
 
@@ -247,6 +250,35 @@ class AdminTest {
         assertEquals(1, b.requests(Request.DescribeCertificates.class).size(), "node 1 pointed to the leader");
         assertEquals(15L, inventory.nowMs());
         assertEquals(List.of(entry), inventory.certificates());
+    }
+
+    @Test
+    void describeCertificateRequestsReturnsTheRequestsAndTheNodesClock() {
+        Messages.CertificateRequestEntry entry = new Messages.CertificateRequestEntry(
+                ByteString.copyOf(new byte[32]), "alice", ByteString.copyOf(new byte[] {1, 2}), "root", 10L, 20L,
+                Messages.CertificateRequestState.SIGNED, ByteString.copyOf(new byte[] {3}), 12L);
+        serve((n, r) -> r instanceof Request.DescribeCertificateRequests
+                ? new Response.DescribeCertificateRequests(ErrorCode.NONE, null, 15L, List.of(entry))
+                : ok());
+        LotseClient.CertificateRequests requests = client.describeCertificateRequests();
+        assertEquals(1, b.requests(Request.DescribeCertificateRequests.class).size(), "node 1 pointed to the leader");
+        assertEquals(15L, requests.nowMs());
+        assertEquals(List.of(entry), requests.requests());
+    }
+
+    @Test
+    void certificateRequestCallsCarryWhatTheyName() {
+        serve((n, r) -> ok());
+        client.requestCertificate("alice", new byte[] {1, 2});
+        client.recordCertificate(new byte[] {9}, new byte[] {3}, new byte[32], new byte[] {7}, 5L, 6L);
+        Request.RequestCertificate asked = b.requests(Request.RequestCertificate.class).get(0);
+        assertEquals("alice", asked.principal());
+        assertEquals(ByteString.copyOf(new byte[] {1, 2}), asked.csr());
+        Request.RecordCertificate recorded = b.requests(Request.RecordCertificate.class).get(0);
+        assertEquals(ByteString.copyOf(new byte[] {9}), recorded.id());
+        assertEquals(ByteString.copyOf(new byte[] {3}), recorded.certificate());
+        assertEquals(5L, recorded.notBeforeMs());
+        assertEquals(6L, recorded.notAfterMs());
     }
 
     @Test

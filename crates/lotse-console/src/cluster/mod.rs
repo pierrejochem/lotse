@@ -16,8 +16,9 @@ use crate::auth::Identity;
 use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
-    BindingRow, BindingsView, CertificatesView, ClusterRef, CreateQueue, Credential, Isolation, MoveLeader, NodesView,
-    Overview, QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow, TenantsView, UsersView,
+    BindingRow, BindingsView, CertificateRequestsView, CertificatesView, ClusterRef, CreateQueue, Credential,
+    Isolation, MoveLeader, NodesView, Overview, QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow,
+    TenantsView, UsersView,
 };
 
 /// One managed cluster.
@@ -91,6 +92,13 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// The client certificates the cluster has seen or had revoked (ADR 0091).
     async fn certificates(&self, who: &Identity) -> ApiResult<CertificatesView>;
+
+    /// The certificate requests (ADR 0092).
+    async fn certificate_requests(&self, who: &Identity) -> ApiResult<CertificateRequestsView>;
+
+    /// Asks the CA holder for a client certificate, with a signing request
+    /// the requester's browser made (ADR 0092).
+    async fn request_certificate(&self, who: &Identity, principal: &str, csr: Vec<u8>) -> ApiResult<()>;
 
     /// Revokes one client certificate (ADR 0090).
     async fn revoke_certificate(

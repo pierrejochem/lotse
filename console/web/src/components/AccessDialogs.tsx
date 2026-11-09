@@ -2,7 +2,8 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError, type S } from '../api/client';
-import { useAlterBinding, useSetCredential, useTenants } from '../api/queries';
+import { useAlterBinding, useRequestCertificate, useSetCredential, useTenants } from '../api/queries';
+import { canRequest, makeCertificateRequest, principalError } from '../certificateRequest';
 import { canDerive, deriveCredential } from '../scramCredential';
 import { useToast } from './toast';
 import { Icon, Select } from './ui';
@@ -179,6 +180,152 @@ export function PasswordDialog({ cluster, user }: { cluster: string; user?: stri
               <button type="submit" className="btn primary" disabled={set.isPending || !secure}>
                 {user ? 'Set password' : 'Add user'}
               </button>
+            </div>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/** Offers `text` as a file download: the browser keeps it, the page does not. */
+export function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/x-pem-file' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Asks the CA holder for a client certificate. The browser makes the key and
+ * the signing request; the private key is offered as a file once and is not
+ * kept, and the console passes on only the request (ADR 0092).
+ */
+export function RequestCertificateDialog({ cluster }: { cluster: string }) {
+  const [open, setOpen] = useState(false);
+  const [principal, setPrincipal] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [made, setMade] = useState<{ principal: string; key: string; fingerprint: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ask = useRequestCertificate(cluster);
+  const toast = useToast();
+  const secure = canRequest();
+  const name = principal.trim();
+  const invalid = name !== '' ? principalError(name) : null;
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const problem = principalError(name);
+    if (problem) return setError(problem);
+    setBusy(true);
+    try {
+      const request = await makeCertificateRequest(name);
+      ask.mutate(
+        { principal: name, csr: request.csr },
+        {
+          onSuccess: (d) => {
+            toast({ title: d.message, cli: d.cli });
+            setMade({ principal: name, key: request.privateKeyPem, fingerprint: request.fingerprint });
+            // Offered at once; the file is the only copy.
+            download(`${name}.key`, request.privateKeyPem);
+          },
+          onError: (err) => setError(message(err, 'The request could not be sent.')),
+          onSettled: () => setBusy(false),
+        },
+      );
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : 'The key could not be made.');
+    }
+  };
+
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        setPrincipal('');
+        setError(null);
+        setMade(null);
+      }}
+    >
+      <Dialog.Trigger className="btn primary">
+        <Icon name="plus" /> Request certificate
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="overlay" />
+        <Dialog.Content className="dialog" style={narrow} aria-describedby="rc-desc">
+          <form onSubmit={submit} style={{ display: 'contents' }} noValidate>
+            <div className="dialog-head">
+              <div>
+                <Dialog.Title className="h2">{made ? 'Request sent' : 'Request a client certificate'}</Dialog.Title>
+                <Dialog.Description id="rc-desc" className="sub" style={{ margin: '4px 0 0' }}>
+                  {made
+                    ? 'The private key was saved as a file. Nothing else has it, and the console cannot give it again.'
+                    : 'This browser makes a key and a signing request. The private key never leaves it; the CA holder signs the request with lotse certs --sign.'}
+                </Dialog.Description>
+              </div>
+              <Dialog.Close className="btn icon" aria-label="Close">
+                <Icon name="close" size={14} />
+              </Dialog.Close>
+            </div>
+            <div className="dialog-body">
+              {!secure && (
+                <p role="alert" className="error-text" style={{ margin: 0 }}>
+                  This page cannot make a key here. Open the console over https or on localhost.
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="error-text" style={{ margin: 0, padding: '10px 12px', borderRadius: 4, background: 'var(--crit-bg)' }}>
+                  {error}
+                </p>
+              )}
+              {made ? (
+                <>
+                  <p style={{ margin: 0 }}>
+                    Certificate for <strong>{made.principal}</strong>. The CA holder can compare this key fingerprint with the one the signing command shows:
+                  </p>
+                  <p className="mono small" style={{ margin: 0, wordBreak: 'break-all' }}>{made.fingerprint}</p>
+                  <p className="muted" style={{ margin: 0 }}>
+                    When it is signed, download the certificate from the list and use it with {made.principal}.key. The request lapses after 7 days.
+                  </p>
+                </>
+              ) : (
+                <div className="field">
+                  <label htmlFor="rc-principal">Principal</label>
+                  <input
+                    id="rc-principal"
+                    className="input"
+                    value={principal}
+                    onChange={(e) => setPrincipal(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-invalid={invalid ? true : undefined}
+                    autoFocus
+                  />
+                  {invalid ? <span className="error-text">{invalid}</span> : <span className="muted small">The name a node takes as the principal, such as a service or an admin.</span>}
+                </div>
+              )}
+            </div>
+            <div className="dialog-foot">
+              {made ? (
+                <>
+                  <button type="button" className="btn" onClick={() => download(`${made.principal}.key`, made.key)}>
+                    Save the key again
+                  </button>
+                  <Dialog.Close className="btn primary">Done</Dialog.Close>
+                </>
+              ) : (
+                <>
+                  <Dialog.Close className="btn">Cancel</Dialog.Close>
+                  <button type="submit" className="btn primary" disabled={busy || ask.isPending || !secure}>
+                    Request certificate
+                  </button>
+                </>
+              )}
             </div>
           </form>
         </Dialog.Content>

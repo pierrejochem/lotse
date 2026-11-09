@@ -20,6 +20,7 @@ import {
   type TenantEntry,
   type UserEntry,
   type CertificateEntry,
+  type CertificateRequestEntry,
   type PublishEntry,
   type PublishResult,
   type ResourceMetadata,
@@ -1810,6 +1811,64 @@ export class LotseClient {
     }
     return this.adminChange(
       { type: "RevokeCertificate", issuer, serial, notAfterMs: BigInt(notAfterMs), reason },
+      options.signal,
+    );
+  }
+
+  /**
+   * Asks for a certificate with a PKCS#10 signing request in DER form, made by the requester: its private key never
+   * reaches the cluster (ADR 0092). The request's id is the SHA-256 of `csr`, so asking twice is one request. Needs the
+   * cluster-admin role.
+   */
+  async requestCertificate(principal: string, csr: Uint8Array, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "RequestCertificate", principal, csr }, options.signal);
+  }
+
+  /** The certificate requests, newest first, with `nowMs`, the answering node's clock (ADR 0092). Cluster admin. */
+  async describeCertificateRequests(
+    options: CallOptions = {},
+  ): Promise<{ readonly requests: readonly CertificateRequestEntry[]; readonly nowMs: bigint }> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeCertificateRequests" });
+        if (r.type !== "DescribeCertificateRequests") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return { requests: r.requests, nowMs: r.nowMs };
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * The CA holder records the certificate it signed for the request `id` (the SHA-256 of its signing request). The
+   * broker does not read the certificate: `issuer` (SHA-256 of the issuer's name in DER form, 32 bytes), `serial`
+   * (big-endian) and the validity times, in ms since the Unix epoch, are the CA holder's word (ADR 0092). Cluster
+   * admin.
+   */
+  async recordCertificate(
+    id: Uint8Array,
+    certificate: Uint8Array,
+    issuer: Uint8Array,
+    serial: Uint8Array,
+    notBeforeMs: bigint | number,
+    notAfterMs: bigint | number,
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    return this.adminChange(
+      {
+        type: "RecordCertificate",
+        id,
+        certificate,
+        issuer,
+        serial,
+        notBeforeMs: BigInt(notBeforeMs),
+        notAfterMs: BigInt(notAfterMs),
+      },
       options.signal,
     );
   }

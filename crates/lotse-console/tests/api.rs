@@ -145,6 +145,7 @@ async fn the_openapi_document_lists_every_route() {
         "/api/v1/clusters/{cluster}/sessions/revoke",
         "/api/v1/clusters/{cluster}/certificates",
         "/api/v1/clusters/{cluster}/certificates/revoke",
+        "/api/v1/clusters/{cluster}/certificate-requests",
     ] {
         assert!(paths.contains_key(p), "{p} missing");
     }
@@ -261,6 +262,29 @@ async fn users_bindings_and_sessions_in_the_demo() {
     }
     let revoked = rows.iter().find(|r| r["serial"] == "01ab").expect("the revoked one is listed");
     assert_eq!((revoked["state"].as_str(), revoked["reason"].as_str()), (Some("revoked"), Some("lost")));
+
+    // Certificate requests: the signing request is base64, the name one the
+    // CA holder can sign; the demo cluster lists what was asked.
+    let uri = format!("{base}/certificate-requests");
+    let csr = "MIHKMHICAQAwEDEOMAwGA1UEAwwFYWxpY2UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARnKUSI4DRkymlj6IpyYHjl9g4fkO/KxbIv1mwPnPz6Uzzgu6zhq+BZCN0Ag5wvdlBj3SbgAATmU4mbaITAsGl6oAAwCgYIKoZIzj0EAwIDSAAwRQIgQKvHGNTyKosN+lfdcw26mTmMr9BK5y34EAESHttDA1kCIQCFfhWHtobQFEY8SXm5AquJHSijZHVx/Xps8gbif2hQvQ==";
+    let ask = |principal: &str, csr: &str| json!({"principal": principal, "csr": csr});
+    assert_eq!(call_on(&app, "POST", &uri, Some(ask("alice", "not base64!"))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call_on(&app, "POST", &uri, Some(ask("../alice", csr))).await.0, StatusCode::BAD_REQUEST);
+    let (s, v) = call_on(&app, "POST", &uri, Some(ask("alice", csr))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["cli"].as_str().unwrap().starts_with("lotse certs --config"), "{v}");
+    let (s, v) = call_on(&app, "GET", &uri, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let rows = v["requests"].as_array().unwrap();
+    let mine = rows.iter().find(|r| r["principal"] == "alice").expect("the request is listed");
+    assert_eq!(
+        (mine["state"].as_str(), mine["key_fingerprint"].as_str()),
+        (Some("pending"), Some("23b66907cf9a2d8b55976d1142b8ec5c5a2b85b18685722603440f15c2da42c5"))
+    );
+    let signed = rows.iter().find(|r| r["state"] == "signed").expect("a signed sample");
+    assert!(signed["certificate"].as_str().unwrap().starts_with("-----BEGIN CERTIFICATE-----"), "{signed}");
+    let times: Vec<u64> = rows.iter().map(|r| r["requested_at_ms"].as_u64().unwrap()).collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "newest first: {times:?}");
 
     // Sessions: the name typed again.
     let revoke = |confirm: &str| json!({"subject": "platform-team", "group": true, "confirm": confirm});

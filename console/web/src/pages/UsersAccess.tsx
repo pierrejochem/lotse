@@ -5,13 +5,14 @@ import { ApiError } from '../api/client';
 import {
   useAlterBinding,
   useBindings,
+  useCertificateRequests,
   useCertificates,
   useDeleteUser,
   useRevokeCertificate,
   useRevokeSessions,
   useUsers,
 } from '../api/queries';
-import { BindingDialog, PasswordDialog, TypedConfirmButton } from '../components/AccessDialogs';
+import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
 import { Chip, Failed, Loading, Select } from '../components/ui';
 
@@ -334,6 +335,70 @@ function CertificateList({ cluster }: { cluster: string }) {
   );
 }
 
+const REQUEST_TONE = { pending: 'warn', signed: 'plain', expired: 'plain' } as const;
+
+/** Requests for client certificates: waiting for the CA holder, signed (with the certificate to download) or lapsed (ADR 0092). */
+function CertificateRequests({ cluster }: { cluster: string }) {
+  const q = useCertificateRequests(cluster);
+  if (q.isPending) return <Loading />;
+  if (q.isError) {
+    if (q.error instanceof ApiError && q.error.status === 403) {
+      return <p className="muted">Only cluster admins can list certificate requests. {q.error.message}</p>;
+    }
+    return <Failed error={q.error} retry={() => q.refetch()} />;
+  }
+  const { requests, now_ms } = q.data;
+  return (
+    <div className="stack">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <p className="sub" style={{ margin: 0 }}>
+          The key is made in your browser and never reaches the console. The CA holder signs a request with <span className="mono">lotse certs --sign</span>, on the machine with the CA key; a request lapses after 7 days.
+        </p>
+        <RequestCertificateDialog cluster={cluster} />
+      </div>
+      <section className="table-wrap" aria-label="Certificate requests">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Principal</th>
+              <th scope="col">Asked by</th>
+              <th scope="col">Asked</th>
+              <th scope="col">Key fingerprint</th>
+              <th scope="col">State</th>
+              <th scope="col"><span className="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {requests.map((r) => (
+              <tr key={r.id}>
+                <th scope="row">{r.principal}</th>
+                <td>{r.requested_by}</td>
+                <td>{when(r.requested_at_ms)}</td>
+                <td className="mono" title={r.key_fingerprint}>{r.key_fingerprint ? r.key_fingerprint.slice(0, 16) : '—'}</td>
+                <td>
+                  <Chip tone={REQUEST_TONE[r.state as keyof typeof REQUEST_TONE] ?? 'plain'}>{r.state}</Chip>
+                  {r.state === 'pending' && (
+                    <span className="muted small"> lapses in {Math.max(0, Math.round((r.expires_at_ms - now_ms) / DAY))} days</span>
+                  )}
+                  {r.state === 'signed' && <span className="muted small"> {when(r.signed_at_ms)}</span>}
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  {r.state === 'signed' && r.certificate && (
+                    <button className="btn small" onClick={() => download(`${r.principal}.pem`, r.certificate)}>
+                      Download certificate
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {requests.length === 0 && <tr><td colSpan={6} className="muted">No requests.</td></tr>}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
 /** Revokes a client certificate by issuer and serial, until it expires (ADR 0090). */
 function RevokeBySerial({ cluster }: { cluster: string }) {
   const revoke = useRevokeCertificate(cluster);
@@ -422,6 +487,7 @@ export function UsersAccess() {
         <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="certificates" className="tabs-content">
           <div className="stack" style={{ gap: 32 }}>
+            <CertificateRequests cluster={cluster} />
             <CertificateList cluster={cluster} />
             <details>
               <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>

@@ -64,6 +64,8 @@ public sealed class AdminTests : IDisposable
             Request.DescribeUsers => new Response.DescribeUsers(ErrorCode.NotLeader, hint, Array.Empty<Messages.UserEntry>()),
             Request.DescribeCertificates => new Response.DescribeCertificates(
                 ErrorCode.NotLeader, hint, 0, Array.Empty<Messages.CertificateEntry>()),
+            Request.DescribeCertificateRequests => new Response.DescribeCertificateRequests(
+                ErrorCode.NotLeader, hint, 0, Array.Empty<Messages.CertificateRequestEntry>()),
             Request.DescribeTenants => new Response.DescribeTenants(ErrorCode.NotLeader, hint, Array.Empty<Messages.TenantEntry>()),
             Request.DescribeRoleBindings => new Response.DescribeRoleBindings(ErrorCode.NotLeader, hint, Array.Empty<Messages.SourcedBinding>()),
             Request.DescribeNodes => new Response.DescribeNodes(ErrorCode.NotLeader, hint, Array.Empty<Messages.NodeEntry>()),
@@ -350,6 +352,36 @@ public sealed class AdminTests : IDisposable
     }
 
     [Fact]
+    public async Task CertificateRequestsAreMadeListedAndAnsweredThroughTheLeader()
+    {
+        var entry = new Messages.CertificateRequestEntry(
+            ByteString.CopyOf(new byte[32]), "alice", ByteString.CopyOf(new byte[] { 1, 2, 3 }), "admin", 1_750_000_000_000UL,
+            1_750_600_000_000UL, Messages.CertificateRequestState.Signed, ByteString.CopyOf(new byte[] { 9, 9 }),
+            1_750_100_000_000UL);
+        Serve((n, r) => r switch
+        {
+            Request.RequestCertificate or Request.RecordCertificate => Ok(),
+            Request.DescribeCertificateRequests => new Response.DescribeCertificateRequests(
+                ErrorCode.None, null, 1_750_000_000_001UL, new[] { entry }),
+            _ => throw new InvalidOperationException("unexpected " + r),
+        });
+        await _client!.RequestCertificateAsync("alice", new byte[] { 1, 2, 3 });
+        Request.RequestCertificate asked = _b.Requests<Request.RequestCertificate>()[0];
+        Assert.Equal("alice", asked.Principal);
+        Assert.Equal(new byte[] { 1, 2, 3 }, asked.Csr.ToByteArray());
+
+        Messages.CertificateRequests listed = await _client!.DescribeCertificateRequestsAsync();
+        Assert.Equal(1_750_000_000_001UL, listed.NowMs);
+        Assert.Equal(entry, Assert.Single(listed.Requests));
+
+        await _client!.RecordCertificateAsync(new byte[32], new byte[] { 9, 9 }, new byte[32], new byte[] { 0x7f }, 5, 6);
+        Request.RecordCertificate recorded = _b.Requests<Request.RecordCertificate>()[0];
+        Assert.Equal(new byte[] { 9, 9 }, recorded.Certificate.ToByteArray());
+        Assert.Equal(new byte[] { 0x7f }, recorded.Serial.ToByteArray());
+        Assert.Equal((5UL, 6UL), (recorded.NotBeforeMs, recorded.NotAfterMs));
+    }
+
+    [Fact]
     public void ARecordCertificatesRequestRoundTripsAndIsAnsweredLikeAnAdminRequest()
     {
         var seen = new Messages.SeenCertificate(
@@ -524,6 +556,8 @@ public sealed class AdminTests : IDisposable
             c => c.AlterRoleBindingsAsync(new[] { binding }),
             c => c.RevokeSessionsAsync("u", false),
             c => c.RevokeCertificateAsync(new byte[32], new byte[] { 1 }, 0, string.Empty),
+            c => c.RequestCertificateAsync("u", new byte[] { 1 }),
+            c => c.RecordCertificateAsync(new byte[32], new byte[] { 1 }, new byte[32], new byte[] { 1 }, 0, 0),
             c => c.AddNodeAsync(4, "n4:1", "n4:2"),
             c => c.RemoveNodeAsync(4),
             c => c.MoveLeaderAsync("s", 0, 1),
