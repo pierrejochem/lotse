@@ -779,6 +779,41 @@ pub struct BindingRow {
     pub source: String,
 }
 
+/// One client certificate the cluster has seen or had revoked (ADR 0091).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CertificateRow {
+    /// SHA-256 of the issuer's name in DER form, 64 hex digits.
+    pub issuer: String,
+    /// The serial number, hex.
+    pub serial: String,
+    /// The principal it names; empty for one revoked before any node saw it.
+    pub principal: String,
+    /// First millisecond it is valid in, since the Unix epoch; 0 if unknown.
+    pub not_before_ms: u64,
+    /// Millisecond it stops being valid in, since the Unix epoch.
+    pub not_after_ms: u64,
+    /// When a node first accepted it; 0 if none did.
+    pub first_seen_ms: u64,
+    /// When a node last accepted it; connections that stay open are noted
+    /// again every ten minutes and the cluster records it at most hourly.
+    pub last_seen_ms: u64,
+    /// `valid`, `expiring` (within 30 days), `expired` or `revoked`.
+    pub state: String,
+    /// Why it was revoked; empty if it was not.
+    pub reason: String,
+    /// When it was revoked; 0 if it was not.
+    pub revoked_at_ms: u64,
+}
+
+/// The certificates screen.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CertificatesView {
+    /// By expiry.
+    pub certificates: Vec<CertificateRow>,
+    /// The cluster's clock when the list was made, ms since the Unix epoch.
+    pub now_ms: u64,
+}
+
 /// Request to revoke one client certificate (ADR 0090). Destructive: the
 /// serial is typed again.
 #[derive(Debug, Clone, Deserialize, ToSchema)]

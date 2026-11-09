@@ -143,6 +143,7 @@ async fn the_openapi_document_lists_every_route() {
         "/api/v1/clusters/{cluster}/users/{name}/credential",
         "/api/v1/clusters/{cluster}/bindings",
         "/api/v1/clusters/{cluster}/sessions/revoke",
+        "/api/v1/clusters/{cluster}/certificates",
         "/api/v1/clusters/{cluster}/certificates/revoke",
     ] {
         assert!(paths.contains_key(p), "{p} missing");
@@ -247,6 +248,19 @@ async fn users_bindings_and_sessions_in_the_demo() {
     let (s, v) = call_on(&app, "POST", &uri, Some(cert("01AB", "01ab", ends))).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(v["cli"].as_str().unwrap().starts_with("lotse-cli cert revoke --issuer abab"), "{v}");
+
+    // The list holds the samples by expiry and what was just revoked.
+    let (s, v) = call_on(&app, "GET", &format!("{base}/certificates"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let rows = v["certificates"].as_array().unwrap();
+    let ends: Vec<u64> = rows.iter().map(|r| r["not_after_ms"].as_u64().unwrap()).collect();
+    assert!(ends.windows(2).all(|w| w[0] <= w[1]), "by expiry: {ends:?}");
+    let states: Vec<&str> = rows.iter().map(|r| r["state"].as_str().unwrap()).collect();
+    for want in ["expired", "expiring", "valid", "revoked"] {
+        assert!(states.contains(&want), "{want} in {states:?}");
+    }
+    let revoked = rows.iter().find(|r| r["serial"] == "01ab").expect("the revoked one is listed");
+    assert_eq!((revoked["state"].as_str(), revoked["reason"].as_str()), (Some("revoked"), Some("lost")));
 
     // Sessions: the name typed again.
     let revoke = |confirm: &str| json!({"subject": "platform-team", "group": true, "confirm": confirm});

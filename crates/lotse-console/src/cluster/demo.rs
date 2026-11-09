@@ -58,7 +58,7 @@ struct State {
     /// Subjects whose sessions were revoked: `(group, name)`.
     revoked: BTreeSet<(bool, String)>,
     /// Certificates revoked here: issuer and serial.
-    revoked_certs: BTreeSet<([u8; 32], Vec<u8>)>,
+    revoked_certs: BTreeMap<([u8; 32], Vec<u8>), (u64, String)>,
 }
 
 /// Users the demo cluster starts with, as `(name, configured)`.
@@ -1070,13 +1070,80 @@ impl Cluster for DemoCluster {
         Ok(())
     }
 
+    async fn certificates(&self, _who: &Identity) -> ApiResult<CertificatesView> {
+        const DAY: u64 = 86_400_000;
+        let now = crate::time::now_ms();
+        let issuer = [0x5a; 32];
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let sample = |serial: u8, principal: &str, ends_in_days: i64, seen_days_ago: u64| {
+            let not_after_ms = now.saturating_add_signed(ends_in_days * DAY as i64);
+            (
+                (issuer, vec![serial]),
+                CertificateRow {
+                    issuer: hex(&issuer),
+                    serial: hex(&[serial]),
+                    principal: principal.into(),
+                    not_before_ms: not_after_ms.saturating_sub(365 * DAY),
+                    not_after_ms,
+                    first_seen_ms: now.saturating_sub(120 * DAY),
+                    last_seen_ms: now.saturating_sub(seen_days_ago * DAY),
+                    state: String::new(),
+                    reason: String::new(),
+                    revoked_at_ms: 0,
+                },
+            )
+        };
+        let mut all: BTreeMap<([u8; 32], Vec<u8>), CertificateRow> = [
+            sample(1, "ingest-service", 200, 0),
+            sample(2, "billing-reader", 12, 1),
+            sample(3, "old-batch-job", -3, 40),
+        ]
+        .into_iter()
+        .collect();
+        for (key, (at, reason)) in &self.lock().revoked_certs {
+            let row = all.entry(key.clone()).or_insert_with(|| CertificateRow {
+                issuer: hex(&key.0),
+                serial: hex(&key.1),
+                principal: String::new(),
+                not_before_ms: 0,
+                not_after_ms: now + 30 * DAY,
+                first_seen_ms: 0,
+                last_seen_ms: 0,
+                state: String::new(),
+                reason: String::new(),
+                revoked_at_ms: 0,
+            });
+            row.state = "revoked".into();
+            row.reason.clone_from(reason);
+            row.revoked_at_ms = *at;
+        }
+        let mut certificates: Vec<CertificateRow> = all
+            .into_values()
+            .map(|mut c| {
+                if c.state.is_empty() {
+                    c.state = if c.not_after_ms < now {
+                        "expired"
+                    } else if c.not_after_ms - now < 30 * DAY {
+                        "expiring"
+                    } else {
+                        "valid"
+                    }
+                    .into();
+                }
+                c
+            })
+            .collect();
+        certificates.sort_by_key(|c| c.not_after_ms);
+        Ok(CertificatesView { certificates, now_ms: now })
+    }
+
     async fn revoke_certificate(
         &self,
         _who: &Identity,
         issuer: [u8; 32],
         serial: &[u8],
         not_after_ms: u64,
-        _reason: &str,
+        reason: &str,
     ) -> ApiResult<()> {
         if not_after_ms < crate::time::now_ms() {
             return Err(ApiError::BadRequest(
@@ -1084,7 +1151,7 @@ impl Cluster for DemoCluster {
                     .into(),
             ));
         }
-        self.lock().revoked_certs.insert((issuer, serial.to_vec()));
+        self.lock().revoked_certs.insert((issuer, serial.to_vec()), (crate::time::now_ms(), reason.to_owned()));
         Ok(())
     }
 

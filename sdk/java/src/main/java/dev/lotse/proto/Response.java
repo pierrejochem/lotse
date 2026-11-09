@@ -766,6 +766,65 @@ public sealed interface Response {
     }
 
     /**
+     * The client certificate inventory, by expiry. The leader hint sits before the time; there is no trailing block.
+     *
+     * @param error the outcome
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param nowMs the answering node's clock, milliseconds since the Unix epoch, a {@code u64}, which the states are
+     *     computed against
+     * @param certificates the certificates
+     */
+    record DescribeCertificates(
+            ErrorCode error, LeaderHint leaderHint, long nowMs, List<CertificateEntry> certificates)
+            implements Response {
+        /** Creates the response. */
+        public DescribeCertificates {
+            certificates = List.copyOf(certificates);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code());
+            Messages.putHint(w, leaderHint);
+            w.u64(nowMs);
+            w.array(certificates, (w1, c) -> w1.bytes(c.issuer())
+                    .bytes(c.serial())
+                    .string(c.principal())
+                    .u64(c.notBeforeMs())
+                    .u64(c.notAfterMs())
+                    .u64(c.firstSeenMs())
+                    .u64(c.lastSeenMs())
+                    .u8(c.state())
+                    .string(c.reason())
+                    .u64(c.revokedAtMs()));
+        }
+
+        static DescribeCertificates read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            LeaderHint hint = Messages.getHint(r);
+            long nowMs = r.u64();
+            // issuer, serial, principal, four u64, state, reason, u64: 4 + 4 + 2 + 4 * 8 + 1 + 2 + 8 bytes at least
+            return new DescribeCertificates(
+                    error,
+                    hint,
+                    nowMs,
+                    r.array(
+                            53,
+                            r1 -> new CertificateEntry(
+                                    r1.bytes(),
+                                    r1.bytes(),
+                                    r1.string(),
+                                    r1.u64(),
+                                    r1.u64(),
+                                    r1.u64(),
+                                    r1.u64(),
+                                    r1.u8(),
+                                    r1.string(),
+                                    r1.u64())));
+        }
+    }
+
+    /**
      * The tenants, sorted by name. The leader hint sits before the tenants; there is no trailing block.
      *
      * @param error the outcome

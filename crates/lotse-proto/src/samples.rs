@@ -367,6 +367,28 @@ pub fn requests() -> Vec<Request> {
             not_after_ms: 0,
             reason: String::new(),
         }),
+        Request::DescribeCertificates(DescribeCertificatesRequest),
+        Request::RecordCertificates(RecordCertificatesRequest {
+            certificates: vec![
+                SeenCertificate {
+                    issuer: Bytes::from_static(&[7; 32]),
+                    serial: Bytes::from_static(&[0x01, 0xab, 0xcd]),
+                    principal: "alice".into(),
+                    not_before_ms: 1_700_000_000_000,
+                    not_after_ms: 1_800_000_000_000,
+                    seen_ms: 1_750_000_000_000,
+                },
+                SeenCertificate {
+                    issuer: Bytes::from_static(&[9; 32]),
+                    serial: Bytes::from_static(&[0x7f]),
+                    principal: String::new(),
+                    not_before_ms: 0,
+                    not_after_ms: 1,
+                    seen_ms: 2,
+                },
+            ],
+        }),
+        Request::RecordCertificates(RecordCertificatesRequest { certificates: Vec::new() }),
     ]
 }
 
@@ -737,6 +759,44 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                     UserEntry { name: "ops".into(), mechanism: "SCRAM-SHA-512".into(), iterations: 8192, source: 2 },
                 ],
             }),
+        ),
+        (
+            ApiKey::DESCRIBE_CERTIFICATES,
+            Response::DescribeCertificates(DescribeCertificatesResponse {
+                error: ErrorCode::NONE,
+                leader_hint: Some(LeaderHint { leader: 1, term: 2 }),
+                now_ms: 1_750_000_000_000,
+                certificates: vec![
+                    CertificateEntry {
+                        issuer: Bytes::from_static(&[7; 32]),
+                        serial: Bytes::from_static(&[0x01, 0xab, 0xcd]),
+                        principal: "alice".into(),
+                        not_before_ms: 1_700_000_000_000,
+                        not_after_ms: 1_800_000_000_000,
+                        first_seen_ms: 1_701_000_000_000,
+                        last_seen_ms: 1_749_000_000_000,
+                        state: certificate_state::VALID,
+                        reason: String::new(),
+                        revoked_at_ms: 0,
+                    },
+                    CertificateEntry {
+                        issuer: Bytes::from_static(&[9; 32]),
+                        serial: Bytes::from_static(&[0x7f]),
+                        principal: String::new(),
+                        not_before_ms: 0,
+                        not_after_ms: 1_800_000_000_000,
+                        first_seen_ms: 0,
+                        last_seen_ms: 0,
+                        state: certificate_state::REVOKED,
+                        reason: "laptop lost".into(),
+                        revoked_at_ms: 1_749_500_000_000,
+                    },
+                ],
+            }),
+        ),
+        (
+            ApiKey::RECORD_CERTIFICATES,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
         ),
         (
             ApiKey::DESCRIBE_TENANTS,

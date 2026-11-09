@@ -49,6 +49,7 @@ use crate::model::*;
         remove_binding,
         revoke_sessions,
         revoke_certificate,
+        certificates,
         tenants,
         metrics
     ),
@@ -422,6 +423,19 @@ pub async fn revoke_sessions(
         req.subject
     );
     Ok(Json(Done { message, cli: cli::revoke_sessions(&req.subject, req.group) }))
+}
+
+/// The client certificates the cluster has seen or had revoked, by expiry.
+/// The broker lets only cluster admins list them.
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/certificates",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, body = CertificatesView), (status = 403, body = ErrorBody)))]
+pub async fn certificates(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<CertificatesView>> {
+    Ok(Json(cluster(&st, &id)?.certificates(&who).await?))
 }
 
 /// Decodes hex, or says what is wrong with `what`.

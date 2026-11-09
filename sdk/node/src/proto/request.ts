@@ -220,6 +220,15 @@ export interface RevokeCertificateRequest {
   readonly notAfterMs: bigint;
   readonly reason: string;
 }
+/** `DescribeCertificates` (key 53): the client certificates the cluster has seen or had revoked. Cluster admin. */
+export interface DescribeCertificatesRequest {
+  readonly type: "DescribeCertificates";
+}
+/** `RecordCertificates` (key 54, internal: only broker nodes send it): certificates a node accepted. */
+export interface RecordCertificatesRequest {
+  readonly type: "RecordCertificates";
+  readonly certificates: readonly m.SeenCertificate[];
+}
 /** `PurgeQueue` (key 47) or `Requeue` (key 48). */
 export interface QueueActionRequest {
   readonly type: "QueueAction";
@@ -323,6 +332,8 @@ export type Request =
   | CreatePartitionsRequest
   | RevokeSessionsRequest
   | RevokeCertificateRequest
+  | DescribeCertificatesRequest
+  | RecordCertificatesRequest
   | QueueActionRequest
   | DescribeConfigsRequest
   | AlterConfigsRequest
@@ -371,6 +382,8 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   CreatePartitions: ApiKey.CREATE_PARTITIONS,
   RevokeSessions: ApiKey.REVOKE_SESSIONS,
   RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
+  DescribeCertificates: ApiKey.DESCRIBE_CERTIFICATES,
+  RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   QueueAction: ApiKey.PURGE_QUEUE, // or REQUEUE: see requestApiKey
   DescribeConfigs: ApiKey.DESCRIBE_CONFIGS,
   AlterConfigs: ApiKey.ALTER_CONFIGS,
@@ -425,6 +438,7 @@ export function writeRequest(w: Writer, req: Request): void {
     case "ApiVersions":
     case "DescribeMetrics":
     case "DescribeUsers":
+    case "DescribeCertificates":
     case "DescribeTenants":
     case "DescribeRoleBindings":
     case "WhoAmI":
@@ -602,6 +616,11 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RevokeCertificate":
       w.bytes(req.issuer).bytes(req.serial).u64(req.notAfterMs).string(req.reason).noTags();
+      return;
+    case "RecordCertificates":
+      w.array(req.certificates, (w1, c) =>
+        w1.bytes(c.issuer).bytes(c.serial).string(c.principal).u64(c.notBeforeMs).u64(c.notAfterMs).u64(c.seenMs),
+      ).noTags();
       return;
     case "QueueAction":
       w.u64(req.queueId).u64(req.upTo).noTags();
@@ -942,6 +961,19 @@ export function readRequest(apiKey: number, r: Reader): Request {
       r.tags();
       return x;
     }
+    case ApiKey.RECORD_CERTIFICATES: {
+      // 4 + 4 + 2 + 3 * 8 bytes at least.
+      const certificates = r.array(34, (r1) => ({
+        issuer: r1.bytes(),
+        serial: r1.bytes(),
+        principal: r1.string(),
+        notBeforeMs: r1.u64(),
+        notAfterMs: r1.u64(),
+        seenMs: r1.u64(),
+      }));
+      r.tags();
+      return { type: "RecordCertificates", certificates };
+    }
     case ApiKey.PURGE_QUEUE:
     case ApiKey.REQUEUE: {
       const x: QueueActionRequest = {
@@ -1000,6 +1032,9 @@ export function readRequest(apiKey: number, r: Reader): Request {
     case ApiKey.DESCRIBE_USERS:
       r.tags();
       return { type: "DescribeUsers" };
+    case ApiKey.DESCRIBE_CERTIFICATES:
+      r.tags();
+      return { type: "DescribeCertificates" };
     case ApiKey.CREATE_TENANT: {
       const x: CreateTenantRequest = { type: "CreateTenant", name: r.string() };
       r.tags();

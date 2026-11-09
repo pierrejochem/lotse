@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   BrokerResponseError,
   ClientClosedError,
+  CertificateState,
+  type CertificateEntry,
   ConfigSource,
   ErrorCode,
   type ErrorCodeValue,
@@ -53,6 +55,8 @@ function notLeader(r: Request): Response {
       return { type: "DescribeConfigs", error, leaderHint, resources: [] };
     case "DescribeUsers":
       return { type: "DescribeUsers", error, leaderHint, users: [] };
+    case "DescribeCertificates":
+      return { type: "DescribeCertificates", error, leaderHint, nowMs: 0n, certificates: [] };
     case "DescribeTenants":
       return { type: "DescribeTenants", error, leaderHint, tenants: [] };
     case "DescribeRoleBindings":
@@ -329,10 +333,24 @@ describe("admin calls against scripted brokers", () => {
 
   test("users, tenants, role bindings and nodes are read from the metadata leader", async () => {
     const binding: RoleBinding = { subjectKind: SubjectKind.GROUP, subject: "ops", role: Role.VIEWER, tenant: "acme", prefix: "orders-" };
+    const entry: CertificateEntry = {
+      issuer: Buffer.alloc(32, 7),
+      serial: Buffer.from([1, 0xab]),
+      principal: "bob",
+      notBeforeMs: 1_690_000_000_000n,
+      notAfterMs: 1_800_000_000_000n,
+      firstSeenMs: 1_695_000_000_000n,
+      lastSeenMs: 1_699_000_000_000n,
+      state: CertificateState.REVOKED,
+      reason: "laptop lost",
+      revokedAtMs: 1_698_000_000_000n,
+    };
     serve((r) => {
       switch (r.type) {
         case "DescribeUsers":
           return { type: "DescribeUsers", error: ErrorCode.NONE, leaderHint: null, users: [{ name: "bob", mechanism: "SCRAM-SHA-512", iterations: 4096, source: ConfigSource.DYNAMIC }] };
+        case "DescribeCertificates":
+          return { type: "DescribeCertificates", error: ErrorCode.NONE, leaderHint: null, nowMs: 1_700_000_000_000n, certificates: [entry] };
         case "DescribeTenants":
           return { type: "DescribeTenants", error: ErrorCode.NONE, leaderHint: null, tenants: [{ name: "acme", source: ConfigSource.DYNAMIC, resources: 3 }] };
         case "DescribeRoleBindings":
@@ -344,6 +362,7 @@ describe("admin calls against scripted brokers", () => {
       }
     });
     assert.deepEqual(await client.describeUsers(), [{ name: "bob", mechanism: "SCRAM-SHA-512", iterations: 4096, source: ConfigSource.DYNAMIC }]);
+    assert.deepEqual(await client.describeCertificates(), { certificates: [entry], nowMs: 1_700_000_000_000n });
     assert.deepEqual(await client.describeTenants(), [{ name: "acme", source: ConfigSource.DYNAMIC, resources: 3 }]);
     assert.deepEqual(await client.describeRoleBindings(), [{ binding, source: ConfigSource.DYNAMIC }]);
     assert.deepEqual(await client.describeNodes(), [{ nodeId: 2n, peer: "127.0.0.1:9101", client: "127.0.0.1:9001", state: 0, replicas: 5, moving: 1 }]);
@@ -541,6 +560,7 @@ describe("admin calls against scripted brokers", () => {
       client.whoAmI(),
       client.revokeSessions("u"),
       client.revokeCertificate(new Uint8Array(32), Uint8Array.of(1), 0, ""),
+      client.describeCertificates(),
       client.addNode(5, "p", "c"),
       client.removeNode(5),
       client.describeNodes(),

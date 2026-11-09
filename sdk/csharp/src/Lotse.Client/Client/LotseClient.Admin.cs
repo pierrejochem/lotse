@@ -262,6 +262,28 @@ public sealed partial class LotseClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The client certificates the cluster has seen or had revoked, by expiry, with the answering node's clock the
+    /// states are computed against. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<Messages.CertificateInventory> DescribeCertificatesAsync(CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return await RetryingAsync<Messages.CertificateInventory>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(new Request.DescribeCertificates(), cancellationToken).ConfigureAwait(false);
+                if (r is not Response.DescribeCertificates d)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(d.Error, d.LeaderHint, null);
+                return new Messages.CertificateInventory(d.NowMs, d.Certificates);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
     // ---- tenants and roles ----
 
     /// <summary>Creates a tenant. Needs the cluster-admin role.</summary>

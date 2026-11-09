@@ -83,6 +83,9 @@ class AdminTest {
         if (r instanceof Request.DescribeConfigs) {
             return new Response.DescribeConfigs(ErrorCode.NOT_LEADER, hint, List.of());
         }
+        if (r instanceof Request.DescribeCertificates) {
+            return new Response.DescribeCertificates(ErrorCode.NOT_LEADER, hint, 0L, List.of());
+        }
         return new Response.Admin(ErrorCode.NOT_LEADER, null, hint);
     }
 
@@ -229,6 +232,21 @@ class AdminTest {
         assertEquals(ErrorCode.INVALID_REQUEST, e.code());
         assertEquals("no such role", e.brokerMessage());
         assertEquals(2, b.requests(Request.CreateTenant.class).size());
+    }
+
+    @Test
+    void describeCertificatesReturnsTheInventoryAndTheNodesClock() {
+        ByteString issuer = ByteString.copyOf(new byte[32]);
+        Messages.CertificateEntry entry = new Messages.CertificateEntry(
+                issuer, ByteString.copyOf(new byte[] {1, (byte) 0xab}), "alice", 10L, 20L, 11L, 12L,
+                Messages.CertificateState.REVOKED, "lost", 13L);
+        serve((n, r) -> r instanceof Request.DescribeCertificates
+                ? new Response.DescribeCertificates(ErrorCode.NONE, null, 15L, List.of(entry))
+                : ok());
+        LotseClient.CertificateInventory inventory = client.describeCertificates();
+        assertEquals(1, b.requests(Request.DescribeCertificates.class).size(), "node 1 pointed to the leader");
+        assertEquals(15L, inventory.nowMs());
+        assertEquals(List.of(entry), inventory.certificates());
     }
 
     @Test

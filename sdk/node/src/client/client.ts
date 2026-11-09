@@ -19,6 +19,7 @@ import {
   SubjectKind,
   type TenantEntry,
   type UserEntry,
+  type CertificateEntry,
   type PublishEntry,
   type PublishResult,
   type ResourceMetadata,
@@ -1684,6 +1685,27 @@ export class LotseClient {
         }
         this.adminAnswer(r.error, r.leaderHint, null, false);
         return r.users;
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * The client certificates the cluster has seen or had revoked (ADR 0091), with their state at `nowMs`, the answering
+   * node's clock. Last-seen times are at most an hour late. Needs the cluster-admin role.
+   */
+  async describeCertificates(
+    options: CallOptions = {},
+  ): Promise<{ readonly certificates: readonly CertificateEntry[]; readonly nowMs: bigint }> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeCertificates" });
+        if (r.type !== "DescribeCertificates") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return { certificates: r.certificates, nowMs: r.nowMs };
       },
       options.signal,
     );

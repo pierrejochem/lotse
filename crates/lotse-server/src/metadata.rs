@@ -99,6 +99,10 @@ pub(crate) enum Change {
     /// (ADR 0090). `at_ms` is the proposing leader's clock; a revocation
     /// whose certificate ended before it is dropped when this one applies.
     RevokeCertificate { cert: CertKey, not_after_ms: u64, at_ms: u64, reason: String },
+    /// Nodes report client certificates they accepted (ADR 0091). `at_ms` is
+    /// the proposing leader's clock; entries whose certificate ended long
+    /// before it are dropped when this applies.
+    RecordCertificates { seen: Vec<(CertKey, SeenCert)>, at_ms: u64 },
     /// New partitions for a runtime stream, one voter set each, numbered on
     /// from its last (ADR 0074).
     AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
@@ -370,6 +374,9 @@ pub(crate) struct MetadataState {
     pub(crate) revocations: BTreeMap<Subject, u64>,
     /// Revoked client certificates (ADR 0090), until they expire.
     pub(crate) revoked_certs: BTreeMap<CertKey, RevokedCert>,
+    /// The client certificates nodes accepted (ADR 0091), until they have
+    /// been expired for [`CERT_KEEP_MS`].
+    pub(crate) certs: BTreeMap<CertKey, SeenCert>,
     /// Nodes added at runtime; those from the configuration are not here.
     pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
     /// Nodes being drained.
@@ -694,6 +701,25 @@ impl MetadataState {
                 let at = self.revocations.entry(subject).or_insert(0);
                 *at = (*at).max(before_ms);
             }
+            Change::RecordCertificates { seen, at_ms } => {
+                // An entry stays visible for a while after its certificate
+                // ended, then goes, by the leader's time carried here.
+                self.certs.retain(|_, c| c.not_after_ms.saturating_add(CERT_KEEP_MS) >= at_ms);
+                for (key, c) in seen {
+                    if c.not_after_ms.saturating_add(CERT_KEEP_MS) < at_ms {
+                        continue;
+                    }
+                    match self.certs.get_mut(&key) {
+                        Some(known) => {
+                            known.first_seen_ms = known.first_seen_ms.min(c.first_seen_ms);
+                            known.last_seen_ms = known.last_seen_ms.max(c.last_seen_ms);
+                        }
+                        None => {
+                            self.certs.insert(key, c);
+                        }
+                    }
+                }
+            }
             Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
                 // An expired certificate is refused by its validity anyway:
                 // forget those, by the time the leader proposed this at, so
@@ -819,7 +845,9 @@ impl MetadataState {
             .filter(|q| q.limits.priority_levels != 0)
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
-        let sections = if !self.revoked_certs.is_empty() {
+        let sections = if !self.certs.is_empty() {
+            8
+        } else if !self.revoked_certs.is_empty() {
             7
         } else if !levels.is_empty() {
             6
@@ -882,6 +910,13 @@ impl MetadataState {
                 b.put_u64_le(r.not_after_ms);
                 b.put_u64_le(r.at_ms);
                 put_str(&mut b, &r.reason);
+            }
+        }
+        if sections >= 8 {
+            b.put_u32_le(self.certs.len() as u32);
+            for (cert, c) in &self.certs {
+                put_cert_key(&mut b, cert);
+                put_seen(&mut b, c);
             }
         }
         b.freeze()
@@ -1029,6 +1064,12 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let cert = get_cert_key(b)?;
+                s.certs.insert(cert, get_seen(b)?);
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1172,6 +1213,15 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(18);
             put_subject(&mut b, subject);
             b.put_u64_le(*before_ms);
+        }
+        Change::RecordCertificates { seen, at_ms } => {
+            b.put_u8(21);
+            b.put_u64_le(*at_ms);
+            b.put_u32_le(seen.len() as u32);
+            for (cert, c) in seen {
+                put_cert_key(&mut b, cert);
+                put_seen(&mut b, c);
+            }
         }
         Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
             b.put_u8(20);
@@ -1354,6 +1404,13 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let resource_id = b.get_u64_le();
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
             Change::AddPartitions { resource_id, partitions }
+        }
+        21 => {
+            need(b, 8)?;
+            let at_ms = b.get_u64_le();
+            let seen =
+                (0..count(b)?).map(|_| Ok((get_cert_key(b)?, get_seen(b)?))).collect::<Result<Vec<_>, String>>()?;
+            Change::RecordCertificates { seen, at_ms }
         }
         20 => {
             let cert = get_cert_key(b)?;
@@ -1547,6 +1604,42 @@ pub(crate) struct RevokedCert {
     /// The leader's clock when it was revoked.
     pub(crate) at_ms: u64,
     pub(crate) reason: String,
+}
+
+/// How long an inventory entry stays after its certificate ended: 30 days.
+pub(crate) const CERT_KEEP_MS: u64 = 30 * 24 * 3_600_000;
+
+/// A client certificate a node accepted (ADR 0091).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeenCert {
+    /// The principal it names.
+    pub(crate) principal: String,
+    pub(crate) not_before_ms: u64,
+    pub(crate) not_after_ms: u64,
+    /// When a node first accepted it, ms since the Unix epoch.
+    pub(crate) first_seen_ms: u64,
+    /// When a node last accepted it, as nodes report.
+    pub(crate) last_seen_ms: u64,
+}
+
+fn put_seen(b: &mut BytesMut, c: &SeenCert) {
+    put_str(b, &c.principal);
+    b.put_u64_le(c.not_before_ms);
+    b.put_u64_le(c.not_after_ms);
+    b.put_u64_le(c.first_seen_ms);
+    b.put_u64_le(c.last_seen_ms);
+}
+
+fn get_seen(b: &mut &[u8]) -> Result<SeenCert, String> {
+    let principal = get_str(b)?;
+    need(b, 32)?;
+    Ok(SeenCert {
+        principal,
+        not_before_ms: b.get_u64_le(),
+        not_after_ms: b.get_u64_le(),
+        first_seen_ms: b.get_u64_le(),
+        last_seen_ms: b.get_u64_le(),
+    })
 }
 
 fn put_cert_key(b: &mut BytesMut, k: &CertKey) {

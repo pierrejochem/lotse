@@ -5,6 +5,7 @@ import { ApiError } from '../api/client';
 import {
   useAlterBinding,
   useBindings,
+  useCertificates,
   useDeleteUser,
   useRevokeCertificate,
   useRevokeSessions,
@@ -238,8 +239,103 @@ function Sessions({ cluster }: { cluster: string }) {
 
 const HEX = /^([0-9a-fA-F]{2})+$/;
 
+const DAY = 86_400_000;
+const when = (ms: number) => (ms > 0 ? new Date(ms).toLocaleDateString('en-GB', { year: 'numeric', month: 'short', day: 'numeric' }) : '—');
+const STATE_TONE = { valid: 'plain', expiring: 'warn', expired: 'plain', revoked: 'critical' } as const;
+
+/** The client certificates the cluster has seen or had revoked, with Revoke (ADR 0091). */
+function CertificateList({ cluster }: { cluster: string }) {
+  const q = useCertificates(cluster);
+  const revoke = useRevokeCertificate(cluster);
+  const toast = useToast();
+  const [filter, setFilter] = useState('all');
+  if (q.isPending) return <Loading />;
+  if (q.isError) {
+    if (q.error instanceof ApiError && q.error.status === 403) {
+      return <p className="muted">Only cluster admins can list certificates. {q.error.message}</p>;
+    }
+    return <Failed error={q.error} retry={() => q.refetch()} />;
+  }
+  const { certificates, now_ms } = q.data;
+  const shown = certificates.filter((c) => filter === 'all' || c.state === filter);
+  return (
+    <div className="stack">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <p className="sub" style={{ margin: 0 }}>
+          Client certificates a node accepted, with the ones revoked here. “Last seen” is at most an hour late. Certificates revoked in the CRL file and node certificates are not listed.
+        </p>
+        <Select
+          label="Show"
+          sans
+          value={filter}
+          onChange={setFilter}
+          options={[{ value: 'all', label: 'All' }, { value: 'expiring', label: 'Expiring within 30 days' }, { value: 'revoked', label: 'Revoked' }, { value: 'expired', label: 'Expired' }]}
+        />
+      </div>
+      <section className="table-wrap" aria-label="Client certificates">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Principal</th>
+              <th scope="col">Serial</th>
+              <th scope="col">Valid until</th>
+              <th scope="col">Last seen</th>
+              <th scope="col">State</th>
+              <th scope="col"><span className="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((c) => (
+              <tr key={`${c.issuer}/${c.serial}`}>
+                <th scope="row">{c.principal || <span className="muted">not seen</span>}</th>
+                <td className="mono">{c.serial}</td>
+                <td>
+                  {when(c.not_after_ms)}
+                  {c.state === 'valid' || c.state === 'expiring' ? <span className="muted small"> ({Math.max(0, Math.round((c.not_after_ms - now_ms) / DAY))} days)</span> : null}
+                </td>
+                <td>{when(c.last_seen_ms)}</td>
+                <td>
+                  <Chip tone={STATE_TONE[c.state as keyof typeof STATE_TONE] ?? 'plain'}>{c.state}</Chip>
+                  {c.reason && <span className="muted small"> {c.reason}</span>}
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  {(c.state === 'valid' || c.state === 'expiring') && (
+                    <TypedConfirmButton
+                      small
+                      trigger="Revoke"
+                      title={`Revoke the certificate of ${c.principal || c.serial}?`}
+                      body="Every node refuses it from now on and ends the connections that showed it, until it expires. This cannot be undone."
+                      name={c.serial}
+                      prompt="Type the serial to revoke the certificate"
+                      action="Revoke certificate"
+                      keep="Keep the certificate"
+                      pending={revoke.isPending}
+                      onConfirm={(confirm) =>
+                        revoke.mutate(
+                          { issuer: c.issuer, serial: c.serial, not_after_ms: c.not_after_ms, reason: '', confirm },
+                          {
+                            onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+                            onError: (e) => toast({ title: failure(e, 'Could not revoke the certificate.'), error: true }),
+                          },
+                        )
+                      }
+                    />
+                  )}
+                </td>
+              </tr>
+            ))}
+            {shown.length === 0 && (
+              <tr><td colSpan={6} className="muted">No certificates{filter === 'all' ? ' seen yet' : ' match'}.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
 /** Revokes a client certificate by issuer and serial, until it expires (ADR 0090). */
-function Certificates({ cluster }: { cluster: string }) {
+function RevokeBySerial({ cluster }: { cluster: string }) {
   const revoke = useRevokeCertificate(cluster);
   const toast = useToast();
   const [issuer, setIssuer] = useState('');
@@ -324,7 +420,15 @@ export function UsersAccess() {
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
-        <Tabs.Content value="certificates" className="tabs-content"><Certificates cluster={cluster} /></Tabs.Content>
+        <Tabs.Content value="certificates" className="tabs-content">
+          <div className="stack" style={{ gap: 32 }}>
+            <CertificateList cluster={cluster} />
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>
+              <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
+            </details>
+          </div>
+        </Tabs.Content>
       </Tabs.Root>
     </main>
   );

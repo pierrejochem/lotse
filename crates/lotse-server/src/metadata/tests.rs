@@ -465,6 +465,51 @@ fn revoked_certificates_are_forgotten_once_expired_and_survive_a_snapshot() {
 }
 
 #[test]
+fn the_certificate_inventory_merges_reports_and_forgets_the_long_expired() {
+    use crate::metadata::{CERT_KEEP_MS, CertKey, SeenCert};
+    let key = |serial: u8| CertKey { issuer: [1; 32], serial: vec![serial] };
+    let seen = |principal: &str, not_after_ms: u64, at: u64| SeenCert {
+        principal: principal.into(),
+        not_before_ms: 0,
+        not_after_ms,
+        first_seen_ms: at,
+        last_seen_ms: at,
+    };
+    let record = |seen: Vec<(CertKey, SeenCert)>, at_ms: u64| Change::RecordCertificates { seen, at_ms };
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&record(vec![(key(1), seen("alice", 10_000_000, 5_000))], 5_000))).unwrap();
+    // Two nodes report the same certificate in either order: the earliest
+    // first sight and the latest last sight stand.
+    s.apply(2, &payload(&record(vec![(key(1), seen("alice", 10_000_000, 9_000))], 9_000))).unwrap();
+    s.apply(3, &payload(&record(vec![(key(1), seen("alice", 10_000_000, 2_000))], 9_500))).unwrap();
+    let c = &s.certs[&key(1)];
+    assert_eq!((c.first_seen_ms, c.last_seen_ms), (2_000, 9_000));
+    assert_eq!(s.certs.len(), 1, "one entry per issuer and serial");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // A certificate that ended more than the keep time ago is not recorded,
+    // and is forgotten once a report after that time applies.
+    let late = 10_000_000 + CERT_KEEP_MS + 1;
+    s.apply(4, &payload(&record(vec![(key(2), seen("bob", 10_000_000, late))], late))).unwrap();
+    assert!(s.certs.is_empty(), "both are past the keep time: {:?}", s.certs);
+    s.apply(5, &payload(&record(vec![(key(3), seen("carol", late + 1_000, late))], late))).unwrap();
+    assert_eq!(s.certs.len(), 1);
+    // Revoked entries live in their own map, with the inventory's sections
+    // before them written.
+    s.apply(
+        6,
+        &payload(&Change::RevokeCertificate {
+            cert: key(3),
+            not_after_ms: late + 1_000,
+            at_ms: late,
+            reason: "x".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
 fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
     let mut s = MetadataState::default();
     let create = Change::CreateStream {

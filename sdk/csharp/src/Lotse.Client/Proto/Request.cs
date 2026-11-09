@@ -935,6 +935,50 @@ public abstract record Request
         }
     }
 
+    /// <summary>Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091).</summary>
+    public sealed record DescribeCertificates : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeCertificates;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.NoTags();
+
+        internal static DescribeCertificates Read(Reader r)
+        {
+            r.Tags();
+            return new DescribeCertificates();
+        }
+    }
+
+    /// <summary>
+    /// A node reports client certificates it accepted. Internal: only broker nodes may send it, and the client has no
+    /// method for it (ADR 0091). Answered with <see cref="Response.Admin"/>.
+    /// </summary>
+    /// <param name="Certificates">The certificates, at most a few hundred.</param>
+    public sealed record RecordCertificates(IReadOnlyList<Messages.SeenCertificate> Certificates) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RecordCertificates;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.Array(Certificates, (w1, c) => w1.Bytes(c.Issuer).Bytes(c.Serial).String(c.Principal)
+                .U64(c.NotBeforeMs).U64(c.NotAfterMs).U64(c.SeenMs));
+            w.NoTags();
+        }
+
+        internal static RecordCertificates Read(Reader r)
+        {
+            // issuer, serial, principal: 4 + 4 + 2 bytes at least, then three u64
+            List<Messages.SeenCertificate> certificates = r.Array(
+                34, r1 => new Messages.SeenCertificate(r1.Bytes(), r1.Bytes(), r1.String(), r1.U64(), r1.U64(), r1.U64()));
+            r.Tags();
+            return new RecordCertificates(certificates);
+        }
+    }
+
     /// <summary>Purges a queue's ready messages, or moves a dead-letter queue's back (ADR 0064).</summary>
     /// <param name="Requeue"><c>true</c>: requeue (key 48); <c>false</c>: purge (key 47).</param>
     /// <param name="QueueId">The queue.</param>

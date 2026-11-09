@@ -149,6 +149,10 @@ impl ApiKey {
     pub const CREATE_PARTITIONS: ApiKey = ApiKey(51);
     /// Revokes a client certificate by issuer and serial (ADR 0090).
     pub const REVOKE_CERTIFICATE: ApiKey = ApiKey(52);
+    /// Lists the client certificates the cluster has seen (ADR 0091).
+    pub const DESCRIBE_CERTIFICATES: ApiKey = ApiKey(53);
+    /// A node reports client certificates it accepted (internal, ADR 0091).
+    pub const RECORD_CERTIFICATES: ApiKey = ApiKey(54);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -173,7 +177,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 52] = [
+    pub const SUPPORTED: [ApiVersionRange; 54] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -225,6 +229,8 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::REVOKE_SESSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::CREATE_PARTITIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REVOKE_CERTIFICATE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_CERTIFICATES, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::RECORD_CERTIFICATES, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -515,6 +521,10 @@ pub enum Request {
     CreatePartitions(CreatePartitionsRequest),
     /// [`ApiKey::REVOKE_CERTIFICATE`].
     RevokeCertificate(RevokeCertificateRequest),
+    /// [`ApiKey::DESCRIBE_CERTIFICATES`].
+    DescribeCertificates(DescribeCertificatesRequest),
+    /// [`ApiKey::RECORD_CERTIFICATES`].
+    RecordCertificates(RecordCertificatesRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -574,6 +584,8 @@ impl Request {
             Request::RevokeSessions(_) => ApiKey::REVOKE_SESSIONS,
             Request::CreatePartitions(_) => ApiKey::CREATE_PARTITIONS,
             Request::RevokeCertificate(_) => ApiKey::REVOKE_CERTIFICATE,
+            Request::DescribeCertificates(_) => ApiKey::DESCRIBE_CERTIFICATES,
+            Request::RecordCertificates(_) => ApiKey::RECORD_CERTIFICATES,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -624,6 +636,8 @@ pub enum Response {
     SaslAuthenticate(SaslAuthenticateResponse),
     /// To [`Request::DescribeUsers`].
     DescribeUsers(DescribeUsersResponse),
+    /// Answer to [`Request::DescribeCertificates`].
+    DescribeCertificates(DescribeCertificatesResponse),
     /// To [`Request::DescribeTenants`].
     DescribeTenants(DescribeTenantsResponse),
     /// To [`Request::DescribeRoleBindings`].
@@ -713,6 +727,8 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::RevokeSessions(r) => r.put(&mut w),
         Request::CreatePartitions(r) => r.put(&mut w),
         Request::RevokeCertificate(r) => r.put(&mut w),
+        Request::DescribeCertificates(r) => r.put(&mut w),
+        Request::RecordCertificates(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -785,6 +801,8 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::REVOKE_SESSIONS => Request::RevokeSessions(RevokeSessionsRequest::get(&mut r)?),
         ApiKey::CREATE_PARTITIONS => Request::CreatePartitions(CreatePartitionsRequest::get(&mut r)?),
         ApiKey::REVOKE_CERTIFICATE => Request::RevokeCertificate(RevokeCertificateRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_CERTIFICATES => Request::DescribeCertificates(DescribeCertificatesRequest::get(&mut r)?),
+        ApiKey::RECORD_CERTIFICATES => Request::RecordCertificates(RecordCertificatesRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -819,6 +837,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::SaslHandshake(r) => r.put(&mut w),
         Response::SaslAuthenticate(r) => r.put(&mut w),
         Response::DescribeUsers(r) => r.put(&mut w),
+        Response::DescribeCertificates(r) => r.put(&mut w),
         Response::DescribeTenants(r) => r.put(&mut w),
         Response::DescribeRoleBindings(r) => r.put(&mut w),
         Response::WhoAmI(r) => r.put(&mut w),
@@ -931,6 +950,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::REVOKE_SESSIONS
         | ApiKey::CREATE_PARTITIONS
         | ApiKey::REVOKE_CERTIFICATE
+        | ApiKey::RECORD_CERTIFICATES
         | ApiKey::SETTLE_VOTERS => Response::Admin(AdminResponse::get(&mut r)?),
         ApiKey::DESCRIBE_NODES => Response::DescribeNodes(DescribeNodesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CONFIGS => Response::DescribeConfigs(DescribeConfigsResponse::get(&mut r)?),
@@ -938,6 +958,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::SASL_HANDSHAKE => Response::SaslHandshake(SaslHandshakeResponse::get(&mut r)?),
         ApiKey::SASL_AUTHENTICATE => Response::SaslAuthenticate(SaslAuthenticateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_USERS => Response::DescribeUsers(DescribeUsersResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_CERTIFICATES => Response::DescribeCertificates(DescribeCertificatesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_TENANTS => Response::DescribeTenants(DescribeTenantsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_ROLE_BINDINGS => Response::DescribeRoleBindings(DescribeRoleBindingsResponse::get(&mut r)?),
         ApiKey::WHO_AM_I => Response::WhoAmI(WhoAmIResponse::get(&mut r)?),

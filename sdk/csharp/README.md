@@ -213,7 +213,7 @@ Every call takes a `CancellationToken` and follows `lotse-client` and the Java S
 
 Names become ids through `Metadata` asked of every known broker, and a name no broker knows is `UnknownStreamException`. A change whose answer was lost is asked again; a refusal after such a lost attempt is `OutcomeUnknownException`, as the earlier attempt may have been carried out. A missing role is a `BrokerErrorException` with `UNAUTHORIZED` at once. Tenants are created by a cluster admin and a duplicate is `RESOURCE_EXISTS`; `CreateStreamAsync` and the other creates use the configured tenant.
 
-Not in this client, as in the Java SDK: creating a queue in a tenant other than the configured one (use a client with `WithTenant`) and the node-internal `SettleVoters`.
+Not in this client, as in the Java SDK: creating a queue in a tenant other than the configured one (use a client with `WithTenant`) and the node-internal `SettleVoters` and `RecordCertificates`.
 
 ## Consumer groups
 

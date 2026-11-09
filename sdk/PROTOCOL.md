@@ -51,7 +51,7 @@ The tenant of a transactional or group id is tag 1 of a request's trailing block
 
 | Where the block is | Messages |
 | --- | --- |
-| Hint **is** the trailing block | `InitProducer`, `Subscribe`, `QueueAction` (answer to `PurgeQueue`, `Requeue`), `Outcome` (answer to `Ack`, `Nack`, `Unsubscribe`, `Bind`, `Unbind`), `Create` (`CreateStream`, `CreateQueue`, `DeclareExchange`), `Admin` (`DeleteResource`, `AlterConfigs`, `AlterUser`, `CreateTenant`, `DeleteTenant`, `AlterRoleBindings`, `AddNode`, `RemoveNode`, `MoveLeader`, `RevokeSessions`, `RevokeCertificate`) |
+| Hint **is** the trailing block | `InitProducer`, `Subscribe`, `QueueAction` (answer to `PurgeQueue`, `Requeue`), `Outcome` (answer to `Ack`, `Nack`, `Unsubscribe`, `Bind`, `Unbind`), `Create` (`CreateStream`, `CreateQueue`, `DeclareExchange`), `Admin` (`DeleteResource`, `AlterConfigs`, `AlterUser`, `CreateTenant`, `DeleteTenant`, `AlterRoleBindings`, `AddNode`, `RemoveNode`, `MoveLeader`, `RevokeSessions`, `RevokeCertificate`, `RecordCertificates`) |
 | Hint in the **middle**, no trailing block | `DescribeConfigs`, `DescribeUsers`, `DescribeTenants`, `DescribeRoleBindings`, `DescribeNodes` (after the error code, before the array) |
 | Hint is the **element's** block, one per partition | `Produce` and `Fetch` partitions (the resource around them still ends in an empty block) |
 | Hint is the last field of a push | `Deliver` |
@@ -307,6 +307,7 @@ Admin requests (creates, deletes, bindings, settings, users, tenants, roles, nod
 - A bind or unbind changes routing: forget the exchange's cached bindings.
 - `PurgeQueue` and `Requeue` go to the queue's leader and work in rounds: send `up_to` 0, then the `up_to` the answer gave, until `more` is false, adding up `count`.
 - `RevokeCertificate` (key 52) carries the issuer (32 bytes: the SHA-256 of the issuer's name in DER form), the serial, the certificate's `not_after_ms` and a reason. A cluster admin sends it; every node then ends connections that showed that certificate and refuses it until it expires (ADR 0090).
+- `DescribeCertificates` (key 53, cluster admin) lists the client certificates nodes accepted and the revoked ones: per entry issuer, serial, principal, validity, first and last sight, a state (0 valid, 1 expiring within 30 days, 2 expired, 3 revoked), the reason and time of a revocation; the answer carries the leader's clock the states are computed against. `RecordCertificates` (key 54) is internal: only broker nodes send it, and a client never does (ADR 0091).
 - `AlterUser` carries a SCRAM-SHA-512 credential: a random 16-byte salt, at least 4096 iterations, the stored and server keys. The password never leaves the client.
 
 ## Conformance vectors

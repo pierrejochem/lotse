@@ -62,6 +62,8 @@ public sealed class AdminTests : IDisposable
         {
             Request.DescribeConfigs => new Response.DescribeConfigs(ErrorCode.NotLeader, hint, Array.Empty<Messages.ResourceConfigs>()),
             Request.DescribeUsers => new Response.DescribeUsers(ErrorCode.NotLeader, hint, Array.Empty<Messages.UserEntry>()),
+            Request.DescribeCertificates => new Response.DescribeCertificates(
+                ErrorCode.NotLeader, hint, 0, Array.Empty<Messages.CertificateEntry>()),
             Request.DescribeTenants => new Response.DescribeTenants(ErrorCode.NotLeader, hint, Array.Empty<Messages.TenantEntry>()),
             Request.DescribeRoleBindings => new Response.DescribeRoleBindings(ErrorCode.NotLeader, hint, Array.Empty<Messages.SourcedBinding>()),
             Request.DescribeNodes => new Response.DescribeNodes(ErrorCode.NotLeader, hint, Array.Empty<Messages.NodeEntry>()),
@@ -326,6 +328,38 @@ public sealed class AdminTests : IDisposable
         await _client!.DeleteUserAsync("alice");
         Assert.Null(_b.Requests<Request.AlterUser>()[2].Credential);
         Assert.Equal("alice", _b.Requests<Request.AlterUser>()[2].User);
+    }
+
+    [Fact]
+    public async Task TheCertificateInventoryIsListedFromTheLeaderWithTheNodesClock()
+    {
+        var entry = new Messages.CertificateEntry(
+            ByteString.CopyOf(new byte[32]), ByteString.CopyOf(new byte[] { 1, 0xab }), "alice", 1_700_000_000_000UL,
+            1_800_000_000_000UL, 1_701_000_000_000UL, 1_749_000_000_000UL, Messages.CertificateState.Revoked, "lost",
+            1_750_000_000_000UL);
+        Serve((n, r) => r switch
+        {
+            Request.DescribeCertificates => new Response.DescribeCertificates(ErrorCode.None, null, 1_750_000_000_001UL, new[] { entry }),
+            _ => throw new InvalidOperationException("unexpected " + r),
+        });
+        Messages.CertificateInventory inventory = await _client!.DescribeCertificatesAsync();
+        Assert.Equal(1_750_000_000_001UL, inventory.NowMs);
+        Assert.Equal(entry, Assert.Single(inventory.Certificates));
+        // Node 1 answered NOT_LEADER with a hint to node 2 the first time.
+        Assert.Equal(1, _a.Count<Request.DescribeCertificates>());
+    }
+
+    [Fact]
+    public void ARecordCertificatesRequestRoundTripsAndIsAnsweredLikeAnAdminRequest()
+    {
+        var seen = new Messages.SeenCertificate(
+            ByteString.CopyOf(new byte[32]), ByteString.CopyOf(new byte[] { 0x7f }), "alice", 1, 2, 3);
+        byte[] frame = Frames.EncodeRequest(5, new Request.RecordCertificates(new[] { seen }));
+        var decoded = Assert.IsType<Request.RecordCertificates>(Frames.DecodeRequest(frame).Request);
+        Assert.Equal(seen, Assert.Single(decoded.Certificates));
+        Assert.Equal(ApiKey.RecordCertificates, decoded.ApiKey);
+        byte[] answer = Frames.EncodeResponse(5, Ok());
+        Assert.Equal(Ok(), Frames.DecodeResponse(answer, ApiKey.RecordCertificates).Response);
     }
 
     [Fact]

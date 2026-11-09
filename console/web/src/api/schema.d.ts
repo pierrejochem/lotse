@@ -40,6 +40,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/certificates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The client certificates the cluster has seen or had revoked, by expiry.
+         *     The broker lets only cluster admins list them.
+         */
+        get: operations["certificates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/certificates/revoke": {
         parameters: {
             query?: never;
@@ -446,6 +466,55 @@ export interface components {
             bindings: components["schemas"]["BindingRow"][];
             /** @description Whether the caller may change bindings. */
             can_edit: boolean;
+        };
+        /** @description One client certificate the cluster has seen or had revoked (ADR 0091). */
+        CertificateRow: {
+            /**
+             * Format: int64
+             * @description When a node first accepted it; 0 if none did.
+             */
+            first_seen_ms: number;
+            /** @description SHA-256 of the issuer's name in DER form, 64 hex digits. */
+            issuer: string;
+            /**
+             * Format: int64
+             * @description When a node last accepted it; connections that stay open are noted
+             *     again every ten minutes and the cluster records it at most hourly.
+             */
+            last_seen_ms: number;
+            /**
+             * Format: int64
+             * @description Millisecond it stops being valid in, since the Unix epoch.
+             */
+            not_after_ms: number;
+            /**
+             * Format: int64
+             * @description First millisecond it is valid in, since the Unix epoch; 0 if unknown.
+             */
+            not_before_ms: number;
+            /** @description The principal it names; empty for one revoked before any node saw it. */
+            principal: string;
+            /** @description Why it was revoked; empty if it was not. */
+            reason: string;
+            /**
+             * Format: int64
+             * @description When it was revoked; 0 if it was not.
+             */
+            revoked_at_ms: number;
+            /** @description The serial number, hex. */
+            serial: string;
+            /** @description `valid`, `expiring` (within 30 days), `expired` or `revoked`. */
+            state: string;
+        };
+        /** @description The certificates screen. */
+        CertificatesView: {
+            /** @description By expiry. */
+            certificates: components["schemas"]["CertificateRow"][];
+            /**
+             * Format: int64
+             * @description The cluster's clock when the list was made, ms since the Unix epoch.
+             */
+            now_ms: number;
         };
         /** @description A status chip: colour plus word, never colour alone. */
         Chip: {
@@ -1507,6 +1576,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    certificates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificatesView"];
                 };
             };
             403: {

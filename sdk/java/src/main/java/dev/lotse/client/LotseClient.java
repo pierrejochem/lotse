@@ -1407,6 +1407,33 @@ public final class LotseClient implements AutoCloseable {
         });
     }
 
+    /**
+     * The client certificates the cluster has seen or had revoked, by expiry (cluster admin, ADR 0091).
+     *
+     * @param nowMs the answering node's clock in milliseconds since the Unix epoch, which the entries' states are
+     *     computed against
+     * @param certificates the inventory
+     */
+    public record CertificateInventory(long nowMs, List<Messages.CertificateEntry> certificates) {
+        /** Creates the result. */
+        public CertificateInventory {
+            certificates = List.copyOf(certificates);
+        }
+    }
+
+    /** The inventory of client certificates (cluster admin). */
+    public CertificateInventory describeCertificates() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeCertificates());
+            if (!(r instanceof Response.DescribeCertificates d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return new CertificateInventory(d.nowMs(), d.certificates());
+        });
+    }
+
     /** Creates a tenant. */
     public void createTenant(String name) {
         checkOpen();
