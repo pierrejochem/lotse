@@ -383,14 +383,18 @@ mod tests {
         assert_eq!(tiers(h(2), s(10)), [(s(10), h(1)), (s(60), h(2))], "none longer than the retention");
         assert_eq!(tiers(day, s(120)), [(s(120), h(1)), (s(120), h(6)), (s(480), day)], "none finer than a sample");
 
-        // A day of samples every 10 s: 900 kept instead of 8,640.
+        // A day of samples every 10 s: about 900 kept instead of 8,640. The
+        // 10 s and 1 min tiers keep 360 each; the 8 min tier keeps its
+        // completed buckets, and a day of samples spans 180 or 181 of them
+        // depending on where `now` falls on the 480 s grid, one of them still
+        // filling and not counted. So 899 or 900, by the clock's phase.
         let store = MetricsStore::new(day, s(10));
         let now = now_ms();
         let start = now - 86_400_000;
         for i in 0..8_640u64 {
             store.record("c", start + i * 10_000, &sample(&[(1, (i % 6) as f64)], Some(1.0)));
         }
-        assert!((900..=903).contains(&store.samples("c")), "{}", store.samples("c"));
+        assert!((899..=900).contains(&store.samples("c")), "{}", store.samples("c"));
         let all = sees(&[1], true);
         let q = |range: u64| store.query("c", "in_bytes_per_sec", Duration::from_secs(range), 10_000, &all).unwrap();
         let fifteen = q(900);
