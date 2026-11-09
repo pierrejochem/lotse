@@ -307,6 +307,14 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             stored_key: Bytes::from(c.stored_key),
             server_key: Bytes::from(c.server_key),
         };
+        self.set_user_credential(user, credential).await
+    }
+
+    /// Sets `user`'s SCRAM-SHA-512 credential from one derived elsewhere,
+    /// creating the user if needed. For callers that must not see the
+    /// password, such as the console, whose browser derives it. The broker
+    /// refuses fewer iterations than its minimum.
+    pub async fn set_user_credential(&self, user: &str, credential: ScramCredentialData) -> Result<(), ClientError> {
         self.alter_user(AlterUserRequest { user: user.into(), credential: Some(credential) }).await
     }
 

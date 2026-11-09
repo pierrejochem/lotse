@@ -40,6 +40,14 @@ use crate::model::*;
         purge_queue,
         requeue,
         move_leader,
+        users,
+        create_user,
+        set_credential,
+        delete_user,
+        bindings,
+        add_binding,
+        remove_binding,
+        revoke_sessions,
         tenants,
         metrics
     ),
@@ -252,6 +260,167 @@ pub async fn move_leader(
         None => format!("Partition {} of {} is unpinned. Leaders spread by themselves.", req.partition, req.resource),
     };
     Ok(Json(Done { message, cli: cli::move_leader(&req) }))
+}
+
+/// SCRAM users. The broker lets only cluster admins list them.
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/users",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, body = UsersView), (status = 403, body = ErrorBody)))]
+pub async fn users(State(st): State<AppState>, who: Identity, Path(id): Path<String>) -> ApiResult<Json<UsersView>> {
+    Ok(Json(cluster(&st, &id)?.users(&who).await?))
+}
+
+/// A SCRAM user name the broker and the SCRAM exchange can carry.
+fn check_user_name(name: &str) -> ApiResult<()> {
+    if name.is_empty() || name.len() > 128 || name.chars().any(|c| c.is_control() || c == ',' || c == '=') {
+        return Err(ApiError::BadRequest(
+            "A user name has 1 to 128 characters, none of them a comma, an equals sign or a control character.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Creates a user with a credential the browser derived.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/users",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = CreateUser,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn create_user(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<CreateUser>,
+) -> ApiResult<Json<Done>> {
+    check_user_name(&req.name)?;
+    let c = cluster(&st, &id)?;
+    if c.users(&who).await?.users.iter().any(|u| u.name == req.name) {
+        return Err(ApiError::Conflict(format!("{} exists already; set a new password instead.", req.name)));
+    }
+    c.set_user_credential(&who, &req.name, &req.credential).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, user = %req.name, "user created");
+    Ok(Json(Done { message: format!("Created {}.", req.name), cli: cli::set_user_password(&req.name) }))
+}
+
+/// Sets a new password for a user, as a derived credential.
+#[utoipa::path(put, path = "/api/v1/clusters/{cluster}/users/{name}/credential",
+    params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "User name")),
+    request_body = Credential,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn set_credential(
+    State(st): State<AppState>,
+    who: Identity,
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<Credential>,
+) -> ApiResult<Json<Done>> {
+    check_user_name(&name)?;
+    cluster(&st, &id)?.set_user_credential(&who, &name, &req).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, user = %name, "user password set");
+    Ok(Json(Done {
+        message: format!("Set a new password for {name}. Open sessions stay until they end or are revoked."),
+        cli: cli::set_user_password(&name),
+    }))
+}
+
+/// Deletes a user. Destructive: the body names the user again.
+#[utoipa::path(delete, path = "/api/v1/clusters/{cluster}/users/{name}",
+    params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "User name")),
+    request_body = DeleteUser,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub async fn delete_user(
+    State(st): State<AppState>,
+    who: Identity,
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<DeleteUser>,
+) -> ApiResult<Json<Done>> {
+    if req.confirm != name {
+        return Err(ApiError::BadRequest(format!("Type the user's name, {name}, to delete it.")));
+    }
+    cluster(&st, &id)?.delete_user(&who, &name).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, user = %name, "user deleted");
+    Ok(Json(Done {
+        message: format!("Deleted {name}. Open sessions end at the latest when the node's session limit is up."),
+        cli: cli::delete_user(&name),
+    }))
+}
+
+/// Role bindings: all for a cluster admin, one's own for everyone else.
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/bindings",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, body = BindingsView), (status = 403, body = ErrorBody)))]
+pub async fn bindings(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<BindingsView>> {
+    Ok(Json(cluster(&st, &id)?.bindings(&who).await?))
+}
+
+/// Adds a role binding.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/bindings",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = BindingRow,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn add_binding(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<BindingRow>,
+) -> ApiResult<Json<Done>> {
+    cluster(&st, &id)?.alter_binding(&who, &req, true).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, subject = %req.subject, role = %req.role, tenant = %req.tenant, "binding added");
+    Ok(Json(Done { message: format!("{} is now {}.", req.subject, binding_text(&req)), cli: cli::bind(&req, true) }))
+}
+
+/// Removes a role binding.
+#[utoipa::path(delete, path = "/api/v1/clusters/{cluster}/bindings",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = BindingRow,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn remove_binding(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<BindingRow>,
+) -> ApiResult<Json<Done>> {
+    cluster(&st, &id)?.alter_binding(&who, &req, false).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, subject = %req.subject, role = %req.role, tenant = %req.tenant, "binding removed");
+    Ok(Json(Done {
+        message: format!("{} is no longer {}.", req.subject, binding_text(&req)),
+        cli: cli::bind(&req, false),
+    }))
+}
+
+/// `producer in payments for events.*`, for the messages.
+fn binding_text(b: &BindingRow) -> String {
+    match (b.tenant.is_empty(), b.prefix.is_empty()) {
+        (true, _) => b.role.clone(),
+        (false, true) => format!("{} in {}", b.role, b.tenant),
+        (false, false) => format!("{} in {} for {}*", b.role, b.tenant, b.prefix),
+    }
+}
+
+/// Ends the sessions of a user or an IdP group that began before now.
+/// Destructive: the body names the subject again.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/sessions/revoke",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = RevokeSessions,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn revoke_sessions(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<RevokeSessions>,
+) -> ApiResult<Json<Done>> {
+    if req.subject.is_empty() || req.confirm != req.subject {
+        return Err(ApiError::BadRequest(format!("Type the name, {}, to revoke its sessions.", req.subject)));
+    }
+    cluster(&st, &id)?.revoke_sessions(&who, &req.subject, req.group).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, subject = %req.subject, group = req.group, "sessions revoked");
+    let message = format!(
+        "Revoked the sessions of {}. Tokens issued before now are refused; a SCRAM user with the password can sign in again.",
+        req.subject
+    );
+    Ok(Json(Done { message, cli: cli::revoke_sessions(&req.subject, req.group) }))
 }
 
 /// Creates a queue.

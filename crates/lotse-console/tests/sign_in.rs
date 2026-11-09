@@ -540,6 +540,102 @@ async fn the_console_acts_as_whoever_signed_in() {
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
     assert!(r.json["message"].as_str().unwrap().contains("did not accept your sign-in"), "{r:?}");
 
+    // --- Users and access, as the signed-in user (ADR 0089) ---
+    // The browser derives the credential; the console passes it on.
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let derived = |password: &str| {
+        let c = ScramCredential::new(password, b"sixteen byte salt", 4096);
+        json!({
+            "salt": b64.encode(&c.salt),
+            "iterations": c.iterations,
+            "stored_key": b64.encode(&c.stored_key),
+            "server_key": b64.encode(&c.server_key),
+        })
+    };
+    let with_name = |name: &str, password: &str| {
+        let mut body = derived(password);
+        body["name"] = json!(name);
+        body
+    };
+    let admin_app = dev("admin-pw");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/users", None, Some(with_name("carol", "carol-pw"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/users", None, Some(with_name("carol", "other"))).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "a second create is refused: {r:?}");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/users", None, Some(with_name("a,b", "pw"))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "a name SCRAM cannot carry: {r:?}");
+    let r = call(&admin_app, "GET", "/api/v1/clusters/local/users", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let carol = r.json["users"].as_array().unwrap().iter().find(|u| u["name"] == "carol").cloned();
+    let carol = carol.unwrap_or_else(|| panic!("carol is listed: {}", r.json));
+    assert_eq!((carol["source"].as_str(), carol["mechanism"].as_str()), (Some("runtime"), Some("SCRAM-SHA-512")));
+    assert!(!r.json.to_string().contains(&b64.encode(b"sixteen byte salt")), "no key material in the list");
+
+    // The password she was given works; she is nobody's admin.
+    let carol_app = dev_with("carol", "carol-pw", store());
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/streams", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "she signs in with the derived credential: {r:?}");
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/users", None, None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "only cluster admins list users: {r:?}");
+    let r = call(&carol_app, "POST", "/api/v1/clusters/local/users", None, Some(with_name("mallory", "pw"))).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "the broker decides, not the console: {r:?}");
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/bindings", None, None).await;
+    assert_eq!((r.status, r.json["can_edit"].clone()), (StatusCode::OK, json!(false)), "{r:?}");
+    let binding = json!({"subject_kind": "user", "subject": "carol", "role": "viewer", "tenant": "shop", "prefix": ""});
+    let r = call(&carol_app, "POST", "/api/v1/clusters/local/bindings", None, Some(binding.clone())).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "she cannot bind herself: {r:?}");
+
+    // A new password replaces the old one.
+    let r =
+        call(&admin_app, "PUT", "/api/v1/clusters/local/users/carol/credential", None, Some(derived("new-pw"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    // A console seat keeps its open session, so the broker is asked afresh.
+    let signs_in = |user: &str, password: &str| {
+        let client = Client::new(
+            TokioRuntime::new(&root).with_tls(ca.client_tls(None).unwrap()),
+            ClientConfig {
+                retry_for: Duration::from_secs(5),
+                credentials: Some(Credentials::Scram { user: user.into(), password: password.into() }),
+                ..ClientConfig::new(bootstrap.clone())
+            },
+        );
+        async move { client.who_am_i().await.is_ok() }
+    };
+    assert!(!signs_in("carol", "carol-pw").await, "the old password is refused");
+    assert!(signs_in("carol", "new-pw").await, "the new one works");
+
+    // Bindings: add, list with their source, remove.
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/bindings", None, Some(binding.clone())).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    assert_eq!(r.json["message"], "carol is now viewer in shop.");
+    let r = call(&admin_app, "GET", "/api/v1/clusters/local/bindings", None, None).await;
+    assert_eq!(r.json["can_edit"], true, "{r:?}");
+    let listed = |r: &Reply| {
+        r.json["bindings"].as_array().unwrap().iter().any(|b| b["subject"] == "carol" && b["source"] == "runtime")
+    };
+    assert!(listed(&r), "{r:?}");
+    let bad = json!({"subject_kind": "user", "subject": "carol", "role": "viewer", "tenant": "", "prefix": ""});
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/bindings", None, Some(bad)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "a tenant role needs a tenant: {r:?}");
+    let r = call(&admin_app, "DELETE", "/api/v1/clusters/local/bindings", None, Some(binding)).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let r = call(&admin_app, "GET", "/api/v1/clusters/local/bindings", None, None).await;
+    assert!(!listed(&r), "{r:?}");
+
+    // Revoking and deleting name the subject again.
+    let revoke = |confirm: &str| json!({"subject": "carol", "group": false, "confirm": confirm});
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/sessions/revoke", None, Some(revoke("carl"))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{r:?}");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/sessions/revoke", None, Some(revoke("carol"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let r =
+        call(&admin_app, "DELETE", "/api/v1/clusters/local/users/carol", None, Some(json!({"confirm": "carl"}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{r:?}");
+    let r =
+        call(&admin_app, "DELETE", "/api/v1/clusters/local/users/carol", None, Some(json!({"confirm": "carol"}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    assert!(!signs_in("carol", "new-pw").await, "a deleted user cannot sign in");
+
     // --- The metrics sampler, with client credentials ---
     // As a cluster viewer it sees every tenant; Bob, with a password now,
     // only the shop.

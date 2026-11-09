@@ -14,6 +14,8 @@ export const keys = {
   queues: (c: string) => ['queues', c] as const,
   queue: (c: string, n: string) => ['queue', c, n] as const,
   tenants: (c: string) => ['tenants', c] as const,
+  users: (c: string) => ['users', c] as const,
+  bindings: (c: string) => ['bindings', c] as const,
   metrics: (c: string, s: string, r: Range) => ['metrics', c, s, r] as const,
 };
 
@@ -160,5 +162,73 @@ export function useMoveLeader(cluster: string) {
       void qc.invalidateQueries({ queryKey: ['stream', cluster] });
       void qc.invalidateQueries({ queryKey: ['queue', cluster] });
     },
+  });
+}
+
+/** SCRAM users; only a cluster admin gets the list (403 for everyone else). */
+export const useUsers = (cluster: string) =>
+  useQuery({
+    queryKey: keys.users(cluster),
+    queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/users', path(cluster))),
+  });
+
+/** Role bindings: all for a cluster admin, one's own for everyone else. */
+export const useBindings = (cluster: string) =>
+  useQuery({
+    queryKey: keys.bindings(cluster),
+    queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/bindings', path(cluster))),
+  });
+
+/** Creates a user, or sets a new password. The credential is derived in the browser (ADR 0089). */
+export function useSetCredential(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, credential, create }: { name: string; credential: S['Credential']; create: boolean }) =>
+      create
+        ? unwrap(api.POST('/api/v1/clusters/{cluster}/users', { ...path(cluster), body: { name, ...credential } }))
+        : unwrap(
+            api.PUT('/api/v1/clusters/{cluster}/users/{name}/credential', {
+              params: { path: { cluster, name } },
+              body: credential,
+            }),
+          ),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.users(cluster) }),
+  });
+}
+
+/** Deletes a user; `confirm` is the name typed again. */
+export function useDeleteUser(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, confirm }: { name: string; confirm: string }) =>
+      unwrap(api.DELETE('/api/v1/clusters/{cluster}/users/{name}', { params: { path: { cluster, name } }, body: { confirm } })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.users(cluster) });
+      void qc.invalidateQueries({ queryKey: keys.bindings(cluster) });
+    },
+  });
+}
+
+/** Adds or removes one role binding. */
+export function useAlterBinding(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ binding, add }: { binding: S['BindingRow']; add: boolean }) =>
+      add
+        ? unwrap(api.POST('/api/v1/clusters/{cluster}/bindings', { ...path(cluster), body: binding }))
+        : unwrap(api.DELETE('/api/v1/clusters/{cluster}/bindings', { ...path(cluster), body: binding })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.bindings(cluster) });
+      void qc.invalidateQueries({ queryKey: keys.users(cluster) });
+      void qc.invalidateQueries({ queryKey: keys.tenants(cluster) });
+    },
+  });
+}
+
+/** Revokes the sessions of a user or an IdP group; `confirm` is the name typed again (ADR 0070). */
+export function useRevokeSessions(cluster: string) {
+  return useMutation({
+    mutationFn: (body: S['RevokeSessions']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/sessions/revoke', { ...path(cluster), body })),
   });
 }

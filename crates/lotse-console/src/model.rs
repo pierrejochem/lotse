@@ -706,6 +706,101 @@ pub struct TenantBindings {
     pub bindings: Vec<RoleBinding>,
 }
 
+/// A SCRAM user. Key material never leaves the cluster, so a row says only
+/// how the user is stored.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct UserRow {
+    /// User name, the principal in role bindings.
+    pub name: String,
+    /// `SCRAM-SHA-512`.
+    pub mechanism: String,
+    /// PBKDF2 iterations of the stored credential.
+    pub iterations: u32,
+    /// `configuration` (read only) or `runtime`.
+    pub source: String,
+    /// Bindings that name this user, as `role (tenant)` texts.
+    pub roles: Vec<String>,
+}
+
+/// The users screen.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct UsersView {
+    /// SCRAM users, by name.
+    pub users: Vec<UserRow>,
+}
+
+/// A SCRAM credential derived in the browser (ADR 0089). There is no
+/// password field: the console never sees one.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct Credential {
+    /// Salt, base64.
+    pub salt: String,
+    /// PBKDF2 iterations; the broker refuses fewer than its minimum.
+    pub iterations: u32,
+    /// `H(ClientKey)`, base64.
+    pub stored_key: String,
+    /// `ServerKey`, base64.
+    pub server_key: String,
+}
+
+/// Request to create a user with a credential.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateUser {
+    /// New user name.
+    pub name: String,
+    /// The credential.
+    #[serde(flatten)]
+    pub credential: Credential,
+}
+
+/// Request to delete a user. Destructive: names the user again.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct DeleteUser {
+    /// The user's name, typed again.
+    pub confirm: String,
+}
+
+/// A role binding with its tenant, prefix and where it comes from.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BindingRow {
+    /// `user` or `group` (a group at the identity provider).
+    pub subject_kind: String,
+    /// User name or group name.
+    pub subject: String,
+    /// `cluster-admin`, `cluster-viewer`, `tenant-admin`, `producer`,
+    /// `consumer` or `viewer`.
+    pub role: String,
+    /// Tenant; empty for the two cluster-wide roles.
+    pub tenant: String,
+    /// Name prefix the binding covers; empty means every name.
+    pub prefix: String,
+    /// `configuration` (read only) or `runtime`. Ignored in requests.
+    #[serde(default)]
+    pub source: String,
+}
+
+/// The role bindings screen.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BindingsView {
+    /// Every binding the caller may see: all of them for a cluster admin,
+    /// the caller's own for everyone else.
+    pub bindings: Vec<BindingRow>,
+    /// Whether the caller may change bindings.
+    pub can_edit: bool,
+}
+
+/// Request to revoke the sessions of a user or an IdP group (ADR 0070).
+/// Destructive: names the subject again.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct RevokeSessions {
+    /// User name or group name.
+    pub subject: String,
+    /// `true` for a group at the identity provider.
+    pub group: bool,
+    /// The subject's name, typed again.
+    pub confirm: String,
+}
+
 /// One point of a time series.
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 pub struct Point {

@@ -16,8 +16,8 @@ use crate::auth::Identity;
 use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
-    ClusterRef, CreateQueue, Isolation, MoveLeader, NodesView, Overview, QueueDetail, QueueRow, RecordView,
-    StreamDetail, StreamRow, TenantsView,
+    BindingRow, BindingsView, ClusterRef, CreateQueue, Credential, Isolation, MoveLeader, NodesView, Overview,
+    QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow, TenantsView, UsersView,
 };
 
 /// One managed cluster.
@@ -73,6 +73,24 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Tenants with quota use and role bindings.
     async fn tenants(&self, who: &Identity) -> ApiResult<TenantsView>;
+
+    /// SCRAM users (cluster admins only; the broker decides).
+    async fn users(&self, who: &Identity) -> ApiResult<UsersView>;
+
+    /// Sets a user's credential, creating the user (ADR 0089).
+    async fn set_user_credential(&self, who: &Identity, name: &str, credential: &Credential) -> ApiResult<()>;
+
+    /// Removes a user's credential.
+    async fn delete_user(&self, who: &Identity, name: &str) -> ApiResult<()>;
+
+    /// Role bindings with tenant, prefix and source.
+    async fn bindings(&self, who: &Identity) -> ApiResult<BindingsView>;
+
+    /// Adds or removes one binding.
+    async fn alter_binding(&self, who: &Identity, binding: &BindingRow, add: bool) -> ApiResult<()>;
+
+    /// Revokes the sessions of a user or an IdP group (ADR 0070).
+    async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()>;
 
     /// Asks the operator to stop after the node it is upgrading.
     async fn pause_upgrade(&self, who: &Identity) -> ApiResult<()>;

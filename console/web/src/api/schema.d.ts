@@ -21,6 +21,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Role bindings: all for a cluster admin, one's own for everyone else. */
+        get: operations["bindings"];
+        put?: never;
+        /** Adds a role binding. */
+        post: operations["add_binding"];
+        /** Removes a role binding. */
+        delete: operations["remove_binding"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/leaders": {
         parameters: {
             query?: never;
@@ -45,11 +64,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Chart history from the console's in-memory buffer (at most 180 points):
+        /** Chart history from the console's in-memory buffer (at most 180 points):
          *     the sum over the streams and queues the caller may see; the commit
-         *     latency only for cluster admins and cluster viewers.
-         */
+         *     latency only for cluster admins and cluster viewers. */
         get: operations["metrics"];
         put?: never;
         post?: never;
@@ -137,10 +154,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Settles a queue's ready messages: what consumers hold stays theirs.
-         *     Destructive: the body names the queue again.
-         */
+        /** Settles a queue's ready messages: what consumers hold stays theirs.
+         *     Destructive: the body names the queue again. */
         post: operations["purge_queue"];
         delete?: never;
         options?: never;
@@ -157,11 +172,27 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Moves the ready messages of a dead-letter queue back to the queues they
-         *     came from, each once.
-         */
+        /** Moves the ready messages of a dead-letter queue back to the queues they
+         *     came from, each once. */
         post: operations["requeue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/sessions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ends the sessions of a user or an IdP group that began before now.
+         *     Destructive: the body names the subject again. */
+        post: operations["revoke_sessions"];
         delete?: never;
         options?: never;
         head?: never;
@@ -253,6 +284,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SCRAM users. The broker lets only cluster admins list them. */
+        get: operations["users"];
+        put?: never;
+        /** Creates a user with a credential the browser derived. */
+        post: operations["create_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/users/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Deletes a user. Destructive: the body names the user again. */
+        delete: operations["delete_user"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/users/{name}/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Sets a new password for a user, as a derived credential. */
+        put: operations["set_credential"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -307,6 +390,30 @@ export interface components {
             /** @description Explanation of a handover in progress. */
             note?: string | null;
         };
+        /** @description A role binding with its tenant, prefix and where it comes from. */
+        BindingRow: {
+            /** @description Name prefix the binding covers; empty means every name. */
+            prefix: string;
+            /** @description `cluster-admin`, `cluster-viewer`, `tenant-admin`, `producer`,
+             *     `consumer` or `viewer`. */
+            role: string;
+            /** @description `configuration` (read only) or `runtime`. Ignored in requests. */
+            source?: string;
+            /** @description User name or group name. */
+            subject: string;
+            /** @description `user` or `group` (a group at the identity provider). */
+            subject_kind: string;
+            /** @description Tenant; empty for the two cluster-wide roles. */
+            tenant: string;
+        };
+        /** @description The role bindings screen. */
+        BindingsView: {
+            /** @description Every binding the caller may see: all of them for a cluster admin,
+             *     the caller's own for everyone else. */
+            bindings: components["schemas"]["BindingRow"][];
+            /** @description Whether the caller may change bindings. */
+            can_edit: boolean;
+        };
         /** @description A status chip: colour plus word, never colour alone. */
         Chip: {
             /** @description Word shown next to the colour. */
@@ -325,10 +432,8 @@ export interface components {
              * @description Number of broker nodes.
              */
             nodes: number;
-            /**
-             * @description Whether queues can have priorities, single active consumer, a TTL
-             *     and dead-letter queues.
-             */
+            /** @description Whether queues can have priorities, single active consumer, a TTL
+             *     and dead-letter queues. */
             queue_options: boolean;
             /** @description One-line status, e.g. "upgrading to 0.4.1". */
             status: string;
@@ -365,6 +470,26 @@ export interface components {
              */
             ttl_ms?: number | null;
         };
+        /** @description Request to create a user with a credential. */
+        CreateUser: components["schemas"]["Credential"] & {
+            /** @description New user name. */
+            name: string;
+        };
+        /** @description A SCRAM credential derived in the browser (ADR 0089). There is no
+         *     password field: the console never sees one. */
+        Credential: {
+            /**
+             * Format: int32
+             * @description PBKDF2 iterations; the broker refuses fewer than its minimum.
+             */
+            iterations: number;
+            /** @description Salt, base64. */
+            salt: string;
+            /** @description `ServerKey`, base64. */
+            server_key: string;
+            /** @description `H(ClientKey)`, base64. */
+            stored_key: string;
+        };
         /** @description A dead-lettered message. */
         DeadLetter: {
             /** @description Time, RFC 3339. */
@@ -383,6 +508,11 @@ export interface components {
             offset: number;
             /** @description Why it was dead-lettered. */
             reason: string;
+        };
+        /** @description Request to delete a user. Destructive: names the user again. */
+        DeleteUser: {
+            /** @description The user's name, typed again. */
+            confirm: string;
         };
         /** @description Disk thresholds, as fractions of free space. */
         DiskLimits: {
@@ -466,15 +596,11 @@ export interface components {
             /** @description Principal name the cluster authorises. */
             principal: string;
         };
-        /**
-         * @description Request to pin a partition's leader to one of its replicas, or to unpin
-         *     it (ADR 0065).
-         */
+        /** @description Request to pin a partition's leader to one of its replicas, or to unpin
+         *     it (ADR 0065). */
         MoveLeader: {
-            /**
-             * @description The node to lead it, as the console names nodes; `None` unpins it so
-             *     that leaders spread by themselves again.
-             */
+            /** @description The node to lead it, as the console names nodes; `None` unpins it so
+             *     that leaders spread by themselves again. */
             node?: string | null;
             /**
              * Format: int32
@@ -690,10 +816,8 @@ export interface components {
              */
             ready: number;
         };
-        /**
-         * @description Request to purge a queue's ready messages (ADR 0064). Destructive, so
-         *     the queue's name must be typed again.
-         */
+        /** @description Request to purge a queue's ready messages (ADR 0064). Destructive, so
+         *     the queue's name must be typed again. */
         PurgeQueue: {
             /** @description The queue's name, typed by the user. */
             confirm: string;
@@ -907,12 +1031,20 @@ export interface components {
          * @enum {string}
          */
         ReplicaState: "leader" | "in_sync" | "catching_up";
+        /** @description Request to revoke the sessions of a user or an IdP group (ADR 0070).
+         *     Destructive: names the subject again. */
+        RevokeSessions: {
+            /** @description The subject's name, typed again. */
+            confirm: string;
+            /** @description `true` for a group at the identity provider. */
+            group: boolean;
+            /** @description User name or group name. */
+            subject: string;
+        };
         /** @description A role binding. */
         RoleBinding: {
-            /**
-             * @description How the subject is recognised: `user` or `group` (a group at the
-             *     identity provider); the demo says `mTLS` or `OIDC`.
-             */
+            /** @description How the subject is recognised: `user` or `group` (a group at the
+             *     identity provider); the demo says `mTLS` or `OIDC`. */
             auth: string;
             /** @description Principal. */
             principal: string;
@@ -1153,6 +1285,28 @@ export interface components {
             /** @description Status chip. */
             status: components["schemas"]["Chip"];
         };
+        /** @description A SCRAM user. Key material never leaves the cluster, so a row says only
+         *     how the user is stored. */
+        UserRow: {
+            /**
+             * Format: int32
+             * @description PBKDF2 iterations of the stored credential.
+             */
+            iterations: number;
+            /** @description `SCRAM-SHA-512`. */
+            mechanism: string;
+            /** @description User name, the principal in role bindings. */
+            name: string;
+            /** @description Bindings that name this user, as `role (tenant)` texts. */
+            roles: string[];
+            /** @description `configuration` (read only) or `runtime`. */
+            source: string;
+        };
+        /** @description The users screen. */
+        UsersView: {
+            /** @description SCRAM users, by name. */
+            users: components["schemas"]["UserRow"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -1177,6 +1331,120 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClusterRef"][];
+                };
+            };
+        };
+    };
+    bindings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BindingsView"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    add_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BindingRow"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BindingRow"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };
@@ -1530,6 +1798,48 @@ export interface operations {
             };
         };
     };
+    revoke_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeSessions"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     streams: {
         parameters: {
             query?: never;
@@ -1673,6 +1983,174 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Done"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsersView"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUser"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+                /** @description User name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteUser"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+                /** @description User name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Credential"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             403: {

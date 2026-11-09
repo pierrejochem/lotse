@@ -11,7 +11,7 @@ use lotse_console::cluster::Cluster;
 use lotse_console::cluster::demo::DemoCluster;
 use lotse_console::metrics::MetricsStore;
 use lotse_console::{AppState, router};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 fn app() -> axum::Router {
@@ -134,7 +134,16 @@ async fn the_openapi_document_lists_every_route() {
     let (s, v, _) = call("GET", "/api/openapi.json", None).await;
     assert_eq!(s, StatusCode::OK);
     let paths = v["paths"].as_object().unwrap();
-    for p in ["/api/v1/me", "/api/v1/clusters/{cluster}/queues", "/api/v1/clusters/{cluster}/streams/{name}/records"] {
+    for p in [
+        "/api/v1/me",
+        "/api/v1/clusters/{cluster}/queues",
+        "/api/v1/clusters/{cluster}/streams/{name}/records",
+        "/api/v1/clusters/{cluster}/users",
+        "/api/v1/clusters/{cluster}/users/{name}",
+        "/api/v1/clusters/{cluster}/users/{name}/credential",
+        "/api/v1/clusters/{cluster}/bindings",
+        "/api/v1/clusters/{cluster}/sessions/revoke",
+    ] {
         assert!(paths.contains_key(p), "{p} missing");
     }
 }
@@ -153,4 +162,82 @@ async fn deep_links_get_the_app_and_missing_files_get_404() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _, _) = call("GET", "/api/v1/nope", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// Like `call`, on one router, so that a change shows in the next call.
+async fn call_on(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(v) => {
+            req = req.header(header::CONTENT_TYPE, "application/json");
+            Body::from(v.to_string())
+        }
+        None => Body::empty(),
+    };
+    let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn users_bindings_and_sessions_in_the_demo() {
+    let app = app();
+    let base = "/api/v1/clusters/prod-hamburg-1";
+    let credential = |iterations: u32| json!({"salt": "c2FsdA==", "iterations": iterations, "stored_key": "a2V5", "server_key": "a2V5"});
+
+    let (s, v) = call_on(&app, "GET", &format!("{base}/users"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let names = |v: &Value| -> Vec<String> {
+        v["users"].as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap().to_owned()).collect()
+    };
+    assert!(names(&v).contains(&"ingest-service".to_owned()), "{v}");
+    assert!(!v.to_string().contains("stored_key"), "rows carry no key material");
+
+    // Create, refuse a repeat, set a new password, delete with the name typed again.
+    let mut body = credential(4096);
+    body["name"] = json!("dave");
+    let (s, v) = call_on(&app, "POST", &format!("{base}/users"), Some(body.clone())).await;
+    assert_eq!((s, v["message"].as_str()), (StatusCode::OK, Some("Created dave.")), "{v}");
+    assert_eq!(call_on(&app, "POST", &format!("{base}/users"), Some(body)).await.0, StatusCode::CONFLICT);
+    let (s, _) = call_on(&app, "PUT", &format!("{base}/users/dave/credential"), Some(credential(2))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "too few iterations");
+    let (s, _) = call_on(&app, "PUT", &format!("{base}/users/dave/credential"), Some(credential(8192))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v) = call_on(&app, "GET", &format!("{base}/users"), None).await;
+    let dave = v["users"].as_array().unwrap().iter().find(|u| u["name"] == "dave").unwrap().clone();
+    assert_eq!(dave["iterations"], 8192);
+    let (s, _) = call_on(&app, "DELETE", &format!("{base}/users/dave"), Some(json!({"confirm": "dav"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, v) = call_on(&app, "DELETE", &format!("{base}/users/dave"), Some(json!({"confirm": "dave"}))).await;
+    assert_eq!((s, v["cli"].as_str()), (StatusCode::OK, Some("lotse-cli user delete dave")), "{v}");
+    let (_, v) = call_on(&app, "GET", &format!("{base}/users"), None).await;
+    assert!(!names(&v).contains(&"dave".to_owned()));
+    let (s, _) = call_on(&app, "DELETE", &format!("{base}/users/pierre"), Some(json!({"confirm": "pierre"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a configured user is read only");
+
+    // Bindings.
+    let binding =
+        json!({"subject_kind": "group", "subject": "ops", "role": "viewer", "tenant": "payments", "prefix": "events."});
+    let (s, v) = call_on(&app, "POST", &format!("{base}/bindings"), Some(binding.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["message"], "ops is now viewer in payments for events.*.");
+    let has_ops = |v: &Value| v["bindings"].as_array().unwrap().iter().any(|b| b["subject"] == "ops");
+    let (_, v) = call_on(&app, "GET", &format!("{base}/bindings"), None).await;
+    assert!(has_ops(&v) && v["can_edit"] == true, "{v}");
+    let mut wrong = binding.clone();
+    wrong["role"] = json!("overlord");
+    assert_eq!(call_on(&app, "POST", &format!("{base}/bindings"), Some(wrong)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call_on(&app, "DELETE", &format!("{base}/bindings"), Some(binding)).await.0, StatusCode::OK);
+    let (_, v) = call_on(&app, "GET", &format!("{base}/bindings"), None).await;
+    assert!(!has_ops(&v), "{v}");
+
+    // Sessions: the name typed again.
+    let revoke = |confirm: &str| json!({"subject": "platform-team", "group": true, "confirm": confirm});
+    assert_eq!(
+        call_on(&app, "POST", &format!("{base}/sessions/revoke"), Some(revoke("platform"))).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (s, v) = call_on(&app, "POST", &format!("{base}/sessions/revoke"), Some(revoke("platform-team"))).await;
+    assert_eq!((s, v["cli"].as_str()), (StatusCode::OK, Some("lotse-cli session revoke --group platform-team")), "{v}");
 }
