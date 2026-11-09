@@ -24,6 +24,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
+import { leaderOf as currentLeader } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -203,7 +204,11 @@ describe("admin calls against three real nodes", { skip }, () => {
       // Until the leader has nothing ready: what the leader has pushed to the consumer's credit is held, not ready.
       await until("the queue to have nothing ready", async () => {
         purged += await client.purge("purge-q");
+        // Only the node the metadata names leader counts: a leader that was deposed goes on reporting the queue, with
+        // what it last knew, until it hears of the new term.
+        const leader = await currentLeader(client, "purge-q");
         const ready = (await client.nodeMetrics())
+          .filter((m) => m.nodeId === leader)
           .flatMap((m) => m.metrics?.queues ?? [])
           .filter((q) => q.resourceId === queueId)
           .map((q) => q.ready);

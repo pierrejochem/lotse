@@ -23,6 +23,7 @@ import { crc32c } from "../src/record/crc32c.js";
 import { putU32 } from "../src/record/bytes.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
+import { stable } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -172,13 +173,18 @@ describe("a client against three real nodes", { skip }, () => {
     // The log starts with entries of the broker's own, so the first offset is not 0 and not a message.
     const earliest = await client.listOffset("times", 0, OffsetAt.EARLIEST);
     assert.ok(earliest <= a.baseOffset, `earliest ${earliest} before the first batch ${a.baseOffset}`);
-    const latest = await client.listOffset("times", 0, OffsetAt.LATEST);
+    // A new leader appends a note of its own term, which can fall between listing the end and reading to it: the two
+    // are compared once the end has stopped moving.
+    const readEnd = async (): Promise<bigint> => {
+      let end = 0n;
+      for (let f = await client.fetch("times", 0, 0n, 50); f.records.length > 0; f = await client.fetch("times", 0, end, 50)) {
+        end = f.nextOffset(end);
+      }
+      return end;
+    };
+    const latest = await stable(() => client.listOffset("times", 0, OffsetAt.LATEST));
     assert.ok(latest > c.baseOffset);
-    let end = 0n;
-    for (let f = await client.fetch("times", 0, 0n, 50); f.records.length > 0; f = await client.fetch("times", 0, end, 50)) {
-      end = f.nextOffset(end);
-    }
-    assert.equal(latest, end, "the end a reader sees");
+    assert.equal(await stable(readEnd), latest, "the end a reader sees");
 
     // By batches: the first batch with a record at or after the time.
     assert.equal(await client.listOffset("times", 0, OffsetAt.time(0)), a.baseOffset);
@@ -186,7 +192,7 @@ describe("a client against three real nodes", { skip }, () => {
     assert.equal(await client.listOffset("times", 0, OffsetAt.time(1_501)), b.baseOffset, "a's newest is 1500");
     assert.equal(await client.listOffset("times", 0, OffsetAt.time(2_000)), b.baseOffset);
     assert.equal(await client.listOffset("times", 0, OffsetAt.time(2_001)), c.baseOffset);
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(3_001)), latest, "none yet: the latest offset");
+    assert.equal(await stable(() => client.listOffset("times", 0, OffsetAt.time(3_001))), latest, "none yet: the latest offset");
     assert.equal(await client.listOffset("times", 0, OffsetAt.time(-7)), a.baseOffset, "a negative time counts as 0");
   });
 
