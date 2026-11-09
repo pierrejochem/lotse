@@ -414,6 +414,28 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::RevokeSessions(req)).await
     }
 
+    /// Revokes one client certificate (ADR 0090): each node ends the
+    /// connections that showed it and refuses it from then on, until it
+    /// expires at `not_after_ms` (ms since the Unix epoch). `issuer` is the
+    /// SHA-256 of the issuer's name in DER form and `serial` the serial, as
+    /// [`lotse_rt::CertInfo`] has them. The CRL file stays as it is. Needs
+    /// the cluster-admin role.
+    pub async fn revoke_certificate(
+        &self,
+        issuer: [u8; 32],
+        serial: &[u8],
+        not_after_ms: u64,
+        reason: &str,
+    ) -> Result<(), ClientError> {
+        let req = lotse_proto::RevokeCertificateRequest {
+            issuer: Bytes::copy_from_slice(&issuer),
+            serial: Bytes::copy_from_slice(serial),
+            not_after_ms,
+            reason: reason.into(),
+        };
+        self.admin_change(Request::RevokeCertificate(req)).await
+    }
+
     /// The cluster's nodes, as the metadata group knows them.
     pub async fn describe_nodes(&self) -> Result<Vec<NodeEntry>, ClientError> {
         let req = Request::DescribeNodes(DescribeNodesRequest);

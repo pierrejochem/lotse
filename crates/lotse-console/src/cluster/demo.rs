@@ -57,6 +57,8 @@ struct State {
     removed: Vec<BindingRow>,
     /// Subjects whose sessions were revoked: `(group, name)`.
     revoked: BTreeSet<(bool, String)>,
+    /// Certificates revoked here: issuer and serial.
+    revoked_certs: BTreeSet<([u8; 32], Vec<u8>)>,
 }
 
 /// Users the demo cluster starts with, as `(name, configured)`.
@@ -1065,6 +1067,24 @@ impl Cluster for DemoCluster {
                 st.removed.push(b);
             }
         }
+        Ok(())
+    }
+
+    async fn revoke_certificate(
+        &self,
+        _who: &Identity,
+        issuer: [u8; 32],
+        serial: &[u8],
+        not_after_ms: u64,
+        _reason: &str,
+    ) -> ApiResult<()> {
+        if not_after_ms < crate::time::now_ms() {
+            return Err(ApiError::BadRequest(
+                "The cluster refused the revocation: the certificate has expired already, so it is refused without one."
+                    .into(),
+            ));
+        }
+        self.lock().revoked_certs.insert((issuer, serial.to_vec()));
         Ok(())
     }
 

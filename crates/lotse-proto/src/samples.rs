@@ -355,6 +355,18 @@ pub fn requests() -> Vec<Request> {
             subject: "ops".into(),
             before_ms: 0,
         }),
+        Request::RevokeCertificate(RevokeCertificateRequest {
+            issuer: Bytes::from_static(&[7; 32]),
+            serial: Bytes::from_static(&[0x01, 0xab, 0xcd]),
+            not_after_ms: 1_800_000_000_000,
+            reason: "laptop lost".into(),
+        }),
+        Request::RevokeCertificate(RevokeCertificateRequest {
+            issuer: Bytes::from_static(&[9; 32]),
+            serial: Bytes::from_static(&[0x7f]),
+            not_after_ms: 0,
+            reason: String::new(),
+        }),
     ]
 }
 

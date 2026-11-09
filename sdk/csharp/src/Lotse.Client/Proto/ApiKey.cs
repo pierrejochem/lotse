@@ -159,6 +159,9 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>Raises a runtime stream's partition count (tenant admin, ADR 0074).</summary>
     public static readonly ApiKey CreatePartitions = new(51);
 
+    /// <summary>Adds a client certificate to the cluster's revocation list (cluster admin).</summary>
+    public static readonly ApiKey RevokeCertificate = new(52);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
@@ -179,7 +182,7 @@ public readonly record struct ApiKey(ushort Id)
         Range(DeleteTenant), Range(DescribeTenants), Range(AlterRoleBindings),
         Range(DescribeRoleBindings), Range(WhoAmI), Range(AddNode), Range(RemoveNode),
         Range(DescribeNodes), Range(PurgeQueue), Range(Requeue), Range(MoveLeader), Range(RevokeSessions),
-        Range(CreatePartitions), Range(Publish),
+        Range(CreatePartitions), Range(RevokeCertificate), Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);

@@ -229,6 +229,15 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     public suspend fun revokeSessions(subject: String, group: Boolean = false): Unit =
         io { java.revokeSessions(subject, group) }
 
+    /** Adds a certificate to the cluster's revocation list. */
+    public suspend fun revokeCertificate(
+        issuer: ByteArray,
+        serial: ByteArray,
+        notAfterMs: Long,
+        reason: String = "",
+    ): Unit =
+        io { java.revokeCertificate(issuer, serial, notAfterMs, reason) }
+
     /** Adds a node to the cluster. */
     public suspend fun addNode(nodeId: Long, peer: String, client: String): Unit =
         io { java.addNode(nodeId, peer, client) }

@@ -611,6 +611,7 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.SETTLE_VOTERS:
     case ApiKey.MOVE_LEADER:
     case ApiKey.REVOKE_SESSIONS:
+    case ApiKey.REVOKE_CERTIFICATE:
     case ApiKey.CREATE_PARTITIONS:
       return { type: "Admin", error: r.u16(), errorMsg: r.optString(), leaderHint: m.getHint(r) };
     case ApiKey.DESCRIBE_NODES: {

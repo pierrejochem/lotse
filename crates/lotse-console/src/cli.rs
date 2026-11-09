@@ -131,6 +131,11 @@ pub fn bind(b: &crate::model::BindingRow, add: bool) -> String {
     cmd
 }
 
+/// `lotse-cli cert revoke …`.
+pub fn revoke_certificate(req: &crate::model::RevokeCertificate) -> String {
+    format!("lotse-cli cert revoke --issuer {} --serial {} --not-after-ms {}", req.issuer, req.serial, req.not_after_ms)
+}
+
 /// `lotse-cli session revoke …`.
 pub fn revoke_sessions(subject: &str, group: bool) -> String {
     format!("lotse-cli session revoke {}{subject}", if group { "--group " } else { "" })

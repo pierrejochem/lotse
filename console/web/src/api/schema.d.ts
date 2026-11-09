@@ -40,6 +40,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/certificates/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revokes one client certificate, by issuer and serial. Every node refuses
+         *     it from then on and ends the connections that showed it. Destructive: the
+         *     body names the serial again.
+         */
+        post: operations["revoke_certificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/leaders": {
         parameters: {
             query?: never;
@@ -1054,6 +1075,27 @@ export interface components {
          */
         ReplicaState: "leader" | "in_sync" | "catching_up";
         /**
+         * @description Request to revoke one client certificate (ADR 0090). Destructive: the
+         *     serial is typed again.
+         */
+        RevokeCertificate: {
+            /** @description The serial, typed again. */
+            confirm: string;
+            /** @description SHA-256 of the issuer's name in DER form, 64 hex digits. */
+            issuer: string;
+            /**
+             * Format: int64
+             * @description When the certificate stops being valid, ms since the Unix epoch. The
+             *     revocation is forgotten after that: an expired certificate is refused
+             *     anyway.
+             */
+            not_after_ms: number;
+            /** @description Why; may be empty. */
+            reason?: string;
+            /** @description The serial number, hex. */
+            serial: string;
+        };
+        /**
          * @description Request to revoke the sessions of a user or an IdP group (ADR 0070).
          *     Destructive: names the subject again.
          */
@@ -1448,6 +1490,48 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["BindingRow"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_certificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeCertificate"];
             };
         };
         responses: {

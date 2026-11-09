@@ -1366,6 +1366,7 @@ impl Known {
         let state = meta.metadata().clone();
         auth.set_users(&state.users);
         auth.set_revocations(&state.revocations);
+        auth.set_revoked_certs(&state.revoked_certs);
         let mut known = Known::configured(cfg);
         known.access = Access::build(&cfg.auth, &configured_ids(cfg), &state);
         known.applied = self.applied;

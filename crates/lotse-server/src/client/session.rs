@@ -14,7 +14,7 @@ use lotse_auth::scram::{self, ScramServer};
 use lotse_proto::{
     ErrorCode, SaslAuthenticateRequest, SaslAuthenticateResponse, SaslHandshakeRequest, SaslHandshakeResponse,
 };
-use lotse_rt::{Clock, Http, Instant, PeerIdentity, Rng};
+use lotse_rt::{CertInfo, Clock, Http, Instant, PeerIdentity, Rng};
 
 use crate::auth::{Auth, Principal};
 
@@ -31,6 +31,9 @@ enum Sasl {
 pub(super) struct Session<R> {
     auth: Arc<Auth<R>>,
     principal: Option<Principal>,
+    /// The certificate the connection showed, if a cluster admin may revoke
+    /// it (ADR 0090).
+    cert: Option<CertInfo>,
     /// When the session ends; `None` for one that lasts the connection
     /// (a certificate, or no authentication required).
     until: Option<Instant>,
@@ -53,14 +56,21 @@ pub(super) struct Step {
 
 impl<R: Clock + Http + Rng + Clone> Session<R> {
     /// A session for a connection whose other end proved `identity`.
-    pub(super) fn new(auth: Arc<Auth<R>>, identity: Option<PeerIdentity>, now_ms: u64) -> Session<R> {
+    pub(super) fn new(
+        auth: Arc<Auth<R>>,
+        identity: Option<PeerIdentity>,
+        cert: Option<CertInfo>,
+        now_ms: u64,
+    ) -> Session<R> {
+        // Node certificates are revoked in the CRL file only (ADR 0090).
+        let cert = cert.filter(|_| !matches!(identity, Some(PeerIdentity::Node(_))));
         let principal = match identity {
             Some(PeerIdentity::Node(id)) => Some(Principal::Node(id)),
             Some(PeerIdentity::Principal(name)) if auth.cfg.mtls => Some(Principal::User { name, groups: Vec::new() }),
             _ if !auth.cfg.required => Some(Principal::Anonymous),
             _ => None,
         };
-        Session { auth, principal, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
+        Session { auth, principal, cert, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
     }
 
     /// Who the connection acts as at `now`; `None` before authenticating or
@@ -75,7 +85,10 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
     /// Whether a revocation ended this session (ADR 0070): the connection
     /// closes, and the client authenticates afresh on a new one.
     pub(super) fn revoked(&self) -> bool {
-        self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
+        // A certificate a cluster admin revoked ends the connection whoever
+        // it then authenticates as (ADR 0090).
+        self.cert.as_ref().is_some_and(|c| self.auth.cert_revoked(c))
+            || self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
     }
 
     /// Set when revocations change, so a waiting connection checks again.

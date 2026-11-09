@@ -143,6 +143,7 @@ async fn the_openapi_document_lists_every_route() {
         "/api/v1/clusters/{cluster}/users/{name}/credential",
         "/api/v1/clusters/{cluster}/bindings",
         "/api/v1/clusters/{cluster}/sessions/revoke",
+        "/api/v1/clusters/{cluster}/certificates/revoke",
     ] {
         assert!(paths.contains_key(p), "{p} missing");
     }
@@ -231,6 +232,21 @@ async fn users_bindings_and_sessions_in_the_demo() {
     assert_eq!(call_on(&app, "DELETE", &format!("{base}/bindings"), Some(binding)).await.0, StatusCode::OK);
     let (_, v) = call_on(&app, "GET", &format!("{base}/bindings"), None).await;
     assert!(!has_ops(&v), "{v}");
+
+    // Certificates: the serial typed again, hex only, not expired already.
+    let now_ms = lotse_console::time::now_ms();
+    let cert = |serial: &str, confirm: &str, not_after_ms: u64| json!({"issuer": "ab".repeat(32), "serial": serial, "not_after_ms": not_after_ms, "reason": "lost", "confirm": confirm});
+    let uri = format!("{base}/certificates/revoke");
+    let ends = now_ms + 86_400_000;
+    assert_eq!(call_on(&app, "POST", &uri, Some(cert("01ab", "01a", ends))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call_on(&app, "POST", &uri, Some(cert("zz", "zz", ends))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call_on(&app, "POST", &uri, Some(cert("01ab", "01ab", 1))).await.0, StatusCode::BAD_REQUEST);
+    let mut short = cert("01ab", "01ab", ends);
+    short["issuer"] = json!("abcd");
+    assert_eq!(call_on(&app, "POST", &uri, Some(short)).await.0, StatusCode::BAD_REQUEST);
+    let (s, v) = call_on(&app, "POST", &uri, Some(cert("01AB", "01ab", ends))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["cli"].as_str().unwrap().starts_with("lotse-cli cert revoke --issuer abab"), "{v}");
 
     // Sessions: the name typed again.
     let revoke = |confirm: &str| json!({"subject": "platform-team", "group": true, "confirm": confirm});

@@ -1475,6 +1475,22 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
+     * Adds a certificate to the cluster's revocation list: every node refuses it from then on and ends its
+     * connections. Needs the cluster-admin role.
+     *
+     * @param issuer SHA-256 of the issuer's distinguished name in DER form, 32 bytes
+     * @param serial the serial number, big-endian
+     * @param notAfterMs milliseconds since the Unix epoch at which the certificate stops being valid; the entry is
+     *     dropped after that
+     * @param reason why, for whoever reads the list later; may be empty
+     */
+    public void revokeCertificate(byte[] issuer, byte[] serial, long notAfterMs, String reason) {
+        checkOpen();
+        adminChange(new Request.RevokeCertificate(
+                ByteString.copyOf(issuer), ByteString.copyOf(serial), notAfterMs, reason));
+    }
+
+    /**
      * Adds node {@code nodeId} to the cluster, reached by nodes at {@code peer} and by clients at {@code client};
      * start it with {@code join} afterwards. Ids are never used twice.
      */

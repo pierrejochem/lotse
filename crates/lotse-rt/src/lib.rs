@@ -216,6 +216,23 @@ pub enum PeerIdentity {
     Principal(String),
 }
 
+/// What a peer's certificate says about itself, beyond who it names: enough
+/// to tell one certificate from another and to know when it ends. A cluster
+/// admin revokes a client certificate by these (ADR 0090).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CertInfo {
+    /// SHA-256 of the issuer's distinguished name in DER form: the issuer by
+    /// its name, as a revocation list names it. Two issuers with the same
+    /// name are one issuer here; a cluster has one CA.
+    pub issuer: [u8; 32],
+    /// The serial number, big-endian, as the certificate has it.
+    pub serial: Vec<u8>,
+    /// First millisecond the certificate is valid in, since the Unix epoch.
+    pub not_before_ms: u64,
+    /// Millisecond it stops being valid in, since the Unix epoch.
+    pub not_after_ms: u64,
+}
+
 impl PeerIdentity {
     /// The URI prefix that marks a node certificate.
     pub const NODE_URI: &'static str = "lotse://node/";
@@ -297,6 +314,12 @@ pub trait Conn: Send + Sync + 'static {
     /// Who the other end proved to be; `None` if it showed no certificate or
     /// the network does not verify peers.
     fn peer_identity(&self) -> Option<PeerIdentity>;
+
+    /// The certificate the other end showed; `None` if it showed none, the
+    /// network does not verify peers, or it cannot tell.
+    fn peer_cert(&self) -> Option<CertInfo> {
+        None
+    }
 }
 
 /// Fetches documents over HTTP(S): an identity provider's discovery document

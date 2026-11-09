@@ -48,6 +48,7 @@ use crate::model::*;
         add_binding,
         remove_binding,
         revoke_sessions,
+        revoke_certificate,
         tenants,
         metrics
     ),
@@ -421,6 +422,47 @@ pub async fn revoke_sessions(
         req.subject
     );
     Ok(Json(Done { message, cli: cli::revoke_sessions(&req.subject, req.group) }))
+}
+
+/// Decodes hex, or says what is wrong with `what`.
+fn hex(what: &str, text: &str) -> ApiResult<Vec<u8>> {
+    let bad = || ApiError::BadRequest(format!("The {what} is hexadecimal: pairs of 0-9 and a-f."));
+    if text.is_empty() || text.len() % 2 != 0 {
+        return Err(bad());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2).ok_or_else(bad)?, 16).map_err(|_| bad()))
+        .collect()
+}
+
+/// Revokes one client certificate, by issuer and serial. Every node refuses
+/// it from then on and ends the connections that showed it. Destructive: the
+/// body names the serial again.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/certificates/revoke",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = RevokeCertificate,
+    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+pub async fn revoke_certificate(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<RevokeCertificate>,
+) -> ApiResult<Json<Done>> {
+    let serial = hex("serial", &req.serial)?;
+    if !req.confirm.eq_ignore_ascii_case(&req.serial) {
+        return Err(ApiError::BadRequest(format!("Type the serial, {}, to revoke the certificate.", req.serial)));
+    }
+    let issuer: [u8; 32] = hex("issuer", &req.issuer)?
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("The issuer is 64 hex digits: the SHA-256 of the issuer's name.".into()))?;
+    cluster(&st, &id)?.revoke_certificate(&who, issuer, &serial, req.not_after_ms, &req.reason).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, serial = %req.serial, "certificate revoked");
+    let message = format!(
+        "Revoked the certificate with serial {}. Connections that showed it end; it is refused until it expires.",
+        req.serial
+    );
+    Ok(Json(Done { message, cli: cli::revoke_certificate(&req) }))
 }
 
 /// Creates a queue.

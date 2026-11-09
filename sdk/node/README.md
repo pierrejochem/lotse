@@ -183,6 +183,7 @@ Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-c
 | `setUserPassword`, `deleteUser`, `describeUsers` | SCRAM-SHA-512 users kept in the metadata group. Cluster admin. |
 | `createTenant`, `deleteTenant`, `describeTenants` | Tenants (ADR 0039). A tenant that holds resources is not deleted. `describeTenants` lists those the caller has a role in. |
 | `alterRoleBindings(add, remove)`, `describeRoleBindings`, `whoAmI` | Role bindings of a user or IdP group, in a tenant, for names with a prefix; removals are applied first. `whoAmI` says who the client acts as and which bindings apply. |
+| `revokeCertificate(issuer, serial, notAfterMs, reason)` | Revokes one client certificate, named by the SHA-256 of its issuer's name (32 bytes) and its serial: nodes end its connections and refuse it until it expires (ADR 0090). The CRL file stays as it is. Cluster admin. |
 | `revokeSessions(subject, group)` | Ends the sessions of a user or IdP group that began before now, and refuses their older tokens (ADR 0070). A SCRAM user can log in again unless the password is changed or deleted. Cluster admin. |
 | `addNode`, `removeNode`, `describeNodes` | The node list in the metadata group (ADR 0048): `removeNode` starts a drain, `describeNodes` shows replicas and moves. Ids are never used twice. |
 | `moveLeader(name, partition, node)` | Pins a partition's leader to one of its voters; `null` unpins (ADR 0065). Cluster admin. |

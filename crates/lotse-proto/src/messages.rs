@@ -3427,6 +3427,45 @@ impl RevokeSessionsRequest {
     }
 }
 
+/// Revokes one client certificate (cluster admin, ADR 0090): every node
+/// refuses it from the moment it applies the entry and ends the connections
+/// that showed it. The CRL file stays as it is. Answered with
+/// [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeCertificateRequest {
+    /// SHA-256 of the issuer's distinguished name in DER form (32 bytes),
+    /// as `lotse_rt::CertInfo` has it.
+    pub issuer: Bytes,
+    /// The serial number, big-endian, as the certificate has it.
+    pub serial: Bytes,
+    /// Milliseconds since the Unix epoch at which the certificate stops being
+    /// valid. The entry is dropped after that: an expired certificate is
+    /// refused anyway.
+    pub not_after_ms: u64,
+    /// Why, for the people who read the list later; may be empty.
+    pub reason: String,
+}
+
+impl RevokeCertificateRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.bytes(&self.issuer);
+        w.bytes(&self.serial);
+        w.u64(self.not_after_ms);
+        w.string(&self.reason);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RevokeCertificateRequest {
+            issuer: r.bytes()?,
+            serial: r.bytes()?,
+            not_after_ms: r.u64()?,
+            reason: r.string()?,
+        };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

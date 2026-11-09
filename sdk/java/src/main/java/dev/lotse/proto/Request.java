@@ -1176,6 +1176,35 @@ public sealed interface Request {
     }
 
     /**
+     * Adds a certificate to the cluster's revocation list (cluster admin): every node refuses it from then on and
+     * ends its connections. Answered with {@link Response.Admin}.
+     *
+     * @param issuer SHA-256 of the issuer's distinguished name in DER form, 32 bytes
+     * @param serial the serial number, big-endian, as the certificate has it
+     * @param notAfterMs milliseconds since the Unix epoch at which the certificate stops being valid, a
+     *     {@code u64}; the entry is dropped after that
+     * @param reason why, for the people who read the list later; may be empty
+     */
+    record RevokeCertificate(ByteString issuer, ByteString serial, long notAfterMs, String reason)
+            implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.REVOKE_CERTIFICATE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.bytes(issuer).bytes(serial).u64(notAfterMs).string(reason).noTags();
+        }
+
+        static RevokeCertificate read(Reader r) {
+            RevokeCertificate x = new RevokeCertificate(r.bytes(), r.bytes(), r.u64(), r.string());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code PurgeQueue} (47) or {@code Requeue} (48): an action on a queue's ready messages, served by its leader
      * (ADR 0064). Each request acts on a bounded number of messages; send it again with the answer's {@code upTo}
      * while the answer says {@code more}.

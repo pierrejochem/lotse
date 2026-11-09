@@ -2,7 +2,14 @@ import { useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
-import { useAlterBinding, useBindings, useDeleteUser, useRevokeSessions, useUsers } from '../api/queries';
+import {
+  useAlterBinding,
+  useBindings,
+  useDeleteUser,
+  useRevokeCertificate,
+  useRevokeSessions,
+  useUsers,
+} from '../api/queries';
 import { BindingDialog, PasswordDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
 import { Chip, Failed, Loading, Select } from '../components/ui';
@@ -229,6 +236,76 @@ function Sessions({ cluster }: { cluster: string }) {
   );
 }
 
+const HEX = /^([0-9a-fA-F]{2})+$/;
+
+/** Revokes a client certificate by issuer and serial, until it expires (ADR 0090). */
+function Certificates({ cluster }: { cluster: string }) {
+  const revoke = useRevokeCertificate(cluster);
+  const toast = useToast();
+  const [issuer, setIssuer] = useState('');
+  const [serial, setSerial] = useState('');
+  const [until, setUntil] = useState('');
+  const [reason, setReason] = useState('');
+  const issuerOk = /^[0-9a-fA-F]{64}$/.test(issuer.trim());
+  const serialOk = HEX.test(serial.trim());
+  const ends = until ? new Date(until).getTime() : NaN;
+  const ready = issuerOk && serialOk && Number.isFinite(ends);
+  return (
+    <div className="stack" style={{ maxWidth: 640 }}>
+      <p className="sub" style={{ margin: 0 }}>
+        Revoking refuses one client certificate on every node at once and ends the connections that showed it. It is forgotten when the
+        certificate expires. Certificates revoked in the CRL file stay revoked; node certificates are revoked there only.
+      </p>
+      <div className="field">
+        <label htmlFor="cert-issuer">Issuer (SHA-256 of the issuer name, 64 hex digits)</label>
+        <input id="cert-issuer" className="input" value={issuer} onChange={(e) => setIssuer(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={issuer !== '' && !issuerOk ? true : undefined} />
+      </div>
+      <div className="two">
+        <div className="field">
+          <label htmlFor="cert-serial">Serial (hex)</label>
+          <input id="cert-serial" className="input" value={serial} onChange={(e) => setSerial(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={serial !== '' && !serialOk ? true : undefined} />
+        </div>
+        <div className="field">
+          <label htmlFor="cert-until">Valid until</label>
+          <input id="cert-until" className="input sans" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="cert-reason">Reason (optional)</label>
+        <input id="cert-reason" className="input sans" value={reason} onChange={(e) => setReason(e.target.value)} autoComplete="off" />
+      </div>
+      <div>
+        {ready ? (
+          <TypedConfirmButton
+            trigger="Revoke certificate"
+            title="Revoke this certificate?"
+            body="Every node refuses it from now on and ends the connections that showed it, until it expires. This cannot be undone."
+            name={serial.trim()}
+            prompt="Type the serial to revoke the certificate"
+            action="Revoke certificate"
+            keep="Keep the certificate"
+            pending={revoke.isPending}
+            onConfirm={(confirm) =>
+              revoke.mutate(
+                { issuer: issuer.trim(), serial: serial.trim(), not_after_ms: ends, reason: reason.trim(), confirm },
+                {
+                  onSuccess: (d) => {
+                    toast({ title: d.message, cli: d.cli });
+                    setSerial('');
+                  },
+                  onError: (e) => toast({ title: failure(e, 'Could not revoke the certificate.'), error: true }),
+                },
+              )
+            }
+          />
+        ) : (
+          <button className="btn" disabled>Revoke certificate</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function UsersAccess() {
   const { cluster = '' } = useParams();
   return (
@@ -242,10 +319,12 @@ export function UsersAccess() {
           <Tabs.Trigger value="users">Users</Tabs.Trigger>
           <Tabs.Trigger value="bindings">Role bindings</Tabs.Trigger>
           <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
+          <Tabs.Trigger value="certificates">Certificates</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
+        <Tabs.Content value="certificates" className="tabs-content"><Certificates cluster={cluster} /></Tabs.Content>
       </Tabs.Root>
     </main>
   );

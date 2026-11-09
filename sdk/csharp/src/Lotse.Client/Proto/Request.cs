@@ -914,6 +914,27 @@ public abstract record Request
         }
     }
 
+    /// <summary>Adds a certificate to the cluster's revocation list.</summary>
+    /// <param name="Issuer">SHA-256 of the issuer's distinguished name in DER form (32 bytes).</param>
+    /// <param name="Serial">The serial number, big-endian, as the certificate has it.</param>
+    /// <param name="NotAfterMs">When the certificate stops being valid, in milliseconds since the epoch; the entry is dropped after that.</param>
+    /// <param name="Reason">Why, for the people who read the list later; may be empty.</param>
+    public sealed record RevokeCertificate(ByteString Issuer, ByteString Serial, ulong NotAfterMs, string Reason) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RevokeCertificate;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.Bytes(Issuer).Bytes(Serial).U64(NotAfterMs).String(Reason).NoTags();
+
+        internal static RevokeCertificate Read(Reader r)
+        {
+            var x = new RevokeCertificate(r.Bytes(), r.Bytes(), r.U64(), r.String());
+            r.Tags();
+            return x;
+        }
+    }
+
     /// <summary>Purges a queue's ready messages, or moves a dead-letter queue's back (ADR 0064).</summary>
     /// <param name="Requeue"><c>true</c>: requeue (key 48); <c>false</c>: purge (key 47).</param>
     /// <param name="QueueId">The queue.</param>

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use lotse_rt::{Conn, Link, Listener, MAX_FRAME, Net, PeerIdentity};
+use lotse_rt::{CertInfo, Conn, Link, Listener, MAX_FRAME, Net, PeerIdentity};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -45,6 +45,20 @@ struct Watch {
     expires: Option<tokio::time::Instant>,
     closed: AtomicBool,
     wake: Notify,
+}
+
+/// What a certificate (DER) says about itself: issuer fingerprint, serial and
+/// validity, for revoking it by serial (ADR 0090).
+pub(crate) fn cert_info(cert: &[u8]) -> Option<CertInfo> {
+    use sha2::{Digest, Sha256};
+    let (_, c) = x509_parser::parse_x509_certificate(cert).ok()?;
+    let ms = |t: i64| u64::try_from(t).ok().map(|s| s.saturating_mul(1000));
+    Some(CertInfo {
+        issuer: Sha256::digest(c.issuer().as_raw()).into(),
+        serial: c.tbs_certificate.raw_serial().to_vec(),
+        not_before_ms: ms(c.validity().not_before.timestamp())?,
+        not_after_ms: ms(c.validity().not_after.timestamp())?,
+    })
 }
 
 /// The moment `cert` (DER) expires, on Tokio's clock.
@@ -153,6 +167,8 @@ pub struct TokioConn {
     rd: tokio::sync::Mutex<Reader>,
     wr: tokio::sync::Mutex<Writer>,
     peer: Option<PeerIdentity>,
+    /// What the other end's certificate says, if it showed one.
+    cert: Option<CertInfo>,
     /// Set for TLS connections whose other end showed a certificate.
     watch: Option<Arc<Watch>>,
 }
@@ -167,10 +183,17 @@ impl TokioConn {
     fn new<S: AsyncRead + AsyncWrite + Send + 'static>(
         stream: S,
         peer: Option<PeerIdentity>,
+        cert: Option<CertInfo>,
         watch: Option<Arc<Watch>>,
     ) -> Self {
         let (rd, wr) = tokio::io::split(stream);
-        TokioConn { rd: tokio::sync::Mutex::new(Box::new(rd)), wr: tokio::sync::Mutex::new(Box::new(wr)), peer, watch }
+        TokioConn {
+            rd: tokio::sync::Mutex::new(Box::new(rd)),
+            wr: tokio::sync::Mutex::new(Box::new(wr)),
+            peer,
+            cert,
+            watch,
+        }
     }
 
     /// Runs `io` unless or until the connection ends: its other end's
@@ -232,8 +255,10 @@ async fn handshake_in(
         .map_err(|_| io::Error::new(ErrorKind::TimedOut, "TLS handshake timed out"))??;
     let certs = tls.get_ref().1.peer_certificates();
     let peer = checked(link, certs)?;
-    let watch = shared.watch(certs.and_then(|c| c.first()));
-    Ok(TokioConn::new(tls, peer, watch))
+    let first = certs.and_then(|c| c.first());
+    let watch = shared.watch(first);
+    let cert = first.and_then(|c| cert_info(c.as_ref()));
+    Ok(TokioConn::new(tls, peer, cert, watch))
 }
 
 async fn accept_loop(
@@ -258,7 +283,7 @@ async fn accept_loop(
         let peer = peer.to_string();
         match &tls {
             None => {
-                if out.send((TokioConn::new(stream, None, None), peer)).await.is_err() {
+                if out.send((TokioConn::new(stream, None, None, None), peer)).await.is_err() {
                     return;
                 }
             }
@@ -318,7 +343,7 @@ impl Net for TokioRuntime {
                     loopback_only(&addr).await?;
                     let tcp = tokio::net::TcpStream::connect(&addr).await?;
                     tcp.set_nodelay(true)?;
-                    Ok(TokioConn::new(tcp, None, None))
+                    Ok(TokioConn::new(tcp, None, None, None))
                 }
                 Security::Tls(t) => {
                     let host = addr.rsplit_once(':').map_or(addr.as_str(), |(h, _)| h);
@@ -333,8 +358,10 @@ impl Net for TokioRuntime {
                         .map_err(|_| io::Error::new(ErrorKind::TimedOut, "TLS handshake timed out"))??;
                     let certs = tls.get_ref().1.peer_certificates();
                     let peer = checked(link, certs)?;
-                    let watch = t.watch(certs.and_then(|c| c.first()));
-                    Ok(TokioConn::new(tls, peer, watch))
+                    let first = certs.and_then(|c| c.first());
+                    let watch = t.watch(first);
+                    let cert = first.and_then(|c| cert_info(c.as_ref()));
+                    Ok(TokioConn::new(tls, peer, cert, watch))
                 }
             }
         }
@@ -377,6 +404,10 @@ impl Conn for TokioConn {
 
     fn peer_identity(&self) -> Option<PeerIdentity> {
         self.peer.clone()
+    }
+
+    fn peer_cert(&self) -> Option<CertInfo> {
+        self.cert.clone()
     }
 }
 

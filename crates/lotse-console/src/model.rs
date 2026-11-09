@@ -779,6 +779,25 @@ pub struct BindingRow {
     pub source: String,
 }
 
+/// Request to revoke one client certificate (ADR 0090). Destructive: the
+/// serial is typed again.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct RevokeCertificate {
+    /// SHA-256 of the issuer's name in DER form, 64 hex digits.
+    pub issuer: String,
+    /// The serial number, hex.
+    pub serial: String,
+    /// When the certificate stops being valid, ms since the Unix epoch. The
+    /// revocation is forgotten after that: an expired certificate is refused
+    /// anyway.
+    pub not_after_ms: u64,
+    /// Why; may be empty.
+    #[serde(default)]
+    pub reason: String,
+    /// The serial, typed again.
+    pub confirm: String,
+}
+
 /// The role bindings screen.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BindingsView {

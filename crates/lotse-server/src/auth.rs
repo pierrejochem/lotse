@@ -7,7 +7,7 @@
 //! publishes from the applied metadata state, and tokens are checked
 //! against the issuer's keys, fetched through the runtime and cached.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +15,9 @@ use lotse_auth::oauth::{self, Jwks, OidcSettings, TokenError, Verified};
 use lotse_auth::roles::Subject;
 use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
-use lotse_rt::{Clock, Http, Instant};
+use lotse_rt::{CertInfo, Clock, Http, Instant};
 
+use crate::metadata::{CertKey, RevokedCert};
 use crate::signal::Signal;
 
 /// How long a session lasts at most before the client must authenticate
@@ -164,6 +165,9 @@ pub(crate) struct Auth<R> {
     /// 0070), and the signal set when they change, which connections wait
     /// on.
     revocations: Mutex<(BTreeMap<Subject, u64>, Signal)>,
+    /// Revoked client certificates as the metadata group last applied them
+    /// (ADR 0090). A change wakes the same signal.
+    certs: Mutex<BTreeSet<CertKey>>,
     oidc: Option<Oidc<R>>,
 }
 
@@ -174,6 +178,7 @@ impl<R: Clock + Http + Clone> Auth<R> {
             cfg,
             users: Mutex::new(BTreeMap::new()),
             revocations: Mutex::new((BTreeMap::new(), Signal::default())),
+            certs: Mutex::new(BTreeSet::new()),
             oidc,
         })
     }
@@ -194,6 +199,23 @@ impl<R: Clock + Http + Clone> Auth<R> {
             r.0.clone_from(revocations);
             std::mem::take(&mut r.1).set();
         }
+    }
+
+    /// Publishes the revoked certificates the metadata group applied, and
+    /// wakes every connection to check its own if they changed.
+    pub(crate) fn set_revoked_certs(&self, revoked: &BTreeMap<CertKey, RevokedCert>) {
+        let keys: BTreeSet<CertKey> = revoked.keys().cloned().collect();
+        let mut c = self.certs.lock().expect("certs lock");
+        if *c != keys {
+            *c = keys;
+            std::mem::take(&mut self.revocations.lock().expect("revocations lock").1).set();
+        }
+    }
+
+    /// Whether the certificate is revoked.
+    pub(crate) fn cert_revoked(&self, cert: &CertInfo) -> bool {
+        let key = CertKey { issuer: cert.issuer, serial: cert.serial.clone() };
+        self.certs.lock().expect("certs lock").contains(&key)
     }
 
     /// Set once the revoked sessions change after this call.

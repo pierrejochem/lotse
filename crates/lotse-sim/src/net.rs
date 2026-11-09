@@ -15,7 +15,7 @@ use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use bytes::Bytes;
-use lotse_rt::{Instant, Link, MAX_FRAME, PeerIdentity, Rng};
+use lotse_rt::{CertInfo, Instant, Link, MAX_FRAME, PeerIdentity, Rng};
 
 use crate::SimRng;
 use crate::executor::Executor;
@@ -38,6 +38,7 @@ struct ListenerState {
     link: Link,
     /// What the listening end proves (its certificate).
     identity: Option<PeerIdentity>,
+    cert: Option<CertInfo>,
     backlog: VecDeque<(SimConn, String)>,
     acceptor: Option<Waker>,
 }
@@ -161,6 +162,7 @@ impl SimNet {
         &self,
         host: &str,
         identity: Option<PeerIdentity>,
+        cert: Option<CertInfo>,
         addr: &str,
         link: Link,
     ) -> io::Result<SimListener> {
@@ -179,7 +181,7 @@ impl SimNet {
         }
         s.listeners.insert(
             addr.clone(),
-            ListenerState { host: host.to_owned(), link, identity, backlog: VecDeque::new(), acceptor: None },
+            ListenerState { host: host.to_owned(), link, identity, cert, backlog: VecDeque::new(), acceptor: None },
         );
         Ok(SimListener { net: self.clone(), addr })
     }
@@ -188,12 +190,13 @@ impl SimNet {
         &self,
         host: &str,
         identity: Option<PeerIdentity>,
+        cert: Option<CertInfo>,
         addr: &str,
         link: Link,
     ) -> io::Result<SimConn> {
         let mut s = self.state.lock().expect("net lock");
-        let Some((server, server_link, server_identity)) =
-            s.listeners.get(addr).map(|l| (l.host.clone(), l.link, l.identity.clone()))
+        let Some((server, server_link, server_identity, server_cert)) =
+            s.listeners.get(addr).map(|l| (l.host.clone(), l.link, l.identity.clone(), l.cert.clone()))
         else {
             return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("nothing listens on {addr}")));
         };
@@ -213,9 +216,9 @@ impl SimNet {
                     format!("the TLS handshake with {addr} failed: a certificate is missing or of the wrong kind"),
                 ));
             }
-            (server_identity, identity)
+            ((server_identity, server_cert), (identity, cert))
         } else {
-            (None, None)
+            ((None, None), (None, None))
         };
         let mut pipe = |from: &str, to: &str| {
             let id = s.next_pipe;
@@ -237,8 +240,8 @@ impl SimNet {
         let down = pipe(&server, host);
         s.next_port += 1;
         let peer = format!("{host}:{}", s.next_port);
-        let client = SimConn { net: self.clone(), tx: up, rx: down, peer: client_sees };
-        let accepted = SimConn { net: self.clone(), tx: down, rx: up, peer: server_sees };
+        let client = SimConn { net: self.clone(), tx: up, rx: down, peer: client_sees.0, cert: client_sees.1 };
+        let accepted = SimConn { net: self.clone(), tx: down, rx: up, peer: server_sees.0, cert: server_sees.1 };
         let l = s.listeners.get_mut(addr).expect("checked above");
         l.backlog.push_back((accepted, peer));
         if let Some(w) = l.acceptor.take() {
@@ -299,6 +302,7 @@ pub struct SimConn {
     tx: u64,
     rx: u64,
     peer: Option<PeerIdentity>,
+    cert: Option<CertInfo>,
 }
 
 impl fmt::Debug for SimConn {
@@ -338,6 +342,10 @@ fn reset() -> io::Error {
 impl lotse_rt::Conn for SimConn {
     fn peer_identity(&self) -> Option<PeerIdentity> {
         self.peer.clone()
+    }
+
+    fn peer_cert(&self) -> Option<CertInfo> {
+        self.cert.clone()
     }
 
     fn send(&self, frame: Bytes) -> impl Future<Output = io::Result<()>> + Send {

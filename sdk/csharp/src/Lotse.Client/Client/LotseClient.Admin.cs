@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Lotse.Auth;
 using Lotse.Net;
 using Lotse.Proto;
+using Lotse.Record;
 
 namespace Lotse.Client;
 
@@ -369,6 +370,27 @@ public sealed partial class LotseClient
         ArgumentNullException.ThrowIfNull(subject);
         byte kind = group ? Messages.SubjectKind.Group : Messages.SubjectKind.User;
         return AdminChangeAsync(new Request.RevokeSessions(kind, subject, 0), cancellationToken);
+    }
+
+    /// <summary>
+    /// Puts a certificate on the cluster's revocation list: every node refuses it in a handshake and ends its open
+    /// connections once it has the entry. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="issuer">SHA-256 of the issuer's distinguished name in DER form (32 bytes).</param>
+    /// <param name="serial">The serial number, big-endian, as the certificate has it.</param>
+    /// <param name="notAfterMs">When the certificate stops being valid, in milliseconds since the epoch; the entry is dropped after that.</param>
+    /// <param name="reason">Why, for the people who read the list later; may be empty.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task RevokeCertificateAsync(byte[] issuer, byte[] serial, long notAfterMs, string reason, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(issuer);
+        ArgumentNullException.ThrowIfNull(serial);
+        ArgumentNullException.ThrowIfNull(reason);
+        ArgumentOutOfRangeException.ThrowIfNegative(notAfterMs);
+        return AdminChangeAsync(
+            new Request.RevokeCertificate(ByteString.CopyOf(issuer), ByteString.CopyOf(serial), (ulong)notAfterMs, reason),
+            cancellationToken);
     }
 
     // ---- nodes, pins and partitions ----
