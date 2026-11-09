@@ -96,8 +96,14 @@ pub struct Revoked {
 }
 
 struct Ca {
-    cert: rcgen::Certificate,
-    key: KeyPair,
+    /// The CA as rcgen signs with it: its name, usages and key.
+    issuer: rcgen::Issuer<'static, KeyPair>,
+}
+
+impl Ca {
+    fn issuer(&self) -> &rcgen::Issuer<'static, KeyPair> {
+        &self.issuer
+    }
 }
 
 /// The CA key's path: the CA certificate's, with `.key`.
@@ -243,7 +249,7 @@ pub fn sign_csr(file: &ClusterFile, der: &[u8], principal: &str, days: u32) -> R
     }
     let ca = load_or_make_ca(&ca_path, &mut Vec::new())?;
     let params = client_params(principal, days);
-    let cert = params.signed_by(&csr.public_key, &ca.cert, &ca.key).map_err(|e| cert_err(principal, e))?;
+    let cert = params.signed_by(&csr.public_key, ca.issuer()).map_err(|e| cert_err(principal, e))?;
     let bytes = cert.der().to_vec();
     let (_, parsed) = x509_parser::parse_x509_certificate(&bytes).map_err(|e| cert_err(principal, e))?;
     let millis = |t: x509_parser::time::ASN1Time| u64::try_from(t.timestamp()).unwrap_or(0) * 1000;
@@ -359,7 +365,7 @@ fn revocation_list(ca: &Ca, revoked: Vec<RevokedCertParams>, number: u64) -> Res
         revoked_certs: revoked,
         key_identifier_method: KeyIdMethod::Sha256,
     };
-    let list = params.signed_by(&ca.cert, &ca.key).map_err(|e| cert_err("the revocation list", e))?;
+    let list = params.signed_by(ca.issuer()).map_err(|e| cert_err("the revocation list", e))?;
     list.pem().map_err(|e| cert_err("the revocation list", e))
 }
 
@@ -380,11 +386,10 @@ fn load_or_make_ca(path: &Path, out: &mut Vec<Outcome>) -> Result<Ca, CertError>
         }
         // Signing needs the CA as rcgen sees it: its name and key, which
         // is all that ends up in what it issues.
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem).map_err(|e| cert_err("the CA certificate", e))?;
-        let cert = params.self_signed(&key).map_err(|e| cert_err("the CA certificate", e))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| cert_err("the CA certificate", e))?;
         out.push(Outcome::Kept(path.to_path_buf()));
         out.push(Outcome::Kept(key_path));
-        return Ok(Ca { cert, key });
+        return Ok(Ca { issuer });
     }
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
@@ -397,7 +402,7 @@ fn load_or_make_ca(path: &Path, out: &mut Vec<Outcome>) -> Result<Ca, CertError>
     write(&key_path, &key.serialize_pem(), true)?;
     out.push(Outcome::Wrote(path.to_path_buf()));
     out.push(Outcome::Wrote(key_path));
-    Ok(Ca { cert, key })
+    Ok(Ca { issuer: rcgen::Issuer::new(params, key) })
 }
 
 /// From a little before now, for clocks slightly behind, to `days` ahead.
@@ -425,7 +430,7 @@ fn issue(
     };
     params.use_authority_key_identifier_extension = true;
     let key = KeyPair::generate().map_err(|e| cert_err(common_name, e))?;
-    let cert = params.signed_by(&key, &ca.cert, &ca.key).map_err(|e| cert_err(common_name, e))?;
+    let cert = params.signed_by(&key, ca.issuer()).map_err(|e| cert_err(common_name, e))?;
     Ok((cert.pem(), key.serialize_pem()))
 }
 
