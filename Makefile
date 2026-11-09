@@ -53,6 +53,14 @@ sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK and the
 	cd sdk/java && ./gradlew check
 	cd sdk/kotlin && ./gradlew check
 
+.PHONY: sdk-node-test
+sdk-node-test: ## Test the Node.js SDK (needs Node.js 20+)
+	cd sdk/node && npm ci && npm test
+
+.PHONY: sdk-csharp-test
+sdk-csharp-test: ## Test the C# SDK (needs the .NET 10 SDK on PATH)
+	cd sdk/csharp && dotnet test
+
 clean: ## Remove build output of the web app and cargo
 	rm -rf console/web/dist
 	cargo clean

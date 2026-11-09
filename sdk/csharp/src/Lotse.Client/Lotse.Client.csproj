@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Lotse</RootNamespace>
+    <AssemblyName>Lotse.Client</AssemblyName>
+    <PackageId>Lotse.Client</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Lotse.Client.Tests" />
+    <InternalsVisibleTo Include="Lotse.Client.NoCodecs.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -87,6 +87,9 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 | 0081 | [User guides with mdBook on GitHub Pages](0081-user-guides-with-mdbook-on-github-pages.md) | Accepted |
 | 0082 | [Simulations run on pull requests; merging needs a green CI](0082-simulations-run-on-pull-requests-and-merging-needs-green.md) | Accepted; amends 0027 and 0030; where the simulations run changed by 0088 |
+| 0083 | [Client SDKs for C# and Node.js](0083-client-sdks-for-csharp-and-nodejs.md) | Accepted |
+| 0084 | [Codecs in the C# SDK](0084-codecs-in-the-csharp-sdk.md) | Accepted |
+| 0085 | [Codecs in the Node.js SDK](0085-codecs-in-the-nodejs-sdk.md) | Accepted |
 | 0087 | [Group subscriptions are kept as named](0087-group-subscriptions-are-kept-as-named.md) | Accepted |
 | 0088 | [Simulations gate the release, not the pull request](0088-simulations-gate-the-release.md) | Accepted; changes 0082 |
 
