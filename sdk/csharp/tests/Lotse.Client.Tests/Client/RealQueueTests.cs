@@ -406,24 +406,42 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task ClosingGivesBackWhatWasPushedButNotHandedOut()
     {
-        await Client.CreateQueueAsync("give-back");
-        await ProduceAsync("give-back", 3);
-        await SettledAsync("give-back");
-        QueueConsumer c = await Client.SubscribeAsync("give-back", SubscribeOptions.WithCredit(10));
-        Delivery kept = await Take(c); // the other two are pushed and buffered
-        // Close only once the client holds all three pushes, so that the two unread ones are what the close gives back.
-        await RealWaits.UntilAsync("the node's pushes", () => Task.FromResult(c.PushedForTests >= 3), 30);
-        await c.DisposeAsync();
-        await using QueueConsumer next = await Client.SubscribeAsync("give-back", SubscribeOptions.WithCredit(10));
-        var offsets = new List<ulong>();
-        for (int i = 0; i < 2; i++)
+        // A new queue leader redelivers everything that is not acked and starts the counts again (ADR 0031), so
+        // "the one handed out stays with the first consumer" holds only while the leader stays the same. A run in
+        // which it changed says nothing about close and is repeated on a fresh queue; a failure with the same leader
+        // before and after is a real one and reports both.
+        for (int attempt = 0; ; attempt++)
         {
-            Delivery d = await Take(next, 10);
-            offsets.Add(d.Offset);
-            await next.AckAsync(d);
+            string queue = "give-back-" + attempt;
+            await Client.CreateQueueAsync(queue);
+            await ProduceAsync(queue, 3);
+            await SettledAsync(queue);
+            int leaderBefore = await LeaderOfAsync(queue);
+            QueueConsumer c = await Client.SubscribeAsync(queue, SubscribeOptions.WithCredit(10));
+            Delivery kept = await Take(c); // the other two are pushed and buffered
+            // Close only once the client holds all three pushes, so that the two unread ones are what the close gives back.
+            await RealWaits.UntilAsync("the node's pushes", () => Task.FromResult(c.PushedForTests >= 3), 30);
+            await c.DisposeAsync();
+            await using QueueConsumer next = await Client.SubscribeAsync(queue, SubscribeOptions.WithCredit(10));
+            var offsets = new List<ulong>();
+            for (int i = 0; i < 2; i++)
+            {
+                Delivery d = await Take(next, 10);
+                offsets.Add(d.Offset);
+                await next.AckAsync(d);
+            }
+            Assert.Equal(2, offsets.Distinct().Count());
+            int leaderAfter = await LeaderOfAsync(queue);
+            if (leaderBefore != leaderAfter && attempt < 2)
+            {
+                continue;
+            }
+            Assert.True(
+                !offsets.Contains(kept.Offset),
+                $"the one handed out stays with the first consumer: kept {kept.Offset}, got {string.Join(",", offsets)}, "
+                    + $"leader {leaderBefore} before and {leaderAfter} after");
+            return;
         }
-        Assert.DoesNotContain(kept.Offset, offsets); // the one handed out stays with the first consumer
-        Assert.Equal(2, offsets.Distinct().Count());
     }
 
     [LotseFact]
