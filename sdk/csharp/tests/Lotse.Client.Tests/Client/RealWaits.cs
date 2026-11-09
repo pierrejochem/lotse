@@ -35,4 +35,34 @@ internal static class RealWaits
             }
         }
     }
+
+    /// <summary>Polls <paramref name="condition"/> until it holds; fails with <paramref name="what"/> after <paramref name="seconds"/>.</summary>
+    internal static async Task UntilAsync(string what, Func<Task<bool>> condition, int seconds = 60)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (!await condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "timed out waiting for " + what);
+            await Task.Delay(50);
+        }
+    }
+
+    /// <summary>
+    /// Waits until every node's own view of the cluster (its metadata, asked of that node alone) satisfies
+    /// <paramref name="holds"/>. An admin change is answered when the metadata group has applied it; the other nodes
+    /// apply it a moment later, and a test that looks at them must not race that.
+    /// </summary>
+    internal static async Task OnEveryNodeAsync(RealCluster cluster, string what, string name, Func<Messages.ResourceMetadata?, bool> holds)
+    {
+        for (int node = 1; node <= 3; node++)
+        {
+            using var probe = new LotseClient(ClientConfig.CreateBuilder(cluster.AddressOf(node).ToString()).PlaintextOnLoopback()
+                .WithRequestTimeout(TimeSpan.FromSeconds(5)).WithRetryFor(TimeSpan.FromSeconds(60)).Build());
+            await UntilAsync($"node {node}: {what}", async () =>
+            {
+                Response.Metadata m = await probe.MetadataAsync(new[] { name });
+                return holds(m.Resources.FirstOrDefault(r => r.Name == name && r.Error.IsOk));
+            });
+        }
+    }
 }

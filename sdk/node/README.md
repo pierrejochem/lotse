@@ -4,7 +4,7 @@ A client for the Lotse native protocol in TypeScript, for Node.js 20 and later. 
 
 ## Status
 
-Phase 5 of 8 is done: transactions, publishing and consumer groups, on top of the stream client and the queue consumer. The client creates streams and queues, produces idempotently, reads committed records, finds offsets, consumes queues with credit, acks, nacks, delayed requeues, standbys of a single active consumer and dead-letter headers, runs transactions (produce, publish, queue acks, group offsets), publishes through exchanges, declares and binds exchanges, and joins consumer groups. The rest of the admin calls (deletes, settings, purge and requeue, users, tenants, roles, nodes, pins, partitions, sessions, metrics) come in phase 6.
+Phase 6 of 8 is done: the admin calls, on top of transactions, publishing and consumer groups. The client creates streams and queues, produces idempotently, reads committed records, finds offsets, consumes queues with credit, acks, nacks, delayed requeues, standbys of a single active consumer and dead-letter headers, runs transactions (produce, publish, queue acks, group offsets), publishes through exchanges, declares and binds exchanges, joins consumer groups, and administers a cluster: deletes, settings, purge and requeue, users, tenants, role bindings, nodes, pinned leaders, partitions, revoked sessions and node metrics.
 
 | Module | What |
 | --- | --- |
@@ -12,7 +12,7 @@ Phase 5 of 8 is done: transactions, publishing and consumer groups, on top of th
 | `src/record` | Record batch: parse, build, in-place edits (`stamp`, `setProducer`, `setTransactional`, `setBaseTimestamp`), control batches, CRC32C, varints |
 | `src/net` | `Connection` (TLS 1.3 or plain TCP on loopback, pipelining, pushes, session state), `ConnectionPool`, `TlsConfig`, `Address`, errors |
 | `src/auth` | `ScramClient` (SCRAM-SHA-512), `ScramCredential` (the `AlterUser` credential), OAUTHBEARER messages, `authenticate` |
-| `src/client` | `LotseClient`: metadata routing with leader hints, idempotent `produce`, read_committed `fetch`, `listOffset`, `createStream`, `createQueue`, `readRecords`, `subscribe`, `beginTransaction`, `publish`, `declareExchange`, `bind`, `unbind`, `joinGroup`; `Transaction`, `GroupConsumer`, `QueueConsumer`, `Delivery`, `QueueOptions`, `SubscribeOptions`, `GroupConfig`, `Fetched`, `OffsetAt`, `OutMessage`, `Published`, the errors; the client-side exchange routing (`exchange.ts`) |
+| `src/client` | `LotseClient`: metadata routing with leader hints, idempotent `produce`, read_committed `fetch`, `listOffset`, `createStream`, `createQueue`, `readRecords`, `subscribe`, `beginTransaction`, `publish`, `declareExchange`, `bind`, `unbind`, `joinGroup`, the admin calls (see "Administration"); `Transaction`, `GroupConsumer`, `QueueConsumer`, `Delivery`, `QueueOptions`, `SubscribeOptions`, `GroupConfig`, `Fetched`, `OffsetAt`, `OutMessage`, `Published`, `NodeMetrics`, the errors; the client-side exchange routing (`exchange.ts`) |
 
 ## Connections
 
@@ -159,6 +159,42 @@ await group.close(); // commits the positions and leaves
 - **Positions.** A partition without a position asks `OffsetFetch` with `requireStable`, so an offset an open transaction holds waits. With no committed offset it starts at 0 (`OffsetAt.EARLIEST`) or at `ListOffsets` for `startFrom` (ADR 0059). A committed offset that retention deleted goes on from the log start. `positions()` and `assignment()` show what the member owns; `rewind()` forgets the positions so that every partition starts again from the committed offset.
 - **`close()`** commits the positions when `autoCommit` is on, then leaves with epoch -1. It waits for the poll in progress, which hands out nothing once the consumer is closed.
 
+## Administration
+
+```ts
+await client.createTenant("acme");
+await client.alterRoleBindings([{ subjectKind: SubjectKind.USER, subject: "bob", role: Role.TENANT_ADMIN, tenant: "acme", prefix: "" }]);
+await client.setUserPassword("bob", "secret"); // only a salted credential leaves the client
+
+const bob = new LotseClient({ bootstrap, tls, credentials: scramCredentials("bob", "secret"), tenant: "acme" });
+await bob.createStream("orders", 1, 3);
+await bob.alterConfigs("orders", { "retention.ms": "86400000" }, ["retention.bytes"]);
+const settings = await bob.describeConfigs("orders"); // [{ key, value, source: ConfigSource.DYNAMIC | DEFAULT | STATIC }]
+await bob.deleteIfEmpty("orders");
+```
+
+Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-client` and the Java client rule for rule ([`../PROTOCOL.md`](../PROTOCOL.md): "Client behaviour: admin").
+
+| Calls | What |
+| --- | --- |
+| `delete(name)`, `deleteIfEmpty(name)` | A stream, queue or exchange made at runtime, and its id. `deleteIfEmpty` is refused with `RESOURCE_NOT_EMPTY` when a queue holds an unsettled message or a stream a record (ADR 0063); it guards against mistakes, not against a producer. |
+| `purge(queue)`, `requeue(queue)` | The count of messages settled, or moved from a dead-letter queue back to their source (ADR 0064), in rounds until the leader says there is no more. A message a consumer holds, its credit included, is not purged. Tenant admin. |
+| `alterConfigs(name, set, reset)`, `describeConfigs(name)` | Settings of a resource made at runtime; each setting is read with its source. A key the resource does not take is refused with `INVALID_REQUEST` and the reason. |
+| `setUserPassword`, `deleteUser`, `describeUsers` | SCRAM-SHA-512 users kept in the metadata group. Cluster admin. |
+| `createTenant`, `deleteTenant`, `describeTenants` | Tenants (ADR 0039). A tenant that holds resources is not deleted. `describeTenants` lists those the caller has a role in. |
+| `alterRoleBindings(add, remove)`, `describeRoleBindings`, `whoAmI` | Role bindings of a user or IdP group, in a tenant, for names with a prefix; removals are applied first. `whoAmI` says who the client acts as and which bindings apply. |
+| `revokeSessions(subject, group)` | Ends the sessions of a user or IdP group that began before now, and refuses their older tokens (ADR 0070). A SCRAM user can log in again unless the password is changed or deleted. Cluster admin. |
+| `addNode`, `removeNode`, `describeNodes` | The node list in the metadata group (ADR 0048): `removeNode` starts a drain, `describeNodes` shows replicas and moves. Ids are never used twice. |
+| `moveLeader(name, partition, node)` | Pins a partition's leader to one of its voters; `null` unpins (ADR 0065). Cluster admin. |
+| `createPartitions(name, count)` | Raises a runtime stream's partition count (ADR 0074); never lowers it. |
+| `nodeMetrics()` | Each node's `DescribeMetrics` answer, asked of the node itself: `{ nodeId, metrics, error }`. A node that does not answer has a `NoAnswerError`; the call does not reject. |
+
+- **Where requests go.** Admin requests go to the metadata group's leader. Until the client knows it, it asks the brokers in turn; a retriable answer with a leader hint sets the next address. A change that was sent and got no answer is sent again, so a delete may find the resource gone and is then done, and a create may find what it made and reject with `ResourceExistsError` and the id. Other refusals are `BrokerResponseError` with the code and the broker's reason in `brokerMessage`. A name a principal may not see is `UnknownStreamError`, as for a name that does not exist.
+- **Given up.** A change given up after it was sent rejects with `UnknownOutcomeError`; a read given up, or one that was refused as retriable until the time ran out, rejects with `GaveUpError`.
+- **Names and ids.** The calls that take a name ask every known broker for it and take the newest resource, so a name made a moment ago is found on a broker that lags. The node that answers a read has applied what the metadata leader had when it answered; a node you ask for metadata may be behind, so wait for a change you made before you look for it on every node.
+- **Arguments** out of range (`createPartitions` with a count below 1 or above `u32`, a partition that is not a `u32`, a node id that is not positive) are a `RangeError` before anything is sent. Node ids are `number` or `bigint`; `describeNodes` gives `bigint`.
+- Not offered, as in Java: creating a queue in another tenant than the client's (give the client that `tenant`), and the nodes' own `SettleVoters`.
+
 ## Authentication
 
 `scramCredentials(user, password)` and `oauthBearerCredentials(() => token)` (the function is called for every authentication, renewals included, and may be async). A client certificate is part of `TlsConfig`.
@@ -193,6 +229,6 @@ npm test        # compiles to dist/, then runs node:test on dist/test
 
 or `make sdk-node-test` from the repository root. The tests decode every vector in `sdk/conformance` and write it again to identical bytes, refuse each vector cut at every length and with one byte added, and check the fixed cases for CRC32C, varints, error codes and in-place batch edits. Set `LOTSE_CONFORMANCE` to read the vectors from another directory.
 
-The client tests run against scripted brokers in the test process (routing, hints, idempotent retries, read_committed, signals, `createStream`, the queue consumer: credit, settling, standbys, ending and subscribing again, closing, `createQueue`; transactions: must-abort, ending, `await using`, signals, routed publish, queue acks, offsets; publishing, `declareExchange` and `bind`; a group member: heartbeats, rebalancing, a lost session, a fenced instance, positions, patterns) and, with `LOTSE_BIN`, against three real nodes on loopback (create, produce, read back, `ListOffsets`, compressed batches, a leader killed in the middle of a produce, a failover, a named producer fenced; queues: consuming, ack, requeue, `nackAfter`, ack timeout, a vanished consumer, dead letters, a single active consumer taking over, priorities, a leader killed mid-consumption; commit and abort as read_committed readers see them, a producer fenced by a newer epoch, exactly-once consume-transform-produce from a stream and from a queue, `MESSAGE_NOT_HELD` between two transactions, two group members that never share a partition, a static member taken over, a pattern, a publish through a topic exchange to two queues, and a publish whose answer never comes, made by pausing the nodes) and one TLS node. The client-side exchange routing is checked against `conformance/routing.txt`. The lz4 codec has its own tests (`lz4.test.ts`); the zstd tests are skipped, with the reason, on a Node.js without zstd in `node:zlib`.
+The admin tests (`admin.test.ts`) run against scripted brokers and check every field of every admin request and every refusal; `admin-real.test.ts` runs them against three real nodes (deletes seen on every node, `deleteIfEmpty`, purge in rounds, requeue of a dead letter, settings, partitions, a pinned leader, metrics, nodes) and one TLS node with authentication (users and their logins, tenants, a tenant admin inside and outside the tenant, prefixes, revoked sessions). The client tests run against scripted brokers in the test process (routing, hints, idempotent retries, read_committed, signals, `createStream`, the queue consumer: credit, settling, standbys, ending and subscribing again, closing, `createQueue`; transactions: must-abort, ending, `await using`, signals, routed publish, queue acks, offsets; publishing, `declareExchange` and `bind`; a group member: heartbeats, rebalancing, a lost session, a fenced instance, positions, patterns) and, with `LOTSE_BIN`, against three real nodes on loopback (create, produce, read back, `ListOffsets`, compressed batches, a leader killed in the middle of a produce, a failover, a named producer fenced; queues: consuming, ack, requeue, `nackAfter`, ack timeout, a vanished consumer, dead letters, a single active consumer taking over, priorities, a leader killed mid-consumption; commit and abort as read_committed readers see them, a producer fenced by a newer epoch, exactly-once consume-transform-produce from a stream and from a queue, `MESSAGE_NOT_HELD` between two transactions, two group members that never share a partition, a static member taken over, a pattern, a publish through a topic exchange to two queues, and a publish whose answer never comes, made by pausing the nodes) and one TLS node. The client-side exchange routing is checked against `conformance/routing.txt`. The lz4 codec has its own tests (`lz4.test.ts`); the zstd tests are skipped, with the reason, on a Node.js without zstd in `node:zlib`.
 
 The connection tests run against a fake broker in the test process (plain TCP and TLS), with a fake clock for sessions; SCRAM is checked against `conformance/scram.txt` and a server written for the tests from the RFC. The tests that need real certificates or a real node (`tls`, `real-node`, `client-real`) use the `lotse` executable: set `LOTSE_BIN`, or build `lotse-node` so that `/tmp/cargo-target/debug/lotse` (or `$CARGO_TARGET_DIR/debug/lotse`) exists. Without one they are skipped and say so. They start one TLS node with sessions limited to 4 s and one plain-TCP node with authentication off, and the stream client tests three more, so the suite takes about 80 s with `LOTSE_BIN` set. The certificate expiry test needs `openssl` 3.4 or later and is skipped without it.

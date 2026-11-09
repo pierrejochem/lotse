@@ -107,6 +107,20 @@ public sealed class UnknownStreamException : ClientException
     public int Partition { get; }
 }
 
+/// <summary>A node that was asked directly did not answer.</summary>
+public sealed class NoAnswerException : ClientException
+{
+    /// <summary>Creates the exception.</summary>
+    public NoAnswerException(uint node, string why)
+        : base($"node {node} did not answer: {why}")
+    {
+        Node = node;
+    }
+
+    /// <summary>The node.</summary>
+    public uint Node { get; }
+}
+
 /// <summary>A create found the name taken. The exception names the existing resource, which a retried create finds too.</summary>
 public sealed class ResourceExistsException : ClientException
 {

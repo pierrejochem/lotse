@@ -149,3 +149,13 @@ export class NotAllWrittenError extends ClientError {
     );
   }
 }
+
+/** A node did not answer a request made of it alone (`LotseClient.nodeMetrics`): it is down, unreachable or answered something else. */
+export class NoAnswerError extends ClientError {
+  constructor(
+    readonly nodeId: number,
+    why: string,
+  ) {
+    super(`node ${nodeId} gave no answer: ${why}`);
+  }
+}

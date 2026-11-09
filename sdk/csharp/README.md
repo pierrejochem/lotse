@@ -4,7 +4,7 @@ A C# client for the Lotse native protocol. It follows the Java SDK rule for rule
 
 ## Status
 
-Phase 5 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, the queue consumer (`QueueConsumer`, `CreateQueueAsync`), and now transactions (`Transaction`), publishing through exchanges, and consumer groups (`GroupConsumer`).
+Phase 6 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, the queue consumer (`QueueConsumer`, `CreateQueueAsync`), transactions (`Transaction`), publishing through exchanges, consumer groups (`GroupConsumer`), and now the admin calls.
 
 | Namespace | What |
 | --- | --- |
@@ -12,7 +12,7 @@ Phase 5 of 8 is done: the protocol codec and record batch, connections and authe
 | `Lotse.Record` | Record batch parser and builder, in-place edits (producer, transactional bit, base timestamp), control batches, varints, CRC32C |
 | `Lotse.Net` | `Connection` (TLS 1.3 or plain TCP on loopback, pipelining, pushes, a read loop, session state), `ConnectionPool` (login, renewal, replacement), `ConnectionOptions`, `TlsConfig`, `Address`, the exceptions |
 | `Lotse.Auth` | SCRAM-SHA-512 (`ScramClient`, both ends are tested), OAUTHBEARER messages, `Credentials`, `Authenticator`, `ScramCredential` for `AlterUser` |
-| `Lotse.Client` | `LotseClient` (metadata routing, idempotent produce, read_committed fetch, `ListOffsets`, `CreateStream`, `CreateQueue`, `Subscribe`, `BeginTransaction`, `Publish`, `DeclareExchange`, `Bind`, `Unbind`, `JoinGroup`), `Transaction`, `QueueConsumer`, `GroupConsumer`, `GroupConfig`, `GroupRecord`, `Published`, `Delivery`, `DeadLetter`, `QueueOptions`, `SubscribeOptions`, `ClientConfig`, `OutMessage`, `Fetched`, `OffsetAt`, the exceptions |
+| `Lotse.Client` | `LotseClient` (metadata routing, idempotent produce, read_committed fetch, `ListOffsets`, `CreateStream`, `CreateQueue`, `Subscribe`, `BeginTransaction`, `Publish`, `DeclareExchange`, `Bind`, `Unbind`, `JoinGroup`, and the admin calls below), `NodeMetrics`, `Transaction`, `QueueConsumer`, `GroupConsumer`, `GroupConfig`, `GroupRecord`, `Published`, `Delivery`, `DeadLetter`, `QueueOptions`, `SubscribeOptions`, `ClientConfig`, `OutMessage`, `Fetched`, `OffsetAt`, the exceptions |
 
 Two packages, two projects:
 
@@ -21,7 +21,7 @@ Two packages, two projects:
 | `src/Lotse.Client` (`Lotse.Client`) | Everything above | none beyond the base class library |
 | `src/Lotse.Client.Codecs` (`Lotse.Client.Codecs`) | zstd and LZ4 for compressed batches, optional ([ADR 0084](../../docs/adr/0084-codecs-in-the-csharp-sdk.md)) | ZstdSharp.Port 0.8.6, K4os.Compression.LZ4.Streams 1.3.8 |
 
-Not yet: the other admin calls (deletes, settings, purge and requeue, users, tenants, roles, nodes, pins, partitions, sessions, metrics), examples.
+Not yet: examples.
 
 ## Streams
 
@@ -167,7 +167,51 @@ foreach (RoutedQueue q in published.Routed)                 // in queue name ord
 }
 ```
 
-Outside a transaction a node routes (`Publish`, ADR 0079): it applies its bindings, checks the producer role on the exchange and on every routed queue, and writes each queue. The call returns once every routed queue holds the message. A message no queue takes is dropped, or refused with `UnroutableException` when `mandatory`. `NotAllWrittenException` names the queues that hold it and why the others do not (`OutcomeUnknownException` for a write whose outcome is unknown). If the node's answer is lost the call throws `OutcomeUnknownException` and is not sent again, since the node may have written it; a token cancelled after the request was sent does the same. A name unknown to the node is looked up once more, since a deleted and declared exchange has a new id. `BindHeadersAsync` binds a headers exchange; the other admin calls come with phase 6.
+Outside a transaction a node routes (`Publish`, ADR 0079): it applies its bindings, checks the producer role on the exchange and on every routed queue, and writes each queue. The call returns once every routed queue holds the message. A message no queue takes is dropped, or refused with `UnroutableException` when `mandatory`. `NotAllWrittenException` names the queues that hold it and why the others do not (`OutcomeUnknownException` for a write whose outcome is unknown). If the node's answer is lost the call throws `OutcomeUnknownException` and is not sent again, since the node may have written it; a token cancelled after the request was sent does the same. A name unknown to the node is looked up once more, since a deleted and declared exchange has a new id. `BindHeadersAsync` binds a headers exchange; the other admin calls are in the next section.
+
+## Admin
+
+```csharp
+using Lotse.Proto;
+
+ulong id = await client.CreateStreamAsync("orders", 2, 3, new Dictionary<string, string> { ["retention.ms"] = "604800000" });
+await client.AlterConfigsAsync("orders", new Dictionary<string, string> { ["retention.bytes"] = "1073741824" }, reset: new[] { "retention.ms" });
+foreach (Messages.ConfigEntry e in await client.DescribeConfigsAsync("orders"))
+{
+    Console.WriteLine($"{e.Key} = {e.Value} (source {e.Source})");     // Messages.ConfigSource: Default, Dynamic, Static
+}
+await client.CreatePartitionsAsync("orders", 4);
+
+await client.SetUserPasswordAsync("carol", "secret");                  // only a salted credential leaves the client
+await client.CreateTenantAsync("acme");
+await client.AlterRoleBindingsAsync(add: new[]
+{
+    new Messages.RoleBinding(Messages.SubjectKind.User, "carol", Messages.Role.TenantAdmin, "acme", Prefix: string.Empty),
+});
+
+ulong purged = await client.PurgeAsync("jobs");                        // ready messages only
+ulong moved = await client.RequeueAsync("jobs-dead");                  // dead letters back to the queue they came from
+await client.DeleteIfEmptyAsync("jobs-dead");                          // RESOURCE_NOT_EMPTY if it holds anything
+```
+
+Every call takes a `CancellationToken` and follows `lotse-client` and the Java SDK ([`sdk/PROTOCOL.md`](../PROTOCOL.md), "Client behaviour: admin"):
+
+| Call | What |
+| --- | --- |
+| `DeleteAsync`, `DeleteIfEmptyAsync` | Returns the id. A resource that is gone counts as deleted, also when someone else deleted it. The conditional form asks every partition's leader first (ADR 0063). The exchange cache of the client is dropped. |
+| `PurgeAsync`, `RequeueAsync` | Go to the queue's leader in rounds (`up_to` 0, then the bound the answer gave, until `more` is false) and return the sum (ADR 0064). Tenant admin. |
+| `AlterConfigsAsync`, `DescribeConfigsAsync` | Streams take `retention.ms`, `retention.bytes`, `cleanup.policy`, `delete.retention.ms`; queues `ack.timeout.ms`, `max.deliveries`, `message.ttl.ms`, `dead.letter.queue`, `single.active.consumer`, `priority.levels`. Keys are sent in ordinal order. The node refuses anything else and a key given as both set and reset, with its reason in `BrokerErrorException.BrokerMessage`. Reads come from the metadata leader. |
+| `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync` | SCRAM-SHA-512, 16 random bytes of salt, 4096 iterations. Cluster admin. |
+| `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync` | A tenant that holds resources is not deleted. Describe lists the tenants the client has a role in. |
+| `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync` | Removals are applied before additions. A principal does not see resources outside its binding's prefix: they are `UnknownStreamException` to it, not a refusal. |
+| `RevokeSessionsAsync(subject, group)` | Ends the subject's sessions that began before now (ADR 0070). A SCRAM user who still has the password logs in again. Cluster admin. |
+| `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync` | ADR 0048. |
+| `MoveLeaderAsync(name, partition, node)` | Pins a leader to a voter; `null` unpins (ADR 0065). Cluster admin. |
+| `NodeMetricsAsync` | Asks each node the metadata names for `DescribeMetrics`; a node that does not answer is a `NodeMetrics` with `Error` (`NoAnswerException` or `BrokerErrorException`), not a failure of the call. |
+
+Names become ids through `Metadata` asked of every known broker, and a name no broker knows is `UnknownStreamException`. A change whose answer was lost is asked again; a refusal after such a lost attempt is `OutcomeUnknownException`, as the earlier attempt may have been carried out. A missing role is a `BrokerErrorException` with `UNAUTHORIZED` at once. Tenants are created by a cluster admin and a duplicate is `RESOURCE_EXISTS`; `CreateStreamAsync` and the other creates use the configured tenant.
+
+Not in this client, as in the Java SDK: creating a queue in a tenant other than the configured one (use a client with `WithTenant`) and the node-internal `SettleVoters`.
 
 ## Consumer groups
 
@@ -268,4 +312,8 @@ The transaction tests on three nodes check what read_committed readers see while
 
 The three-node stream tests create streams, produce and read back, look up offsets by start, end and time, kill the leader of a partition in the middle of 150 idempotent produces (every message once, in order, with its own offset), follow a failover, produce without idempotence, send the same sequence to a node twice, and round-trip zstd and LZ4 batches through a node, which refuses a block it cannot decode.
 
+The admin tests run in three places. Unit tests against scripted brokers decode every request from the wire, check each field, and run every admin change through the same refusal, retry and cancellation cases. Three real nodes on plain loopback TCP create and delete streams, queues and exchanges, refuse a conditional delete while a queue holds an unsettled message or a stream a record, purge, requeue dead letters to the queue they came from, change, reset and read stream and queue settings with their source, raise a partition count, list nodes, read every node's metrics, and pin a leader to each node in turn. One real node with TLS and a required login (`alice` the cluster admin by certificate) sets passwords and logs the users in over SCRAM, binds a tenant admin who may work in her tenant and may not elsewhere, a consumer who may not create, change, purge or delete, and a tenant admin limited by a name prefix, shows a cluster viewer and a user without a role what each may see, ends the sessions of one user and not another, and deletes a tenant only when it holds nothing. Changes are applied by the node before it answers, but the tests wait for their effect (every node knowing a stream, a login working, a role ending) before they look anywhere but at the metadata leader.
+
 Safety rules that the tests break on purpose (ADR 0010): the SCRAM server signature, the strict server nonce and the iteration bounds, no transport by default, plain TCP only on loopback, correlation by id, the error flag becoming `BrokerException`, the limit on kept pushes, renewal at four fifths, the lifetime counted from before the login, replacing an ended session, certificate checking, TLS 1.3 only, the client certificate and the end at certificate expiry; and, for the stream client, the sequence advancing by the record count and per partition, an unknown outcome retried with the same bytes when idempotent and never otherwise, the session started over after an unknown outcome, an out-of-order sequence, a fenced producer or a cancelled produce, produces to one partition one at a time, the leader term sent with a fetch, the isolation of fetch and `ListOffsets`, skipping aborted transactions (from their first offset, sorted, ended only by their producer's abort marker, control batches never shown), following a leader hint only when its term is not older and it names another leader, dropping the route on `UNKNOWN_RESOURCE`, the newest id winning the merge, asking a partition's voters, a refusal after a lost attempt becoming `OutcomeUnknownException`, the tenant, `OFFSET_OUT_OF_RANGE` not retried, and, for the codecs, the decompression limit (removed and off by one, and kept by the SDK against a codec that ignores it), the builder's limit, the builder compressing, decompression running, a missing codec named and not reported as damage, and a codec that is not there not being called available., and, for the queue consumer, the credit threshold (rounded up, at least, reset after each refill, bytes counted once), handing out only the offsets in a push's list with the count it gives, ranges sorted, deduplicated and joined, a requeue on the subscription's own connection and not for a message of an ended subscription, the delay, an ack retried after a lost answer and after `NOT_LEADER` but not after a refusal, asking to be told when active, the standby answer and the activation push, resubscribing after a push error or a broken connection (and not while messages are held), the leader hint and the dropped route, what close sends and in which order, giving back unread pushes, waking a waiting task, and ending the connection of a cancelled subscribe; and, for transactions, groups and publishing, the epoch the end raises and the producer id asked afresh after a failed end, aborting on dispose, only an abort left after an error, an unknown write, a refused write, a refused offset and a call that ended without an outcome, the sequence counted by records and per partition, the transactional bit, a partition added once, the commit flag, one transaction at a time, ending a transaction that only sent offsets, not ending one whose add only gave up, offsets that go with the transaction and not on their own, the ack on the subscription's own connection and its `MESSAGE_NOT_HELD`, a publish that reached some queues only, a publish whose answer is lost not being sent again, the routing of topic (`#`, the empty key), headers (all and any, null values) and the binding refresh, a revoked partition released at once and only after its commit, dropping everything at the session timeout and after a slow fetch, a member rejoining after `UNKNOWN_MEMBER_ID`, staying out after `FENCED_INSTANCE_ID`, the start offset, the log start and `require_stable`.
+
+For the admin calls the tests break, on purpose: the reason and the code of a refusal reaching the caller and a refusal not being swallowed, a retriable answer counting as possibly carried out, the conditional flag of a delete, an already deleted resource being done, a name turning into the right id, purge and requeue not swapped and the rounds continuing from the bound the node gave, the exchange cache dropped by a delete, settings sent in key order, a new salt for every password, the add and remove lists of role bindings and the field order of a binding, the subject kind of a revocation (the real node keeps the session when the kind is wrong) and the pin of a leader being removed with `null`.
