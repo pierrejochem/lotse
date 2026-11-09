@@ -703,11 +703,11 @@ public final class Messages {
      * One queue's copy of a published message.
      *
      * @param queueId the queue, a {@code u64}
+     * @param name the queue's name; empty when the node no longer knows the queue
      * @param error {@code NONE}: the queue holds it at {@code baseOffset}; {@code REQUEST_TIMED_OUT}: unknown;
      *     anything else: it does not
      * @param baseOffset where, with {@code NONE}, a {@code u64}
      */
-    /** One queue's copy of a published message; {@code name} is empty when the node no longer knows the queue. */
     public record RoutedMessage(long queueId, String name, ErrorCode error, long baseOffset) {}
 
     // ---- consumer groups ----

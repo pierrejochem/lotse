@@ -260,7 +260,7 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 
 ### Closing
 
-Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out, one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
+Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out (the ones parsed into the buffer and those in pushes that arrived but were not read yet, which the node holds in flight just the same), one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
 
 ### Publishing through an exchange
 
@@ -278,7 +278,7 @@ A client configured with a transactional id runs one transaction at a time (ADR 
 2. **Add.** Before the first batch to a partition (a queue is partition 0), send `AddPartitionsToTxn` to the coordinator, once per partition per transaction. A retriable error means: forget the coordinator and try again.
 3. **Produce.** Stamp the batch with the producer id, epoch and a sequence per partition starting at 0 in each transaction, set the transactional bit, and send it with `txn_id` set. Retry an unknown outcome with the same bytes, as for an idempotent produce. On success the sequence advances by the record count.
 4. **Must abort.** After any error except "no broker in time" (`GaveUp`) and "no such stream" the transaction may hold a write nobody knows, so only an abort is left. That includes a call that ends before its outcome is known. A client refuses further writes and the commit, without asking the coordinator.
-5. **End.** `EndTxn(commit)` to the coordinator. A lost request or a retriable error may have been decided already: retry, and report `Unknown` if time runs out. A transaction that added no partition ends without `EndTxn`.
+5. **End.** `EndTxn(commit)` to the coordinator. A lost request or a retriable error may have been decided already: retry, and report `Unknown` if time runs out. A transaction that added no partition and sent no offsets ends without `EndTxn`. One that sent offsets (`AddOffsetsToTxn`, even if the answer was lost or refused) is ended all the same, with the same `EndTxn`: the coordinator holds the offsets as pending until it hears, and every reader of the group's offsets waits for them until the transaction times out.
 
 **Publishing in a transaction** is routed by the client (ADR 0032): read the exchange's type and bindings from `Metadata` (kept for `metadata_max_age`), pick the queues as `routing.txt` describes, and produce the message to each of them in the transaction. If a write fails after some queues have it, only an abort is left.
 

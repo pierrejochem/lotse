@@ -19,9 +19,9 @@ java {
     }
 }
 
-val zstdJni = "com.github.luben:zstd-jni:1.5.7-16"
+val zstdJni = "com.github.luben:zstd-jni:1.5.7-25"
 // The maintained fork of lz4-java, with the fixes for CVE-2025-12183 and CVE-2025-66566.
-val lz4Java = "at.yawk.lz4:lz4-java:1.11.0"
+val lz4Java = "at.yawk.lz4:lz4-java:1.13.0"
 
 dependencies {
     // Nothing else: the client uses the JDK only.
@@ -29,7 +29,7 @@ dependencies {
     "compressionImplementation"(lz4Java)
     testImplementation(zstdJni)
     testImplementation(lz4Java)
-    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

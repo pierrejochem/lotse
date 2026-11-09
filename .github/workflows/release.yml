@@ -1,21 +1,170 @@
 name: release
 
-# On a version tag (ADR 0049): static `lotse` binaries for x86_64 and
-# aarch64, Debian packages, a GitHub release with them and their
-# checksums, and the image ghcr.io/<owner>/lotse for both architectures.
+# On a version tag (ADR 0049): first every simulation at full depth, 5,000
+# seeds each (ADR 0088); only when all of them pass, static `lotse` binaries
+# for x86_64 and aarch64, Debian packages, a GitHub release with them and
+# their checksums, and the image ghcr.io/<owner>/lotse for both
+# architectures. Run by hand on any branch, it runs the simulations only.
+# A failure prints the seed; reproduce it with
+# LOTSE_SIM_SEED=<seed> cargo test -p <crate> --release --test <file>.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
+# Only the jobs that publish may write.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: true
+      # Many more seeds than the default test run. A failure prints the seed;
+      # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
+      - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may --skip nodes_come_and_go_without_losing_anything --skip compaction_keeps_each_keys_newest_record
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The client simulation is the slowest, so it runs next to the others in a
+  # job of its own (ADR 0030).
+  client-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test clients
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The queue simulation (ADR 0031).
+  queue-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test queues
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The consumer group simulation (ADR 0033), the slowest per seed.
+  group-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test groups
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The metadata simulation (ADR 0034): creating, changing and deleting.
+  metadata-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test metadata
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The access simulation (ADR 0039): role bindings change under load on a
+  # faulty cluster.
+  access-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test access_sim
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The retention simulation (ADR 0046): short limits and small segments
+  # under faults.
+  retention-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test retention
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The compaction simulation (ADR 0067): compacted streams under faults,
+  # every replica read in turn.
+  compaction-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test compaction
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
+  # The membership simulation (ADR 0048): nodes added and drained under load
+  # and faults.
+  membership-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test membership
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
   build:
+    # Nothing is built for a release until every simulation has passed.
+    needs:
+      - simulation
+      - client-simulation
+      - queue-simulation
+      - group-simulation
+      - metadata-simulation
+      - access-simulation
+      - retention-simulation
+      - compaction-simulation
+      - membership-simulation
+    if: startsWith(github.ref, 'refs/tags/v')
     strategy:
       matrix:
         include:
@@ -25,7 +174,7 @@ jobs:
             arch: arm64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -43,7 +192,7 @@ jobs:
           file dist/lotse-${{ matrix.arch }} | grep -q 'statically linked'
           cargo deb -p lotse-node --no-build --no-strip --target ${{ matrix.target }} \
             --deb-version "${GITHUB_REF_NAME#v}-1" --output dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.arch }}
           path: dist/
@@ -51,8 +200,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
@@ -67,15 +218,18 @@ jobs:
   image:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -83,7 +237,7 @@ jobs:
       - name: Image name
         id: name
         run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lotse" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: packaging/Dockerfile.prebuilt

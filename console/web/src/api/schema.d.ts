@@ -45,9 +45,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chart history from the console's in-memory buffer (at most 180 points):
+        /**
+         * Chart history from the console's in-memory buffer (at most 180 points):
          *     the sum over the streams and queues the caller may see; the commit
-         *     latency only for cluster admins and cluster viewers. */
+         *     latency only for cluster admins and cluster viewers.
+         */
         get: operations["metrics"];
         put?: never;
         post?: never;
@@ -135,8 +137,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Settles a queue's ready messages: what consumers hold stays theirs.
-         *     Destructive: the body names the queue again. */
+        /**
+         * Settles a queue's ready messages: what consumers hold stays theirs.
+         *     Destructive: the body names the queue again.
+         */
         post: operations["purge_queue"];
         delete?: never;
         options?: never;
@@ -153,8 +157,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Moves the ready messages of a dead-letter queue back to the queues they
-         *     came from, each once. */
+        /**
+         * Moves the ready messages of a dead-letter queue back to the queues they
+         *     came from, each once.
+         */
         post: operations["requeue"];
         delete?: never;
         options?: never;
@@ -319,8 +325,10 @@ export interface components {
              * @description Number of broker nodes.
              */
             nodes: number;
-            /** @description Whether queues can have priorities, single active consumer, a TTL
-             *     and dead-letter queues. */
+            /**
+             * @description Whether queues can have priorities, single active consumer, a TTL
+             *     and dead-letter queues.
+             */
             queue_options: boolean;
             /** @description One-line status, e.g. "upgrading to 0.4.1". */
             status: string;
@@ -458,11 +466,15 @@ export interface components {
             /** @description Principal name the cluster authorises. */
             principal: string;
         };
-        /** @description Request to pin a partition's leader to one of its replicas, or to unpin
-         *     it (ADR 0065). */
+        /**
+         * @description Request to pin a partition's leader to one of its replicas, or to unpin
+         *     it (ADR 0065).
+         */
         MoveLeader: {
-            /** @description The node to lead it, as the console names nodes; `None` unpins it so
-             *     that leaders spread by themselves again. */
+            /**
+             * @description The node to lead it, as the console names nodes; `None` unpins it so
+             *     that leaders spread by themselves again.
+             */
             node?: string | null;
             /**
              * Format: int32
@@ -678,8 +690,10 @@ export interface components {
              */
             ready: number;
         };
-        /** @description Request to purge a queue's ready messages (ADR 0064). Destructive, so
-         *     the queue's name must be typed again. */
+        /**
+         * @description Request to purge a queue's ready messages (ADR 0064). Destructive, so
+         *     the queue's name must be typed again.
+         */
         PurgeQueue: {
             /** @description The queue's name, typed by the user. */
             confirm: string;
@@ -895,8 +909,10 @@ export interface components {
         ReplicaState: "leader" | "in_sync" | "catching_up";
         /** @description A role binding. */
         RoleBinding: {
-            /** @description How the subject is recognised: `user` or `group` (a group at the
-             *     identity provider); the demo says `mTLS` or `OIDC`. */
+            /**
+             * @description How the subject is recognised: `user` or `group` (a group at the
+             *     identity provider); the demo says `mTLS` or `OIDC`.
+             */
             auth: string;
             /** @description Principal. */
             principal: string;

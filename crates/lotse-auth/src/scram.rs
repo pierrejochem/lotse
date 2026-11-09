@@ -10,7 +10,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha512};
 
 /// The mechanism's name in `SaslHandshake`.
@@ -83,7 +83,7 @@ pub enum ScramError {
 }
 
 fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut m = <Hmac<Sha512> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
+    let mut m = <Hmac<Sha512> as KeyInit>::new_from_slice(key).expect("HMAC takes any key length");
     m.update(data);
     m.finalize().into_bytes().to_vec()
 }

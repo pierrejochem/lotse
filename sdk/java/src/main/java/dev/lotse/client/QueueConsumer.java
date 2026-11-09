@@ -281,17 +281,39 @@ public final class QueueConsumer implements AutoCloseable {
         for (DeliveredOffset d : push.deliveries()) {
             mine.put(d.offset(), d.deliveryCount());
         }
+        boolean closedMeanwhile = false;
         synchronized (mu) {
             if (sub != from) {
-                return; // the subscription ended meanwhile (closed)
-            }
-            for (BatchRecord r : records) {
+                // The subscription ended meanwhile. Closed: this push was taken off the events before close could
+                // give it back with the rest, and the broker still holds it for the subscription.
+                closedMeanwhile = closed;
+            } else {
+                for (BatchRecord r : records) {
                 Integer count = mine.get(r.offset());
-                if (count != null) {
-                    buffered.addLast(new Delivery(r, count, from));
+                    if (count != null) {
+                        buffered.addLast(new Delivery(r, count, from));
+                    }
                 }
+                usedBytes = Math.min(U32_MAX, usedBytes + push.batch().size());
             }
-            usedBytes = Math.min(U32_MAX, usedBytes + push.batch().size());
+        }
+        if (closedMeanwhile) {
+            List<Long> offsets = new ArrayList<>();
+            for (DeliveredOffset d : push.deliveries()) {
+                offsets.add(d.offset());
+            }
+            giveBack(from, offsets);
+        }
+    }
+
+    /** Requeues messages the broker holds for a subscription this consumer no longer reads, over its connection. */
+    private void giveBack(Sub from, List<Long> offsets) {
+        if (!offsets.isEmpty()) {
+            long queueId;
+            synchronized (mu) {
+                queueId = resourceId;
+            }
+            sendQuietly(from.conn, new Request.Nack(queueId, OffsetRanges.of(offsets.stream().mapToLong(Long::longValue).toArray()), true, 0));
         }
     }
 
@@ -516,7 +538,7 @@ public final class QueueConsumer implements AutoCloseable {
 
     /**
      * Ends the subscription. Messages handed out stay with this consumer until acknowledged (or until this client's
-     * connection closes); the ones not handed out yet go back to the queue. A thread waiting in {@link #next} gets
+     * connection closes); the ones not handed out yet, also those pushed and not read, go back to the queue. A thread waiting in {@link #next} gets
      * an {@link IllegalStateException}.
      */
     @Override
@@ -532,9 +554,20 @@ public final class QueueConsumer implements AutoCloseable {
             sub = null;
             if (ending != null) {
                 requests.add(new Request.Unsubscribe(ending.id));
-                if (!buffered.isEmpty()) {
-                    List<Delivery> back = new ArrayList<>(buffered);
-                    requests.add(new Request.Nack(resourceId, OffsetRanges.of(offsets(back)), true, 0));
+                // Received means buffered here or pushed and not read yet: the broker holds both for this subscription.
+                List<Long> back = new ArrayList<>();
+                for (long o : offsets(buffered)) {
+                    back.add(o);
+                }
+                for (Object e : ending.events) {
+                    if (e instanceof Frames.DeliverPush push && push.error().isOk()) {
+                        for (DeliveredOffset d : push.deliveries()) {
+                            back.add(d.offset());
+                        }
+                    }
+                }
+                if (!back.isEmpty()) {
+                    requests.add(new Request.Nack(resourceId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0));
                 }
             }
             buffered.clear();

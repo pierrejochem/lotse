@@ -392,7 +392,8 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
 
     /// Ends the subscription. Messages handed out stay with this consumer
     /// until acknowledged (or until this client's connection closes); the
-    /// ones not handed out yet go back to the queue.
+    /// ones not handed out yet, also those pushed but not read, go back to
+    /// the queue.
     pub async fn close(mut self) {
         if let Some((conn, reqs)) = self.cleanup() {
             for req in reqs {
@@ -407,7 +408,18 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         let sub = self.sub.take()?;
         sub.conn.unregister(sub.id);
         let mut reqs = vec![Request::Unsubscribe(UnsubscribeRequest { subscription_id: sub.id })];
-        let offsets: BTreeSet<u64> = self.buffered.drain(..).map(|m| m.offset()).collect();
+        let mut offsets: BTreeSet<u64> = self.buffered.drain(..).map(|m| m.offset()).collect();
+        // Pushes that arrived but were never read: the node counts their
+        // messages as in flight too, and without a nack they would wait for
+        // the ack timeout. Nothing reads them after this, so take them all.
+        {
+            let mut q = sub.pushes.lock().expect("push lock");
+            for push in q.0.drain(..).flatten() {
+                if push.error == ErrorCode::NONE && !push.is_activation() {
+                    offsets.extend(push.deliveries.iter().map(|d| d.offset));
+                }
+            }
+        }
         if !offsets.is_empty() {
             let ranges = offsets.iter().map(|o| (*o, o + 1)).collect();
             reqs.push(Request::Nack(NackRequest { queue_id: self.resource_id, ranges, requeue: true, delay_ms: 0 }));

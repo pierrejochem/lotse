@@ -44,6 +44,11 @@ public final class Transaction implements AutoCloseable {
     private final int epoch;
     private final Map<Part, Integer> next = new HashMap<>();
     private final Set<Part> added = new HashSet<>();
+    /**
+     * Offsets were sent: the coordinator may hold them although no partition was added. The transaction must then be
+     * ended there, or the offsets stay pending until it times out and block the group.
+     */
+    private boolean coordinatorMayHold;
     /** Why only an abort is left, or {@code null}. */
     private String poisoned;
     private boolean ended;
@@ -227,6 +232,9 @@ public final class Transaction implements AutoCloseable {
                 consumer.memberEpoch(),
                 GroupConsumer.resources(client, consumer.positionMap()),
                 client.config().tenant());
+        // From here on the coordinator may hold the offsets, also if the answer is lost: the transaction has to be
+        // ended there even when no partition was added.
+        coordinatorMayHold = true;
         try {
             client.retrying(() -> GroupConsumer.commitOnce(client, txnId, req));
         } catch (ClientException e) {
@@ -257,7 +265,7 @@ public final class Transaction implements AutoCloseable {
 
     private void end(boolean commit) {
         ended = true;
-        if (added.isEmpty()) {
+        if (added.isEmpty() && !coordinatorMayHold) {
             client.transactionEnded(new LotseClient.ProducerIds(producerId, epoch));
             return;
         }
