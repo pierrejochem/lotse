@@ -680,7 +680,7 @@ Cluster A, Cluster B, …  (Broker-Nodes)
 
 ### Frontend
 
-- React 18 + TypeScript, Radix Primitives, gestylt mit den Lotse-Tokens als CSS-Variablen (Hell und Dunkel).
+- React 19 + TypeScript, Radix Primitives, gestylt mit den Lotse-Tokens als CSS-Variablen (Hell und Dunkel).
 - Radix-Zuordnung: Tabs (Stream-Bereiche), ToggleGroup (Zeitraum, Startpunkt), DropdownMenu (Cluster, Konto, Zeilenaktionen), Select (Tenant, Einheiten), Dialog (Queue anlegen), AlertDialog (Queue leeren), Switch (Committed only, Single active consumer), Progress (Upgrade), Tooltip, Toast, ScrollArea.
 - Jede schreibende Aktion zeigt den gleichwertigen `lotse-cli`-Befehl, damit UI und CLI dieselben Operationen haben.
 
