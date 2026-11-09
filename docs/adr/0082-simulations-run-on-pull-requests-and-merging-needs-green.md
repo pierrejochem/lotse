@@ -1,6 +1,6 @@
 # 82. Simulations run on pull requests; merging needs a green CI
 
-- Status: Accepted
+- Status: Accepted; where the simulations run is changed by [ADR 0088](0088-simulations-gate-the-release.md): only in the release workflow, before every release
 - Date: 2026-11-08
 
 ## Context

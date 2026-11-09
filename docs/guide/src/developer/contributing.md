@@ -47,7 +47,7 @@ LOTSE_SIM_SEED=1234 cargo test -p lotse-sim                              # exact
 - A failing seed is a bug until proven otherwise. Find the cause, then decide whether the code or the check is wrong, and say which in the commit. Never weaken a check to make a test pass.
 - After you add faults or operations, check with a quick statistic that they happen (crashes per run, snapshots installed, reads served) before you trust a green run.
 
-CI runs the simulations at 5,000 seeds, and several of them in jobs of their own, nightly as well ([ADR 0010](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0010-deterministic-simulation-and-mutation-checking.md)).
+Pull requests do not run the simulations at depth. The release workflow runs all of them at 5,000 seeds before anything is built for a release, and a failure there blocks the release ([ADR 0088](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0088-simulations-gate-the-release.md)). So run the simulations your change touches yourself, at CI depth where it matters, or run the release workflow by hand on your branch: run by hand, it runs the simulations only ([ADR 0010](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0010-deterministic-simulation-and-mutation-checking.md)).
 
 ## Mutation checking
 
