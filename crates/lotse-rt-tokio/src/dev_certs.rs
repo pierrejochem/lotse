@@ -3,7 +3,7 @@
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyIdMethod, KeyPair, KeyUsagePurpose, RevokedCertParams, SanType, SerialNumber,
+    Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose, RevokedCertParams, SanType, SerialNumber,
 };
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
@@ -22,6 +22,8 @@ pub struct Issued {
 /// A self-signed CA that issues node and principal certificates.
 pub struct DevCa {
     cert: rcgen::Certificate,
+    /// What rcgen needs to sign with: the CA's name and usages.
+    params: CertificateParams,
     key: KeyPair,
 }
 
@@ -40,7 +42,7 @@ impl DevCa {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let key = KeyPair::generate().expect("a key pair");
         let cert = params.self_signed(&key).expect("a self-signed CA");
-        DevCa { cert, key }
+        DevCa { cert, params, key }
     }
 
     /// The CA certificate, PEM.
@@ -117,7 +119,11 @@ impl DevCa {
             revoked_certs,
             key_identifier_method: KeyIdMethod::Sha256,
         };
-        params.signed_by(&self.cert, &self.key).expect("a signed revocation list").pem().expect("PEM")
+        params
+            .signed_by(&Issuer::from_params(&self.params, &self.key))
+            .expect("a signed revocation list")
+            .pem()
+            .expect("PEM")
     }
 
     fn issue(&self, common_name: &str, sans: Vec<SanType>, server: bool) -> Issued {
@@ -146,7 +152,7 @@ impl DevCa {
         };
         params.use_authority_key_identifier_extension = true;
         let key = KeyPair::generate().expect("a key pair");
-        let cert = params.signed_by(&key, &self.cert, &self.key).expect("a signed certificate");
+        let cert = params.signed_by(&key, &Issuer::from_params(&self.params, &self.key)).expect("a signed certificate");
         Issued { cert_pem: cert.pem(), key_pem: key.serialize_pem() }
     }
 }
