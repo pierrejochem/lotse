@@ -8,8 +8,14 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 | [`conformance/`](conformance/) | Golden vectors, written by Rust and read by every SDK |
 | [`java/`](java/) | Java 17, Gradle; no runtime dependencies, two optional ones for compressed batches |
 | [`kotlin/`](kotlin/) | A thin Kotlin layer on the Java client: `suspend` functions, flows, builders; depends on it and on kotlinx-coroutines |
+| [`csharp/`](csharp/) | .NET 10; no dependencies, an optional `Lotse.Client.Codecs` package for compressed batches ([ADR 0083](../docs/adr/0083-client-sdks-for-csharp-and-nodejs.md), [ADR 0084](../docs/adr/0084-codecs-in-the-csharp-sdk.md)) |
+| [`node/`](node/) | TypeScript for Node.js 20 and later; no runtime dependencies ([ADR 0083](../docs/adr/0083-client-sdks-for-csharp-and-nodejs.md), [ADR 0085](../docs/adr/0085-codecs-in-the-nodejs-sdk.md)) |
 
 ## Status
+
+The C# and Node.js clients cover the same scope as the Java client (streams, queues, publishing, transactions, consumer groups, admin, TLS, SCRAM-SHA-512 and OAUTHBEARER) and follow it rule for rule; each has its own README with the API and the rules, and a chapter in the developer guide. Both are tested against the golden vectors and, with `LOTSE_BIN`, against real nodes. Nothing is published to NuGet or npm yet.
+
+The rest of this page describes the Java client and the Kotlin layer.
 
 Done in the Java client: `dev.lotse.proto` (field codec, frames, every client-facing request and response, error codes), `dev.lotse.record` (record batch, builder, in-place edits, control batches), `dev.lotse.net` (connections, TLS 1.3, pipelining, pushes, session renewal) and `dev.lotse.auth` (SCRAM-SHA-512, OAUTHBEARER, the `AlterUser` credential), and `dev.lotse.client` for streams (metadata and leader routing, idempotent produce, read_committed fetch, `listOffset`), queues (subscribe with credit, ack, nack, resubscribing, dead-letter headers), publishing through exchanges (routed by a node, or by the client within a transaction, with the routing checked against `routing.txt`), transactions (produce, publish, queue acks and group offsets in one transaction), consumer groups and the admin calls of `lotse-client`. `sdk/kotlin` wraps all of it for coroutines.
 
@@ -219,13 +225,17 @@ implementation("at.yawk.lz4:lz4-java:1.11.0")
 ## Build and test
 
 ```sh
-make sdk-test            # check the vectors, run the Java tests (with and without the codecs) and the Kotlin tests, compile the examples
+make sdk-test            # check the vectors, run the Java tests (with and without the codecs), the Kotlin tests, the C# tests and the Node.js tests, compile the examples
 LOTSE_BIN=/path/to/lotse make sdk-test   # also the tests that need real certificates and a real node
+make sdk-csharp-test     # only the C# SDK: dotnet test Lotse.sln, with and without the codecs
+make sdk-node-test       # only the Node.js SDK: npm ci, compile, node --test
 make sdk-vectors         # regenerate sdk/conformance after changing the protocol
 ```
 
-`make sdk-test` needs a JDK 17 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce, fetch, transaction, group and admin rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
+`make sdk-test` needs a JDK 17 or newer, the .NET SDK that `sdk/csharp/global.json` pins (10.0.403, rolling forward to later feature bands) and Node.js 20 or newer. The TLS and real-node tests use the `lotse` executable (`cargo build -p lotse-node`): they look at `LOTSE_BIN`, then at `$CARGO_TARGET_DIR/debug/lotse` (default `/tmp/cargo-target`), and skip with a message when there is none. The build targets Java 17 whatever JDK runs it. Tests ran on JDK 25 and 21. The client's routing, produce, fetch, transaction, group and admin rules are tested against scripted brokers in the test process; `RealClusterTest` starts three `lotse` processes and kills the leader of a partition while a client produces.
+
+CI runs `make sdk-test` with `LOTSE_BIN` set to the executable it builds (job `sdk`, Node.js 24), and the Node.js tests again on Node.js 20 (job `sdk-node-20`). Programs for the C# and Node.js clients are in `sdk/csharp/examples` and `sdk/node/examples`.
 
 ## Conformance
 
-`make sdk-vectors-check` regenerates the vectors into a temporary directory and compares them with `sdk/conformance`; a change to a message layout fails it until the vectors are regenerated and committed. Each SDK decodes every vector and writes it again to identical bytes.
+`make sdk-vectors-check` regenerates the vectors into a temporary directory and compares them with `sdk/conformance`; a change to a message layout fails it until the vectors are regenerated and committed. Each SDK (Java, C#, Node.js) decodes every vector and writes it again to identical bytes.

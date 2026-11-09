@@ -61,7 +61,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Also run the affected simulation at CI depth. After you change a message or the batch format, run `make sdk-vectors` and `make sdk-test`. After you change an API type of the console, run `npm run api` in `console/web`.
+Also run the affected simulation at CI depth. After you change a message or the batch format, run `make sdk-vectors` and `make sdk-test`; a change to a message needs the codecs of the Java, C# and Node.js SDKs updated. After you change an API type of the console, run `npm run api` in `console/web`.
 
 ## Decisions: the ADR process
 

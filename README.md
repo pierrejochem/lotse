@@ -9,7 +9,7 @@ Lotse is a message broker in Rust: reliable queues and persistent streams on one
 - **Exactly-once:** idempotent producers, transactions and consumer group offsets committed in the same transaction.
 - **Secure by default:** TLS 1.3 on every connection, SCRAM-SHA-512, OAUTHBEARER and client certificates, tenants and roles.
 - **Tested by simulation:** deterministic simulation with crashing disks and a faulty network, 5,000 seeds per simulation before every release.
-- **Clients and console:** Rust and Java clients, a Kotlin layer, and a web console.
+- **Clients and console:** clients for Rust, Java (with a Kotlin layer), C# and Node.js, and a web console.
 
 Status: foundation. The runtime seam with its Tokio implementation, the record format, the segmented log, the Raft core, the simulation harness, a broker node (many Raft groups over one transport) and the first cut of the native protocol with a Rust client (idempotent and transactional produce, read_committed fetch, queues with acks, credit and redelivery, publishing through exchanges, consumer groups with exactly-once consume-transform-produce, a metadata group that creates, changes and deletes streams, queues and exchanges at runtime), TLS 1.3 on every connection with node certificates, authentication (client certificates, SCRAM-SHA-512, OAUTHBEARER), tenants and six roles checked on every request exist and are tested, and so does the management console, with OpenID Connect sign-in, against a real cluster (numbers from `DescribeMetrics`, which every node answers for itself) or a built-in demo cluster. Retention deletes whole segments by age and size (streams) or below the ack floor (queues), and streams can be compacted to the newest record per key. The `lotse` binary runs a node from a cluster file, as a systemd unit, a Debian package or a container image, and nodes can be added to and drained from a running cluster.
 
@@ -18,7 +18,7 @@ Status: foundation. The runtime seam with its Tokio implementation, the record f
 - [Design document](docs/design.md): architecture and storage design with the reasons behind each decision (German).
 - [Architecture decisions](docs/adr/): one record per decision, with its reasons.
 - [Architecture overview](docs/architecture.png): the whole system on one page.
-- [Client SDKs](sdk/): the protocol for implementers, golden test vectors and the Java client (the protocol codec, record batch, connections, authentication, streams, queues, publishing, transactions, consumer groups and admin, with a Kotlin layer of `suspend` functions and flows).
+- [Client SDKs](sdk/): the protocol for implementers, golden test vectors and the Java, C# and Node.js clients (the protocol codec, record batch, connections, authentication, streams, queues, publishing, transactions, consumer groups and admin), with a Kotlin layer of `suspend` functions and flows on the Java client.
 - [Brand](docs/brand/): the Fairway mark, logos, colours, type and design tokens.
 - [Console](docs/console/): screenshots and mockups of the management console.
 
@@ -179,7 +179,7 @@ The authentication tests in `crates/lotse-server/tests/auth.rs` run three nodes 
 ## Known gaps
 
 - ListOffsets: a time lookup reads batch headers from the first segment that may hold the time (no time index), and finds batches, not records.
-- Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK needs zstd-jni and lz4-java on its class path for them (ADR 0061); `lotse-client` compresses only what the caller builds compressed.
+- Compression: zstd and lz4 per batch (ADR 0058); a decompressed block may hold at most 16 MiB; the Java SDK needs zstd-jni and lz4-java on its class path for them (ADR 0061), the C# SDK the `Lotse.Client.Codecs` package (ADR 0084), and the Node.js SDK brings lz4 itself and uses `node:zlib` for zstd, which needs Node.js 22.15 or later (ADR 0085); `lotse-client` compresses only what the caller builds compressed.
 - The sparse offset index is rebuilt by scanning on open; `.index`, `.timeindex` and `.txnindex` files come later.
 - Raft: snapshots travel in chunks (1 MiB by default), one in flight per follower and collected in memory before they are installed; pipelining chunks and spilling them to disk come later. A leader backing up past a conflict resends a whole term's entries rather than probing. Followers do not serve reads themselves; the server forwards them to the leader.
 - Transactional and group ids live in a tenant (ADR 0062); a tenant deleted and created again is a new incarnation whose ids start afresh, and the coordinator forgets the old one's (ADR 0069). A removed role binding takes effect on each node once it applies the metadata group. Certificate revocation is a CRL file the operator copies to every node (no OCSP); sessions and tokens are revoked per user or IdP group (`RevokeSessions`, ADR 0070), not per token.
