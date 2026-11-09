@@ -184,6 +184,7 @@ Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-c
 | `createTenant`, `deleteTenant`, `describeTenants` | Tenants (ADR 0039). A tenant that holds resources is not deleted. `describeTenants` lists those the caller has a role in. |
 | `alterRoleBindings(add, remove)`, `describeRoleBindings`, `whoAmI` | Role bindings of a user or IdP group, in a tenant, for names with a prefix; removals are applied first. `whoAmI` says who the client acts as and which bindings apply. |
 | `revokeCertificate(issuer, serial, notAfterMs, reason)` | Revokes one client certificate, named by the SHA-256 of its issuer's name (32 bytes) and its serial: nodes end its connections and refuse it until it expires (ADR 0090). The CRL file stays as it is. Cluster admin. |
+| `describeCertificates()` | The client certificates the cluster has seen or had revoked (ADR 0091): `{ certificates, nowMs }`, each entry with its issuer hash, serial, principal, validity, first and last seen (last seen at most an hour late), `state` (`CertificateState.VALID`, `EXPIRING`, `EXPIRED`, `REVOKED`) and, if revoked, reason and time; states are computed against `nowMs`, the answering node's clock. Cluster admin. |
 | `revokeSessions(subject, group)` | Ends the sessions of a user or IdP group that began before now, and refuses their older tokens (ADR 0070). A SCRAM user can log in again unless the password is changed or deleted. Cluster admin. |
 | `addNode`, `removeNode`, `describeNodes` | The node list in the metadata group (ADR 0048): `removeNode` starts a drain, `describeNodes` shows replicas and moves. Ids are never used twice. |
 | `moveLeader(name, partition, node)` | Pins a partition's leader to one of its voters; `null` unpins (ADR 0065). Cluster admin. |
@@ -194,7 +195,7 @@ Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-c
 - **Given up.** A change given up after it was sent rejects with `UnknownOutcomeError`; a read given up, or one that was refused as retriable until the time ran out, rejects with `GaveUpError`.
 - **Names and ids.** The calls that take a name ask every known broker for it and take the newest resource, so a name made a moment ago is found on a broker that lags. The node that answers a read has applied what the metadata leader had when it answered; a node you ask for metadata may be behind, so wait for a change you made before you look for it on every node.
 - **Arguments** out of range (`createPartitions` with a count below 1 or above `u32`, a partition that is not a `u32`, a node id that is not positive) are a `RangeError` before anything is sent. Node ids are `number` or `bigint`; `describeNodes` gives `bigint`.
-- Not offered, as in Java: creating a queue in another tenant than the client's (give the client that `tenant`), and the nodes' own `SettleVoters`.
+- Not offered, as in Java: creating a queue in another tenant than the client's (give the client that `tenant`), and the nodes' own `SettleVoters` and `RecordCertificates` (the codec exists, there is no client call).
 
 ## Authentication
 

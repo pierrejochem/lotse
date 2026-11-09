@@ -110,6 +110,13 @@ public record ApiKey(int id) {
     public static final ApiKey CREATE_PARTITIONS = new ApiKey(51);
     /** Adds a certificate to the cluster's revocation list (cluster admin). */
     public static final ApiKey REVOKE_CERTIFICATE = new ApiKey(52);
+    /** Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091). */
+    public static final ApiKey DESCRIBE_CERTIFICATES = new ApiKey(53);
+    /**
+     * Node to node, not for clients: a node reports the client certificates it accepted (ADR 0091). The codec
+     * exists so the golden vectors round-trip; the client has no call for it.
+     */
+    public static final ApiKey RECORD_CERTIFICATES = new ApiKey(54);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -124,7 +131,7 @@ public record ApiKey(int id) {
 
     /**
      * The client-facing keys this library has request and response types for, all at version 0. The node-internal
-     * keys 43, 44, 45 and 1000 are constants only.
+     * keys 43, 44, 45 and 1000 are constants only; 54 is decodable for the golden vectors but has no client call.
      */
     public static final List<ApiVersionRange> IMPLEMENTED = List.of(
             range(API_VERSIONS), range(METADATA), range(FIND_COORDINATOR), range(PRODUCE), range(FETCH),
@@ -138,7 +145,8 @@ public record ApiKey(int id) {
             range(DELETE_TENANT), range(DESCRIBE_TENANTS), range(ALTER_ROLE_BINDINGS),
             range(DESCRIBE_ROLE_BINDINGS), range(WHO_AM_I), range(ADD_NODE), range(REMOVE_NODE),
             range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER), range(REVOKE_SESSIONS),
-            range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(PUBLISH));
+            range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(DESCRIBE_CERTIFICATES),
+            range(RECORD_CERTIFICATES), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

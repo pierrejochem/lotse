@@ -1039,6 +1039,34 @@ impl Cluster for NativeCluster {
         self.seat(who).client.alter_role_bindings(add_list, remove_list).await.map_err(|e| refused("the binding", e))
     }
 
+    async fn certificates(&self, who: &Identity) -> ApiResult<CertificatesView> {
+        let d = self.seat(who).client.describe_certificates().await.map_err(failed)?;
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let certificates = d
+            .certificates
+            .iter()
+            .map(|c| CertificateRow {
+                issuer: hex(&c.issuer),
+                serial: hex(&c.serial),
+                principal: c.principal.clone(),
+                not_before_ms: c.not_before_ms,
+                not_after_ms: c.not_after_ms,
+                first_seen_ms: c.first_seen_ms,
+                last_seen_ms: c.last_seen_ms,
+                state: match c.state {
+                    lotse_proto::certificate_state::REVOKED => "revoked",
+                    lotse_proto::certificate_state::EXPIRED => "expired",
+                    lotse_proto::certificate_state::EXPIRING => "expiring",
+                    _ => "valid",
+                }
+                .into(),
+                reason: c.reason.clone(),
+                revoked_at_ms: c.revoked_at_ms,
+            })
+            .collect();
+        Ok(CertificatesView { certificates, now_ms: d.now_ms })
+    }
+
     async fn revoke_certificate(
         &self,
         who: &Identity,

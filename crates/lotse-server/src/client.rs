@@ -63,6 +63,7 @@ use crate::wire::GroupId;
 
 mod actions;
 mod admin;
+pub(crate) mod certs;
 mod coord;
 mod empty;
 mod groups;
@@ -143,6 +144,10 @@ pub(crate) async fn serve<R: Runtime>(
 ) {
     let now_ms = u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX);
     let mut session = Session::new(auth, conn.peer_identity(), conn.peer_cert(), now_ms);
+    // The inventory learns of the certificate now, and again every so often
+    // while the connection lives (ADR 0091).
+    session.note_cert(now_ms);
+    let mut noted = rt.now();
     let conn = Arc::new(conn);
     let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
     let closed = Signal::default();
@@ -160,6 +165,10 @@ pub(crate) async fn serve<R: Runtime>(
             _ => break,
         };
         NetStats::add(&net.client_in, frame.len());
+        if rt.now() - noted >= NOTE_CERT_EVERY {
+            noted = rt.now();
+            session.note_cert(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX));
+        }
         match lotse_proto::decode_request(frame) {
             Ok((header, Request::SaslHandshake(req))) => {
                 outbox.push(header.correlation_id, &Response::SaslHandshake(session.handshake(&req)));
@@ -249,6 +258,10 @@ struct PendingInit {
 }
 
 /// How long the coordinator waits for an allocation to commit.
+/// A connection that stays open tells the certificate inventory again after
+/// this (ADR 0091).
+const NOTE_CERT_EVERY: Duration = Duration::from_secs(600);
+
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PendingFetch {
@@ -451,6 +464,8 @@ impl Clients {
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
             Request::RevokeCertificate(req) => self.revoke_certificate(outbox, id, req, view, groups),
+            Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, view, groups),
+            Request::RecordCertificates(req) => self.record_certificates(outbox, id, req, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),

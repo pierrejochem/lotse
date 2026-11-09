@@ -1204,6 +1204,62 @@ public sealed interface Request {
         }
     }
 
+    /** Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091). */
+    record DescribeCertificates() implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_CERTIFICATES;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.noTags();
+        }
+
+        static DescribeCertificates read(Reader r) {
+            r.tags();
+            return new DescribeCertificates();
+        }
+    }
+
+    /**
+     * {@code RecordCertificates} (54): a node reports client certificates it accepted. Internal: only broker nodes
+     * may send it, so the client has no call for it; the codec exists for the golden vectors. Answered with
+     * {@link Response.Admin}.
+     *
+     * @param certificates the certificates, at most a few hundred
+     */
+    record RecordCertificates(List<SeenCertificate> certificates) implements Request {
+        /** Creates the request. */
+        public RecordCertificates {
+            certificates = List.copyOf(certificates);
+        }
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.RECORD_CERTIFICATES;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.array(certificates, (w1, c) -> w1.bytes(c.issuer())
+                    .bytes(c.serial())
+                    .string(c.principal())
+                    .u64(c.notBeforeMs())
+                    .u64(c.notAfterMs())
+                    .u64(c.seenMs()));
+            w.noTags();
+        }
+
+        static RecordCertificates read(Reader r) {
+            // issuer, serial, principal, three u64: 4 + 4 + 2 + 3 * 8 bytes at least
+            List<SeenCertificate> certificates = r.array(
+                    34, r1 -> new SeenCertificate(r1.bytes(), r1.bytes(), r1.string(), r1.u64(), r1.u64(), r1.u64()));
+            r.tags();
+            return new RecordCertificates(certificates);
+        }
+    }
+
     /**
      * {@code PurgeQueue} (47) or {@code Requeue} (48): an action on a queue's ready messages, served by its leader
      * (ADR 0064). Each request acts on a bounded number of messages; send it again with the answer's {@code upTo}

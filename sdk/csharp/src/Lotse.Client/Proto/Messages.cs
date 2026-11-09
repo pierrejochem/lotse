@@ -726,6 +726,52 @@ public static class Messages
     /// <param name="Source">See <see cref="ConfigSource"/>.</param>
     public sealed record UserEntry(string Name, string Mechanism, uint Iterations, byte Source);
 
+    /// <summary>States of a certificate in a <see cref="CertificateEntry"/>.</summary>
+    public static class CertificateState
+    {
+        /// <summary>Valid, and not ending within 30 days.</summary>
+        public const byte Valid = 0;
+
+        /// <summary>Valid, and ending within 30 days.</summary>
+        public const byte Expiring = 1;
+
+        /// <summary>Past its end.</summary>
+        public const byte Expired = 2;
+
+        /// <summary>Revoked by a cluster admin (<c>RevokeCertificate</c>).</summary>
+        public const byte Revoked = 3;
+    }
+
+    /// <summary>One client certificate in the cluster's inventory.</summary>
+    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Serial">The serial number, big-endian.</param>
+    /// <param name="Principal">The principal it names (its common name); empty for a certificate revoked before any node saw it.</param>
+    /// <param name="NotBeforeMs">First millisecond it is valid in, since the epoch; 0 if unknown.</param>
+    /// <param name="NotAfterMs">Millisecond it stops being valid in, since the epoch.</param>
+    /// <param name="FirstSeenMs">When a node first accepted it, in milliseconds since the epoch; 0 if none did.</param>
+    /// <param name="LastSeenMs">When a node last accepted it, as far as nodes report: at most an hour late.</param>
+    /// <param name="State">See <see cref="CertificateState"/>.</param>
+    /// <param name="Reason">Why it was revoked; empty if it was not.</param>
+    /// <param name="RevokedAtMs">When it was revoked, in milliseconds since the epoch; 0 if it was not.</param>
+    public sealed record CertificateEntry(
+        ByteString Issuer, ByteString Serial, string Principal, ulong NotBeforeMs, ulong NotAfterMs, ulong FirstSeenMs,
+        ulong LastSeenMs, byte State, string Reason, ulong RevokedAtMs);
+
+    /// <summary>The certificate inventory with the answering node's clock.</summary>
+    /// <param name="NowMs">The node's clock in milliseconds since the epoch, which the states are computed against.</param>
+    /// <param name="Certificates">The certificates.</param>
+    public sealed record CertificateInventory(ulong NowMs, IReadOnlyList<CertificateEntry> Certificates);
+
+    /// <summary>One accepted client certificate, as a node reports it (internal, ADR 0091).</summary>
+    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Serial">The serial number, big-endian.</param>
+    /// <param name="Principal">The principal it names.</param>
+    /// <param name="NotBeforeMs">First millisecond it is valid in.</param>
+    /// <param name="NotAfterMs">Millisecond it stops being valid in.</param>
+    /// <param name="SeenMs">When the node accepted it, by its clock.</param>
+    public sealed record SeenCertificate(
+        ByteString Issuer, ByteString Serial, string Principal, ulong NotBeforeMs, ulong NotAfterMs, ulong SeenMs);
+
     /// <summary>One tenant.</summary>
     /// <param name="Name">The name.</param>
     /// <param name="Source">See <see cref="ConfigSource"/>.</param>

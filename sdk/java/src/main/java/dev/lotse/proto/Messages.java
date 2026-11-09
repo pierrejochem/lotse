@@ -969,6 +969,65 @@ public final class Messages {
      */
     public record UserEntry(String name, String mechanism, long iterations, int source) {}
 
+    /** How a certificate stands in an inventory entry (ADR 0091). */
+    public static final class CertificateState {
+        /** Valid, and not ending within 30 days. */
+        public static final int VALID = 0;
+        /** Valid, and ending within 30 days. */
+        public static final int EXPIRING = 1;
+        /** Past its end. */
+        public static final int EXPIRED = 2;
+        /** Revoked by a cluster admin. */
+        public static final int REVOKED = 3;
+
+        private CertificateState() {}
+    }
+
+    /**
+     * One client certificate in the inventory.
+     *
+     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param serial the serial number, big-endian
+     * @param principal the principal it names (its common name); empty for a certificate revoked before any node
+     *     saw it
+     * @param notBeforeMs first millisecond it is valid in, since the Unix epoch, a {@code u64}; 0 if unknown
+     * @param notAfterMs millisecond it stops being valid in, a {@code u64}
+     * @param firstSeenMs when a node first accepted it, a {@code u64}; 0 if none did
+     * @param lastSeenMs when a node last accepted it, as far as nodes report: at most an hour late, a {@code u64}
+     * @param state see {@link CertificateState}
+     * @param reason why it was revoked; empty if it was not
+     * @param revokedAtMs when it was revoked, a {@code u64}; 0 if it was not
+     */
+    public record CertificateEntry(
+            ByteString issuer,
+            ByteString serial,
+            String principal,
+            long notBeforeMs,
+            long notAfterMs,
+            long firstSeenMs,
+            long lastSeenMs,
+            int state,
+            String reason,
+            long revokedAtMs) {}
+
+    /**
+     * One accepted client certificate, as a node reports it.
+     *
+     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param serial the serial number, big-endian
+     * @param principal the principal it names
+     * @param notBeforeMs first millisecond it is valid in, a {@code u64}
+     * @param notAfterMs millisecond it stops being valid in, a {@code u64}
+     * @param seenMs when the node accepted it, by its clock, a {@code u64}
+     */
+    public record SeenCertificate(
+            ByteString issuer,
+            ByteString serial,
+            String principal,
+            long notBeforeMs,
+            long notAfterMs,
+            long seenMs) {}
+
     /**
      * One tenant.
      *

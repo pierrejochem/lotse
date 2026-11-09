@@ -3466,6 +3466,170 @@ impl RevokeCertificateRequest {
     }
 }
 
+/// How a certificate stands in an inventory entry (ADR 0091).
+pub mod certificate_state {
+    /// Valid, and not ending within 30 days.
+    pub const VALID: u8 = 0;
+    /// Valid, and ending within 30 days.
+    pub const EXPIRING: u8 = 1;
+    /// Past its end.
+    pub const EXPIRED: u8 = 2;
+    /// Revoked by a cluster admin (`RevokeCertificate`).
+    pub const REVOKED: u8 = 3;
+}
+
+/// Lists the client certificates the cluster has seen or had revoked
+/// (cluster admin, ADR 0091).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeCertificatesRequest;
+
+impl DescribeCertificatesRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeCertificatesRequest)
+    }
+}
+
+/// One client certificate in the inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateEntry {
+    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    pub issuer: Bytes,
+    /// The serial number, big-endian.
+    pub serial: Bytes,
+    /// The principal it names (its common name); empty for a certificate
+    /// that was revoked before any node saw it.
+    pub principal: String,
+    /// First millisecond it is valid in, since the Unix epoch; 0 if unknown.
+    pub not_before_ms: u64,
+    /// Millisecond it stops being valid in, since the Unix epoch.
+    pub not_after_ms: u64,
+    /// When a node first accepted it, ms since the Unix epoch; 0 if none did.
+    pub first_seen_ms: u64,
+    /// When a node last accepted it, as far as nodes report: at most an
+    /// hour late.
+    pub last_seen_ms: u64,
+    /// [`certificate_state`].
+    pub state: u8,
+    /// Why it was revoked; empty if it was not.
+    pub reason: String,
+    /// When it was revoked, ms since the Unix epoch; 0 if it was not.
+    pub revoked_at_ms: u64,
+}
+
+/// The inventory, by expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeCertificatesResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The answering node's clock, ms since the Unix epoch, which the
+    /// states are computed against.
+    pub now_ms: u64,
+    /// The certificates.
+    pub certificates: Vec<CertificateEntry>,
+}
+
+impl DescribeCertificatesResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_hint(w, self.leader_hint);
+        w.u64(self.now_ms);
+        w.array(&self.certificates, |w, c| {
+            w.bytes(&c.issuer);
+            w.bytes(&c.serial);
+            w.string(&c.principal);
+            w.u64(c.not_before_ms);
+            w.u64(c.not_after_ms);
+            w.u64(c.first_seen_ms);
+            w.u64(c.last_seen_ms);
+            w.u8(c.state);
+            w.string(&c.reason);
+            w.u64(c.revoked_at_ms);
+        });
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(DescribeCertificatesResponse {
+            error: ErrorCode(r.u16()?),
+            leader_hint: get_hint(r)?,
+            now_ms: r.u64()?,
+            // 4 + 4 + 2 + 4 * 8 + 1 + 2 + 8 bytes at least.
+            certificates: r.array(53, |r| {
+                Ok(CertificateEntry {
+                    issuer: r.bytes()?,
+                    serial: r.bytes()?,
+                    principal: r.string()?,
+                    not_before_ms: r.u64()?,
+                    not_after_ms: r.u64()?,
+                    first_seen_ms: r.u64()?,
+                    last_seen_ms: r.u64()?,
+                    state: r.u8()?,
+                    reason: r.string()?,
+                    revoked_at_ms: r.u64()?,
+                })
+            })?,
+        })
+    }
+}
+
+/// One accepted client certificate, as a node reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenCertificate {
+    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    pub issuer: Bytes,
+    /// The serial number, big-endian.
+    pub serial: Bytes,
+    /// The principal it names.
+    pub principal: String,
+    /// First millisecond it is valid in.
+    pub not_before_ms: u64,
+    /// Millisecond it stops being valid in.
+    pub not_after_ms: u64,
+    /// When the node accepted it, by its clock.
+    pub seen_ms: u64,
+}
+
+/// A node reports client certificates it accepted (internal: only broker
+/// nodes may send it, ADR 0091). Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordCertificatesRequest {
+    /// The certificates, at most a few hundred.
+    pub certificates: Vec<SeenCertificate>,
+}
+
+impl RecordCertificatesRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.array(&self.certificates, |w, c| {
+            w.bytes(&c.issuer);
+            w.bytes(&c.serial);
+            w.string(&c.principal);
+            w.u64(c.not_before_ms);
+            w.u64(c.not_after_ms);
+            w.u64(c.seen_ms);
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        // 4 + 4 + 2 + 3 * 8 bytes at least.
+        let certificates = r.array(34, |r| {
+            Ok(SeenCertificate {
+                issuer: r.bytes()?,
+                serial: r.bytes()?,
+                principal: r.string()?,
+                not_before_ms: r.u64()?,
+                not_after_ms: r.u64()?,
+                seen_ms: r.u64()?,
+            })
+        })?;
+        r.tags()?;
+        Ok(RecordCertificatesRequest { certificates })
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

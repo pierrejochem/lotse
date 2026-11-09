@@ -467,6 +467,53 @@ export interface UserEntry {
   readonly source: number;
 }
 
+/** How a certificate stands in an inventory entry (ADR 0091). */
+export const CertificateState = {
+  /** Valid, and not ending within 30 days. */
+  VALID: 0,
+  /** Valid, and ending within 30 days. */
+  EXPIRING: 1,
+  /** Past its end. */
+  EXPIRED: 2,
+  /** Revoked by a cluster admin (`RevokeCertificate`). */
+  REVOKED: 3,
+} as const;
+
+/** One client certificate in the inventory (`DescribeCertificates`). */
+export interface CertificateEntry {
+  /** SHA-256 of the issuer's name in DER form (32 bytes). */
+  readonly issuer: Uint8Array;
+  /** The serial number, big-endian. */
+  readonly serial: Uint8Array;
+  /** The principal it names (its common name); empty for a certificate revoked before any node saw it. */
+  readonly principal: string;
+  /** First millisecond it is valid in, since the Unix epoch; 0 if unknown. */
+  readonly notBeforeMs: bigint;
+  /** Millisecond it stops being valid in, since the Unix epoch. */
+  readonly notAfterMs: bigint;
+  /** When a node first accepted it, ms since the Unix epoch; 0 if none did. */
+  readonly firstSeenMs: bigint;
+  /** When a node last accepted it, as far as nodes report: at most an hour late. */
+  readonly lastSeenMs: bigint;
+  /** A {@link CertificateState}. */
+  readonly state: number;
+  /** Why it was revoked; empty if it was not. */
+  readonly reason: string;
+  /** When it was revoked, ms since the Unix epoch; 0 if it was not. */
+  readonly revokedAtMs: bigint;
+}
+
+/** One accepted client certificate, as a node reports it (`RecordCertificates`, internal). */
+export interface SeenCertificate {
+  readonly issuer: Uint8Array;
+  readonly serial: Uint8Array;
+  readonly principal: string;
+  readonly notBeforeMs: bigint;
+  readonly notAfterMs: bigint;
+  /** When the node accepted it, by its clock. */
+  readonly seenMs: bigint;
+}
+
 export interface TenantEntry {
   readonly name: string;
   readonly source: number;

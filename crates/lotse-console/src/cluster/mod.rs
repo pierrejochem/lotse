@@ -16,8 +16,8 @@ use crate::auth::Identity;
 use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
-    BindingRow, BindingsView, ClusterRef, CreateQueue, Credential, Isolation, MoveLeader, NodesView, Overview,
-    QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow, TenantsView, UsersView,
+    BindingRow, BindingsView, CertificatesView, ClusterRef, CreateQueue, Credential, Isolation, MoveLeader, NodesView,
+    Overview, QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow, TenantsView, UsersView,
 };
 
 /// One managed cluster.
@@ -88,6 +88,9 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Adds or removes one binding.
     async fn alter_binding(&self, who: &Identity, binding: &BindingRow, add: bool) -> ApiResult<()>;
+
+    /// The client certificates the cluster has seen or had revoked (ADR 0091).
+    async fn certificates(&self, who: &Identity) -> ApiResult<CertificatesView>;
 
     /// Revokes one client certificate (ADR 0090).
     async fn revoke_certificate(

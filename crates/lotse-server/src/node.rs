@@ -282,6 +282,43 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     }
 }
 
+/// Tells the metadata group which client certificates this node accepted
+/// since the last report, leaving out what it already holds (ADR 0091).
+fn report_certificates<R: Runtime>(
+    rt: &R,
+    known: &Known,
+    auth: &Auth<R>,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+) {
+    let fresh: Vec<lotse_proto::SeenCertificate> = auth
+        .take_seen()
+        .into_iter()
+        .filter(|(k, c)| {
+            !known.state.certs.get(k).is_some_and(|held| {
+                held.last_seen_ms.saturating_add(crate::client::certs::LAST_SEEN_EVERY_MS) > c.last_seen_ms
+            })
+        })
+        .take(crate::client::certs::MAX_REPORTED)
+        .map(|(k, c)| lotse_proto::SeenCertificate {
+            issuer: Bytes::copy_from_slice(&k.issuer),
+            serial: Bytes::from(k.serial),
+            principal: c.principal,
+            not_before_ms: c.not_before_ms,
+            not_after_ms: c.not_after_ms,
+            seen_ms: c.last_seen_ms,
+        })
+        .collect();
+    if fresh.is_empty() {
+        return;
+    }
+    let (client, stop) = (client.clone(), shared.stop.clone());
+    jobs.spawn(rt, async move {
+        let _ = race(client.record_certificates(fresh), &[&stop]).await;
+    });
+}
+
 /// How often each replica looks whether retention lets something go.
 const RETAIN_EVERY: Duration = Duration::from_secs(1);
 
@@ -1018,6 +1055,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         if rt.now() >= next_membership {
             next_membership = rt.now() + cfg.tick * MEMBERSHIP_EVERY_TICKS;
             membership_pass(rt, cfg, groups, &known, &configured_voters, &mut moves, &marker_client, shared, jobs);
+            report_certificates(rt, &known, auth, &marker_client, shared, jobs);
         }
         for (to, messages) in outbound {
             let Some((_, peer)) = links.peers.get(&to) else { continue };

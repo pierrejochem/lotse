@@ -188,6 +188,46 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/certificates": {
+      "get": {
+        "tags": [],
+        "summary": "The client certificates the cluster has seen or had revoked, by expiry.\nThe broker lets only cluster admins list them.",
+        "operationId": "certificates",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertificatesView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/certificates/revoke": {
       "post": {
         "tags": [],
@@ -1491,6 +1531,97 @@
           "can_edit": {
             "type": "boolean",
             "description": "Whether the caller may change bindings."
+          }
+        }
+      },
+      "CertificateRow": {
+        "type": "object",
+        "description": "One client certificate the cluster has seen or had revoked (ADR 0091).",
+        "required": [
+          "issuer",
+          "serial",
+          "principal",
+          "not_before_ms",
+          "not_after_ms",
+          "first_seen_ms",
+          "last_seen_ms",
+          "state",
+          "reason",
+          "revoked_at_ms"
+        ],
+        "properties": {
+          "first_seen_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When a node first accepted it; 0 if none did.",
+            "minimum": 0
+          },
+          "issuer": {
+            "type": "string",
+            "description": "SHA-256 of the issuer's name in DER form, 64 hex digits."
+          },
+          "last_seen_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When a node last accepted it; connections that stay open are noted\nagain every ten minutes and the cluster records it at most hourly.",
+            "minimum": 0
+          },
+          "not_after_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Millisecond it stops being valid in, since the Unix epoch.",
+            "minimum": 0
+          },
+          "not_before_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First millisecond it is valid in, since the Unix epoch; 0 if unknown.",
+            "minimum": 0
+          },
+          "principal": {
+            "type": "string",
+            "description": "The principal it names; empty for one revoked before any node saw it."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it was revoked; empty if it was not."
+          },
+          "revoked_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was revoked; 0 if it was not.",
+            "minimum": 0
+          },
+          "serial": {
+            "type": "string",
+            "description": "The serial number, hex."
+          },
+          "state": {
+            "type": "string",
+            "description": "`valid`, `expiring` (within 30 days), `expired` or `revoked`."
+          }
+        }
+      },
+      "CertificatesView": {
+        "type": "object",
+        "description": "The certificates screen.",
+        "required": [
+          "certificates",
+          "now_ms"
+        ],
+        "properties": {
+          "certificates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CertificateRow"
+            },
+            "description": "By expiry."
+          },
+          "now_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cluster's clock when the list was made, ms since the Unix epoch.",
+            "minimum": 0
           }
         }
       },

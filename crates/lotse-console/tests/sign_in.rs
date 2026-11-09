@@ -635,6 +635,15 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificates/revoke", None, Some(expired)).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "an expired certificate needs no revocation: {r:?}");
 
+    // The inventory lists them for a cluster admin only.
+    let r = call(&admin_app, "GET", "/api/v1/clusters/local/certificates", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let listed =
+        r.json["certificates"].as_array().unwrap().iter().any(|c| c["serial"] == "0102" && c["state"] == "revoked");
+    assert!(listed, "the certificate revoked above is listed: {r:?}");
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/certificates", None, None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
+
     // Revoking and deleting name the subject again.
     let revoke = |confirm: &str| json!({"subject": "carol", "group": false, "confirm": confirm});
     let r = call(&admin_app, "POST", "/api/v1/clusters/local/sessions/revoke", None, Some(revoke("carl"))).await;

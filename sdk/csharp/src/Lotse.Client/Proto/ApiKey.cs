@@ -162,11 +162,18 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>Adds a client certificate to the cluster's revocation list (cluster admin).</summary>
     public static readonly ApiKey RevokeCertificate = new(52);
 
+    /// <summary>Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091).</summary>
+    public static readonly ApiKey DescribeCertificates = new(53);
+
+    /// <summary>Broker nodes only: a node reports client certificates it accepted (ADR 0091). Clients must not send it.</summary>
+    public static readonly ApiKey RecordCertificates = new(54);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
     /// <summary>
-    /// The client-facing keys this library has request and response types for, all at version 0. The node-internal
+    /// The keys this library has request and response types for, all at version 0. Key 54 is for broker nodes only;
+    /// it is here so the codec reads and writes it, and the client has no method for it. The node-internal
     /// keys 43, 44, 45, 46 and 1000 are constants only.
     /// </summary>
     public static readonly IReadOnlyList<ApiVersionRange> Implemented = new[]
@@ -182,7 +189,8 @@ public readonly record struct ApiKey(ushort Id)
         Range(DeleteTenant), Range(DescribeTenants), Range(AlterRoleBindings),
         Range(DescribeRoleBindings), Range(WhoAmI), Range(AddNode), Range(RemoveNode),
         Range(DescribeNodes), Range(PurgeQueue), Range(Requeue), Range(MoveLeader), Range(RevokeSessions),
-        Range(CreatePartitions), Range(RevokeCertificate), Range(Publish),
+        Range(CreatePartitions), Range(RevokeCertificate), Range(DescribeCertificates), Range(RecordCertificates),
+        Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);

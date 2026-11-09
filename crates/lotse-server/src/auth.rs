@@ -17,7 +17,7 @@ use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
 use lotse_rt::{CertInfo, Clock, Http, Instant};
 
-use crate::metadata::{CertKey, RevokedCert};
+use crate::metadata::{CertKey, RevokedCert, SeenCert};
 use crate::signal::Signal;
 
 /// How long a session lasts at most before the client must authenticate
@@ -168,6 +168,9 @@ pub(crate) struct Auth<R> {
     /// Revoked client certificates as the metadata group last applied them
     /// (ADR 0090). A change wakes the same signal.
     certs: Mutex<BTreeSet<CertKey>>,
+    /// Client certificates this node accepted since the last report (ADR
+    /// 0091), for the main loop to send to the metadata leader.
+    seen: Mutex<BTreeMap<CertKey, SeenCert>>,
     oidc: Option<Oidc<R>>,
 }
 
@@ -179,6 +182,7 @@ impl<R: Clock + Http + Clone> Auth<R> {
             users: Mutex::new(BTreeMap::new()),
             revocations: Mutex::new((BTreeMap::new(), Signal::default())),
             certs: Mutex::new(BTreeSet::new()),
+            seen: Mutex::new(BTreeMap::new()),
             oidc,
         })
     }
@@ -210,6 +214,31 @@ impl<R: Clock + Http + Clone> Auth<R> {
             *c = keys;
             std::mem::take(&mut self.revocations.lock().expect("revocations lock").1).set();
         }
+    }
+
+    /// Notes that a connection showed `cert`, naming `principal`, at
+    /// `now_ms`; reported to the cluster by the main loop.
+    pub(crate) fn saw_cert(&self, cert: &CertInfo, principal: &str, now_ms: u64) {
+        let key = CertKey { issuer: cert.issuer, serial: cert.serial.clone() };
+        let mut seen = self.seen.lock().expect("seen lock");
+        // A flood of distinct certificates is bounded: the report keeps the
+        // newest few hundred and the rest are noted again next time.
+        if seen.len() >= 4 * crate::client::certs::MAX_REPORTED && !seen.contains_key(&key) {
+            return;
+        }
+        let c = seen.entry(key).or_insert_with(|| SeenCert {
+            principal: principal.to_owned(),
+            not_before_ms: cert.not_before_ms,
+            not_after_ms: cert.not_after_ms,
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+        });
+        c.last_seen_ms = c.last_seen_ms.max(now_ms);
+    }
+
+    /// The certificates noted since the last call.
+    pub(crate) fn take_seen(&self) -> BTreeMap<CertKey, SeenCert> {
+        std::mem::take(&mut *self.seen.lock().expect("seen lock"))
     }
 
     /// Whether the certificate is revoked.

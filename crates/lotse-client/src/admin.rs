@@ -456,6 +456,31 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::SettleVoters(SettleVotersRequest { group, voters })).await
     }
 
+    /// Internal, for nodes: reports client certificates the node accepted
+    /// (ADR 0091).
+    pub async fn record_certificates(
+        &self,
+        certificates: Vec<lotse_proto::SeenCertificate>,
+    ) -> Result<(), ClientError> {
+        self.admin_change(Request::RecordCertificates(lotse_proto::RecordCertificatesRequest { certificates })).await
+    }
+
+    /// The client certificates the cluster has seen or had revoked, by
+    /// expiry (ADR 0091). Needs the cluster-admin role.
+    pub async fn describe_certificates(&self) -> Result<lotse_proto::DescribeCertificatesResponse, ClientError> {
+        let req = Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeCertificates(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
     /// Adds and removes role bindings; removals first.
     pub async fn alter_role_bindings(
         &self,

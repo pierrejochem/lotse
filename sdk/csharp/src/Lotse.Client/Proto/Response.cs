@@ -669,6 +669,39 @@ public abstract record Response
         }
     }
 
+    /// <summary>The client certificates the cluster has seen or had revoked, by expiry.</summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    /// <param name="NowMs">The answering node's clock in milliseconds since the epoch, which the states are computed against.</param>
+    /// <param name="Certificates">The certificates.</param>
+    public sealed record DescribeCertificates(
+        ErrorCode Error, LeaderHint? LeaderHint, ulong NowMs, IReadOnlyList<CertificateEntry> Certificates) : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code);
+            PutHint(w, LeaderHint);
+            w.U64(NowMs);
+            w.Array(Certificates, (w1, c) => w1.Bytes(c.Issuer).Bytes(c.Serial).String(c.Principal)
+                .U64(c.NotBeforeMs).U64(c.NotAfterMs).U64(c.FirstSeenMs).U64(c.LastSeenMs)
+                .U8(c.State).String(c.Reason).U64(c.RevokedAtMs));
+        }
+
+        internal static DescribeCertificates Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            LeaderHint? hint = GetHint(r);
+            ulong now = r.U64();
+            // issuer, serial, principal, four u64, state, reason, one u64: 4 + 4 + 2 + 4 * 8 + 1 + 2 + 8 bytes at least
+            List<CertificateEntry> certificates = r.Array(
+                53,
+                r1 => new CertificateEntry(
+                    r1.Bytes(), r1.Bytes(), r1.String(), r1.U64(), r1.U64(), r1.U64(), r1.U64(), r1.U8(), r1.String(), r1.U64()));
+            return new DescribeCertificates(error, hint, now, certificates);
+        }
+    }
+
     /// <summary>The tenants.</summary>
     /// <param name="Error">The outcome.</param>
     /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>

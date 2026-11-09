@@ -16,6 +16,7 @@ export const keys = {
   tenants: (c: string) => ['tenants', c] as const,
   users: (c: string) => ['users', c] as const,
   bindings: (c: string) => ['bindings', c] as const,
+  certificates: (c: string) => ['certificates', c] as const,
   metrics: (c: string, s: string, r: Range) => ['metrics', c, s, r] as const,
 };
 
@@ -225,11 +226,20 @@ export function useAlterBinding(cluster: string) {
   });
 }
 
+/** Client certificates the cluster has seen or had revoked, by expiry; cluster admins only (ADR 0091). */
+export const useCertificates = (cluster: string) =>
+  useQuery({
+    queryKey: keys.certificates(cluster),
+    queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/certificates', path(cluster))),
+  });
+
 /** Revokes one client certificate by issuer and serial; `confirm` is the serial typed again (ADR 0090). */
 export function useRevokeCertificate(cluster: string) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: S['RevokeCertificate']) =>
       unwrap(api.POST('/api/v1/clusters/{cluster}/certificates/revoke', { ...path(cluster), body })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.certificates(cluster) }),
   });
 }
 

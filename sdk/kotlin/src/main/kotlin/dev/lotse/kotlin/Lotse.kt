@@ -238,6 +238,9 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     ): Unit =
         io { java.revokeCertificate(issuer, serial, notAfterMs, reason) }
 
+    /** The client certificates the cluster has seen or had revoked, by expiry (cluster admin, ADR 0091). */
+    public suspend fun describeCertificates(): LotseClient.CertificateInventory = io { java.describeCertificates() }
+
     /** Adds a node to the cluster. */
     public suspend fun addNode(nodeId: Long, peer: String, client: String): Unit =
         io { java.addNode(nodeId, peer, client) }

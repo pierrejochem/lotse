@@ -19,7 +19,7 @@ use lotse_auth::scram::{ScramClient, ScramCredential};
 use lotse_auth::testing::TestIssuer;
 use lotse_client::{Client, ClientConfig, ClientError, Credentials};
 use lotse_log::LogConfig;
-use lotse_proto::{ErrorCode, Request, Response, SaslAuthenticateRequest, SaslHandshakeRequest};
+use lotse_proto::{ErrorCode, Request, Response, SaslAuthenticateRequest, SaslHandshakeRequest, certificate_state};
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{CertInfo, Clock, Conn, Link, Net, PeerIdentity};
@@ -596,6 +596,101 @@ fn a_revoked_certificate_ends_its_connections_and_is_refused_at_login() {
             assert!(conn_closed(&rt, &again).await, "a new connection with it ends");
             let fresh = raw_with_cert(&rt, "r5", "billing", &other).await;
             assert!(matches!(call(&rt, &fresh, 13, &meta).await, Response::Metadata(_)));
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn the_certificate_inventory_lists_what_nodes_accepted() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let day = 86_400_000u64;
+            let now = u64::try_from(rt.unix_time().as_millis()).unwrap();
+            let cert = |serial: u8, not_after_ms: u64| CertInfo {
+                issuer: [1; 32],
+                serial: vec![serial],
+                not_before_ms: now - 400 * day,
+                not_after_ms,
+            };
+            let (long, soon, over) = (cert(1, now + 100 * day), cert(2, now + 10 * day), cert(3, now - day));
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+
+            // Each connection shows its certificate and works.
+            let conns = [
+                raw_with_cert(&rt, "r1", "billing", &long).await,
+                raw_with_cert(&rt, "r2", "reports", &soon).await,
+                raw_with_cert(&rt, "r3", "old", &over).await,
+            ];
+            for (i, conn) in conns.iter().enumerate() {
+                assert!(matches!(call(&rt, conn, i as u32, &meta).await, Response::Metadata(_)));
+            }
+            rt.sleep(TICK * 100).await;
+            let listed = admin.describe_certificates().await.unwrap();
+            assert_eq!(listed.certificates.len(), 3, "{:?}", listed.certificates);
+            let view: Vec<(&str, u8)> = listed.certificates.iter().map(|c| (c.principal.as_str(), c.state)).collect();
+            assert_eq!(
+                view,
+                [
+                    ("old", certificate_state::EXPIRED),
+                    ("reports", certificate_state::EXPIRING),
+                    ("billing", certificate_state::VALID),
+                ],
+                "by expiry, with how each stands"
+            );
+            let first = listed.certificates[2].first_seen_ms;
+            assert!(first > 0 && listed.certificates[2].not_after_ms == now + 100 * day);
+
+            // The same certificate on new connections is still one entry,
+            // first seen when it was.
+            rt.sleep(TICK * 100).await;
+            for i in 0..5 {
+                let again = raw_with_cert(&rt, &format!("q{i}"), "billing", &long).await;
+                assert!(matches!(call(&rt, &again, 20, &meta).await, Response::Metadata(_)));
+            }
+            rt.sleep(TICK * 100).await;
+            let listed = admin.describe_certificates().await.unwrap();
+            assert_eq!(listed.certificates.len(), 3);
+            assert_eq!(listed.certificates[2].first_seen_ms, first, "first seen stays");
+
+            // A revocation shows with its reason, and a certificate revoked
+            // before anyone saw it is listed too.
+            admin.revoke_certificate(long.issuer, &long.serial, long.not_after_ms, "laptop lost").await.unwrap();
+            let unseen = cert(9, now + 50 * day);
+            admin.revoke_certificate(unseen.issuer, &unseen.serial, unseen.not_after_ms, "never used").await.unwrap();
+            let listed = admin.describe_certificates().await.unwrap();
+            let lost = listed.certificates.iter().find(|c| c.serial[..] == [1]).expect("still listed");
+            assert_eq!(
+                (lost.state, lost.reason.as_str(), lost.principal.as_str()),
+                (certificate_state::REVOKED, "laptop lost", "billing")
+            );
+            let never = listed.certificates.iter().find(|c| c.serial[..] == [9]).expect("listed unseen");
+            assert_eq!(
+                (never.state, never.principal.as_str(), never.first_seen_ms),
+                (certificate_state::REVOKED, "", 0)
+            );
+
+            // Only a cluster admin lists them, and only nodes report them.
+            let billing = Client::new(
+                rt.node("svc").with_identity(Some(PeerIdentity::Principal("reports".into()))).with_cert(soon.clone()),
+                ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect()),
+            );
+            let refused = billing.describe_certificates().await;
+            assert!(matches!(refused, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{refused:?}");
+            let report = Request::RecordCertificates(lotse_proto::RecordCertificatesRequest {
+                certificates: vec![lotse_proto::SeenCertificate {
+                    issuer: Bytes::from_static(&[1; 32]),
+                    serial: Bytes::from_static(&[0x42]),
+                    principal: "mallory".into(),
+                    not_before_ms: 0,
+                    not_after_ms: u64::MAX,
+                    seen_ms: now,
+                }],
+            });
+            let conn = raw_with_cert(&rt, "r9", "reports", &soon).await;
+            assert!(matches!(call(&rt, &conn, 30, &report).await, Response::Refused { .. }), "not from a client");
             stop(nodes).await;
         });
     });

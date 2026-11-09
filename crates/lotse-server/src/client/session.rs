@@ -34,6 +34,8 @@ pub(super) struct Session<R> {
     /// The certificate the connection showed, if a cluster admin may revoke
     /// it (ADR 0090).
     cert: Option<CertInfo>,
+    /// The principal that certificate names, when it authenticates (ADR 0091).
+    cert_name: Option<String>,
     /// When the session ends; `None` for one that lasts the connection
     /// (a certificate, or no authentication required).
     until: Option<Instant>,
@@ -64,13 +66,17 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
     ) -> Session<R> {
         // Node certificates are revoked in the CRL file only (ADR 0090).
         let cert = cert.filter(|_| !matches!(identity, Some(PeerIdentity::Node(_))));
+        let cert_name = match (&identity, auth.cfg.mtls) {
+            (Some(PeerIdentity::Principal(name)), true) => Some(name.clone()),
+            _ => None,
+        };
         let principal = match identity {
             Some(PeerIdentity::Node(id)) => Some(Principal::Node(id)),
             Some(PeerIdentity::Principal(name)) if auth.cfg.mtls => Some(Principal::User { name, groups: Vec::new() }),
             _ if !auth.cfg.required => Some(Principal::Anonymous),
             _ => None,
         };
-        Session { auth, principal, cert, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
+        Session { auth, principal, cert, cert_name, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
     }
 
     /// Who the connection acts as at `now`; `None` before authenticating or
@@ -89,6 +95,14 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         // it then authenticates as (ADR 0090).
         self.cert.as_ref().is_some_and(|c| self.auth.cert_revoked(c))
             || self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
+    }
+
+    /// Tells the node that the connection's certificate was accepted, for
+    /// the inventory (ADR 0091): only a certificate that authenticates.
+    pub(super) fn note_cert(&self, now_ms: u64) {
+        if let (Some(cert), Some(name)) = (&self.cert, &self.cert_name) {
+            self.auth.saw_cert(cert, name, now_ms);
+        }
     }
 
     /// Set when revocations change, so a waiting connection checks again.
