@@ -411,7 +411,8 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
         await SettledAsync("give-back");
         QueueConsumer c = await Client.SubscribeAsync("give-back", SubscribeOptions.WithCredit(10));
         Delivery kept = await Take(c); // the other two are pushed and buffered
-        await Task.Delay(300);
+        // Close only once the client holds all three pushes, so that the two unread ones are what the close gives back.
+        await RealWaits.UntilAsync("the node's pushes", () => Task.FromResult(c.PushedForTests >= 3), 30);
         await c.DisposeAsync();
         await using QueueConsumer next = await Client.SubscribeAsync("give-back", SubscribeOptions.WithCredit(10));
         var offsets = new List<ulong>();

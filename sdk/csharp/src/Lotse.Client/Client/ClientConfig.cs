@@ -36,6 +36,7 @@ public sealed class ClientConfig
         MetadataMaxAge = b.MetadataMaxAgeValue;
         Tenant = b.TenantValue;
         Credentials = b.CredentialsValue;
+        Time = b.TimeValue;
         _tls = b.TlsValue;
         _plaintextOnLoopback = b.PlaintextValue;
     }
@@ -86,6 +87,9 @@ public sealed class ClientConfig
     /// <summary>The SASL credentials, or <c>null</c>.</summary>
     public Credentials? Credentials { get; }
 
+    /// <summary>The clock a <see cref="GroupConsumer"/> measures its session by; <see cref="TimeProvider.System"/> unless a test set one.</summary>
+    internal TimeProvider Time { get; }
+
     internal ConnectionOptions ConnectionOptions()
     {
         ConnectionOptions.Builder b = Net.ConnectionOptions.CreateBuilder().WithRequestTimeout(RequestTimeout).WithCredentials(Credentials);
@@ -117,6 +121,7 @@ public sealed class ClientConfig
         internal Credentials? CredentialsValue;
         internal TlsConfig? TlsValue;
         internal bool PlaintextValue;
+        internal TimeProvider TimeValue = TimeProvider.System;
 
         internal Builder(IEnumerable<string> bootstrap)
         {
@@ -209,6 +214,13 @@ public sealed class ClientConfig
         public Builder WithMetadataMaxAge(TimeSpan age)
         {
             MetadataMaxAgeValue = Positive(age);
+            return this;
+        }
+
+        /// <summary>The clock a group member's session timeout follows; for tests. Default <see cref="TimeProvider.System"/>.</summary>
+        internal Builder WithTimeProvider(TimeProvider time)
+        {
+            TimeValue = time ?? throw new ArgumentNullException(nameof(time));
             return this;
         }
 

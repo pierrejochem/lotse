@@ -17,6 +17,19 @@ public sealed class GroupConsumerTests : IDisposable
     private const ulong StreamId = 7;
     private static readonly TimeSpan Wait = TimeSpan.FromMilliseconds(20);
 
+    // The member's clock: time passes only when a test says so.
+    private sealed class ManualTime : TimeProvider
+    {
+        private long _ms;
+
+        public override long TimestampFrequency => 1000;
+
+        public override long GetTimestamp() => Interlocked.Read(ref _ms);
+
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _ms, (long)by.TotalMilliseconds);
+    }
+
+    private readonly ManualTime _time = new();
     private readonly FakeNode _node = new(1);
     private LotseClient? _client;
 
@@ -110,7 +123,7 @@ public sealed class GroupConsumerTests : IDisposable
 
     private LotseClient Client()
     {
-        _client = new LotseClient(Fx.Config(_node).WithTransactionalId("t").WithRetryFor(TimeSpan.FromMilliseconds(400)).Build());
+        _client = new LotseClient(Fx.Config(_node).WithTimeProvider(_time).WithTransactionalId("t").WithRetryFor(TimeSpan.FromMilliseconds(400)).Build());
         return _client;
     }
 
@@ -154,7 +167,7 @@ public sealed class GroupConsumerTests : IDisposable
         await g.PollAsync(Wait);
         await g.PollAsync(Wait);
         Assert.Single(HeartbeatsSent()); // not due yet
-        await Task.Delay(250);
+        _time.Advance(TimeSpan.FromMilliseconds(250));
         await g.PollAsync(Wait);
         Assert.Equal(2, HeartbeatsSent().Count);
         Request.GroupHeartbeat second = HeartbeatsSent()[1];
@@ -232,7 +245,7 @@ public sealed class GroupConsumerTests : IDisposable
             "g", new[] { "s" }, GroupConfig.CreateBuilder().WithSessionTimeout(TimeSpan.FromMilliseconds(300)).Build());
         await g.PollAsync(Wait);
         Assert.Equal("s/0", Flat(g.Assignment));
-        await Task.Delay(350);
+        _time.Advance(TimeSpan.FromMilliseconds(350));
         await g.PollAsync(Wait);
         Assert.Equal(string.Empty, Flat(g.Assignment)); // the coordinator may have given it away
         Assert.Equal(string.Empty, g.MemberId);
@@ -247,7 +260,7 @@ public sealed class GroupConsumerTests : IDisposable
         // The fetch answer comes after the session timeout: the coordinator may have given the partition away.
         _fetch[0] = async offset =>
         {
-            await Task.Delay(400);
+            _time.Advance(TimeSpan.FromMilliseconds(400));
             return Fx.Fetched(StreamId, 0, ErrorCode.None, FetchTests.Data(offset, 0, false, "late"), 100, 100, 0);
         };
         await using GroupConsumer g = await Client().JoinGroupAsync(
