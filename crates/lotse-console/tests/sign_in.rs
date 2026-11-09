@@ -622,6 +622,19 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&admin_app, "GET", "/api/v1/clusters/local/bindings", None, None).await;
     assert!(!listed(&r), "{r:?}");
 
+    // A certificate is revoked by issuer and serial, by a cluster admin only.
+    let ends = lotse_console::time::now_ms() + 86_400_000;
+    let cert =
+        json!({"issuer": "ab".repeat(32), "serial": "0102", "not_after_ms": ends, "reason": "lost", "confirm": "0102"});
+    let r = call(&carol_app, "POST", "/api/v1/clusters/local/certificates/revoke", None, Some(cert.clone())).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "only cluster admins revoke certificates: {r:?}");
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificates/revoke", None, Some(cert.clone())).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    let expired =
+        json!({"issuer": "ab".repeat(32), "serial": "0102", "not_after_ms": 1, "reason": "", "confirm": "0102"});
+    let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificates/revoke", None, Some(expired)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "an expired certificate needs no revocation: {r:?}");
+
     // Revoking and deleting name the subject again.
     let revoke = |confirm: &str| json!({"subject": "carol", "group": false, "confirm": confirm});
     let r = call(&admin_app, "POST", "/api/v1/clusters/local/sessions/revoke", None, Some(revoke("carl"))).await;

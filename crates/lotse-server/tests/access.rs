@@ -546,6 +546,16 @@ fn only_nodes_write_markers_and_nodes_do_nothing_else() {
             ));
             let tenant = Request::CreateTenant(lotse_proto::CreateTenantRequest { name: "n".into() });
             assert!(matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &tenant).await, Response::Refused { .. }));
+            let revoke = Request::RevokeCertificate(lotse_proto::RevokeCertificateRequest {
+                issuer: bytes::Bytes::from_static(&[1; 32]),
+                serial: bytes::Bytes::from_static(&[1]),
+                not_after_ms: u64::MAX,
+                reason: String::new(),
+            });
+            assert!(
+                matches!(raw_call(&rt, Some(PeerIdentity::Node(2)), &revoke).await, Response::Refused { .. }),
+                "a node does not revoke certificates"
+            );
             for n in nodes {
                 n.handle().stop();
                 n.join().await.unwrap();

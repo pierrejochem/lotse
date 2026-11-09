@@ -310,3 +310,30 @@ async fn a_connection_ends_when_the_other_ends_certificate_expires() {
         assert!(refused(&conn).await, "an expired certificate cannot come back");
     }
 }
+
+#[tokio::test]
+async fn a_connection_reports_the_certificate_it_showed() {
+    let ca = DevCa::new();
+    let server = node(&ca, 1);
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let addr = l.local_addr();
+    let mut seen = Vec::new();
+    for who in ["alice", "bob"] {
+        let client = rt().with_tls(ca.client_tls(Some(who)).unwrap());
+        let _conn = client.connect(&addr, Link::Client).await.unwrap();
+        seen.push(accepted(&l).await.expect("a client is let in").peer_cert().expect("it showed a certificate"));
+    }
+    assert_eq!(seen[0].issuer, seen[1].issuer, "one CA, one issuer");
+    assert_ne!(seen[0].serial, seen[1].serial, "every certificate has a serial of its own");
+    assert!(!seen[0].serial.is_empty());
+    assert!(seen[0].not_before_ms < seen[0].not_after_ms);
+    // This crate reads the real clock (rule 1).
+    #[allow(clippy::disallowed_methods)]
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert!(seen[0].not_before_ms <= now_ms + 60_000 && now_ms < seen[0].not_after_ms, "valid now: {:?}", seen[0]);
+
+    // No certificate, nothing to report.
+    let anon = rt().with_tls(ca.client_tls(None).unwrap());
+    let _c = anon.connect(&addr, Link::Client).await.unwrap();
+    assert_eq!(accepted(&l).await.unwrap().peer_cert(), None);
+}

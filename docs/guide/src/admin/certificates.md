@@ -63,4 +63,8 @@ Then copy the list to every node. Within 10 s each node:
 
 Other connections stay open. Revocation is a file; there is no OCSP. Distributing the file to the nodes is up to you.
 
+### Revoke from the console or a client
+
+A cluster admin can also revoke one client certificate without the CA key and without copying a file: the console's *Users and access* page (tab *Certificates*) or `lotse-client`'s `revoke_certificate` send `RevokeCertificate` with the issuer (the SHA-256 of the issuer's name in DER form), the serial and the time the certificate expires ([ADR 0090](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0090-revoking-client-certificates-in-the-metadata-group.md)). Every node applies it at once, ends the connections that showed the certificate and refuses it until it expires. The CRL file stays for revoking offline and for node certificates, which this request does not cover.
+
 A revoked certificate does not end a user's other ways in. To cut off a user's sessions, see [Revoking sessions](authentication-and-roles.md#revoking-sessions).

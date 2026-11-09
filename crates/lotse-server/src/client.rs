@@ -142,7 +142,7 @@ pub(crate) async fn serve<R: Runtime>(
     auth: Arc<Auth<R>>,
 ) {
     let now_ms = u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX);
-    let mut session = Session::new(auth, conn.peer_identity(), now_ms);
+    let mut session = Session::new(auth, conn.peer_identity(), conn.peer_cert(), now_ms);
     let conn = Arc::new(conn);
     let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
     let closed = Signal::default();
@@ -450,6 +450,7 @@ impl Clients {
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
+            Request::RevokeCertificate(req) => self.revoke_certificate(outbox, id, req, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),

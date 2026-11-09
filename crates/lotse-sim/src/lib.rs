@@ -65,6 +65,7 @@ impl Sim {
             net,
             host: "sim".into(),
             identity: None,
+            cert: None,
             http: SimHttp::default(),
         };
         exec.block_on(test(rt), self.seed)
@@ -80,6 +81,7 @@ pub struct SimRuntime {
     net: SimNet,
     host: Arc<str>,
     identity: Option<lotse_rt::PeerIdentity>,
+    cert: Option<lotse_rt::CertInfo>,
     http: SimHttp,
 }
 
@@ -99,13 +101,25 @@ impl SimRuntime {
     /// and `host` as its name on the network (it listens on `host:port`).
     /// It proves no identity until given one.
     pub fn node(&self, host: &str) -> SimRuntime {
-        SimRuntime { disk: SimDisk::new(self.rng.clone()), host: host.into(), identity: None, ..self.clone() }
+        SimRuntime {
+            disk: SimDisk::new(self.rng.clone()),
+            host: host.into(),
+            identity: None,
+            cert: None,
+            ..self.clone()
+        }
     }
 
     /// The same runtime proving `identity` on every connection, as a
     /// certificate would once [`SimNet::verify_peers`] is on.
     pub fn with_identity(&self, identity: Option<lotse_rt::PeerIdentity>) -> SimRuntime {
         SimRuntime { identity, ..self.clone() }
+    }
+
+    /// The same runtime showing `cert` on every connection, as the certificate
+    /// that proves its identity would (ADR 0090).
+    pub fn with_cert(&self, cert: lotse_rt::CertInfo) -> SimRuntime {
+        SimRuntime { cert: Some(cert), ..self.clone() }
     }
 
     /// The documents served over HTTP, shared by every node.
@@ -241,10 +255,10 @@ impl lotse_rt::Net for SimRuntime {
     type Listener = SimListener;
 
     fn listen(&self, addr: &str, link: lotse_rt::Link) -> impl Future<Output = std::io::Result<SimListener>> + Send {
-        std::future::ready(self.net.listen(&self.host, self.identity.clone(), addr, link))
+        std::future::ready(self.net.listen(&self.host, self.identity.clone(), self.cert.clone(), addr, link))
     }
     fn connect(&self, addr: &str, link: lotse_rt::Link) -> impl Future<Output = std::io::Result<SimConn>> + Send {
-        std::future::ready(self.net.connect(&self.host, self.identity.clone(), addr, link))
+        std::future::ready(self.net.connect(&self.host, self.identity.clone(), self.cert.clone(), addr, link))
     }
     fn verifies_peers(&self) -> bool {
         self.net.verifies_peers()

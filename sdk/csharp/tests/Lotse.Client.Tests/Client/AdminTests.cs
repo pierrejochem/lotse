@@ -439,6 +439,12 @@ public sealed class AdminTests : IDisposable
         Assert.Equal((Messages.SubjectKind.Group, "ops", 0UL), (revoked[0].SubjectKind, revoked[0].Subject, revoked[0].BeforeMs));
         Assert.Equal((Messages.SubjectKind.User, "bob", 0UL), (revoked[1].SubjectKind, revoked[1].Subject, revoked[1].BeforeMs)); // the node reads its own clock
 
+        await _client!.RevokeCertificateAsync(new byte[32], new byte[] { 1, 0xab }, 1_800_000_000_000L, "lost");
+        Request.RevokeCertificate cert = _b.Requests<Request.RevokeCertificate>()[0];
+        Assert.Equal(new byte[32], cert.Issuer.ToByteArray());
+        Assert.Equal(new byte[] { 1, 0xab }, cert.Serial.ToByteArray());
+        Assert.Equal((1_800_000_000_000UL, "lost"), (cert.NotAfterMs, cert.Reason));
+
         await _client!.CreatePartitionsAsync("s", 4);
         Request.CreatePartitions parts = _b.Requests<Request.CreatePartitions>()[0];
         Assert.Equal((StreamId, 4u), (parts.ResourceId, parts.Count));
@@ -483,6 +489,7 @@ public sealed class AdminTests : IDisposable
             c => c.DeleteTenantAsync("t"),
             c => c.AlterRoleBindingsAsync(new[] { binding }),
             c => c.RevokeSessionsAsync("u", false),
+            c => c.RevokeCertificateAsync(new byte[32], new byte[] { 1 }, 0, string.Empty),
             c => c.AddNodeAsync(4, "n4:1", "n4:2"),
             c => c.RemoveNodeAsync(4),
             c => c.MoveLeaderAsync("s", 0, 1),

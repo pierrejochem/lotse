@@ -35,8 +35,8 @@ use lotse_proto::{
     CreatePartitionsRequest, CreateQueueRequest, CreateResponse, CreateStreamRequest, CreateTenantRequest,
     DeclareExchangeRequest, DeleteResourceRequest, DeleteTenantRequest, DescribeConfigsRequest,
     DescribeConfigsResponse, DescribeRoleBindingsResponse, DescribeTenantsResponse, DescribeUsersResponse, ErrorCode,
-    LeaderHint, OutcomeResponse, ResourceConfigs, Response, RevokeSessionsRequest, RoleBindingData, TenantEntry,
-    UserEntry, WhoAmIResponse, config_source, principal_kind, subject_kind,
+    LeaderHint, OutcomeResponse, ResourceConfigs, Response, RevokeCertificateRequest, RevokeSessionsRequest,
+    RoleBindingData, TenantEntry, UserEntry, WhoAmIResponse, config_source, principal_kind, subject_kind,
 };
 use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
@@ -45,8 +45,8 @@ use lotse_rt::{Instant, Runtime};
 use super::{Clients, ClusterView, Outbox, hint, outcome};
 use crate::auth::Principal;
 use crate::metadata::{
-    self, Change, Cleanup, DEFAULT_DELETE_RETENTION_MS, MAX_PARTITIONS, MetadataState, QueueChange, QueueLimits,
-    StreamChange, StreamSettings,
+    self, CertKey, Change, Cleanup, DEFAULT_DELETE_RETENTION_MS, MAX_PARTITIONS, MetadataState, QueueChange,
+    QueueLimits, StreamChange, StreamSettings,
 };
 use crate::replica::{Proposed, Replica, StateMachine};
 use crate::wire::GroupId;
@@ -872,6 +872,40 @@ impl Clients {
         };
         let before_ms = if req.before_ms == 0 { view.unix_ms } else { req.before_ms };
         let change = Change::RevokeSessions { subject, before_ms };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `RevokeCertificate` (ADR 0090): from when the change applies, every
+    /// node ends the connections that showed the certificate and refuses it
+    /// at login, until it expires.
+    pub(super) fn revoke_certificate<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: RevokeCertificateRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let invalid = |why: &str| outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(why), None));
+        let Ok(issuer) = <[u8; 32]>::try_from(&req.issuer[..]) else {
+            return invalid("the issuer is the 32 bytes of a SHA-256");
+        };
+        if req.serial.is_empty() || req.serial.len() > 64 {
+            return invalid("a serial has 1 to 64 bytes");
+        }
+        if req.reason.len() > 256 {
+            return invalid("the reason has at most 256 bytes");
+        }
+        if req.not_after_ms < view.unix_ms {
+            return invalid("the certificate has expired already: it is refused without a revocation");
+        }
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let cert = CertKey { issuer, serial: req.serial.to_vec() };
+        let change =
+            Change::RevokeCertificate { cert, not_after_ms: req.not_after_ms, at_ms: view.unix_ms, reason: req.reason };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

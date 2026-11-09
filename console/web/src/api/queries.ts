@@ -225,6 +225,14 @@ export function useAlterBinding(cluster: string) {
   });
 }
 
+/** Revokes one client certificate by issuer and serial; `confirm` is the serial typed again (ADR 0090). */
+export function useRevokeCertificate(cluster: string) {
+  return useMutation({
+    mutationFn: (body: S['RevokeCertificate']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/certificates/revoke', { ...path(cluster), body })),
+  });
+}
+
 /** Revokes the sessions of a user or an IdP group; `confirm` is the name typed again (ADR 0070). */
 export function useRevokeSessions(cluster: string) {
   return useMutation({

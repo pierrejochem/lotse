@@ -267,7 +267,8 @@ impl Access {
             | Request::AddNode(_)
             | Request::RemoveNode(_)
             | Request::MoveLeader(_)
-            | Request::RevokeSessions(_) => admin(),
+            | Request::RevokeSessions(_)
+            | Request::RevokeCertificate(_) => admin(),
             Request::DescribeNodes(_) => {
                 if self.sees_cluster(p) {
                     Ok(())

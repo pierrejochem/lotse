@@ -209,6 +209,17 @@ export interface RevokeSessionsRequest {
   readonly subject: string;
   readonly beforeMs: bigint;
 }
+/** `RevokeCertificate` (key 52): one client certificate, named by its issuer hash and serial. */
+export interface RevokeCertificateRequest {
+  readonly type: "RevokeCertificate";
+  /** SHA-256 of the issuer's distinguished name in DER form (32 bytes). */
+  readonly issuer: Uint8Array;
+  /** The serial number, big-endian. */
+  readonly serial: Uint8Array;
+  /** Milliseconds since the Unix epoch at which the certificate stops being valid. */
+  readonly notAfterMs: bigint;
+  readonly reason: string;
+}
 /** `PurgeQueue` (key 47) or `Requeue` (key 48). */
 export interface QueueActionRequest {
   readonly type: "QueueAction";
@@ -311,6 +322,7 @@ export type Request =
   | PublishRequest
   | CreatePartitionsRequest
   | RevokeSessionsRequest
+  | RevokeCertificateRequest
   | QueueActionRequest
   | DescribeConfigsRequest
   | AlterConfigsRequest
@@ -358,6 +370,7 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   Publish: ApiKey.PUBLISH,
   CreatePartitions: ApiKey.CREATE_PARTITIONS,
   RevokeSessions: ApiKey.REVOKE_SESSIONS,
+  RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
   QueueAction: ApiKey.PURGE_QUEUE, // or REQUEUE: see requestApiKey
   DescribeConfigs: ApiKey.DESCRIBE_CONFIGS,
   AlterConfigs: ApiKey.ALTER_CONFIGS,
@@ -586,6 +599,9 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RevokeSessions":
       w.u8(req.subjectKind).string(req.subject).u64(req.beforeMs).noTags();
+      return;
+    case "RevokeCertificate":
+      w.bytes(req.issuer).bytes(req.serial).u64(req.notAfterMs).string(req.reason).noTags();
       return;
     case "QueueAction":
       w.u64(req.queueId).u64(req.upTo).noTags();
@@ -911,6 +927,17 @@ export function readRequest(apiKey: number, r: Reader): Request {
         subjectKind: r.u8(),
         subject: r.string(),
         beforeMs: r.u64(),
+      };
+      r.tags();
+      return x;
+    }
+    case ApiKey.REVOKE_CERTIFICATE: {
+      const x: RevokeCertificateRequest = {
+        type: "RevokeCertificate",
+        issuer: r.bytes(),
+        serial: r.bytes(),
+        notAfterMs: r.u64(),
+        reason: r.string(),
       };
       r.tags();
       return x;

@@ -22,7 +22,7 @@ use lotse_log::LogConfig;
 use lotse_proto::{ErrorCode, Request, Response, SaslAuthenticateRequest, SaslHandshakeRequest};
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
-use lotse_rt::{Clock, Conn, Link, Net, PeerIdentity};
+use lotse_rt::{CertInfo, Clock, Conn, Link, Net, PeerIdentity};
 use lotse_server::{AuthConfig, Node, NodeConfig, OidcConfig, StateMachine, StreamConfig};
 use lotse_sim::{SIM_EPOCH, Sim, SimRuntime};
 
@@ -536,6 +536,66 @@ fn revoked_sessions_end_and_old_tokens_are_refused() {
             let fresh = signed(rt.unix_time().as_secs());
             let bob = client(&rt, "c4", bearer(fresh));
             bob.produce("s", 0, batch("fresh")).await.expect("a token issued after the revocation");
+            stop(nodes).await;
+        });
+    });
+}
+
+/// A connection to node 1's client port showing a certificate for `name`.
+async fn raw_with_cert(rt: &SimRuntime, host: &str, name: &str, cert: &CertInfo) -> lotse_sim::SimConn {
+    let rt = rt.node(host).with_identity(Some(PeerIdentity::Principal(name.into()))).with_cert(cert.clone());
+    rt.connect("n1:9000", Link::Client).await.unwrap()
+}
+
+#[test]
+fn a_revoked_certificate_ends_its_connections_and_is_refused_at_login() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let ends = u64::try_from(rt.unix_time().as_millis()).unwrap() + 86_400_000;
+            let cert = |issuer: u8, serial: u8| CertInfo {
+                issuer: [issuer; 32],
+                serial: vec![serial],
+                not_before_ms: 0,
+                not_after_ms: ends,
+            };
+            let (lost, other, elsewhere) = (cert(1, 1), cert(1, 2), cert(2, 1));
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+
+            // Two certificates of the same principal, and one of another issuer
+            // with the same serial, all work.
+            let a = raw_with_cert(&rt, "r1", "billing", &lost).await;
+            let b = raw_with_cert(&rt, "r2", "billing", &other).await;
+            let c = raw_with_cert(&rt, "r3", "billing", &elsewhere).await;
+            for (i, conn) in [&a, &b, &c].into_iter().enumerate() {
+                assert!(matches!(call(&rt, conn, i as u32, &meta).await, Response::Metadata(_)), "before");
+            }
+            rt.sleep(TICK * 10).await;
+
+            // Only a cluster admin revokes; a certificate does not make one.
+            let billing = Client::new(
+                rt.node("svc").with_identity(Some(PeerIdentity::Principal("billing".into()))).with_cert(other.clone()),
+                ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect()),
+            );
+            let refused = billing.revoke_certificate(lost.issuer, &lost.serial, ends, "no").await;
+            assert!(matches!(refused, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{refused:?}");
+            assert!(matches!(call(&rt, &a, 10, &meta).await, Response::Metadata(_)), "nothing was revoked");
+            // A certificate that ended already needs no revocation.
+            let past = admin.revoke_certificate(lost.issuer, &lost.serial, 1, "late").await;
+            assert!(matches!(past, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. })), "{past:?}");
+
+            admin.revoke_certificate(lost.issuer, &lost.serial, ends, "laptop lost").await.unwrap();
+            assert!(conn_closed(&rt, &a).await, "the connection that showed it ends");
+            assert!(matches!(call(&rt, &b, 11, &meta).await, Response::Metadata(_)), "another serial goes on");
+            assert!(matches!(call(&rt, &c, 12, &meta).await, Response::Metadata(_)), "another issuer goes on");
+
+            // It is refused at login from then on.
+            rt.sleep(TICK * 10).await;
+            let again = raw_with_cert(&rt, "r4", "billing", &lost).await;
+            assert!(conn_closed(&rt, &again).await, "a new connection with it ends");
+            let fresh = raw_with_cert(&rt, "r5", "billing", &other).await;
+            assert!(matches!(call(&rt, &fresh, 13, &meta).await, Response::Metadata(_)));
             stop(nodes).await;
         });
     });

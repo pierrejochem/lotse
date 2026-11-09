@@ -243,6 +243,12 @@ class AdminTest {
         assertEquals(Messages.SubjectKind.GROUP, b.requests(Request.RevokeSessions.class).get(0).subjectKind());
         client.revokeSessions("bob", false);
         assertEquals(Messages.SubjectKind.USER, b.requests(Request.RevokeSessions.class).get(1).subjectKind());
+        client.revokeCertificate(new byte[32], new byte[] {1, (byte) 0xab}, 1_800_000_000_000L, "lost");
+        Request.RevokeCertificate rc = b.requests(Request.RevokeCertificate.class).get(0);
+        assertEquals(32, rc.issuer().size());
+        assertEquals(2, rc.serial().size());
+        assertEquals(1_800_000_000_000L, rc.notAfterMs());
+        assertEquals("lost", rc.reason());
         client.createPartitions("s", 4);
         assertEquals(4, b.requests(Request.CreatePartitions.class).get(0).count());
         client.addNode(4, "n4:9100", "n4:9000");

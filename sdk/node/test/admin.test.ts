@@ -415,6 +415,21 @@ describe("admin calls against scripted brokers", () => {
         { type: "RevokeSessions", subjectKind: SubjectKind.USER, subject: "carol", beforeMs: 0n },
       ],
     );
+    const issuer = new Uint8Array(32).fill(7);
+    await client.revokeCertificate(issuer, Uint8Array.of(1, 0xab), 1_800_000_000_000, "laptop lost");
+    await client.revokeCertificate(issuer, Uint8Array.of(0x7f), 0n, "");
+    // Decoded byte fields are Buffers; compare them as such.
+    assert.deepEqual(b.requests("RevokeCertificate"), [
+      {
+        type: "RevokeCertificate",
+        issuer: Buffer.from(issuer),
+        serial: Buffer.from([1, 0xab]),
+        notAfterMs: 1_800_000_000_000n,
+        reason: "laptop lost",
+      },
+      { type: "RevokeCertificate", issuer: Buffer.from(issuer), serial: Buffer.from([0x7f]), notAfterMs: 0n, reason: "" },
+    ]);
+    await assert.rejects(client.revokeCertificate(new Uint8Array(31), Uint8Array.of(1), 0, ""), RangeError);
     await client.createPartitions("s", 4);
     assert.deepEqual(b.requests("CreatePartitions"), [{ type: "CreatePartitions", resourceId: STREAM_ID, count: 4 }]);
     await client.addNode(4, "n4:9100", "n4:9000");
@@ -525,6 +540,7 @@ describe("admin calls against scripted brokers", () => {
       client.describeRoleBindings(),
       client.whoAmI(),
       client.revokeSessions("u"),
+      client.revokeCertificate(new Uint8Array(32), Uint8Array.of(1), 0, ""),
       client.addNode(5, "p", "c"),
       client.removeNode(5),
       client.describeNodes(),

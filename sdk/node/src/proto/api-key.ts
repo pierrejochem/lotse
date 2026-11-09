@@ -52,6 +52,7 @@ export const ApiKey = {
   MOVE_LEADER: 49,
   REVOKE_SESSIONS: 50,
   CREATE_PARTITIONS: 51,
+  REVOKE_CERTIFICATE: 52,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -104,6 +105,7 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.MOVE_LEADER,
   ApiKey.REVOKE_SESSIONS,
   ApiKey.CREATE_PARTITIONS,
+  ApiKey.REVOKE_CERTIFICATE,
   ApiKey.PUBLISH,
 ];
 

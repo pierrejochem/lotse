@@ -1770,6 +1770,29 @@ export class LotseClient {
   }
 
   /**
+   * Revokes one client certificate (ADR 0090): each node ends the connections that showed it and refuses it from
+   * then on, until it expires at `notAfterMs` (milliseconds since the Unix epoch). `issuer` is the SHA-256 of the
+   * issuer's distinguished name in DER form (32 bytes) and `serial` the serial number, big-endian, as the certificate
+   * has them. The CRL file stays as it is. Needs the cluster-admin role.
+   */
+  async revokeCertificate(
+    issuer: Uint8Array,
+    serial: Uint8Array,
+    notAfterMs: bigint | number,
+    reason: string,
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    if (issuer.length !== 32) {
+      throw new RangeError(`the issuer hash is 32 bytes, not ${issuer.length}`);
+    }
+    return this.adminChange(
+      { type: "RevokeCertificate", issuer, serial, notAfterMs: BigInt(notAfterMs), reason },
+      options.signal,
+    );
+  }
+
+  /**
    * Adds node `nodeId` to the cluster, reached by nodes at `peer` and by clients at `client` (each `host:port`); start it
    * with `join` afterwards. Ids are never used twice. Needs the cluster-admin role.
    */

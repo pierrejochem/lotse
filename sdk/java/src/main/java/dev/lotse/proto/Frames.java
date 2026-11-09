@@ -137,6 +137,7 @@ public final class Frames {
             case 49 -> request = Request.MoveLeader.read(r);
             case 50 -> request = Request.RevokeSessions.read(r);
             case 51 -> request = Request.CreatePartitions.read(r);
+            case 52 -> request = Request.RevokeCertificate.read(r);
             case 9 -> request = Request.Publish.read(r);
             default -> throw new IllegalStateException("checked against the implemented keys");
         }
@@ -199,7 +200,7 @@ public final class Frames {
             case 10 -> response = Response.Subscribe.read(r);
             case 13, 14, 15, 24, 28, 44 -> response = Response.Outcome.read(r);
             case 21, 22, 23 -> response = Response.Create.read(r);
-            case 25, 27, 32, 34, 35, 37, 40, 41, 43, 49, 50, 51 -> response = Response.Admin.read(r);
+            case 25, 27, 32, 34, 35, 37, 40, 41, 43, 49, 50, 51, 52 -> response = Response.Admin.read(r);
             case 42 -> response = Response.DescribeNodes.read(r);
             case 26 -> response = Response.DescribeConfigs.read(r);
             case 29 -> response = Response.DescribeMetrics.read(r);

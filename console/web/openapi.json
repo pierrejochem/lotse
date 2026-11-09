@@ -188,6 +188,66 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/certificates/revoke": {
+      "post": {
+        "tags": [],
+        "summary": "Revokes one client certificate, by issuer and serial. Every node refuses\nit from then on and ends the connections that showed it. Destructive: the\nbody names the serial again.",
+        "operationId": "revoke_certificate",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeCertificate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/leaders": {
       "post": {
         "tags": [],
@@ -2759,6 +2819,40 @@
           "in_sync",
           "catching_up"
         ]
+      },
+      "RevokeCertificate": {
+        "type": "object",
+        "description": "Request to revoke one client certificate (ADR 0090). Destructive: the\nserial is typed again.",
+        "required": [
+          "issuer",
+          "serial",
+          "not_after_ms",
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "The serial, typed again."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "SHA-256 of the issuer's name in DER form, 64 hex digits."
+          },
+          "not_after_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the certificate stops being valid, ms since the Unix epoch. The\nrevocation is forgotten after that: an expired certificate is refused\nanyway.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why; may be empty."
+          },
+          "serial": {
+            "type": "string",
+            "description": "The serial number, hex."
+          }
+        }
       },
       "RevokeSessions": {
         "type": "object",

@@ -89,6 +89,16 @@ pub trait Cluster: Send + Sync + 'static {
     /// Adds or removes one binding.
     async fn alter_binding(&self, who: &Identity, binding: &BindingRow, add: bool) -> ApiResult<()>;
 
+    /// Revokes one client certificate (ADR 0090).
+    async fn revoke_certificate(
+        &self,
+        who: &Identity,
+        issuer: [u8; 32],
+        serial: &[u8],
+        not_after_ms: u64,
+        reason: &str,
+    ) -> ApiResult<()>;
+
     /// Revokes the sessions of a user or an IdP group (ADR 0070).
     async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()>;
 

@@ -1039,6 +1039,21 @@ impl Cluster for NativeCluster {
         self.seat(who).client.alter_role_bindings(add_list, remove_list).await.map_err(|e| refused("the binding", e))
     }
 
+    async fn revoke_certificate(
+        &self,
+        who: &Identity,
+        issuer: [u8; 32],
+        serial: &[u8],
+        not_after_ms: u64,
+        reason: &str,
+    ) -> ApiResult<()> {
+        self.seat(who)
+            .client
+            .revoke_certificate(issuer, serial, not_after_ms, reason)
+            .await
+            .map_err(|e| refused("the revocation", e))
+    }
+
     async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()> {
         self.seat(who).client.revoke_sessions(subject, group).await.map_err(|e| refused("the revocation", e))
     }

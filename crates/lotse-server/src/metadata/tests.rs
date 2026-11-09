@@ -435,6 +435,36 @@ fn revoked_sessions_only_move_forward_and_survive_a_snapshot() {
 }
 
 #[test]
+fn revoked_certificates_are_forgotten_once_expired_and_survive_a_snapshot() {
+    use crate::metadata::CertKey;
+    let key = |issuer: u8, serial: &[u8]| CertKey { issuer: [issuer; 32], serial: serial.to_vec() };
+    let revoke = |cert: CertKey, not_after_ms: u64, at_ms: u64| Change::RevokeCertificate {
+        cert,
+        not_after_ms,
+        at_ms,
+        reason: "lost".into(),
+    };
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&revoke(key(1, &[0x0a]), 10_000, 1_000))).unwrap();
+    s.apply(2, &payload(&revoke(key(1, &[0x0b]), 2_000, 1_500))).unwrap();
+    // A repeat changes nothing, and the issuer is part of the key.
+    s.apply(3, &payload(&revoke(key(1, &[0x0a]), 99_000, 1_800))).unwrap();
+    s.apply(4, &payload(&revoke(key(2, &[0x0a]), 10_000, 1_900))).unwrap();
+    assert_eq!(s.revoked_certs.len(), 3);
+    assert_eq!(s.revoked_certs[&key(1, &[0x0a])].not_after_ms, 10_000, "the first revocation stands");
+    assert!(s.pins.is_empty() && s.incarnations.is_empty(), "the sections before it are written empty");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // A later revocation drops what ended before it.
+    s.apply(5, &payload(&revoke(key(3, &[0x01]), 50_000, 5_000))).unwrap();
+    assert!(!s.revoked_certs.contains_key(&key(1, &[0x0b])), "an expired certificate is forgotten");
+    assert_eq!(s.revoked_certs.len(), 3);
+    // One that has expired already is not recorded.
+    s.apply(6, &payload(&revoke(key(4, &[0x02]), 4_000, 6_000))).unwrap();
+    assert!(!s.revoked_certs.contains_key(&key(4, &[0x02])));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
 fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
     let mut s = MetadataState::default();
     let create = Change::CreateStream {

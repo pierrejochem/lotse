@@ -95,6 +95,10 @@ pub(crate) enum Change {
     /// Sessions of a user or group authenticated before `before_ms`, and
     /// its tokens issued before it, no longer count (ADR 0070).
     RevokeSessions { subject: Subject, before_ms: u64 },
+    /// A client certificate, by issuer and serial, no longer counts
+    /// (ADR 0090). `at_ms` is the proposing leader's clock; a revocation
+    /// whose certificate ended before it is dropped when this one applies.
+    RevokeCertificate { cert: CertKey, not_after_ms: u64, at_ms: u64, reason: String },
     /// New partitions for a runtime stream, one voter set each, numbered on
     /// from its last (ADR 0074).
     AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
@@ -364,6 +368,8 @@ pub(crate) struct MetadataState {
     /// since the Unix epoch before which its sessions and tokens no longer
     /// count. Only ever raised.
     pub(crate) revocations: BTreeMap<Subject, u64>,
+    /// Revoked client certificates (ADR 0090), until they expire.
+    pub(crate) revoked_certs: BTreeMap<CertKey, RevokedCert>,
     /// Nodes added at runtime; those from the configuration are not here.
     pub(crate) nodes: BTreeMap<NodeId, NodeMeta>,
     /// Nodes being drained.
@@ -688,6 +694,16 @@ impl MetadataState {
                 let at = self.revocations.entry(subject).or_insert(0);
                 *at = (*at).max(before_ms);
             }
+            Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
+                // An expired certificate is refused by its validity anyway:
+                // forget those, by the time the leader proposed this at, so
+                // that every replica forgets the same ones.
+                self.revoked_certs.retain(|_, r| r.not_after_ms >= at_ms);
+                // The first revocation stands; a repeat changes nothing.
+                if not_after_ms >= at_ms {
+                    self.revoked_certs.entry(cert).or_insert(RevokedCert { not_after_ms, at_ms, reason });
+                }
+            }
         }
         Ok(())
     }
@@ -794,7 +810,7 @@ impl MetadataState {
         // node from before them: pins (ADR 0065), compaction settings (ADR
         // 0067), tenants' incarnations (ADR 0069), revoked sessions (ADR
         // 0070), single active consumer queues (ADR 0076), priority levels
-        // (ADR 0078). A later section needs the ones before it, empty or not.
+        // (ADR 0078), revoked certificates (ADR 0090). A later section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -803,7 +819,9 @@ impl MetadataState {
             .filter(|q| q.limits.priority_levels != 0)
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
-        let sections = if !levels.is_empty() {
+        let sections = if !self.revoked_certs.is_empty() {
+            7
+        } else if !levels.is_empty() {
             6
         } else if !single.is_empty() {
             5
@@ -855,6 +873,15 @@ impl MetadataState {
             for (id, n) in levels {
                 b.put_u64_le(id);
                 b.put_u8(n);
+            }
+        }
+        if sections >= 7 {
+            b.put_u32_le(self.revoked_certs.len() as u32);
+            for (cert, r) in &self.revoked_certs {
+                put_cert_key(&mut b, cert);
+                b.put_u64_le(r.not_after_ms);
+                b.put_u64_le(r.at_ms);
+                put_str(&mut b, &r.reason);
             }
         }
         b.freeze()
@@ -991,6 +1018,14 @@ impl MetadataState {
                 let id = b.get_u64_le();
                 let levels = b.get_u8();
                 s.queues.get_mut(&id).ok_or("priority levels of an unknown queue")?.limits.priority_levels = levels;
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let cert = get_cert_key(b)?;
+                need(b, 16)?;
+                let (not_after_ms, at_ms) = (b.get_u64_le(), b.get_u64_le());
+                s.revoked_certs.insert(cert, RevokedCert { not_after_ms, at_ms, reason: get_str(b)? });
             }
         }
         if b.has_remaining() {
@@ -1137,6 +1172,13 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(18);
             put_subject(&mut b, subject);
             b.put_u64_le(*before_ms);
+        }
+        Change::RevokeCertificate { cert, not_after_ms, at_ms, reason } => {
+            b.put_u8(20);
+            put_cert_key(&mut b, cert);
+            b.put_u64_le(*not_after_ms);
+            b.put_u64_le(*at_ms);
+            put_str(&mut b, reason);
         }
         Change::SetUser { user, credential } => {
             b.put_u8(7);
@@ -1313,6 +1355,12 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let partitions = (0..count(b)?).map(|_| get_nodes(b)).collect::<Result<_, _>>()?;
             Change::AddPartitions { resource_id, partitions }
         }
+        20 => {
+            let cert = get_cert_key(b)?;
+            need(b, 16)?;
+            let (not_after_ms, at_ms) = (b.get_u64_le(), b.get_u64_le());
+            Change::RevokeCertificate { cert, not_after_ms, at_ms, reason: get_str(b)? }
+        }
         18 => {
             let subject = get_subject(b)?;
             need(b, 8)?;
@@ -1481,6 +1529,41 @@ fn get_compaction(b: &mut &[u8], s: &mut StreamSettings) -> Result<(), String> {
     s.cleanup = if cleanup == i64::MIN { None } else { Some(Cleanup::from_code(cleanup)?) };
     s.delete_retention_ms = Some(b.get_i64_le()).filter(|v| *v != i64::MIN);
     Ok(())
+}
+
+/// A client certificate as revocation names it (ADR 0090): the issuer by the
+/// SHA-256 of its name, and the serial.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CertKey {
+    pub(crate) issuer: [u8; 32],
+    pub(crate) serial: Vec<u8>,
+}
+
+/// A revoked certificate, until it expires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RevokedCert {
+    /// Milliseconds since the Unix epoch at which the certificate expires.
+    pub(crate) not_after_ms: u64,
+    /// The leader's clock when it was revoked.
+    pub(crate) at_ms: u64,
+    pub(crate) reason: String,
+}
+
+fn put_cert_key(b: &mut BytesMut, k: &CertKey) {
+    b.put_slice(&k.issuer);
+    b.put_u16_le(k.serial.len() as u16);
+    b.put_slice(&k.serial);
+}
+
+fn get_cert_key(b: &mut &[u8]) -> Result<CertKey, String> {
+    need(b, 34)?;
+    let mut issuer = [0u8; 32];
+    b.copy_to_slice(&mut issuer);
+    let n = usize::from(b.get_u16_le());
+    need(b, n)?;
+    let mut serial = vec![0u8; n];
+    b.copy_to_slice(&mut serial);
+    Ok(CertKey { issuer, serial })
 }
 
 fn put_subject(b: &mut BytesMut, subject: &Subject) {
