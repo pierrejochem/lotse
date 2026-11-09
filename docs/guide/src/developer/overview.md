@@ -9,14 +9,18 @@ Lotse speaks one binary protocol, the native protocol, over TLS 1.3. Every clien
 | Rust | `crates/lotse-client` | The reference. Written against the `lotse-rt` traits, so it runs on Tokio and in the deterministic simulation. |
 | Java | `sdk/java` | Java 17, Gradle. No runtime dependencies; zstd and lz4 batches need two optional ones. |
 | Kotlin | `sdk/kotlin` | A thin layer on the Java client: `suspend` functions on `Dispatchers.IO`, flows and `transaction { }`. |
+| C# | `sdk/csharp` | .NET 10. No dependencies; zstd and LZ4 batches need the optional `Lotse.Client.Codecs` package. |
+| Node.js | `sdk/node` | TypeScript, Node.js 20 and later. No runtime dependencies; zstd needs Node.js 22.15 or later. |
 
-The Rust code is the authority. `lotse-proto` and `lotse-record` define every byte on the wire; `lotse-client` defines how a client behaves: routing to leaders, retries, idempotent sequences, transactions, groups. The Java client follows it rule for rule. The reasons are in [ADR 0056](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0056-client-sdks-for-the-jvm.md); the Kotlin layer is in [ADR 0080](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0080-kotlin-layer-on-dispatchers-io.md).
+The Rust code is the authority. `lotse-proto` and `lotse-record` define every byte on the wire; `lotse-client` defines how a client behaves: routing to leaders, retries, idempotent sequences, transactions, groups. The Java, C# and Node.js clients follow it rule for rule. The reasons are in [ADR 0056](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0056-client-sdks-for-the-jvm.md); the Kotlin layer is in [ADR 0080](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0080-kotlin-layer-on-dispatchers-io.md); the C# and Node.js clients are in [ADR 0083](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0083-client-sdks-for-csharp-and-nodejs.md), their codecs in [ADR 0084](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0084-codecs-in-the-csharp-sdk.md) and [ADR 0085](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0085-codecs-in-the-nodejs-sdk.md).
 
 Pages in this guide:
 
 - [The native protocol](protocol.md): byte layouts and client behaviour, for anyone writing a client in another language.
 - [Rust client](rust-client.md)
 - [Java and Kotlin](java-and-kotlin.md)
+- [C#](csharp.md)
+- [Node.js](nodejs.md)
 - [Exactly-once recipes](exactly-once.md)
 - [Contributing](contributing.md)
 
@@ -45,13 +49,13 @@ Regenerate the vectors after you change a message or the batch format:
 make sdk-vectors
 ```
 
-`make sdk-test` first checks that `sdk/conformance` still matches what the Rust codec writes, then runs the Java SDK and Kotlin layer tests and compiles their examples (`./gradlew check` in `sdk/java` and `sdk/kotlin`):
+`make sdk-test` first checks that `sdk/conformance` still matches what the Rust codec writes, then runs the Java SDK and Kotlin layer tests and compiles their examples (`./gradlew check` in `sdk/java` and `sdk/kotlin`), then the C# tests (`dotnet test` in `sdk/csharp`) and the Node.js tests (`npm test` in `sdk/node`). `make sdk-csharp-test` and `make sdk-node-test` run one each:
 
 ```sh
 make sdk-test
 ```
 
-You need a JDK 17 or later. Set `LOTSE_BIN` to a `lotse` executable to add the TLS and real-node tests. CI runs the same target with `LOTSE_BIN` set to the binary it builds.
+You need a JDK 17 or later, the .NET 10 SDK and Node.js 20 or later. Set `LOTSE_BIN` to a `lotse` executable to add the TLS and real-node tests. CI runs the same target with `LOTSE_BIN` set to the binary it builds, and runs the Node.js tests once more on Node.js 20.
 
 ## Writing a client in another language
 

@@ -197,25 +197,41 @@ class RealQueueTest {
 
     @Test
     void closingGivesBackWhatWasPushedButNotHandedOut() throws Exception {
-        client.createQueue("give-back");
-        produce("give-back", 3);
-        settled("give-back");
-        long kept;
-        QueueConsumer first = client.subscribe("give-back", SubscribeOptions.withCredit(10));
-        kept = take(first).offset(); // the other two are pushed, some of them perhaps still unread
-        Thread.sleep(300);
-        first.close();
-        Set<Long> offsets = new HashSet<>();
-        try (QueueConsumer next = client.subscribe("give-back", SubscribeOptions.withCredit(10))) {
-            for (int i = 0; i < 2; i++) {
-                Delivery d = next.poll(Duration.ofSeconds(10));
-                assertNotNull(d, "given back at once, not after the ack timeout");
-                offsets.add(d.offset());
-                next.ack(d);
+        // A new queue leader redelivers everything that is not acked and starts the counts again (ADR 0031), so
+        // "the one handed out stays with the first consumer" holds only while the leader stays the same. A run in
+        // which it changed says nothing about close and is repeated on a fresh queue; a failure with the same leader
+        // before and after is a real one and reports both.
+        for (int attempt = 0; ; attempt++) {
+            String queue = "give-back-" + attempt;
+            client.createQueue(queue);
+            produce(queue, 3);
+            settled(queue);
+            int leaderBefore = leaderOf(queue);
+            long kept;
+            QueueConsumer first = client.subscribe(queue, SubscribeOptions.withCredit(10));
+            kept = take(first).offset(); // the other two are pushed, some of them perhaps still unread
+            Thread.sleep(300);
+            first.close();
+            Set<Long> offsets = new HashSet<>();
+            try (QueueConsumer next = client.subscribe(queue, SubscribeOptions.withCredit(10))) {
+                for (int i = 0; i < 2; i++) {
+                    Delivery d = next.poll(Duration.ofSeconds(10));
+                    assertNotNull(d, "given back at once, not after the ack timeout");
+                    offsets.add(d.offset());
+                    next.ack(d);
+                }
             }
+            assertEquals(2, offsets.size());
+            int leaderAfter = leaderOf(queue);
+            if (leaderBefore != leaderAfter && attempt < 2) {
+                continue;
+            }
+            assertTrue(
+                    !offsets.contains(kept),
+                    "the one handed out stays with the first consumer: kept " + kept + ", got " + offsets
+                            + ", leader " + leaderBefore + " before and " + leaderAfter + " after");
+            return;
         }
-        assertEquals(2, offsets.size());
-        assertTrue(!offsets.contains(kept), "the one handed out stays with the first consumer");
     }
 
     @Test

@@ -2,7 +2,7 @@
 ADDR ?= 127.0.0.1:8080
 
 .DEFAULT_GOAL := help
-.PHONY: help dev stop build web test lint fmt check clean sdk-test sdk-vectors sdk-vectors-check
+.PHONY: help dev stop build web test lint fmt check clean sdk-test sdk-csharp-test sdk-node-test sdk-vectors sdk-vectors-check
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-18s %s\n", $$1, $$2}'
@@ -49,17 +49,16 @@ sdk-vectors-check: ## Fail if sdk/conformance differs from what the Rust codec w
 		$(VECTORS) "$$dir" && \
 		diff -r sdk/conformance "$$dir" && echo "sdk/conformance matches the Rust codec"
 
-sdk-test: sdk-vectors-check ## Check the vectors, then test the Java SDK and the Kotlin layer and compile their examples
+sdk-test: sdk-vectors-check ## Check the vectors, then test the Java, Kotlin, C# and Node.js SDKs (LOTSE_BIN adds the real-node tests)
 	cd sdk/java && ./gradlew check
 	cd sdk/kotlin && ./gradlew check
+	$(MAKE) sdk-csharp-test sdk-node-test
 
-.PHONY: sdk-node-test
+sdk-csharp-test: ## Test the C# SDK, with and without the codecs (needs the .NET 10 SDK on PATH)
+	cd sdk/csharp && dotnet test Lotse.sln
+
 sdk-node-test: ## Test the Node.js SDK (needs Node.js 20+)
 	cd sdk/node && npm ci && npm test
-
-.PHONY: sdk-csharp-test
-sdk-csharp-test: ## Test the C# SDK (needs the .NET 10 SDK on PATH)
-	cd sdk/csharp && dotnet test
 
 clean: ## Remove build output of the web app and cargo
 	rm -rf console/web/dist

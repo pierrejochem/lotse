@@ -25,6 +25,8 @@
 - [The native protocol](developer/protocol.md)
 - [Rust client](developer/rust-client.md)
 - [Java and Kotlin](developer/java-and-kotlin.md)
+- [C#](developer/csharp.md)
+- [Node.js](developer/nodejs.md)
 - [Exactly-once recipes](developer/exactly-once.md)
 - [Contributing](developer/contributing.md)
 

@@ -74,9 +74,11 @@ jobs:
       - run: docker build -f packaging/Dockerfile -t lotse:ci .
       - run: docker run --rm lotse:ci --version
 
-  # The JVM SDK (ADR 0056): the vectors drift check, the Java tests with and
-  # without the codec libraries, the TLS and real-node tests against the lotse
-  # executable built here, the Kotlin layer's tests, and both builds' examples.
+  # The client SDKs (ADR 0056, ADR 0083): the vectors drift check, the Java
+  # tests with and without the codec libraries, the TLS and real-node tests
+  # against the lotse executable built here, the Kotlin layer's tests, and both
+  # builds' examples; then the C# tests (with the codecs, and a project without)
+  # and the Node.js tests on Node.js 24, which has zstd.
   sdk:
     runs-on: ubuntu-latest
     steps:
@@ -91,7 +93,39 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: sdk/csharp/global.json
+          cache: true
+          cache-dependency-path: sdk/csharp/**/*.csproj
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
       - run: cargo build -p lotse-node
       - run: make sdk-test
+        env:
+          LOTSE_BIN: ${{ github.workspace }}/target/debug/lotse
+
+  # The Node.js SDK on the oldest Node.js it supports (20): zstd is not in
+  # node:zlib there, lz4 and everything else must work. A job of its own so the
+  # required check `sdk` keeps its name.
+  sdk-node-20:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - run: cargo build -p lotse-node
+      - run: make sdk-node-test
         env:
           LOTSE_BIN: ${{ github.workspace }}/target/debug/lotse

@@ -4,7 +4,7 @@ A C# client for the Lotse native protocol. It follows the Java SDK rule for rule
 
 ## Status
 
-Phase 6 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, the queue consumer (`QueueConsumer`, `CreateQueueAsync`), transactions (`Transaction`), publishing through exchanges, consumer groups (`GroupConsumer`), and now the admin calls.
+Phase 7 of 8 is done: the protocol codec and record batch, connections and authentication, the stream client (`LotseClient`) with the optional zstd and LZ4 codecs, the queue consumer (`QueueConsumer`, `CreateQueueAsync`), transactions (`Transaction`), publishing through exchanges, consumer groups (`GroupConsumer`), the admin calls, and now the examples.
 
 | Namespace | What |
 | --- | --- |
@@ -21,7 +21,9 @@ Two packages, two projects:
 | `src/Lotse.Client` (`Lotse.Client`) | Everything above | none beyond the base class library |
 | `src/Lotse.Client.Codecs` (`Lotse.Client.Codecs`) | zstd and LZ4 for compressed batches, optional ([ADR 0084](../../docs/adr/0084-codecs-in-the-csharp-sdk.md)) | ZstdSharp.Port 0.8.6, K4os.Compression.LZ4.Streams 1.3.8 |
 
-Not yet: examples.
+| `examples/Lotse.Client.Examples` | Four programs to run against a cluster, see [Examples](#examples) | the client |
+
+Not yet: the CI job and the documentation guide (phase 8).
 
 ## Streams
 
@@ -291,6 +293,35 @@ await client.ProduceBatchAsync("orders", 0, builder.Finish());      // the node 
 Without the package a compressed batch still parses: its header and checksum are checked. Reading its records, or building a compressed batch, throws `RecordFormatException` of kind `UnsupportedCompression` that names the package to add; it is never reported as damage, and `Fetched.CommittedMessages()` passes it on as it is. A library that is found but cannot be loaded is named the same way. Plain batches need no package. Nothing compresses by default; the client sends a batch as it was built.
 
 Limits as in the broker: a record block is one zstd frame or one LZ4 frame; decompression stops one byte past 16 MiB and the batch is refused (`TooLarge`); a block that does not decode is `Malformed`; the builder writes zstd at level 3 and LZ4 as independent 64 KiB blocks, and refuses records over 16 MiB.
+
+## Examples
+
+`examples/Lotse.Client.Examples` is one console program with a command per example. It is part of `Lotse.sln`, so `dotnet build` and `make sdk-csharp-test` compile it and the examples cannot drift from the API. The first three do what the Java examples in `sdk/java/src/examples` do, with the same output; the fourth shows the shape of the C# client.
+
+```sh
+cd sdk/csharp
+dotnet run --project examples/Lotse.Client.Examples -- stream
+```
+
+| Command | What it does |
+| --- | --- |
+| `stream` | Creates the stream `example-orders` (2 partitions, 3 replicas), writes ten messages by key and reads them back. |
+| `queue` | A work queue `example-jobs` with a dead-letter queue: `job-3` fails every time and is requeued with `NackAfterAsync` after one second; after three deliveries the queue moves it to `example-jobs-dead`, and the program reads it there with the reason and the delivery count. |
+| `exactly-once` | A group member reads the orders of `example-orders` (run `stream` first) and writes an invoice for each to `example-invoices`. The invoices of one poll and the group's offsets commit in one transaction (`SendOffsetsAsync`); on a failure the transaction aborts and the member reads the same orders again. It polls for 20 s. |
+| `idiomatic` | Its own resources (names ending in `-cs`): a queue read with `await foreach` over `DeliveriesAsync`, a group whose orders are invoiced in a transaction held by `await using`, and the invoices read back with `await foreach` over `RecordsAsync`. |
+
+Resources made by an earlier run are reused, so a second `queue` run adds to the same queues, and a second `exactly-once` run finds the group's committed offsets at the end of the orders and invoices nothing new.
+
+The examples read their connection from the environment:
+
+| Variable | Meaning |
+| --- | --- |
+| `LOTSE_BOOTSTRAP` | Brokers, `host:port` separated by commas. Default `127.0.0.1:9092`. |
+| `LOTSE_CA` | The CA's PEM file. Turns TLS 1.3 on. Without it the examples use plain TCP, which the client allows on loopback only. |
+| `LOTSE_CERT`, `LOTSE_KEY` | A client certificate and its key, for a cluster that logs in by certificate. Need `LOTSE_CA`. |
+| `LOTSE_USER`, `LOTSE_PASSWORD` | A SCRAM-SHA-512 login, if the cluster asks for one. |
+
+A cluster to try them on: three nodes on plain loopback TCP from a cluster file with `[tls] plaintext_on_loopback = true` and `[auth] required = false` (the real-node tests in `tests/Lotse.Client.Tests/Client/RealCluster.cs` write one), started with `lotse run --config cluster.toml --node <id>`; pass the nodes' `client` addresses in `LOTSE_BOOTSTRAP`.
 
 ## Build and test
 
