@@ -623,3 +623,30 @@ describe("admin calls against scripted brokers", () => {
     }
   });
 });
+
+describe("finding the metadata leader", () => {
+  // A leader this client has no address for is looked up with every broker, not only the first that answers: here that
+  // one lags and lists neither the leader nor the node that names it (seed 4638 of the membership simulation).
+  test("a leader only some brokers know is found", async () => {
+    const nodes = await startNodes(3);
+    const [a, b, c] = nodes as [FakeNode, FakeNode, FakeNode];
+    const client = new LotseClient(fx.config([a, b], { retryForMs: 2_000 }));
+    try {
+      const describe = (error: ErrorCodeValue, leaderHint: LeaderHint | null, found: boolean): Response => ({
+        type: "DescribeNodes",
+        error,
+        leaderHint,
+        nodes: found ? [{ nodeId: 3n, peer: "c:7000", client: "c:9000", state: 0, replicas: 0, moving: 0 }] : [],
+      });
+      a.on((_n, r) => (r.type === "Metadata" ? fx.metadata([a]) : describe(ErrorCode.NOT_LEADER, null, false)));
+      b.on((_n, r) =>
+        r.type === "Metadata" ? fx.metadata([a, b, c]) : describe(ErrorCode.NOT_LEADER, { leader: 3, term: 1n }, false),
+      );
+      c.on((_n, r) => (r.type === "Metadata" ? fx.metadata([a, b, c]) : describe(ErrorCode.NONE, null, true)));
+      assert.deepEqual((await client.describeNodes()).map((n) => n.nodeId), [3n]);
+    } finally {
+      client.close();
+      await closeAll(nodes);
+    }
+  });
+});

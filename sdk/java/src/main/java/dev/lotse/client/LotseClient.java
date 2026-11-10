@@ -1691,16 +1691,46 @@ public final class LotseClient implements AutoCloseable {
         throw Attempt.fail(new ClientException.Broker(error, message));
     }
 
+    /**
+     * Learns the address of node {@code node} from the first broker whose metadata lists it. Not from the first broker
+     * that answers: one that lags (cut off from the metadata group) may not know the leader the others name, and would
+     * answer first every time. Only that address is taken; what else the answer says is left alone.
+     */
+    private void findBroker(long node) {
+        Set<Address> sorted = new TreeSet<>(java.util.Comparator.comparing(Address::toString));
+        sorted.addAll(candidates());
+        for (Address addr : sorted) {
+            try {
+                if (call(addr, new Request.Metadata(List.of())) instanceof Response.Metadata m) {
+                    for (Messages.Broker b : m.brokers()) {
+                        if (b.nodeId() == node) {
+                            synchronized (state) {
+                                brokers.put(node, new Address(b.host(), b.port()));
+                            }
+                            return;
+                        }
+                    }
+                }
+            } catch (CallFailure e) {
+                // a broker that does not answer knows nothing
+            }
+        }
+    }
+
     /** Sends an admin request to the metadata leader, or any broker if it is not known. */
     private Response callAdmin(Request req) {
         Long leader = metadataLeader;
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
-        // nodes first, or it keeps asking the others.
+        // nodes first, or it keeps asking the others. If the broker that answers does not know it either (one that
+        // lags), ask the others for its address.
         if (leader != null && addressOf(leader) == null) {
             try {
                 metadata();
             } catch (ClientException e) {
                 // the retry loop reports what is still wrong
+            }
+            if (addressOf(leader) == null) {
+                findBroker(leader);
             }
         }
         Address addr = leader == null ? null : addressOf(leader);
