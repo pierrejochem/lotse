@@ -11,6 +11,7 @@ publish.workspace = true
 lotse-rt.workspace = true
 lotse-record.workspace = true
 bytes.workspace = true
+crc32c.workspace = true
 thiserror.workspace = true
 
 [lints]

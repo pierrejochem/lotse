@@ -375,6 +375,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             // earlier: the log starts at the snapshot again.
             log.trim_before(snap_index).await?;
         }
+        state.txns.forget_aborted_before(log.start_offset());
         let mut runs =
             if snapshot.is_some() { TermRuns::with_snapshot(snap_index, snap_term) } else { TermRuns::new() };
         let mut configs = Vec::new();
@@ -635,6 +636,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             let d = self.state.restore(&snap.data)?;
             self.sm.restore(&d).map_err(Error::Corrupt)?;
             self.log.reset(snap.meta.index).await?;
+            self.state.txns.forget_aborted_before(self.log.start_offset());
             self.applied = snap.meta.index;
             let old = self.snapshot.replace((snap.meta, snap.data));
             self.older.supersede(old, &self.raft);
@@ -805,6 +807,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.older.supersede(old, &self.raft);
         self.boundaries.retain(|&i, _| i > cut);
         self.log.trim_before(cut).await?;
+        self.state.txns.forget_aborted_before(self.log.start_offset());
         Ok(Some(cut))
     }
 

@@ -14,6 +14,15 @@
 //! - [`Log::open`] recovers by scanning the active segment, cutting a torn or
 //!   corrupt tail, and syncing the result, so recovered data is durable.
 //!
+//! Every sealed segment has an index file beside it (`.index`, ADR 0094):
+//! its sparse offset index and the newest timestamp before each entry. It is
+//! written when the segment is sealed and read back on open, so opening a
+//! log reads the active segment and one batch of each sealed one, not every
+//! batch. An index file that does not match its segment is ignored, the
+//! segment scanned and the file written again; one is removed before its
+//! segment changes (truncation, retention, a rewrite, a reset). Batches of a
+//! sealed segment are checked when they are read.
+//!
 //! After a snapshot is installed, [`Log::reset`] restarts the log at the
 //! snapshot's end; segments then no longer start at 0.
 //!
@@ -24,18 +33,18 @@
 //!
 //! Compaction replaces a sealed segment with [`Log::rewrite_segment`]: the
 //! same batches with the same offsets and terms, some records left out.
-//!
-//! Not yet here: persisted `.index`/`.timeindex`/`.txnindex` files (the
-//! sparse index is rebuilt by scanning on open).
 
 #![warn(missing_docs)]
 
-use std::collections::BTreeMap;
+mod index;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+use index::{Entry, SegmentIndex};
 use lotse_record::{Batch, HEADER_LEN, LEN_PREFIX, MAX_BATCH_LEN};
 use lotse_rt::{Disk, OpenMode, SegmentFile};
 
@@ -114,11 +123,17 @@ struct Segment<F> {
     file: F,
     size: u64,
     next_offset: u64,
-    /// Sparse `(base_offset of a batch, byte position)` entries, ascending.
-    index: Vec<(u64, u64)>,
+    /// Sparse index entries, ascending.
+    index: Vec<Entry>,
     bytes_since_index: u64,
     /// The newest record timestamp in the segment, ms; `i64::MIN` if empty.
     max_timestamp: i64,
+    /// Byte position and stored CRC of the last batch, which an index file
+    /// records so that a stale file is recognised on open.
+    last_position: u64,
+    last_crc: u32,
+    /// An index file for this segment is on disk.
+    indexed: bool,
 }
 
 /// What retention needs to know about one segment.
@@ -135,23 +150,73 @@ pub struct SegmentInfo {
     pub max_timestamp: i64,
 }
 
-impl<F: SegmentFile> Segment<F> {
-    fn note_batch(&mut self, base_offset: u64, position: u64, len: u64, interval: u64, max_timestamp: i64) {
-        self.max_timestamp = self.max_timestamp.max(max_timestamp);
+impl<F> Segment<F> {
+    fn empty(path: PathBuf, file: F, base: u64) -> Self {
+        Segment {
+            path,
+            file,
+            size: 0,
+            next_offset: base,
+            index: Vec::new(),
+            bytes_since_index: 0,
+            max_timestamp: i64::MIN,
+            last_position: 0,
+            last_crc: 0,
+            indexed: false,
+        }
+    }
+
+    fn note_batch(&mut self, batch: &Batch, position: u64, interval: u64) {
+        let len = batch.len() as u64;
         if self.index.is_empty() || self.bytes_since_index >= interval {
-            self.index.push((base_offset, position));
+            self.index.push(Entry { offset: batch.base_offset(), position, timestamp_before: self.max_timestamp });
             self.bytes_since_index = 0;
         }
         self.bytes_since_index += len;
+        self.max_timestamp = self.max_timestamp.max(batch.max_timestamp());
+        self.last_position = position;
+        self.last_crc = batch.crc();
     }
 
     /// Byte position to start scanning from for `offset`.
     fn scan_start(&self, offset: u64) -> u64 {
-        match self.index.partition_point(|&(o, _)| o <= offset) {
+        match self.index.partition_point(|e| e.offset <= offset) {
             0 => 0,
-            i => self.index[i - 1].1,
+            i => self.index[i - 1].position,
         }
     }
+
+    /// The first offset of the segment from which a search for a batch whose
+    /// newest record is at or after `at` may start: every batch before it
+    /// is older.
+    fn time_start(&self, at: i64) -> u64 {
+        match self.index.partition_point(|e| e.timestamp_before < at) {
+            0 => self.index.first().map_or(self.next_offset, |e| e.offset),
+            i => self.index[i - 1].offset,
+        }
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.path.with_extension("index")
+    }
+
+    fn to_index(&self, base: u64) -> SegmentIndex {
+        SegmentIndex {
+            base_offset: base,
+            size: self.size,
+            next_offset: self.next_offset,
+            max_timestamp: self.max_timestamp,
+            last_position: self.last_position,
+            last_crc: self.last_crc,
+            entries: self.index.clone(),
+        }
+    }
+}
+
+/// Bytes of one segment read ahead, from `pos`.
+struct Window {
+    pos: u64,
+    bytes: Bytes,
 }
 
 /// A partition log on one disk.
@@ -178,17 +243,31 @@ impl<D: Disk> fmt::Debug for Log<D> {
 impl<D: Disk> Log<D> {
     /// Opens the log in `dir`, creating it if needed, and recovers from any
     /// crash: a torn or corrupt tail in the active segment is cut off and the
-    /// result synced.
+    /// result synced. Sealed segments are taken from their index files where
+    /// those match, and scanned (and indexed) where not.
     pub async fn open(disk: D, dir: impl Into<PathBuf>, config: LogConfig) -> Result<Self, Error> {
         let dir = dir.into();
         disk.create_dir_all(&dir).await?;
         let files = disk.list(&dir).await?;
-        // A rewrite that did not finish: the old segment is still whole.
-        for p in files.iter().filter(|p| p.extension().is_some_and(|e| e == "cleaned")) {
+        // A rewrite or an index that was not finished: what it replaces is
+        // still whole.
+        for p in files.iter().filter(|p| p.extension().is_some_and(|e| e == "cleaned" || e == "tmp")) {
             disk.remove(p).await?;
         }
-        let mut bases: Vec<u64> = files.iter().filter_map(|p| parse_segment_name(p)).collect();
+        let mut bases: Vec<u64> = files.iter().filter_map(|p| parse_name(p, ".log")).collect();
         bases.sort_unstable();
+        let mut indexed: BTreeSet<u64> = BTreeSet::new();
+        for p in &files {
+            if let Some(base) = parse_name(p, ".index") {
+                // The active segment changes, so its index file, if a crash
+                // left one, says nothing; neither does one without a segment.
+                if bases.last() != Some(&base) && bases.binary_search(&base).is_ok() {
+                    indexed.insert(base);
+                } else {
+                    disk.remove(p).await?;
+                }
+            }
+        }
 
         let mut log = Log { disk, dir, config, segments: BTreeMap::new(), start_offset: 0, next_offset: 0 };
         let count = bases.len();
@@ -201,7 +280,18 @@ impl<D: Disk> Log<D> {
                     reason: format!("segment starts at {base}, previous segment ends at {}", log.next_offset),
                 });
             }
-            let seg = log.recover_segment(base, is_last).await?;
+            let loaded = if indexed.contains(&base) { log.load_segment(base).await? } else { None };
+            let seg = match loaded {
+                Some(seg) => seg,
+                None => {
+                    let mut seg = log.recover_segment(base, is_last).await?;
+                    seg.indexed = indexed.contains(&base);
+                    if !is_last {
+                        write_index(&log.disk, base, &mut seg).await?;
+                    }
+                    seg
+                }
+            };
             if log.segments.is_empty() {
                 log.start_offset = base;
             }
@@ -214,34 +304,60 @@ impl<D: Disk> Log<D> {
         Ok(log)
     }
 
+    /// A sealed segment as its index file describes it, if the file matches
+    /// the segment (see the `index` module); `None` to scan it instead.
+    async fn load_segment(&self, base: u64) -> Result<Option<Segment<D::File>>, Error> {
+        let path = segment_path(&self.dir, base);
+        let index_file = self.disk.open(&path.with_extension("index"), OpenMode::Existing).await?;
+        let len = index_file.size().await?;
+        let bytes = index_file.read_at(0, len as usize).await?;
+        drop(index_file);
+        let Ok(index) = SegmentIndex::decode(&bytes) else { return Ok(None) };
+        if index.base_offset != base {
+            return Ok(None);
+        }
+        let file = self.disk.open(&path, OpenMode::Existing).await?;
+        if file.size().await? != index.size {
+            return Ok(None);
+        }
+        let last = match read_batch_at(&file, index.last_position).await {
+            Ok(Some(batch)) => batch,
+            Ok(None) | Err(ReadError::Record(_)) => return Ok(None),
+            Err(ReadError::Io(e)) => return Err(e.into()),
+        };
+        if last.crc() != index.last_crc
+            || last.next_offset() != index.next_offset
+            || index.last_position + last.len() as u64 != index.size
+        {
+            return Ok(None);
+        }
+        Ok(Some(Segment {
+            path,
+            file,
+            size: index.size,
+            next_offset: index.next_offset,
+            index: index.entries,
+            bytes_since_index: 0,
+            max_timestamp: index.max_timestamp,
+            last_position: index.last_position,
+            last_crc: index.last_crc,
+            indexed: true,
+        }))
+    }
+
     async fn recover_segment(&self, base: u64, is_last: bool) -> Result<Segment<D::File>, Error> {
         let path = segment_path(&self.dir, base);
         let file = self.disk.open(&path, OpenMode::Existing).await?;
         let len = file.size().await?;
-        let mut seg = Segment {
-            path,
-            file,
-            size: 0,
-            next_offset: base,
-            index: Vec::new(),
-            bytes_since_index: 0,
-            max_timestamp: i64::MIN,
-        };
+        let mut seg = Segment::empty(path, file, base);
         let mut pos = 0u64;
         let mut problem = None;
         while pos < len {
             match read_batch_at(&seg.file, pos).await {
                 Ok(Some(batch)) if batch.base_offset() == seg.next_offset => {
-                    let n = batch.len() as u64;
-                    seg.note_batch(
-                        batch.base_offset(),
-                        pos,
-                        n,
-                        self.config.index_interval_bytes,
-                        batch.max_timestamp(),
-                    );
+                    seg.note_batch(&batch, pos, self.config.index_interval_bytes);
                     seg.next_offset = batch.next_offset();
-                    pos += n;
+                    pos += batch.len() as u64;
                 }
                 Ok(Some(batch)) => {
                     problem =
@@ -281,18 +397,7 @@ impl<D: Disk> Log<D> {
         if self.segments.is_empty() {
             self.start_offset = base;
         }
-        self.segments.insert(
-            base,
-            Segment {
-                path,
-                file,
-                size: 0,
-                next_offset: base,
-                index: Vec::new(),
-                bytes_since_index: 0,
-                max_timestamp: i64::MIN,
-            },
-        );
+        self.segments.insert(base, Segment::empty(path, file, base));
         Ok(())
     }
 
@@ -332,7 +437,14 @@ impl<D: Disk> Log<D> {
             active.size > 0 && active.size + len > self.config.segment_bytes
         };
         if roll {
-            self.active().file.sync().await?;
+            // Sealed from here on: synced, then indexed, before the next
+            // segment exists, so on open a segment that is not the last
+            // always is whole.
+            let active_base = self.active_base();
+            let disk = self.disk.clone();
+            let active = self.active_mut();
+            active.file.sync().await?;
+            write_index(&disk, active_base, active).await?;
             let base = self.next_offset;
             self.create_segment(base).await?;
         }
@@ -340,7 +452,7 @@ impl<D: Disk> Log<D> {
         let active = self.active_mut();
         let position = active.file.append(batch).await?;
         debug_assert_eq!(position, active.size);
-        active.note_batch(parsed.base_offset(), position, len, interval, parsed.max_timestamp());
+        active.note_batch(&parsed, position, interval);
         active.size += len;
         active.next_offset = parsed.next_offset();
         self.next_offset = parsed.next_offset();
@@ -357,6 +469,9 @@ impl<D: Disk> Log<D> {
     /// to `max_bytes`. Always returns at least one batch if `offset` is in
     /// the log, even if it is larger than `max_bytes`. Returns no bytes at
     /// [`Log::next_offset`].
+    ///
+    /// The batches come from one segment in one read where the read-ahead
+    /// covers them, and are returned as a slice of it, each checked.
     pub async fn read(&self, offset: u64, max_bytes: usize) -> Result<Bytes, Error> {
         if offset < self.start_offset || offset > self.next_offset {
             return Err(Error::OffsetOutOfRange { offset, start: self.start_offset, end: self.next_offset });
@@ -365,27 +480,88 @@ impl<D: Disk> Log<D> {
             return Ok(Bytes::new());
         }
         let (_, seg) = self.segments.range(..=offset).next_back().expect("offset is inside the log");
+        // From the index entry to the batch, then as much as fits.
+        let ahead = (self.config.index_interval_bytes as usize).saturating_add(max_bytes.max(HEADER_LEN));
+        let mut window = Window { pos: 0, bytes: Bytes::new() };
         let mut pos = seg.scan_start(offset);
-        // Find the batch that contains `offset`.
-        let first = loop {
-            let batch = self.batch_in(seg, pos).await?;
-            if batch.last_offset() >= offset {
-                break batch;
+        let first_len = loop {
+            let (len, _, last) = self.header_at(seg, &mut window, pos, ahead).await?;
+            if last >= offset {
+                break len;
             }
-            pos += batch.len() as u64;
+            pos += len as u64;
         };
-        let mut out = BytesMut::from(&first.as_bytes()[..]);
-        pos += first.len() as u64;
-        while pos < seg.size {
-            let Some(len) = self.peek_len_in(seg, pos).await? else { break };
-            if out.len() + len > max_bytes {
+        let start = pos;
+        let mut end = start + first_len as u64;
+        while end < seg.size {
+            let (len, _, _) = self.header_at(seg, &mut window, end, ahead).await?;
+            if (end - start) as usize + len > max_bytes {
                 break;
             }
-            let batch = self.batch_in(seg, pos).await?;
-            out.extend_from_slice(batch.as_bytes());
-            pos += len as u64;
+            end += len as u64;
         }
-        Ok(out.freeze())
+        let out = self.bytes_at(seg, &mut window, start, (end - start) as usize, ahead).await?;
+        let mut rest = out.clone();
+        while !rest.is_empty() {
+            let at = start + (out.len() - rest.len()) as u64;
+            let (_, tail) = Batch::parse(&rest).map_err(|e| Error::Corrupt {
+                segment: seg.path.clone(),
+                position: at,
+                reason: e.to_string(),
+            })?;
+            rest = tail;
+        }
+        Ok(out)
+    }
+
+    /// The header of the batch at `pos`: its length, first and last offset.
+    async fn header_at(
+        &self,
+        seg: &Segment<D::File>,
+        window: &mut Window,
+        pos: u64,
+        ahead: usize,
+    ) -> Result<(usize, u64, u64), Error> {
+        let corrupt = |reason: &str| Error::Corrupt { segment: seg.path.clone(), position: pos, reason: reason.into() };
+        if pos + HEADER_LEN as u64 > seg.size {
+            return Err(corrupt("incomplete batch"));
+        }
+        let header = self.bytes_at(seg, window, pos, HEADER_LEN, ahead).await?;
+        let (len, base, last) = lotse_record::peek_span(&header).expect("a whole header");
+        if !(HEADER_LEN..=MAX_BATCH_LEN).contains(&len) {
+            return Err(corrupt("implausible batch length"));
+        }
+        if pos + len as u64 > seg.size {
+            return Err(corrupt("incomplete batch"));
+        }
+        Ok((len, base, last))
+    }
+
+    /// `len` bytes of the segment at `pos`, from the read-ahead if it holds
+    /// them, else from a new read of at least `ahead` bytes.
+    async fn bytes_at(
+        &self,
+        seg: &Segment<D::File>,
+        window: &mut Window,
+        pos: u64,
+        len: usize,
+        ahead: usize,
+    ) -> Result<Bytes, Error> {
+        let held = pos >= window.pos && pos + len as u64 <= window.pos + window.bytes.len() as u64;
+        if !held {
+            let n = len.max(ahead).min((seg.size - pos) as usize);
+            window.bytes = seg.file.read_at(pos, n).await?;
+            window.pos = pos;
+            if window.bytes.len() < len {
+                return Err(Error::Corrupt {
+                    segment: seg.path.clone(),
+                    position: pos,
+                    reason: "incomplete batch".into(),
+                });
+            }
+        }
+        let from = (pos - window.pos) as usize;
+        Ok(window.bytes.slice(from..from + len))
     }
 
     /// Removes every batch at or after `offset`, which must be a batch
@@ -403,18 +579,17 @@ impl<D: Disk> Log<D> {
         let doomed: Vec<u64> =
             self.segments.range(offset..).map(|(&b, _)| b).filter(|&b| b != self.start_offset).collect();
         for base in doomed.into_iter().rev() {
-            let seg = self.segments.remove(&base).expect("listed above");
+            let mut seg = self.segments.remove(&base).expect("listed above");
+            remove_index(&self.disk, &mut seg).await?;
             self.disk.remove(&seg.path).await?;
         }
         let interval = self.config.index_interval_bytes;
         let (&base, _) = self.segments.range(..=offset).next_back().expect("start segment is kept");
         // Find the byte position of `offset` and rebuild the index up to it.
-        let mut pos = 0u64;
-        let mut index = Vec::new();
-        let mut since = 0u64;
-        let mut newest = i64::MIN;
+        let mut cut = Segment::empty(PathBuf::new(), (), base);
         {
             let seg = &self.segments[&base];
+            let mut pos = 0u64;
             while pos < seg.size {
                 let batch = self.batch_in(seg, pos).await?;
                 if batch.base_offset() >= offset {
@@ -426,22 +601,24 @@ impl<D: Disk> Log<D> {
                 if batch.last_offset() >= offset {
                     return Err(Error::NotBatchBoundary(offset));
                 }
-                if index.is_empty() || since >= interval {
-                    index.push((batch.base_offset(), pos));
-                    since = 0;
-                }
-                since += batch.len() as u64;
+                cut.note_batch(&batch, pos, interval);
                 pos += batch.len() as u64;
-                newest = newest.max(batch.max_timestamp());
             }
+            cut.size = pos;
         }
+        let disk = self.disk.clone();
         let seg = self.segments.get_mut(&base).expect("present");
-        seg.max_timestamp = newest;
-        seg.file.truncate(pos).await?;
+        // The segment is the active one now and is about to change: its
+        // index file, if any, goes first.
+        remove_index(&disk, seg).await?;
+        seg.file.truncate(cut.size).await?;
         seg.file.sync().await?;
-        seg.size = pos;
-        seg.index = index;
-        seg.bytes_since_index = since;
+        seg.size = cut.size;
+        seg.index = cut.index;
+        seg.bytes_since_index = cut.bytes_since_index;
+        seg.max_timestamp = cut.max_timestamp;
+        seg.last_position = cut.last_position;
+        seg.last_crc = cut.last_crc;
         seg.next_offset = offset;
         self.next_offset = offset;
         Ok(())
@@ -455,6 +632,15 @@ impl<D: Disk> Log<D> {
             bytes: s.size,
             max_timestamp: s.max_timestamp,
         })
+    }
+
+    /// Where, in the segment that starts at `base`, a search for the first
+    /// batch whose newest record is at or after `at` (ms) may start: every
+    /// batch of the segment before the returned offset is older. Found in
+    /// the segment's sparse index, so the search reads at most one index
+    /// interval of batches it skips. `None` if no segment starts at `base`.
+    pub fn time_search_start(&self, base: u64, at: i64) -> Option<u64> {
+        self.segments.get(&base).map(|s| s.time_start(at))
     }
 
     /// Starts the log at `offset`: reads below it are out of range, and
@@ -477,7 +663,8 @@ impl<D: Disk> Log<D> {
         // Oldest first: a crash in between leaves a log that still starts
         // at a segment base and has no gap.
         for base in doomed {
-            let seg = self.segments.remove(&base).expect("listed above");
+            let mut seg = self.segments.remove(&base).expect("listed above");
+            remove_index(&self.disk, &mut seg).await?;
             self.disk.remove(&seg.path).await?;
         }
         Ok(())
@@ -533,8 +720,12 @@ impl<D: Disk> Log<D> {
         }
         file.sync().await?;
         drop(file);
+        // The old index describes the old bytes: gone before they are.
+        let disk = self.disk.clone();
+        remove_index(&disk, self.segments.get_mut(&base).expect("checked above")).await?;
         self.disk.rename(&cleaned, &path).await?;
-        let seg = self.recover_segment(base, false).await?;
+        let mut seg = self.recover_segment(base, false).await?;
+        write_index(&self.disk, base, &mut seg).await?;
         self.segments.insert(base, seg);
         Ok(())
     }
@@ -548,21 +739,13 @@ impl<D: Disk> Log<D> {
     pub async fn reset(&mut self, offset: u64) -> Result<(), Error> {
         // The new, empty segment first (unless it would clash with one we drop).
         let keep = self.segments.contains_key(&offset);
-        for (base, seg) in std::mem::take(&mut self.segments) {
+        for (base, mut seg) in std::mem::take(&mut self.segments) {
+            remove_index(&self.disk, &mut seg).await?;
             if keep && base == offset {
                 seg.file.truncate(0).await?;
                 seg.file.sync().await?;
-                self.segments.insert(
-                    base,
-                    Segment {
-                        size: 0,
-                        next_offset: offset,
-                        index: Vec::new(),
-                        bytes_since_index: 0,
-                        max_timestamp: i64::MIN,
-                        ..seg
-                    },
-                );
+                let Segment { path, file, .. } = seg;
+                self.segments.insert(base, Segment::empty(path, file, offset));
             } else {
                 self.disk.remove(&seg.path).await?;
             }
@@ -583,11 +766,6 @@ impl<D: Disk> Log<D> {
         self.segments.values_mut().next_back().expect("a log always has a segment")
     }
 
-    async fn peek_len_in(&self, seg: &Segment<D::File>, pos: u64) -> Result<Option<usize>, Error> {
-        let prefix = seg.file.read_at(pos, LEN_PREFIX).await?;
-        Ok(lotse_record::peek_len(&prefix))
-    }
-
     async fn batch_in(&self, seg: &Segment<D::File>, pos: u64) -> Result<Batch, Error> {
         match read_batch_at(&seg.file, pos).await {
             Ok(Some(batch)) => Ok(batch),
@@ -597,6 +775,33 @@ impl<D: Disk> Log<D> {
             Err(e) => Err(Error::Corrupt { segment: seg.path.clone(), position: pos, reason: e.to_string() }),
         }
     }
+}
+
+/// Writes the index file of a sealed segment beside it: to a temporary file,
+/// synced, then renamed into place.
+async fn write_index<D: Disk>(disk: &D, base: u64, seg: &mut Segment<D::File>) -> Result<(), Error> {
+    if seg.size == 0 {
+        return Ok(());
+    }
+    let path = seg.index_path();
+    let tmp = path.with_extension("index.tmp");
+    let file = disk.open(&tmp, OpenMode::CreateOrOpen).await?;
+    file.truncate(0).await?;
+    file.append(seg.to_index(base).encode()).await?;
+    file.sync().await?;
+    drop(file);
+    disk.rename(&tmp, &path).await?;
+    seg.indexed = true;
+    Ok(())
+}
+
+/// Removes a segment's index file, if it has one.
+async fn remove_index<D: Disk>(disk: &D, seg: &mut Segment<D::File>) -> Result<(), Error> {
+    if seg.indexed {
+        disk.remove(&seg.index_path()).await?;
+        seg.indexed = false;
+    }
+    Ok(())
 }
 
 /// Reads and validates the batch at `pos`. `Ok(None)` if the file ends
@@ -637,14 +842,20 @@ pub fn segment_path(dir: &Path, base: u64) -> PathBuf {
     dir.join(format!("{base:020}.log"))
 }
 
+/// Path of the index file of the segment that starts at `base`.
+pub fn index_path(dir: &Path, base: u64) -> PathBuf {
+    dir.join(format!("{base:020}.index"))
+}
+
 /// Where a rewritten segment is written before it replaces the old one.
 fn cleaned_path(dir: &Path, base: u64) -> PathBuf {
     dir.join(format!("{base:020}.log.cleaned"))
 }
 
-fn parse_segment_name(path: &Path) -> Option<u64> {
+/// The base offset in a file name `<20 digits><suffix>`.
+fn parse_name(path: &Path, suffix: &str) -> Option<u64> {
     let name = path.file_name()?.to_str()?;
-    let digits = name.strip_suffix(".log")?;
+    let digits = name.strip_suffix(suffix)?;
     (digits.len() == 20).then(|| digits.parse().ok()).flatten()
 }
 

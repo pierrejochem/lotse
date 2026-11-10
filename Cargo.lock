@@ -1004,6 +1004,7 @@ name = "lotse-log"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "crc32c",
  "lotse-record",
  "lotse-rt",
  "lotse-sim",
