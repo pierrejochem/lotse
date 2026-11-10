@@ -96,5 +96,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0090 | [Revoking client certificates in the metadata group](0090-revoking-client-certificates-in-the-metadata-group.md) | Accepted |
 | 0091 | [Client certificate inventory](0091-client-certificate-inventory.md) | Accepted |
 | 0092 | [Requesting and signing client certificates](0092-requesting-and-signing-client-certificates.md) | Accepted |
+| 0093 | [Rust 1.88 as the minimum version](0093-rust-1-88-as-the-minimum-version.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

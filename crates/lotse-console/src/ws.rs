@@ -56,11 +56,10 @@ async fn session(st: AppState, who: Identity, sid: Option<String>, socket: WebSo
             m = stream.next() => m,
             _ = recheck.tick() => {
                 // A socket outlives neither a sign-out nor an expired session.
-                if let (Some(sessions), Some(sid)) = (&st.sessions, &sid) {
-                    if sessions.resolve(sid).await.is_none() {
+                if let (Some(sessions), Some(sid)) = (&st.sessions, &sid)
+                    && sessions.resolve(sid).await.is_none() {
                         break;
                     }
-                }
                 continue;
             }
         };
@@ -77,10 +76,10 @@ async fn session(st: AppState, who: Identity, sid: Option<String>, socket: WebSo
                         let forward = tokio::spawn(async move {
                             loop {
                                 let frame = rx.borrow_and_update().clone();
-                                if let Some(frame) = frame {
-                                    if tx.send(frame.to_string()).await.is_err() {
-                                        return;
-                                    }
+                                if let Some(frame) = frame
+                                    && tx.send(frame.to_string()).await.is_err()
+                                {
+                                    return;
                                 }
                                 if rx.changed().await.is_err() {
                                     return;

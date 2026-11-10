@@ -358,10 +358,10 @@ impl Drop for Undecided<'_> {
         if !self.armed {
             return;
         }
-        if let Ok(mut session) = self.session.lock() {
-            if session.as_ref().is_some_and(|s| s.producer_id == self.producer_id) {
-                *session = None;
-            }
+        if let Ok(mut session) = self.session.lock()
+            && session.as_ref().is_some_and(|s| s.producer_id == self.producer_id)
+        {
+            *session = None;
         }
     }
 }

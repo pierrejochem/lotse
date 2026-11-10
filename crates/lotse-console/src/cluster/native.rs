@@ -222,10 +222,10 @@ impl Seat {
     /// cluster admin or cluster viewer (anonymous clients, on a cluster
     /// without authentication, may do everything).
     async fn sees_cluster(&self) -> ApiResult<bool> {
-        if let Some((at, known)) = *lock(&self.admin) {
-            if at.elapsed() < ADMIN_FRESH {
-                return Ok(known);
-            }
+        if let Some((at, known)) = *lock(&self.admin)
+            && at.elapsed() < ADMIN_FRESH
+        {
+            return Ok(known);
         }
         let me = self.client.who_am_i().await.map_err(failed)?;
         let known = me.kind == principal_kind::ANONYMOUS || me.bindings.iter().any(|b| cluster_wide(b.role));
