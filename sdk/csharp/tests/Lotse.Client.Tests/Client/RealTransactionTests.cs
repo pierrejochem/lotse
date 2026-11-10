@@ -51,6 +51,10 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         return client;
     }
 
+    /// <summary>Waits until every node's metadata shows <paramref name="count"/> bindings of the exchange.</summary>
+    private Task BindingsEverywhereAsync(string exchange, int count) =>
+        RealWaits.OnEveryNodeAsync(_cluster, $"{count} bindings of {exchange}", exchange, r => r?.Exchange?.Bindings.Count == count);
+
     /// <summary>
     /// Creates a queue and pins its leader where it is (<see cref="RealWaits.PinLeaderAsync"/>): a leader that moves while
     /// a test holds a message ends the subscription, which is the failover behaviour these tests do not want to measure.
@@ -451,6 +455,7 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         await admin.BindAsync("events", "audit", "order.#");
         await admin.BindAsync("events", "billing", "*.paid");
         await admin.BindAsync("events", "other", "refund.*");
+        await BindingsEverywhereAsync("events", 3);
 
         // A node routes by the bindings it has applied; the binding may take a moment to reach it.
         Published published = await PublishUntilRoutedAsync(admin, "events", "order.paid", OutMessage.FromValue("o-1"));
@@ -498,6 +503,9 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         await CreateQueueAsync(admin, "txn-b");
         await admin.BindAsync("txn-events", "txn-a", "t.#");
         await admin.BindAsync("txn-events", "txn-b", "t.*");
+        // The client routes by the bindings in the metadata it reads, which a node that has not applied a bind yet
+        // gives without it (changes reach the nodes one by one): wait until every node has both.
+        await BindingsEverywhereAsync("txn-events", 2);
 
         LotseClient lotse = NewClient("publish-txn");
         await using QueueConsumer a = await admin.SubscribeAsync("txn-a");
@@ -528,6 +536,7 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         // A binding made through this client is seen by its next transactional publish, whatever the metadata age.
         await CreateQueueAsync(lotse, "txn-c");
         await lotse.BindAsync("txn-events", "txn-c", "t.#");
+        await BindingsEverywhereAsync("txn-events", 3);
         await using (Transaction txn = await lotse.BeginTransactionAsync())
         {
             Published p = await txn.PublishAsync("txn-events", "t.z", OutMessage.FromValue("three"));
@@ -543,6 +552,7 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         await admin.DeclareExchangeAsync("lost-x", Messages.ExchangeType.Fanout);
         await CreateQueueAsync(admin, "lost-q");
         await admin.BindAsync("lost-x", "lost-q", string.Empty);
+        await BindingsEverywhereAsync("lost-x", 1);
         await PublishUntilRoutedAsync(admin, "lost-x", "k", OutMessage.FromValue("warm-up"));
 
         // A node in this process that forwards every request to a real node and tells the client that the real node
