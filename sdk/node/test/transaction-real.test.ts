@@ -19,7 +19,7 @@ import {
 } from "../src/index.js";
 import { Connection } from "../src/index.js";
 import { PlainCluster } from "./support/cluster.js";
-import { isNotLeader, leaderTerm, retryIfLeaderMoved } from "./support/failover.js";
+import { isNotLeader, leaderTerm, pinLeader, retryIfLeaderMoved } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -132,26 +132,13 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     }
   }
 
-  /** Waits until the queue's leader has stayed the same for half a second (a new group elects one in its first moments). */
+  /**
+   * Pins the queue's leader where it is and waits until it leads there steadily (`pinLeader`): these scenarios rely on
+   * what the leader keeps in memory, and a new queue's leader otherwise moves to its preferred node at a time no test
+   * can know.
+   */
   async function settled(queue: string): Promise<void> {
-    const leaderOf = async (): Promise<number> => {
-      for (;;) {
-        const m = await client.metadata(queue);
-        const l = m.resources.find((r) => r.name === queue)?.partitions[0]?.leader ?? 0;
-        if (l !== 0) {
-          return l;
-        }
-        await sleep(100);
-      }
-    };
-    let leader = await leaderOf();
-    let same = 0;
-    while (same < 5) {
-      await sleep(100);
-      const now = await leaderOf();
-      same = now === leader ? same + 1 : 0;
-      leader = now;
-    }
+    await pinLeader(client, queue);
   }
 
   // ---- commit and abort ----

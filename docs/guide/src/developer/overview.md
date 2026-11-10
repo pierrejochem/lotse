@@ -57,6 +57,8 @@ make sdk-test
 
 You need a JDK 17 or later, the .NET 10 SDK and Node.js 20 or later. Set `LOTSE_BIN` to a `lotse` executable to add the TLS and real-node tests. CI runs the same target with `LOTSE_BIN` set to the binary it builds, and runs the Node.js tests once more on Node.js 20.
 
+A real-node test that relies on what a leader keeps in memory (messages in flight, delivery counts, a single active consumer, produce counters) pins that leader first: `pinLeader` (Java, Node.js) or `RealWaits.PinLeaderAsync` (C#) pins it where it is with `MoveLeader` and waits until it leads there in one term for five reads in a row. A new group's leader otherwise moves to the group's preferred node at a time no test can know. Tests that stop or restart nodes do not pin: a pinned leader would move back to a node that returns.
+
 ## Writing a client in another language
 
 1. Read [the protocol page](protocol.md) and the vectors.

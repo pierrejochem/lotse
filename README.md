@@ -188,7 +188,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 - **Certificate records are the CA holder's word.** `RecordCertificate` does not parse the certificate, so only the handshake checks a signature (ADR 0092). The inventory tells issuers apart by a hash of their name, so two CAs with one name count as one (ADR 0090).
 - **Memory grows with data in three places.** Compaction holds every key of a partition in memory and rebuilds the map from the log after a restart, with no dirty ratio, minimum lag or bound, and a tombstone dropped while a replica that left the group still holds an older value is not covered by a test (ADR 0067). A snapshot is collected in memory before it is installed. Tombstones of deleted resources are kept for ever.
 - **A producer evicted from a full partition loses its deduplication**, and a plain idempotent producer's id survives a client restart only with a producer name, which fences the earlier instance but does not deduplicate a batch the application sends again (ADR 0071).
-- **Tests that start real nodes depend on timing.** The SDK tests against three real nodes assume a quiet cluster, and one can fail on a slow runner when a leader moves while it runs.
+- **Tests that start real nodes can still meet a lost election.** The SDK tests against three real nodes pin the leader of every queue or stream whose leader's memory they rely on (`MoveLeader`, ADR 0065) and wait until it leads there steadily, so a group's planned move to its preferred node (ADR 0050) no longer falls inside a test. An election that a starved node loses can still move a leader on a slow runner; the Node.js tests run such a scenario again, the Java and C# tests fail.
 
 ### Not built yet
 
