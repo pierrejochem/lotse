@@ -986,7 +986,7 @@ public final class Messages {
     /**
      * One client certificate in the inventory.
      *
-     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian
      * @param principal the principal it names (its common name); empty for a certificate revoked before any node
      *     saw it
@@ -1049,7 +1049,7 @@ public final class Messages {
     /**
      * One accepted client certificate, as a node reports it.
      *
-     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian
      * @param principal the principal it names
      * @param notBeforeMs first millisecond it is valid in, a {@code u64}

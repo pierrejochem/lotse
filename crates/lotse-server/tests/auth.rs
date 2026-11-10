@@ -51,6 +51,64 @@ fn batch(value: &str) -> Bytes {
     b.finish().unwrap()
 }
 
+/// An Ed25519 key from a fixed seed: ring signs Ed25519 deterministically,
+/// so certificates come out the same in every run of a seed.
+fn fixed_key(seed: u8) -> rcgen::KeyPair {
+    let mut der = vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+    der.extend([seed; 32]);
+    rcgen::KeyPair::try_from(&der[..]).unwrap()
+}
+
+/// A CA named like the cluster's, with its key from `seed`: the cluster's
+/// own is seed 1.
+fn test_ca(seed: u8) -> (rcgen::Issuer<'static, rcgen::KeyPair>, Vec<u8>) {
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    params.distinguished_name.push(rcgen::DnType::CommonName, "Lotse cluster CA");
+    params.serial_number = Some(rcgen::SerialNumber::from(1u64));
+    let key = fixed_key(seed);
+    let der = params.self_signed(&key).unwrap().der().to_vec();
+    (rcgen::Issuer::new(params, key), der)
+}
+
+/// A signing request for `principal` with the key from `seed`.
+fn test_csr(seed: u8, principal: &str) -> Vec<u8> {
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name.push(rcgen::DnType::CommonName, principal);
+    params.serialize_request(&fixed_key(seed)).unwrap().der().to_vec()
+}
+
+/// A client certificate for `principal` with the key from `key_seed`, as
+/// `lotse certs --sign` makes one, signed by the CA from `ca_seed`.
+fn test_cert(ca_seed: u8, key_seed: u8, principal: &str, serial: u64) -> Vec<u8> {
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name.push(rcgen::DnType::CommonName, principal);
+    params.serial_number = Some(rcgen::SerialNumber::from(serial));
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    params.signed_by(&fixed_key(key_seed), &test_ca(ca_seed).0).unwrap().der().to_vec()
+}
+
+/// The issuer as ADR 0096 names it, worked out here: SHA-256 over the
+/// issuer's name and the authority key identifier.
+fn issuer_of(cert: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    use x509_parser::prelude::{FromDer, ParsedExtension, X509Certificate};
+    let (_, c) = X509Certificate::from_der(cert).unwrap();
+    let aki = c
+        .extensions()
+        .iter()
+        .find_map(|e| match e.parsed_extension() {
+            ParsedExtension::AuthorityKeyIdentifier(a) => a.key_identifier.as_ref().map(|k| k.0.to_vec()),
+            _ => None,
+        })
+        .expect("lotse certs writes the authority key identifier");
+    let mut h = sha2::Sha256::new();
+    h.update(c.issuer().as_raw());
+    h.update(&aki);
+    h.finalize().to_vec()
+}
+
 fn auth() -> AuthConfig {
     let mut users = BTreeMap::new();
     users.insert("admin".to_string(), ScramCredential::new("admin-pw", b"configured-salt", 4096));
@@ -62,6 +120,7 @@ fn auth() -> AuthConfig {
         max_session: MAX_SESSION,
         users,
         admins: vec!["admin".into()],
+        client_cas: lotse_server::ClientCas::new(vec![test_ca(1).1]),
         ..AuthConfig::none()
     }
 }
@@ -703,7 +762,7 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
         Sim::new(seed).run(|rt| async move {
             let nodes = cluster(&rt).await;
             let admin = client(&rt, "c1", scram("admin", "admin-pw"));
-            let csr = vec![0x30, 0x03, 0x02, 0x01, 0x00];
+            let csr = test_csr(2, "alice");
             let invalid = |r: Result<(), ClientError>| {
                 assert!(matches!(r, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, .. })), "{r:?}")
             };
@@ -745,15 +804,41 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
             };
             unauthorized(alice.request_certificate("alice", vec![1, 2, 3]).await);
             unauthorized(alice.describe_certificate_requests().await.map(|_| ()));
+            let cert = test_cert(1, 2, "alice", 0x42);
+            let (_, parsed) =
+                <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(&cert).unwrap();
             let answer = lotse_proto::RecordCertificateRequest {
                 id: one.id.clone(),
-                certificate: Bytes::from_static(&[0x30, 0x00]),
-                issuer: Bytes::from_static(&[1; 32]),
+                certificate: cert.clone().into(),
+                issuer: issuer_of(&cert).into(),
                 serial: Bytes::from_static(&[0x42]),
-                not_before_ms: 1_000,
-                not_after_ms: 2_000_000_000_000,
+                not_before_ms: parsed.validity().not_before.timestamp() as u64 * 1000,
+                not_after_ms: parsed.validity().not_after.timestamp() as u64 * 1000,
             };
             unauthorized(alice.record_certificate(answer.clone()).await);
+
+            // The certificate must answer the request and come from the
+            // cluster's CA (ADR 0096), and the record must say what it says.
+            let refused = |certificate: Vec<u8>| lotse_proto::RecordCertificateRequest {
+                issuer: issuer_of(&certificate).into(),
+                certificate: certificate.into(),
+                ..answer.clone()
+            };
+            invalid(admin.record_certificate(refused(test_cert(1, 3, "alice", 0x42))).await); // another key
+            invalid(admin.record_certificate(refused(test_cert(1, 2, "mallory", 0x42))).await); // another principal
+            invalid(admin.record_certificate(refused(test_cert(4, 2, "alice", 0x42))).await); // another CA, same name
+            let mut junk = answer.clone();
+            junk.certificate = Bytes::from_static(&[0x30, 0x00]);
+            invalid(admin.record_certificate(junk).await);
+            let mut other_issuer = answer.clone();
+            other_issuer.issuer = Bytes::from_static(&[1; 32]);
+            invalid(admin.record_certificate(other_issuer).await);
+            let mut other_serial = answer.clone();
+            other_serial.serial = Bytes::from_static(&[0x43]);
+            invalid(admin.record_certificate(other_serial).await);
+            let mut other_end = answer.clone();
+            other_end.not_after_ms += 1000;
+            invalid(admin.record_certificate(other_end).await);
 
             // An answer needs an open request and a sound certificate record.
             let mut unknown = answer.clone();
@@ -770,7 +855,7 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
             let listed = admin.describe_certificate_requests().await.unwrap();
             let one = listed.requests.iter().find(|r| r.id == answer.id).expect("still listed");
             assert_eq!(one.state, state::SIGNED);
-            assert_eq!(one.certificate[..], [0x30, 0x00]);
+            assert_eq!(one.certificate[..], cert[..]);
             assert!(one.signed_at_ms > 0);
             // A second answer finds the request closed.
             invalid(admin.record_certificate(answer).await);
@@ -778,6 +863,7 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
             let inventory = admin.describe_certificates().await.unwrap();
             let entry = inventory.certificates.iter().find(|c| c.serial[..] == [0x42]).expect("in the inventory");
             assert_eq!((entry.principal.as_str(), entry.first_seen_ms), ("alice", 0));
+            assert_eq!(entry.issuer[..], issuer_of(&cert)[..], "the issuer by name and key identifier");
             stop(nodes).await;
         });
     });

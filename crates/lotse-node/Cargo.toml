@@ -19,6 +19,7 @@ lotse-rt-tokio.workspace = true
 lotse-log.workspace = true
 lotse-record.workspace = true
 lotse-rt.workspace = true
+lotse-auth.workspace = true
 bytes.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true

@@ -58,6 +58,31 @@ pub struct AuthConfig {
     /// The tenant of each configured resource, by name; those not named
     /// here belong to `default`.
     pub resource_tenants: BTreeMap<String, String>,
+    /// The cluster's CA certificates: a certificate the CA holder records
+    /// must be signed by one of them (ADR 0096). Empty: none is taken.
+    pub client_cas: ClientCas,
+}
+
+/// The cluster's CA certificates (DER), shared with whoever reloads them,
+/// so a node that takes up a changed CA file checks against it at once.
+#[derive(Debug, Clone, Default)]
+pub struct ClientCas(Arc<Mutex<Vec<Vec<u8>>>>);
+
+impl ClientCas {
+    /// These certificates.
+    pub fn new(cas: Vec<Vec<u8>>) -> ClientCas {
+        ClientCas(Arc::new(Mutex::new(cas)))
+    }
+
+    /// Replaces the certificates, for every holder of a clone.
+    pub fn set(&self, cas: Vec<Vec<u8>>) {
+        *self.0.lock().expect("CA lock") = cas;
+    }
+
+    /// The certificates now.
+    pub fn get(&self) -> Vec<Vec<u8>> {
+        self.0.lock().expect("CA lock").clone()
+    }
 }
 
 impl AuthConfig {
@@ -74,6 +99,7 @@ impl AuthConfig {
             admins: Vec::new(),
             tenants: Vec::new(),
             resource_tenants: BTreeMap::new(),
+            client_cas: ClientCas::default(),
         }
     }
 

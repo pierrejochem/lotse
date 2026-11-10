@@ -11,7 +11,7 @@ use bytes::Bytes;
 use lotse_record::Batch;
 use lotse_rt_tokio::TlsConfig;
 use lotse_rt_tokio::TokioRuntime;
-use lotse_server::{Node, StateMachine};
+use lotse_server::{ClientCas, Node, StateMachine};
 
 use crate::config::{ClusterFile, ConfigError};
 
@@ -90,17 +90,35 @@ pub fn tls_files(file: &ClusterFile, id: u64) -> Result<Option<(FileContents, Tl
     Ok(Some((contents, tls)))
 }
 
+/// The certificates (DER) of a PEM bundle such as the CA file, in order;
+/// blocks that are no certificate are left out.
+pub fn pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
+    x509_parser::pem::Pem::iter_from_buffer(pem)
+        .filter_map(Result::ok)
+        .filter(|p| p.label == "CERTIFICATE")
+        .map(|p| p.contents)
+        .collect()
+}
+
 /// Looks at node `id`'s certificate files every [`TLS_RELOAD_EVERY`] and
 /// gives the runtime what changed: a renewed certificate, a new CA bundle,
-/// a longer revocation list. Files that do not make a working configuration
-/// (half written, a key that does not match) are reported and the old
-/// material kept, so a mistake never takes a running node off the network.
-pub async fn reload_tls(rt: TokioRuntime, file: ClusterFile, id: u64) {
-    reload_tls_every(rt, file, id, TLS_RELOAD_EVERY).await
+/// a longer revocation list; a new CA bundle also goes to `cas`, which
+/// recorded client certificates are checked against (ADR 0096). Files that
+/// do not make a working configuration (half written, a key that does not
+/// match) are reported and the old material kept, so a mistake never takes
+/// a running node off the network.
+pub async fn reload_tls(rt: TokioRuntime, file: ClusterFile, id: u64, cas: ClientCas) {
+    reload_tls_every(rt, file, id, cas, TLS_RELOAD_EVERY).await
 }
 
 /// [`reload_tls`], looking every `every`.
-pub async fn reload_tls_every(rt: TokioRuntime, file: ClusterFile, id: u64, every: std::time::Duration) {
+pub async fn reload_tls_every(
+    rt: TokioRuntime,
+    file: ClusterFile,
+    id: u64,
+    cas: ClientCas,
+    every: std::time::Duration,
+) {
     let mut seen = match tls_files(&file, id) {
         Ok(Some((contents, _))) => contents,
         _ => return,
@@ -111,6 +129,7 @@ pub async fn reload_tls_every(rt: TokioRuntime, file: ClusterFile, id: u64, ever
         match tls_files(&file, id) {
             Ok(Some((contents, tls))) if contents != seen => {
                 let closed = rt.reload_tls(tls);
+                cas.set(pem_certificates(&contents[0]));
                 tracing::info!(node = id, revoked_connections_closed = closed, "TLS files changed: reloaded");
                 seen = contents;
                 failing = false;
@@ -134,6 +153,9 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     let mut cfg = file.node_config(id)?;
     cfg.join = join;
     let rt = runtime(file, id)?;
+    if let Some((contents, _)) = tls_files(file, id)? {
+        cfg.auth.client_cas.set(pem_certificates(&contents[0]));
+    }
     tracing::info!(
         node = id,
         peer = %cfg.listen,
@@ -143,7 +165,8 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
         "starting"
     );
     // Stops with this function, however it returns.
-    let _reload = AbortOnDrop(tokio::spawn(reload_tls(rt.clone(), file.clone(), id)).abort_handle());
+    let _reload =
+        AbortOnDrop(tokio::spawn(reload_tls(rt.clone(), file.clone(), id, cfg.auth.client_cas.clone())).abort_handle());
     let node = Node::start(rt, cfg, |_| NoStateMachine).await?;
     let handle = node.handle();
     let stopped = node.join();

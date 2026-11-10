@@ -915,7 +915,7 @@ public abstract record Request
     }
 
     /// <summary>Adds a certificate to the cluster's revocation list.</summary>
-    /// <param name="Issuer">SHA-256 of the issuer's distinguished name in DER form (32 bytes).</param>
+    /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian, as the certificate has it.</param>
     /// <param name="NotAfterMs">When the certificate stops being valid, in milliseconds since the epoch; the entry is dropped after that.</param>
     /// <param name="Reason">Why, for the people who read the list later; may be empty.</param>
@@ -973,7 +973,7 @@ public abstract record Request
     /// <summary>The CA holder records the certificate it signed for a request (ADR 0092).</summary>
     /// <param name="Id">The request it answers: SHA-256 of its signing request.</param>
     /// <param name="Certificate">The signed certificate, DER.</param>
-    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian.</param>
     /// <param name="NotBeforeMs">First millisecond it is valid in.</param>
     /// <param name="NotAfterMs">Millisecond it stops being valid in.</param>

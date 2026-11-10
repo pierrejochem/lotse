@@ -337,6 +337,8 @@ impl ClusterFile {
             admins: a.admins.clone(),
             tenants: a.tenants.clone(),
             resource_tenants: BTreeMap::new(),
+            // Filled from `[tls] ca` when the node runs.
+            client_cas: lotse_server::ClientCas::default(),
         };
         Ok(lotse_server::NodeConfig {
             id,

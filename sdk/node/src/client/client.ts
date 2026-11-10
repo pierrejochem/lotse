@@ -1827,8 +1827,8 @@ export class LotseClient {
   /**
    * Revokes one client certificate (ADR 0090): each node ends the connections that showed it and refuses it from
    * then on, until it expires at `notAfterMs` (milliseconds since the Unix epoch). `issuer` is the SHA-256 of the
-   * issuer's distinguished name in DER form (32 bytes) and `serial` the serial number, big-endian, as the certificate
-   * has them. The CRL file stays as it is. Needs the cluster-admin role.
+   * issuer's DER name and authority key identifier (32 bytes, ADR 0096) and `serial` the serial number, big-endian,
+   * as the certificate has them. The CRL file stays as it is. Needs the cluster-admin role.
    */
   async revokeCertificate(
     issuer: Uint8Array,
@@ -1876,10 +1876,10 @@ export class LotseClient {
   }
 
   /**
-   * The CA holder records the certificate it signed for the request `id` (the SHA-256 of its signing request). The
-   * broker does not read the certificate: `issuer` (SHA-256 of the issuer's name in DER form, 32 bytes), `serial`
-   * (big-endian) and the validity times, in ms since the Unix epoch, are the CA holder's word (ADR 0092). Cluster
-   * admin.
+   * The CA holder records the certificate it signed for the request `id` (the SHA-256 of its signing request).
+   * `issuer` (SHA-256 of the issuer's DER name and authority key identifier, 32 bytes), `serial` (big-endian) and
+   * the validity times, in ms since the Unix epoch, must be what the certificate says, and the certificate must have
+   * the request's key and principal and be signed by the cluster's CA (ADR 0096). Cluster admin.
    */
   async recordCertificate(
     id: Uint8Array,
