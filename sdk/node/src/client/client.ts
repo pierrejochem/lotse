@@ -986,14 +986,41 @@ export class LotseClient {
     );
   }
 
+  /**
+   * Learns the address of node `node` from the first broker whose metadata lists it. Not from the first broker that
+   * answers: one that lags (cut off from the metadata group) may not know the leader the others name, and would answer
+   * first every time. Only that address is taken; what else the answer says is left alone.
+   */
+  private async findBroker(node: number): Promise<void> {
+    const sorted = this.candidates().sort((a, b) => {
+      const x = formatAddress(a);
+      const y = formatAddress(b);
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+    for (const addr of sorted) {
+      try {
+        const m = await this.call(addr, { type: "Metadata", names: [] });
+        const b = m.type === "Metadata" ? m.brokers.find((x) => x.nodeId === node) : undefined;
+        if (b !== undefined) {
+          this.brokers.set(node, { host: b.host, port: b.port });
+          return;
+        }
+      } catch (e) {
+        if (!(e instanceof CallFailure)) {
+          throw e;
+        }
+        // a broker that does not answer knows nothing
+      }
+    }
+  }
+
   /** Sends an admin request to the metadata leader, or any broker if it is not known. */
   private async callAdmin(req: Request): Promise<Response> {
     const leader = this.metadataLeader;
-    // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's nodes
-    // first, or it keeps asking the others. From every broker, not the first that answers: a node that lags (one cut
-    // off from the metadata group) may not know the leader the others name.
+    // A leader whose address this client has not seen (a node added since it last asked): find it first, or the client
+    // keeps asking the others.
     if (leader !== null && !this.brokers.has(leader)) {
-      await this.metadataFromAll([]);
+      await this.findBroker(leader);
     }
     let addr = leader === null ? undefined : this.brokers.get(leader);
     if (addr === undefined) {
