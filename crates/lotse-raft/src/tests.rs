@@ -857,3 +857,72 @@ fn a_transfer_finishes_with_its_snapshot_although_the_leader_snapshots_again() {
     assert!(c.nodes[&f].snapshot_index() >= first);
     assert!(c.nodes[&l].raft.snapshots_in_transfer().is_empty(), "nothing is kept once it arrived");
 }
+
+/// A node asked to campaign soon is elected at the next tick, whatever the
+/// seeds would have chosen; the others' delayed elections never start first
+/// (ADR 0095). Every node gets each role in turn, so the seeds cannot pick it.
+#[test]
+fn a_node_that_campaigns_soon_is_elected_first() {
+    for preferred in 1..=3 {
+        let mut c = Cluster::new(3);
+        for (&id, node) in &mut c.nodes {
+            if id == preferred {
+                node.raft.campaign_soon();
+            } else {
+                node.raft.delay_election();
+            }
+        }
+        c.ticks(1);
+        assert_eq!(c.leader(), Some(preferred), "elected at the first tick");
+        assert_eq!(c.nodes[&preferred].raft.term(), 1);
+    }
+}
+
+/// Without the preferred node the others still elect a leader, one election
+/// timeout later than they would have.
+#[test]
+fn a_delayed_election_still_happens_without_the_preferred_node() {
+    let mut c = Cluster::new(3);
+    c.cut.insert(1);
+    for (&id, node) in &mut c.nodes {
+        if id != 1 {
+            node.raft.delay_election();
+        }
+    }
+    c.ticks(19);
+    assert_eq!(c.leader(), None, "nobody before the delayed timeout");
+    let l = c.elect();
+    assert_ne!(l, 1);
+}
+
+/// A leader reports itself as leading only while a quorum answers it: cut
+/// off, it stops saying so within an election timeout, before check-quorum
+/// makes it a follower; a new leader says so once its first round is
+/// answered.
+#[test]
+fn a_leader_cut_off_stops_claiming_a_quorum_before_it_steps_down() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(3);
+    assert!(c.nodes[&l].raft.leads_with_quorum());
+    for (&id, node) in &c.nodes {
+        if id != l {
+            assert!(!node.raft.leads_with_quorum(), "a follower does not lead");
+        }
+    }
+    let others: Vec<NodeId> = c.nodes.keys().copied().filter(|&id| id != l).collect();
+    c.cut.extend(others);
+    let mut claimed_until = 0;
+    for t in 1..=30 {
+        c.ticks(1);
+        let raft = &c.nodes[&l].raft;
+        if raft.role() != Role::Leader {
+            assert!(claimed_until < t, "it stopped claiming before it stepped down");
+            break;
+        }
+        if raft.leads_with_quorum() {
+            claimed_until = t;
+        }
+    }
+    assert!(claimed_until <= 10, "claimed for {claimed_until} ticks without a quorum");
+}
