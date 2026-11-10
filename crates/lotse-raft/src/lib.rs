@@ -751,6 +751,42 @@ impl RaftGroup {
         }
     }
 
+    /// Starts an election at the next tick, as if the election timeout had
+    /// run out (through pre-vote where configured), if this node may
+    /// campaign. Electing a leader early is always safe; the driver uses it
+    /// so that a new group's first leader is the node it prefers
+    /// (ADR 0095). A leader ignores it.
+    pub fn campaign_soon(&mut self) {
+        if !matches!(self.state, State::Leader { .. }) {
+            self.election_elapsed = self.timeout;
+        }
+    }
+
+    /// Waits one election timeout more before the next election this node
+    /// starts; the wait after that is random again. The other replicas of a
+    /// new group wait so that its preferred node is elected first
+    /// (ADR 0095). A leader ignores it.
+    pub fn delay_election(&mut self) {
+        if !matches!(self.state, State::Leader { .. }) {
+            self.timeout = self.timeout.saturating_add(self.cfg.election_ticks);
+        }
+    }
+
+    /// Whether this node leads and a quorum of voters (this node included)
+    /// answered a round it sent less than an election timeout ago. A
+    /// deposed leader that has not heard of the new term yet, or one cut off
+    /// from the others, says no; so does a new leader before its first
+    /// round is answered. For what a node reports about itself (ADR 0095),
+    /// never for a safety decision: reads go through [`Raft::read_index`].
+    pub fn leads_with_quorum(&self) -> bool {
+        if !matches!(self.state, State::Leader { .. }) {
+            return false;
+        }
+        let q = self.quorum_seq();
+        let window = u64::from(self.cfg.election_ticks);
+        self.rounds.iter().rev().find(|r| r.0 <= q).is_some_and(|r| self.ticks < r.1 + window)
+    }
+
     fn tick_leader(&mut self) {
         self.heartbeat_elapsed += 1;
         self.election_elapsed += 1;
