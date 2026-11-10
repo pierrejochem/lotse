@@ -98,5 +98,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0092 | [Requesting and signing client certificates](0092-requesting-and-signing-client-certificates.md) | Accepted |
 | 0093 | [Rust 1.88 as the minimum version](0093-rust-1-88-as-the-minimum-version.md) | Accepted |
 | 0094 | [Segment index files and reads without copies](0094-segment-index-files-and-reads-without-copies.md) | Accepted |
+| 0095 | [A new group starts on its preferred node](0095-a-new-group-starts-on-its-preferred-node.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

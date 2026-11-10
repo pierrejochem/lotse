@@ -867,7 +867,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let mut next_membership = started;
     let mut moves = Moves::default();
     while !shared.stop.is_set() {
-        if known.refresh(rt, cfg, groups, factory, auth).await? {
+        if known.refresh(rt, cfg, groups, factory, auth, &configured_voters).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
         }
         // Drained: nothing here is needed any more, and what it would tell
@@ -1388,6 +1388,7 @@ impl Known {
     /// Rebuilds the view after the metadata group applied something, opens
     /// the runtime groups this node is a voter of, and closes and removes
     /// deleted ones. Returns whether it closed a group.
+    #[allow(clippy::too_many_arguments)]
     async fn refresh<R: Runtime, S: StateMachine>(
         &mut self,
         rt: &R,
@@ -1395,6 +1396,7 @@ impl Known {
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
         factory: &Factory<S>,
         auth: &Auth<R>,
+        configured_voters: &[NodeId],
     ) -> Result<bool, Error> {
         let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return Ok(false) };
         if meta.applied() == self.applied {
@@ -1470,6 +1472,8 @@ impl Known {
                 }
             }
         }
+        // Computed once, and only when a new replica opens.
+        let mut preferred: Option<BTreeMap<GroupId, NodeId>> = None;
         for (g, voters, queue) in state.groups() {
             known.voters.insert(g, voters.to_vec());
             // Moved off this node: once the group's leader reported the new
@@ -1505,7 +1509,26 @@ impl Known {
                 let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, first) };
                 let options =
                     ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(cfg, g, queue) };
-                let replica = Replica::open_with(rt.clone(), group_dir(g), raft, factory(g), cfg.log, options).await?;
+                let mut replica =
+                    Replica::open_with(rt.clone(), group_dir(g), raft, factory(g), cfg.log, options).await?;
+                // A new group's first leader is its preferred node (ADR 0095):
+                // that replica campaigns at once, the others wait one election
+                // timeout more, so no handover follows. A replica with a term
+                // (one that was here before, or moved back) waits as always.
+                let fresh = replica.raft_ref().term() == 0 && replica.raft_ref().last_index() == 0;
+                if fresh {
+                    let preferred = preferred.get_or_insert_with(|| {
+                        crate::membership::preferred_leaders(
+                            &crate::client::managed_groups(&state, &core_groups(cfg), configured_voters),
+                            &state.pins,
+                        )
+                    });
+                    match preferred.get(&g) {
+                        Some(&p) if p == cfg.id => replica.raft().campaign_soon(),
+                        Some(&p) if voters.contains(&p) => replica.raft().delay_election(),
+                        _ => {}
+                    }
+                }
                 groups.insert(g, replica);
             }
         }

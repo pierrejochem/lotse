@@ -264,10 +264,15 @@ async fn transactional(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: 
 
 /// A partition as one replica serves it: each record as `(offset, key,
 /// value)`, everything up to `end`, read past the last stable offset.
-async fn read_all(client: &Client<SimRuntime>, p: u32, end: u64) -> Vec<(u64, String, Option<String>)> {
+async fn read_all(client: &Client<SimRuntime>, p: u32, end: u64) -> (Vec<(u64, String, Option<String>)>, bool) {
     let rt_text = |b: Option<Bytes>| b.map(|b| String::from_utf8(b.to_vec()).unwrap());
     let mut out = Vec::new();
     let mut offset = 0;
+    // Producers with transactional data since their last marker; an ABORT
+    // marker after such data means the replica still holds aborted data,
+    // also of a transaction whose outcome the writer never learned.
+    let mut open = BTreeSet::new();
+    let mut aborted_left = false;
     while offset < end {
         let f = match client.fetch_uncommitted(STREAM, p, offset, TICK * 10).await {
             Ok(f) => f,
@@ -279,8 +284,20 @@ async fn read_all(client: &Client<SimRuntime>, p: u32, end: u64) -> Vec<(u64, St
             let (b, r) = Batch::parse(&rest).expect("whole valid batches");
             assert!(b.base_offset() <= offset, "partition {p}: a gap before {}", b.base_offset());
             assert!(b.next_offset() > offset, "partition {p}: a batch before {offset} again");
-            if !b.attributes().control {
-                for rec in b.records().expect("records that decode") {
+            if b.attributes().control {
+                if let Ok(Some(lotse_record::Control::Marker(ty, _))) = lotse_record::control(&b)
+                    && open.remove(&b.producer_id())
+                    && ty == lotse_record::ControlType::Abort
+                {
+                    aborted_left = true;
+                }
+            } else {
+                let records = b.records().expect("records that decode");
+                // A batch compaction emptied keeps its offsets, not its data.
+                if b.attributes().transactional && !records.is_empty() {
+                    open.insert(b.producer_id());
+                }
+                for rec in records {
                     if rec.offset >= offset {
                         out.push((rec.offset, rt_text(rec.key).expect("every record has a key"), rt_text(rec.value)));
                     }
@@ -290,7 +307,7 @@ async fn read_all(client: &Client<SimRuntime>, p: u32, end: u64) -> Vec<(u64, St
             rest = r;
         }
     }
-    out
+    (out, aborted_left)
 }
 
 async fn run(rt: SimRuntime) {
@@ -415,11 +432,11 @@ async fn run(rt: SimRuntime) {
                     })
                 });
                 if leads {
-                    let records = read_all(&admin, p, ends[&p]).await;
+                    let (records, aborted_left) = read_all(&admin, p, ends[&p]).await;
                     let mut seen = BTreeSet::new();
                     let compacted = records.iter().all(|(_, k, _)| seen.insert(k.clone()) || k == "filler");
                     let clean = !records.iter().any(|(_, _, v)| v.as_ref().is_some_and(|v| out.aborted.contains(v)));
-                    if compacted && clean {
+                    if compacted && clean && !aborted_left {
                         break records;
                     }
                 }
