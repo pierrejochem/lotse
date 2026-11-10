@@ -298,12 +298,12 @@ pub(crate) fn identity_of(cert: &CertificateDer<'_>) -> Option<PeerIdentity> {
     let mut nodes = Vec::new();
     if let Ok(Some(san)) = cert.subject_alternative_name() {
         for name in &san.value.general_names {
-            if let x509_parser::extensions::GeneralName::URI(uri) = name {
-                if uri.starts_with(PeerIdentity::NODE_URI) {
-                    // A malformed node URI makes the certificate name nobody,
-                    // rather than falling through to its common name.
-                    nodes.push(PeerIdentity::node_from_uri(uri)?);
-                }
+            if let x509_parser::extensions::GeneralName::URI(uri) = name
+                && uri.starts_with(PeerIdentity::NODE_URI)
+            {
+                // A malformed node URI makes the certificate name nobody,
+                // rather than falling through to its common name.
+                nodes.push(PeerIdentity::node_from_uri(uri)?);
             }
         }
     }

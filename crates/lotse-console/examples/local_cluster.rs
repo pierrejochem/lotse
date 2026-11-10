@@ -107,7 +107,7 @@ async fn main() {
             let _ = writer
                 .produce("orders", (i % 3) as u32, batch(&format!("customer-{}", i % 17), &format!("order {i}")))
                 .await;
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 let _ = writer.produce("jobs", 0, batch("job", &format!("job {i}"))).await;
             }
             i += 1;

@@ -42,7 +42,7 @@ pub fn validate_create_queue(req: &CreateQueue) -> Result<(), ApiError> {
 pub fn duration_flag(ms: u64) -> String {
     const UNITS: [(u64, &str); 4] = [(86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s")];
     for (size, unit) in UNITS {
-        if ms >= size && ms % size == 0 {
+        if ms >= size && ms.is_multiple_of(size) {
             return format!("{}{unit}", ms / size);
         }
     }

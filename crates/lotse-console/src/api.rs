@@ -64,7 +64,7 @@ fn messages(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -482,7 +482,7 @@ pub async fn request_certificate(
 /// Decodes hex, or says what is wrong with `what`.
 fn hex(what: &str, text: &str) -> ApiResult<Vec<u8>> {
     let bad = || ApiError::BadRequest(format!("The {what} is hexadecimal: pairs of 0-9 and a-f."));
-    if text.is_empty() || text.len() % 2 != 0 {
+    if text.is_empty() || !text.len().is_multiple_of(2) {
         return Err(bad());
     }
     (0..text.len())
