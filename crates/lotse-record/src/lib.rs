@@ -464,6 +464,18 @@ pub fn peek_len(buf: &[u8]) -> Option<usize> {
     Some(LEN_PREFIX + get_u32(buf, 8) as usize)
 }
 
+/// Length, first offset and last offset of the batch starting at `buf[0]`,
+/// read from its header alone, if `buf` holds the whole header. Nothing is
+/// checked: a reader that walks a segment by headers parses the batches it
+/// keeps with [`Batch::parse`].
+pub fn peek_span(buf: &[u8]) -> Option<(usize, u64, u64)> {
+    if buf.len() < HEADER_LEN {
+        return None;
+    }
+    let base = get_u64(buf, 0);
+    Some((LEN_PREFIX + get_u32(buf, 8) as usize, base, base + u64::from(get_u32(buf, 27))))
+}
+
 /// A validated batch that borrows nothing: cheap to clone, zero-copy to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Batch {
@@ -530,6 +542,12 @@ impl Batch {
     /// Encoded length.
     pub fn len(&self) -> usize {
         self.bytes.len()
+    }
+
+    /// The stored CRC32C, over everything after `base_offset`, `batch_len`,
+    /// `term`, `magic` and the CRC itself.
+    pub fn crc(&self) -> u32 {
+        get_u32(&self.bytes, 21)
     }
 
     /// Whether no record is left: only a compacted batch can be empty.
