@@ -1,10 +1,14 @@
 package dev.lotse.net;
 
 import java.io.IOException;
+import java.net.BindException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
 
@@ -54,5 +58,20 @@ public final class LotseBinary {
             throw new AssertionError(String.join(" ", command) + " failed:\n" + out);
         }
         return out;
+    }
+
+    /**
+     * A port nothing listens on, chosen below the ephemeral range (32768 and up on Linux): a port the kernel handed out
+     * for listening is handed out again to the next outgoing connection, which could take it before the node starts.
+     */
+    public static int freePort() throws IOException {
+        for (;;) {
+            int port = 20_000 + ThreadLocalRandom.current().nextInt(12_000);
+            try (ServerSocket s = new ServerSocket(port, 1, InetAddress.getLoopbackAddress())) {
+                return s.getLocalPort();
+            } catch (BindException e) {
+                // taken: try another
+            }
+        }
     }
 }

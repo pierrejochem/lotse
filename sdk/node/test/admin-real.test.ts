@@ -24,7 +24,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { leaderOf as currentLeader } from "./support/failover.js";
+import { leaderOf as currentLeader, pinLeader } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -192,6 +192,7 @@ describe("admin calls against three real nodes", { skip }, () => {
 
   test("a purge settles the messages that are ready and leaves what a consumer holds", async () => {
     await client.createQueue("purge-q");
+    await pinLeader(client, "purge-q");
     const queueId = (await client.metadata("purge-q")).resources.find((r) => r.name === "purge-q")?.resourceId;
     await client.produce("purge-q", 0, [{ value: "m0" }, { value: "m1" }, { value: "m2" }, { value: "m3" }]);
     const c = await client.subscribe("purge-q", { credit: 1 });
@@ -231,6 +232,7 @@ describe("admin calls against three real nodes", { skip }, () => {
 
   test("a purge in many rounds settles every message", async () => {
     await client.createQueue("rounds-q");
+    await pinLeader(client, "rounds-q");
     const count = 1_200;
     for (let i = 0; i < count; i += 400) {
       await client.produce(
@@ -245,6 +247,8 @@ describe("admin calls against three real nodes", { skip }, () => {
   test("a dead letter is requeued to the queue it came from", async () => {
     await client.createQueue("rq-dead");
     await client.createQueue("rq-src", { maxDeliveries: 1, deadLetterQueue: "rq-dead" });
+    await pinLeader(client, "rq-dead");
+    await pinLeader(client, "rq-src");
     await client.produce("rq-src", 0, { value: "poison" });
     const c = await client.subscribe("rq-src");
     try {
@@ -350,6 +354,8 @@ describe("admin calls against three real nodes", { skip }, () => {
 
   test("every node reports its metrics, and what was produced shows on the leader", async () => {
     await client.createStream("metrics-s", 1, 3);
+    // Produce counters are the leader's, in memory: the leader stays where it took the produce.
+    await pinLeader(client, "metrics-s");
     const id = (await client.metadata("metrics-s")).resources.find((r) => r.name === "metrics-s")?.resourceId;
     await client.produce("metrics-s", 0, [{ value: "a" }, { value: "b" }, { value: "c" }]);
     await until("the leader's counters", async () => {

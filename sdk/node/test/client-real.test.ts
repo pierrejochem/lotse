@@ -23,7 +23,7 @@ import { crc32c } from "../src/record/crc32c.js";
 import { putU32 } from "../src/record/bytes.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { retryIfLeaderMoved, stable } from "./support/failover.js";
+import { pinLeader, retryIfLeaderMoved, stable } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -170,6 +170,7 @@ describe("a client against three real nodes", { skip }, () => {
     await retryIfLeaderMoved(client, async (steady, attempt) => {
       const times = `times${attempt === 1 ? "" : `-${attempt}`}`;
       await client.createStream(times, 1, 3);
+      await pinLeader(client, times);
       await steady.watch(times);
       const a = await client.produce(times, 0, [{ value: "a1", timestamp: 1_000 }, { value: "a2", timestamp: 1_500 }]);
       const b = await client.produce(times, 0, { value: "b", timestamp: 2_000 });

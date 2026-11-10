@@ -36,6 +36,36 @@ internal static class RealWaits
         }
     }
 
+    /// <summary>
+    /// Pins the leader of <paramref name="name"/>'s partition to the node that leads it now (<c>MoveLeader</c>, ADR 0065)
+    /// and waits until that node has led it in one term for five reads in a row. A new group's leader moves to the group's
+    /// preferred node in its first seconds (ADR 0050), and a test that relies on what its leader keeps in memory (what is
+    /// in flight, delivery counts, a single active consumer, produce counters) breaks if that move falls inside it;
+    /// waiting for "the same leader for a while" only guesses when the move comes. A pinned leader is left where it is.
+    /// </summary>
+    internal static async Task PinLeaderAsync(LotseClient client, string name, int partition = 0)
+    {
+        async Task<Messages.PartitionMetadata?> Current()
+        {
+            Response.Metadata m = await client.MetadataAsync(new[] { name });
+            return m.Resources.Where(r => r.Name == name).SelectMany(r => r.Partitions).FirstOrDefault(p => p.Partition == partition);
+        }
+        uint leader = 0;
+        await UntilAsync($"a leader for {name}/{partition}", async () => (leader = (await Current())?.Leader ?? 0) != 0);
+        await client.MoveLeaderAsync(name, partition, leader);
+        (uint Leader, ulong Term) last = (0, 0);
+        int same = 0;
+        await UntilAsync($"node {leader} to lead {name}/{partition} steadily", async () =>
+        {
+            Messages.PartitionMetadata? p = await Current();
+            (uint, ulong) now = (p?.Leader ?? 0, p?.LeaderTerm ?? 0);
+            same = now == last && now.Item1 == leader ? same + 1 : 0;
+            last = now;
+            await Task.Delay(100);
+            return same >= 5;
+        });
+    }
+
     /// <summary>Polls <paramref name="condition"/> until it holds; fails with <paramref name="what"/> after <paramref name="seconds"/>.</summary>
     internal static async Task UntilAsync(string what, Func<Task<bool>> condition, int seconds = 60)
     {

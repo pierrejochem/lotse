@@ -11,7 +11,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { leaderTerm, retryIfLeaderMoved } from "./support/failover.js";
+import { leaderTerm, pinLeader, retryIfLeaderMoved } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -71,19 +71,12 @@ describe("queues against three real nodes", { skip }, () => {
   }
 
   /**
-   * Waits until the queue's leader has stayed the same for half a second. A queue's group elects its leader in its
-   * first moments, and a leader that changes later restarts the delivery counts (they are a lower bound after a
-   * failover), which these tests do not want to measure.
+   * Pins the queue's leader where it is and waits until it leads there steadily (`pinLeader`): these scenarios rely on
+   * what the leader keeps in memory, and a new queue's leader otherwise moves to its preferred node at a time no test
+   * can know.
    */
   async function settled(queue: string): Promise<void> {
-    let leader = await leaderOf(queue);
-    let same = 0;
-    while (same < 5) {
-      await sleep(100);
-      const now = await leaderOf(queue);
-      same = now === leader ? same + 1 : 0;
-      leader = now;
-    }
+    await pinLeader(client, queue);
   }
 
   async function restart(node: number): Promise<void> {
@@ -110,6 +103,7 @@ describe("queues against three real nodes", { skip }, () => {
 
   test("every message is delivered once, acked, and the queue drains", async () => {
     await client.createQueue("drain");
+    await settled("drain");
     await produce("drain", 20);
     const seen = new Set<string>();
     const c = await client.subscribe("drain", { credit: 3 });
@@ -150,6 +144,7 @@ describe("queues against three real nodes", { skip }, () => {
 
   test("messages are read with for await and acked in a batch", async () => {
     await client.createQueue("iter");
+    await settled("iter");
     await produce("iter", 6);
     const c = await client.subscribe("iter", { credit: 4 });
     try {
@@ -411,7 +406,7 @@ describe("queues against three real nodes", { skip }, () => {
         }
         assert.deepEqual(
           next.map((x) => x.text()),
-          ["single-0", "single-1", "single-2"],
+          [0, 1, 2].map((i) => `${single}-${i}`),
         );
         await standby.ack(next);
       } finally {
