@@ -1040,12 +1040,47 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             },
             ct);
 
+    /// <summary>
+    /// Learns the address of node <paramref name="node"/> from the first broker whose metadata lists it. Not from the
+    /// first broker that answers: one that lags (cut off from the metadata group) may not know the leader the others
+    /// name, and would answer first every time. Only that address is taken; what else the answer says is left alone.
+    /// </summary>
+    private async Task FindBrokerAsync(uint node, CancellationToken ct)
+    {
+        var sorted = Candidates().OrderBy(a => a.ToString(), StringComparer.Ordinal).ToList();
+        foreach (Address addr in sorted)
+        {
+            try
+            {
+                if (await CallAsync(addr, new Request.Metadata(Array.Empty<string>()), ct).ConfigureAwait(false) is Response.Metadata m)
+                {
+                    foreach (Messages.Broker b in m.Brokers)
+                    {
+                        if (b.NodeId == node && b.Port != 0)
+                        {
+                            lock (_state)
+                            {
+                                _brokers[node] = new Address(b.Host, b.Port);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (CallFailure)
+            {
+                // a broker that does not answer knows nothing
+            }
+        }
+    }
+
     /// <summary>Sends an admin request to the metadata leader, or any broker if it is not known.</summary>
     private async Task<Response> CallAdminAsync(Request req, CancellationToken ct)
     {
         long leader = Interlocked.Read(ref _metadataLeader);
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
-        // nodes first, or it keeps asking the others.
+        // nodes first, or it keeps asking the others. If the broker that answers does not know it either (one that
+        // lags), ask the others for its address.
         if (leader >= 0 && AddressOf((uint)leader) is null)
         {
             try
@@ -1055,6 +1090,10 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             catch (ClientException)
             {
                 // the retry loop reports what is still wrong
+            }
+            if (AddressOf((uint)leader) is null)
+            {
+                await FindBrokerAsync((uint)leader, ct).ConfigureAwait(false);
             }
         }
         Address? addr = leader >= 0 ? AddressOf((uint)leader) : null;

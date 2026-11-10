@@ -677,15 +677,40 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// Learns the address of node `node` from the first broker whose
+    /// metadata lists it. Not from the first broker that answers: one that
+    /// lags (cut off from the metadata group) may not know the leader the
+    /// others name, and would answer first every time. Only that address is
+    /// taken; what else the answer says is left alone.
+    async fn find_broker(&self, node: u32) {
+        let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
+        addrs.extend(self.cfg.bootstrap.iter().cloned());
+        addrs.sort();
+        addrs.dedup();
+        for addr in addrs {
+            let req = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+            let Ok(Response::Metadata(m)) = self.call(&addr, &req).await else { continue };
+            if let Some(b) = m.brokers.iter().find(|b| b.node_id == node) {
+                self.brokers.lock().expect("brokers lock").insert(node, format!("{}:{}", b.host, b.port));
+                return;
+            }
+        }
+    }
+
     /// Sends an admin request to the metadata leader, or any broker if it
     /// is not known.
     async fn call_admin(&self, req: &Request) -> Result<Response, Attempt> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
         // A leader whose address this client has not seen (a node added
         // since it last asked): learn the cluster's nodes first, or it
-        // keeps asking the others.
-        if leader.is_some_and(|l| !self.brokers.lock().expect("brokers lock").contains_key(&l)) {
+        // keeps asking the others. If the broker that answers does not know
+        // it either (one that lags), ask the others for its address.
+        let unknown = |l: &u32| !self.brokers.lock().expect("brokers lock").contains_key(l);
+        if let Some(l) = leader.filter(unknown) {
             let _ = self.metadata(&[]).await;
+            if unknown(&l) {
+                self.find_broker(l).await;
+            }
         }
         let addr = match leader.and_then(|l| self.brokers.lock().expect("brokers lock").get(&l).cloned()) {
             Some(a) => a,

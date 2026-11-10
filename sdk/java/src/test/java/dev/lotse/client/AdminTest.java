@@ -325,4 +325,26 @@ class AdminTest {
         assertNull(got.get(1).metrics());
         assertTrue(got.get(1).error() instanceof ClientException.NoAnswer);
     }
+
+    /**
+     * A leader this client has no address for is looked up with every broker, not only the first that answers: here
+     * that one lags and lists neither the leader nor the node that names it (seed 4638 of the membership simulation).
+     */
+    @Test
+    void aLeaderOnlySomeBrokersKnowIsFound() throws IOException {
+        try (FakeNode c = new FakeNode(3)) {
+            a.on((n, r) -> r instanceof Request.Metadata
+                    ? Fx.metadata(List.of(a))
+                    : new Response.DescribeNodes(ErrorCode.NOT_LEADER, null, List.of()));
+            b.on((n, r) -> r instanceof Request.Metadata
+                    ? Fx.metadata(List.of(a, b, c))
+                    : new Response.DescribeNodes(ErrorCode.NOT_LEADER, new LeaderHint(3, 1), List.of()));
+            c.on((n, r) -> r instanceof Request.Metadata
+                    ? Fx.metadata(List.of(a, b, c))
+                    : new Response.DescribeNodes(
+                            ErrorCode.NONE, null, List.of(new Messages.NodeEntry(3, "c:7000", "c:9000", 0, 0, 0))));
+            client = new LotseClient(Fx.config(a, b).retryFor(Duration.ofSeconds(2)).build());
+            assertEquals(List.of(3L), client.describeNodes().stream().map(Messages.NodeEntry::nodeId).toList());
+        }
+    }
 }
