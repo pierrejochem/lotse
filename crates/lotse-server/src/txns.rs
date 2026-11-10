@@ -64,6 +64,11 @@ pub(crate) enum MarkerCheck {
     /// past this marker's epoch (a late retry, which must not close the
     /// current transaction). The coordinator counts it as delivered.
     Done,
+    /// Nothing to append, but only because of entries that are not applied
+    /// yet: a marker in flight, perhaps from an earlier leader. Those may
+    /// still be cut from the log, so the marker is delivered only once
+    /// they commit.
+    Covered,
 }
 
 /// The view of one producer, applied state plus tail.
@@ -130,12 +135,17 @@ impl View {
 }
 
 impl TxnState {
-    fn view(&self, producer_id: u64) -> View {
-        let mut v = View {
+    /// The applied state of one producer, without the tail.
+    fn applied_view(&self, producer_id: u64) -> View {
+        View {
             open: self.open.get(&producer_id).copied(),
             epoch: self.epochs.get(&producer_id).copied(),
             coordinator_epoch: self.coordinator_epochs.get(&producer_id).copied(),
-        };
+        }
+    }
+
+    fn view(&self, producer_id: u64) -> View {
+        let mut v = self.applied_view(producer_id);
         for (p, item) in self.tail.values() {
             if *p == producer_id {
                 v.step(*item);
@@ -146,15 +156,22 @@ impl TxnState {
 
     /// Whether a leader may append this marker for `producer_id`.
     pub(crate) fn check_marker(&self, producer_id: u64, epoch: u16, coordinator_epoch: u32) -> MarkerCheck {
-        let v = self.view(producer_id);
-        if v.coordinator_epoch.is_some_and(|c| coordinator_epoch < c) {
-            return MarkerCheck::StaleCoordinator;
+        let check = |v: View| {
+            if v.coordinator_epoch.is_some_and(|c| coordinator_epoch < c) {
+                return MarkerCheck::StaleCoordinator;
+            }
+            // Needed if it closes an open transaction of an older epoch, or
+            // raises the producer's epoch (which also fences a zombie's late
+            // data here).
+            let closes = v.open.is_some_and(|o| o.epoch < epoch);
+            let raises = v.epoch.is_none_or(|e| epoch > e);
+            if closes || raises { MarkerCheck::Append } else { MarkerCheck::Done }
+        };
+        match check(self.view(producer_id)) {
+            // The tail decided it: what it holds is not committed yet.
+            MarkerCheck::Done if check(self.applied_view(producer_id)) == MarkerCheck::Append => MarkerCheck::Covered,
+            c => c,
         }
-        // Needed if it closes an open transaction of an older epoch, or raises
-        // the producer's epoch (which also fences a zombie's late data here).
-        let closes = v.open.is_some_and(|o| o.epoch < epoch);
-        let raises = v.epoch.is_none_or(|e| epoch > e);
-        if closes || raises { MarkerCheck::Append } else { MarkerCheck::Done }
     }
 
     /// Whether `producer_id` has a transaction open in the whole log: then
