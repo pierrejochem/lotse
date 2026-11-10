@@ -84,3 +84,35 @@ export async function retryIfLeaderMoved<T>(
     }
   }
 }
+
+/**
+ * Pins the leader of `name`'s partition to the node that leads it now (`moveLeader`, ADR 0065) and waits until that
+ * node has led it in one term for five reads in a row. A new group's leader moves to the group's preferred node in its
+ * first seconds (ADR 0050), and a scenario that relies on what its leader keeps in memory (what is in flight, delivery
+ * counts, a single active consumer, produce counters) breaks if that move falls inside it; waiting for "the same leader
+ * for a while" only guesses when the move comes. A pinned leader is left where it is. An election that a starved node
+ * loses can still move it; `retryIfLeaderMoved` is for those.
+ */
+export async function pinLeader(client: LotseClient, name: string, partition = 0): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let leader = await leaderOf(client, name, partition);
+  while (leader === 0) {
+    if (Date.now() > deadline) {
+      throw new Error(`no leader for ${name}`);
+    }
+    await sleep(100);
+    leader = await leaderOf(client, name, partition);
+  }
+  await client.moveLeader(name, partition, leader);
+  let last = "";
+  let same = 0;
+  while (same < 5) {
+    if (Date.now() > deadline) {
+      throw new Error(`node ${leader} does not settle as the leader of ${name}: ${last}`);
+    }
+    const now = await leaderTerm(client, name, partition);
+    same = now === last && now.startsWith(`${leader}@`) ? same + 1 : 0;
+    last = now;
+    await sleep(100);
+  }
+}

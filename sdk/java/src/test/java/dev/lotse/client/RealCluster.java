@@ -115,4 +115,54 @@ final class RealCluster implements AutoCloseable {
             }
         }
     }
+
+    /**
+     * Pins the leader of {@code name}'s first partition to the node that leads it now ({@code moveLeader}, ADR 0065)
+     * and waits until that node has led it in one term for five reads in a row. A new group's leader moves to the
+     * group's preferred node in its first seconds (ADR 0050), and a test that relies on what its leader keeps in memory
+     * (what is in flight, delivery counts, a single active consumer, produce counters) breaks if that move falls inside
+     * it; waiting for "the same leader for a while" only guesses when the move comes. A pinned leader is left where it
+     * is.
+     */
+    static void pinLeader(LotseClient client, String name) throws InterruptedException {
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(60).toNanos();
+        dev.lotse.proto.Messages.PartitionMetadata p = partition0(client, name);
+        while (p == null || p.leader() == 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("no leader for " + name);
+            }
+            Thread.sleep(100);
+            p = partition0(client, name);
+        }
+        long leader = p.leader();
+        client.moveLeader(name, 0, leader);
+        long lastLeader = 0;
+        long lastTerm = -1;
+        int same = 0;
+        while (same < 5) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("node " + leader + " does not settle as the leader of " + name);
+            }
+            Thread.sleep(100);
+            p = partition0(client, name);
+            long nowLeader = p == null ? 0 : p.leader();
+            long nowTerm = p == null ? -1 : p.leaderTerm();
+            same = nowLeader == leader && nowLeader == lastLeader && nowTerm == lastTerm ? same + 1 : 0;
+            lastLeader = nowLeader;
+            lastTerm = nowTerm;
+        }
+    }
+
+    private static dev.lotse.proto.Messages.PartitionMetadata partition0(LotseClient client, String name) {
+        for (var r : client.metadata(name).resources()) {
+            if (r.name().equals(name)) {
+                for (var p : r.partitions()) {
+                    if (p.partition() == 0) {
+                        return p;
+                    }
+                }
+            }
+        }
+        return null;
+    }
 }

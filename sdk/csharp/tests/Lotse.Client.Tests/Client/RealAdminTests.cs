@@ -55,18 +55,14 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
         return leader;
     }
 
-    /// <summary>Waits until the leader has stayed the same for half a second (see RealQueueTests).</summary>
+    /// <summary>
+    /// Pins the queue's leader where it is and waits until it leads there steadily (<see cref="RealWaits.PinLeaderAsync"/>):
+    /// these tests rely on what the leader keeps in memory, and a new queue's leader otherwise moves to its preferred node
+    /// at a time no test can know.
+    /// </summary>
     private async Task SettledAsync(string queue)
     {
-        uint leader = await LeaderOfAsync(queue);
-        int same = 0;
-        while (same < 5)
-        {
-            await Task.Delay(100);
-            uint now = await LeaderOfAsync(queue);
-            same = now == leader ? same + 1 : 0;
-            leader = now;
-        }
+        await RealWaits.PinLeaderAsync(Client, queue);
     }
 
     private static async Task<Delivery> Take(QueueConsumer c, int seconds = 30)
@@ -408,6 +404,8 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
     public async Task EveryNodeAnswersForItsOwnMetrics()
     {
         await Client.CreateQueueAsync("adm-metrics");
+        // Produce counters are the leader's, in memory: the leader stays where it took the produce.
+        await SettledAsync("adm-metrics");
         await ProduceAsync("adm-metrics", 4, "m");
         ulong queueId = (await Client.MetadataAsync(new[] { "adm-metrics" })).Resources.First(r => r.Name == "adm-metrics").ResourceId;
         IReadOnlyList<NodeMetrics> all = await Client.NodeMetricsAsync();

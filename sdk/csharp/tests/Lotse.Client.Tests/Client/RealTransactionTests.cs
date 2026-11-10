@@ -51,45 +51,14 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
         return client;
     }
 
-
-    private async Task<int> LeaderOfAsync(LotseClient client, string queue)
-    {
-        DateTime deadline = DateTime.UtcNow.AddSeconds(60);
-        while (DateTime.UtcNow < deadline)
-        {
-            Response.Metadata m = await client.MetadataAsync(new[] { queue });
-            foreach (Messages.ResourceMetadata r in m.Resources)
-            {
-                foreach (Messages.PartitionMetadata p in r.Partitions)
-                {
-                    if (r.Name == queue && p.Partition == 0 && p.Leader != 0)
-                    {
-                        return (int)p.Leader;
-                    }
-                }
-            }
-            await Task.Delay(100);
-        }
-        throw new Xunit.Sdk.XunitException($"no leader for {queue}\n{_cluster.Log(1)}");
-    }
-
     /// <summary>
-    /// Creates a queue and waits until its leader has stayed the same for half a second. A queue's group elects its leader
-    /// in its first moments; a leader that changes while a test holds a message ends the subscription, which is the
-    /// failover behaviour these tests do not want to measure.
+    /// Creates a queue and pins its leader where it is (<see cref="RealWaits.PinLeaderAsync"/>): a leader that moves while
+    /// a test holds a message ends the subscription, which is the failover behaviour these tests do not want to measure.
     /// </summary>
     private async Task CreateQueueAsync(LotseClient client, string name)
     {
         await client.CreateQueueAsync(name);
-        int leader = await LeaderOfAsync(client, name);
-        int same = 0;
-        while (same < 5)
-        {
-            await Task.Delay(100);
-            int now = await LeaderOfAsync(client, name);
-            same = now == leader ? same + 1 : 0;
-            leader = now;
-        }
+        await RealWaits.PinLeaderAsync(client, name);
     }
 
     private static List<string> Texts(IEnumerable<BatchRecord> records) => records.Select(r => r.Value!.ToUtf8()).ToList();
