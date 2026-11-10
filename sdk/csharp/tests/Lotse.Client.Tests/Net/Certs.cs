@@ -58,17 +58,28 @@ internal sealed class Certs
         return certs;
     }
 
+    /// <summary>
+    /// A port nothing listens on, chosen below the ephemeral range (32768 and up on Linux): a port the kernel handed out
+    /// for listening is handed out again to the next outgoing connection, which could take it before the node starts.
+    /// </summary>
     internal static int FreePort()
     {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        try
+        while (true)
         {
-            return ((IPEndPoint)l.LocalEndpoint).Port;
-        }
-        finally
-        {
-            l.Stop();
+            var l = new TcpListener(IPAddress.Loopback, 20_000 + Random.Shared.Next(12_000));
+            try
+            {
+                l.Start();
+                return ((IPEndPoint)l.LocalEndpoint).Port;
+            }
+            catch (SocketException)
+            {
+                // taken: try another
+            }
+            finally
+            {
+                l.Stop();
+            }
         }
     }
 }

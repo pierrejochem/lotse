@@ -73,19 +73,12 @@ class RealQueueTest {
     }
 
     /**
-     * Waits until the queue's leader has stayed the same for half a second. A queue's group elects its leader in
-     * its first moments, and a leader that changes later restarts the delivery counts (they are a lower bound after
-     * a failover), which these tests do not want to measure.
+     * Pins the queue's leader where it is and waits until it leads there steadily ({@link RealCluster#pinLeader}):
+     * these tests rely on what the leader keeps in memory, and a new queue's leader otherwise moves to its preferred
+     * node at a time no test can know.
      */
     private static void settled(String queue) throws InterruptedException {
-        int leader = leaderOf(queue);
-        int same = 0;
-        while (same < 5) {
-            Thread.sleep(100);
-            int now = leaderOf(queue);
-            same = now == leader ? same + 1 : 0;
-            leader = now;
-        }
+        RealCluster.pinLeader(client, queue);
     }
 
     private static void restart(int node) throws Exception {

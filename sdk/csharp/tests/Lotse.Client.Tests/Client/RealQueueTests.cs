@@ -68,21 +68,13 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     }
 
     /// <summary>
-    /// Waits until the queue's leader has stayed the same for half a second. A queue's group elects its leader in its
-    /// first moments, and a leader that changes later restarts the delivery counts (they are a lower bound after a
-    /// failover), which these tests do not want to measure.
+    /// Pins the queue's leader where it is and waits until it leads there steadily (<see cref="RealWaits.PinLeaderAsync"/>):
+    /// these tests rely on what the leader keeps in memory, and a new queue's leader otherwise moves to its preferred node
+    /// at a time no test can know.
     /// </summary>
     private async Task SettledAsync(string queue)
     {
-        int leader = await LeaderOfAsync(queue);
-        int same = 0;
-        while (same < 5)
-        {
-            await Task.Delay(100);
-            int now = await LeaderOfAsync(queue);
-            same = now == leader ? same + 1 : 0;
-            leader = now;
-        }
+        await RealWaits.PinLeaderAsync(Client, queue);
     }
 
     private async Task ProduceAsync(string queue, int count)
