@@ -852,6 +852,27 @@ async fn ready(admin: &Client<SimRuntime>, queue_id: u64) -> u64 {
         .sum()
 }
 
+/// Nacks with requeue what `queue` delivers until `dlq` (id `dlq_id`)
+/// holds `n` ready messages. Nacking each message once is not enough: if the
+/// queue's leader changes between a delivery and its nack, the nack finds
+/// nothing in flight and the count is not written, so the message comes
+/// back with its count started over (counts are a lower bound, ADR 0031 and
+/// ADR 0055). It is nacked again then, as a consumer that keeps failing
+/// would.
+async fn nack_until_dead_lettered(rt: &SimRuntime, admin: &Client<SimRuntime>, queue: &str, dlq_id: u64, n: u64) {
+    let mut c = admin.subscribe(queue, 10).await.unwrap();
+    let mut waited = 0;
+    while ready(admin, dlq_id).await < n {
+        while let Some(m) = c.next(TICK * 10).await.unwrap() {
+            c.nack(&m, true).await.unwrap();
+        }
+        rt.sleep(TICK * 10).await;
+        waited += 1;
+        assert!(waited < 500, "the dead letters from {queue} arrive");
+    }
+    c.close().await;
+}
+
 #[test]
 fn purge_takes_only_ready_messages_and_requeue_moves_dead_letters_back_once() {
     lotse_sim::check_few_seeds(5, |seed| {
@@ -866,22 +887,7 @@ fn purge_takes_only_ready_messages_and_requeue_moves_dead_letters_back_once() {
             for i in 0..5 {
                 admin.produce("work", 0, message(&format!("m{i}"))).await.unwrap();
             }
-            {
-                let mut c = admin.subscribe("work", 10).await.unwrap();
-                let mut seen = 0;
-                while seen < 5 {
-                    let m = c.next(Duration::from_secs(5)).await.unwrap().expect("a delivery");
-                    c.nack(&m, true).await.unwrap();
-                    seen += 1;
-                }
-                c.close().await;
-            }
-            let mut waited = 0;
-            while ready(&admin, dlq).await < 5 {
-                rt.sleep(TICK * 10).await;
-                waited += 1;
-                assert!(waited < 500, "the dead letters arrive");
-            }
+            nack_until_dead_lettered(&rt, &admin, "work", dlq, 5).await;
 
             // Requeue: all five back in `work`, once each.
             assert_eq!(admin.requeue("dlq").await.unwrap(), 5);
@@ -905,18 +911,7 @@ fn purge_takes_only_ready_messages_and_requeue_moves_dead_letters_back_once() {
             admin.produce("dlq", 0, message("plain")).await.unwrap();
             admin.create_queue_with("gone", 3, &[("max.deliveries", "1")], Some("dlq")).await.unwrap();
             admin.produce("gone", 0, message("orphan")).await.unwrap();
-            {
-                let mut c = admin.subscribe("gone", 1).await.unwrap();
-                let m = c.next(Duration::from_secs(5)).await.unwrap().expect("a delivery");
-                c.nack(&m, true).await.unwrap();
-                c.close().await;
-            }
-            let mut waited = 0;
-            while ready(&admin, dlq).await < 2 {
-                rt.sleep(TICK * 10).await;
-                waited += 1;
-                assert!(waited < 500, "the orphan arrives");
-            }
+            nack_until_dead_lettered(&rt, &admin, "gone", dlq, 2).await;
             admin.delete("gone").await.unwrap();
             // Once the dead-letter queue's leader knows of the delete; before,
             // a requeued message goes with the deleted queue (ADR 0064).
