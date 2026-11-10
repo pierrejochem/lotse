@@ -1695,13 +1695,10 @@ public final class LotseClient implements AutoCloseable {
     private Response callAdmin(Request req) {
         Long leader = metadataLeader;
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
-        // nodes first, or it keeps asking the others.
+        // nodes first, or it keeps asking the others. From every broker, not the first that answers: a node that
+        // lags (one cut off from the metadata group) may not know the leader the others name.
         if (leader != null && addressOf(leader) == null) {
-            try {
-                metadata();
-            } catch (ClientException e) {
-                // the retry loop reports what is still wrong
-            }
+            metadataFromAll();
         }
         Address addr = leader == null ? null : addressOf(leader);
         if (addr == null) {

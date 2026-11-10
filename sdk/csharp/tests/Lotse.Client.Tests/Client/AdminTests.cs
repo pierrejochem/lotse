@@ -661,4 +661,25 @@ public sealed class AdminTests : IDisposable
         Assert.Equal(typeof(uint), typeof(NodeMetrics).GetProperty(nameof(NodeMetrics.NodeId))!.PropertyType);
         Assert.Equal(typeof(ulong), typeof(Request.AddNode).GetProperty(nameof(Request.AddNode.NodeId))!.PropertyType);
     }
+
+    /// <summary>
+    /// A leader this client has no address for is looked up with every broker, not only the first that answers: here
+    /// that one lags and lists neither the leader nor the node that names it (seed 4638 of the membership simulation).
+    /// </summary>
+    [Fact]
+    public async Task ALeaderOnlySomeBrokersKnowIsFound()
+    {
+        using var c = new FakeNode(3);
+        var none = Array.Empty<Messages.NodeEntry>();
+        _a.On((n, r) => r is Request.Metadata ? Fx.Metadata(new[] { _a }) : new Response.DescribeNodes(ErrorCode.NotLeader, null, none));
+        _b.On((n, r) => r is Request.Metadata
+            ? Fx.Metadata(new[] { _a, _b, c })
+            : new Response.DescribeNodes(ErrorCode.NotLeader, new LeaderHint(3, 1), none));
+        c.On((n, r) => r is Request.Metadata
+            ? Fx.Metadata(new[] { _a, _b, c })
+            : new Response.DescribeNodes(ErrorCode.None, null, new[] { new Messages.NodeEntry(3, "c:7000", "c:9000", 0, 0, 0) }));
+        _client = new LotseClient(Fx.Config(_a, _b).WithRetryFor(TimeSpan.FromSeconds(2)).Build());
+        IReadOnlyList<Messages.NodeEntry> found = await _client.DescribeNodesAsync();
+        Assert.Equal(new ulong[] { 3 }, found.Select(e => e.NodeId).ToArray());
+    }
 }

@@ -990,16 +990,10 @@ export class LotseClient {
   private async callAdmin(req: Request): Promise<Response> {
     const leader = this.metadataLeader;
     // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's nodes
-    // first, or it keeps asking the others.
+    // first, or it keeps asking the others. From every broker, not the first that answers: a node that lags (one cut
+    // off from the metadata group) may not know the leader the others name.
     if (leader !== null && !this.brokers.has(leader)) {
-      try {
-        await this.metadata();
-      } catch (e) {
-        if (!(e instanceof ClientError)) {
-          throw e;
-        }
-        // the retry loop reports what is still wrong
-      }
+      await this.metadataFromAll([]);
     }
     let addr = leader === null ? undefined : this.brokers.get(leader);
     if (addr === undefined) {
