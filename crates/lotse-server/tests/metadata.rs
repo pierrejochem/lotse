@@ -244,6 +244,10 @@ async fn views_of(rt: &SimRuntime, n: u64) -> BTreeMap<NodeId, View> {
 
 const NAMES: [&str; 7] = ["s1", "s2", "s3", "q1", "q2", "q3", "x1"];
 
+/// The stream the checks create after the run, to know that nothing the
+/// run proposed is still on its way.
+const BARRIER: &str = "barrier";
+
 async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
     let client = Client::new(rt.clone(), client_config(n));
     while !stop.load(Ordering::Relaxed) {
@@ -522,22 +526,33 @@ async fn run(rt: SimRuntime) {
         );
     }
 
-    // Every node reports the same resources, once caught up.
+    // Every node reports the same resources, once caught up. A change whose
+    // answer was lost may still be in a leader's log and commit after the
+    // network heals, so the nodes agreeing once does not mean nothing more
+    // will change. A barrier settles it: the metadata group has one log,
+    // and once every node shows a resource created now, everything proposed
+    // before it has committed or is gone for good.
     let checker =
         Client::new(rt.node("checker"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(n) });
+    match checker.create_stream(BARRIER, 1, 1).await {
+        Ok(_) | Err(ClientError::ResourceExists { .. }) => {}
+        Err(e) => panic!("the healed cluster creates a stream: {e}"),
+    }
     let deadline = rt.now() + Duration::from_secs(30);
     let mut views: BTreeMap<NodeId, View>;
     loop {
         views = views_of(&rt, n).await;
         let first = views[&1].clone();
         let created = out.ids.keys().filter(|n| !out.delete_tried.contains(*n)).all(|name| first.contains_key(name));
-        if views.values().all(|v| *v == first) && created {
+        if views.values().all(|v| *v == first) && created && first.contains_key(BARRIER) {
             break;
         }
         assert!(rt.now() < deadline, "the nodes do not agree on what exists: {views:?}");
         rt.sleep(TICK * 20).await;
     }
-    let view = &views[&1];
+    let mut settled = views[&1].clone();
+    settled.remove(BARRIER);
+    let view = &settled;
     // Ids that were acknowledged once and are gone now: deleted.
     let mut gone: Vec<(String, u64)> = Vec::new();
     for (name, ids) in &out.ids {

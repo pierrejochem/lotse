@@ -1045,17 +1045,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     {
         long leader = Interlocked.Read(ref _metadataLeader);
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
-        // nodes first, or it keeps asking the others.
+        // nodes first, or it keeps asking the others. From every broker, not the first that answers: a node that
+        // lags (one cut off from the metadata group) may not know the leader the others name.
         if (leader >= 0 && AddressOf((uint)leader) is null)
         {
-            try
-            {
-                await MetadataAsync(null, ct).ConfigureAwait(false);
-            }
-            catch (ClientException)
-            {
-                // the retry loop reports what is still wrong
-            }
+            await MetadataFromAllAsync(Array.Empty<string>(), ct).ConfigureAwait(false);
         }
         Address? addr = leader >= 0 ? AddressOf((uint)leader) : null;
         if (addr is null)

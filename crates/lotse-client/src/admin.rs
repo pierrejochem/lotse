@@ -683,9 +683,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
         // A leader whose address this client has not seen (a node added
         // since it last asked): learn the cluster's nodes first, or it
-        // keeps asking the others.
+        // keeps asking the others. From every broker, not the first that
+        // answers: a node that lags (one cut off from the metadata group)
+        // may not know the leader the others name.
         if leader.is_some_and(|l| !self.brokers.lock().expect("brokers lock").contains_key(&l)) {
-            let _ = self.metadata(&[]).await;
+            self.metadata_from_all(&[]).await;
         }
         let addr = match leader.and_then(|l| self.brokers.lock().expect("brokers lock").get(&l).cloned()) {
             Some(a) => a,
