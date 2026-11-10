@@ -1078,11 +1078,23 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     private async Task<Response> CallAdminAsync(Request req, CancellationToken ct)
     {
         long leader = Interlocked.Read(ref _metadataLeader);
-        // A leader whose address this client has not seen (a node added since it last asked): find it first, or the
-        // client keeps asking the others.
+        // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
+        // nodes first, or it keeps asking the others. If the broker that answers does not know it either (one that
+        // lags), ask the others for its address.
         if (leader >= 0 && AddressOf((uint)leader) is null)
         {
-            await FindBrokerAsync((uint)leader, ct).ConfigureAwait(false);
+            try
+            {
+                await MetadataAsync(null, ct).ConfigureAwait(false);
+            }
+            catch (ClientException)
+            {
+                // the retry loop reports what is still wrong
+            }
+            if (AddressOf((uint)leader) is null)
+            {
+                await FindBrokerAsync((uint)leader, ct).ConfigureAwait(false);
+            }
         }
         Address? addr = leader >= 0 ? AddressOf((uint)leader) : null;
         if (addr is null)

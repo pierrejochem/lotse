@@ -1017,10 +1017,21 @@ export class LotseClient {
   /** Sends an admin request to the metadata leader, or any broker if it is not known. */
   private async callAdmin(req: Request): Promise<Response> {
     const leader = this.metadataLeader;
-    // A leader whose address this client has not seen (a node added since it last asked): find it first, or the client
-    // keeps asking the others.
+    // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's nodes
+    // first, or it keeps asking the others. If the broker that answers does not know it either (one that lags), ask the
+    // others for its address.
     if (leader !== null && !this.brokers.has(leader)) {
-      await this.findBroker(leader);
+      try {
+        await this.metadata();
+      } catch (e) {
+        if (!(e instanceof ClientError)) {
+          throw e;
+        }
+        // the retry loop reports what is still wrong
+      }
+      if (!this.brokers.has(leader)) {
+        await this.findBroker(leader);
+      }
     }
     let addr = leader === null ? undefined : this.brokers.get(leader);
     if (addr === undefined) {
