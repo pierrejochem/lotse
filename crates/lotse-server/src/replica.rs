@@ -560,6 +560,13 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         match self.state.txns.check_marker(producer_id, epoch, coordinator_epoch) {
             MarkerCheck::Append => {}
             MarkerCheck::Done => return Ok(MarkerOutcome::Done),
+            // Delivered once the log up to here commits: an entry of an
+            // earlier leader that covers it may yet be cut.
+            MarkerCheck::Covered => {
+                let last = self.raft.last_index();
+                let term = self.raft.log().term_at(last).expect("the last index is in the log");
+                return Ok(MarkerOutcome::Proposed { last, term });
+            }
             MarkerCheck::StaleCoordinator => return Ok(MarkerOutcome::StaleCoordinator),
         }
         let ty = if commit { lotse_record::ControlType::Commit } else { lotse_record::ControlType::Abort };

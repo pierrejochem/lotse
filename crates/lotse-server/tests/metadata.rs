@@ -1034,6 +1034,46 @@ fn a_pinned_leader_stays_where_it_is_put() {
     });
 }
 
+/// A new group's first leader is its preferred node (ADR 0095): its replica
+/// campaigns at once and the others wait one election timeout more, so the
+/// spreading (ADR 0050) has nothing to hand over. In a quiet cluster the
+/// first leader each new stream shows is the one it keeps. Before ADR 0095
+/// whichever replica won the first election led until the handover, and
+/// most of these streams changed leaders.
+#[test]
+fn a_new_groups_first_leader_is_the_one_it_keeps() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            let names: Vec<String> = (0..6).map(|i| format!("fresh{i}")).collect();
+            for name in &names {
+                admin.create_stream(name, 1, 3).await.unwrap();
+            }
+            let mut first: BTreeMap<String, u32> = BTreeMap::new();
+            for _ in 0..200 {
+                for name in &names {
+                    let (leader, _) = leader_of(&admin, name).await;
+                    if leader == 0 {
+                        continue;
+                    }
+                    let was = *first.entry(name.clone()).or_insert(leader);
+                    assert_eq!(was, leader, "{name}: led by node {was} first, then by node {leader}");
+                }
+                rt.sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(first.len(), names.len(), "every stream has a leader: {first:?}");
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}
+
 /// Single active consumer on a queue made at runtime (ADR 0076): the first
 /// subscriber gets the messages, the next waits as a standby and takes over,
 /// in order, once the first is gone; turned off, everyone gets messages.

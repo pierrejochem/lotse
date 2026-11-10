@@ -18,7 +18,7 @@ use lotse_proto::{
     CommittedOffset, ConsumerMetrics, DescribeMetricsResponse, GroupMemberMetrics, GroupMetrics, HostMetrics,
     LATENCY_BUCKETS, PartitionMetrics, QueueMetrics, ReplicaProgress, Response, TxnResource,
 };
-use lotse_raft::{NodeId, Role};
+use lotse_raft::NodeId;
 use lotse_rt::{HostStats, Instant, Runtime};
 
 use super::{Clients, ClusterView, Outbox, ids, queues};
@@ -155,7 +155,9 @@ impl Clients {
                 group: g,
                 resource_id,
                 partition,
-                leader: raft.role() == Role::Leader,
+                // Led only while a quorum answers: a deposed leader that has
+                // not heard of the new term yet does not claim it (ADR 0095).
+                leader: raft.leads_with_quorum(),
                 term: raft.term(),
                 high_watermark: hw,
                 last_stable: replica.txns().last_stable_offset(replica.applied()).min(hw),
@@ -168,9 +170,10 @@ impl Clients {
                 replicas,
             });
         }
-        // Every queue this node leads, served (subscribed to) or not.
+        // Every queue this node leads with a quorum behind it, served
+        // (subscribed to) or not.
         for qc in view.queues {
-            let Some(replica) = groups.get(&qc.group).filter(|r| r.raft_ref().role() == Role::Leader) else { continue };
+            let Some(replica) = groups.get(&qc.group).filter(|r| r.raft_ref().leads_with_quorum()) else { continue };
             let Some(q) = replica.queue() else { continue };
             let serving = self.queues.get(&qc.group).filter(|s| s.term == replica.raft_ref().term());
             let in_flight = serving.map_or(0, |s| s.dispatcher.in_flight_count());
@@ -200,7 +203,7 @@ impl Clients {
         }
         // Consumer groups, from the coordinator's leader.
         if let Some(coord) = view.coordinator.and_then(|g| groups.get(&g))
-            && coord.raft_ref().role() == Role::Leader
+            && coord.raft_ref().leads_with_quorum()
         {
             let state = coord.coordinator().groups();
             for (group_id, g) in &state.groups {
