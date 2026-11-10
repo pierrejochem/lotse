@@ -286,7 +286,7 @@ Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `M
 
 ### Zero-copy
 
-`Fetch` sendet Segmentbytes ohne Umkodierung: einen Ausschnitt dessen, was `Log::read` mit einem Aufruf gelesen hat, den der Antwort-Frame einmal kopiert und TLS verschlüsselt. `sendfile` gibt es nicht (ADR 0094): Jede Client-Verbindung ist TLS 1.3, im Prozess verschlüsselt, und `sendfile` sendet nur Bytes, wie sie auf der Platte liegen; kTLS (Linux) brächte eine neue Abhängigkeit und einen Datei-Send in der `Net`-Naht für eine Kopie. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste.
+`Fetch` sendet Segmentbytes ohne Umkodierung: einen Ausschnitt dessen, was `Log::read` mit einem Aufruf gelesen hat, den der Antwort-Frame einmal kopiert und TLS verschlüsselt. Diese eine Kopie bleibt (ADR 0094): Speicher zu kopieren ist um ein Mehrfaches schneller als die AES-GCM-Verschlüsselung danach, die ohnehin kopiert, und Frames aus mehreren Teilen brächten eine Schnittstelle, die jeder Transport tragen müsste. `sendfile` gibt es nicht (ADR 0094): Jede Client-Verbindung ist TLS 1.3, im Prozess verschlüsselt, und `sendfile` sendet nur Bytes, wie sie auf der Platte liegen; kTLS (Linux) brächte eine neue Abhängigkeit und einen Datei-Send in der `Net`-Naht für eine Kopie. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste.
 
 ## Flow Control & Quotas
 
