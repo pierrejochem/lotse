@@ -1720,10 +1720,18 @@ public final class LotseClient implements AutoCloseable {
     /** Sends an admin request to the metadata leader, or any broker if it is not known. */
     private Response callAdmin(Request req) {
         Long leader = metadataLeader;
-        // A leader whose address this client has not seen (a node added since it last asked): find it first, or the
-        // client keeps asking the others.
+        // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
+        // nodes first, or it keeps asking the others. If the broker that answers does not know it either (one that
+        // lags), ask the others for its address.
         if (leader != null && addressOf(leader) == null) {
-            findBroker(leader);
+            try {
+                metadata();
+            } catch (ClientException e) {
+                // the retry loop reports what is still wrong
+            }
+            if (addressOf(leader) == null) {
+                findBroker(leader);
+            }
         }
         Address addr = leader == null ? null : addressOf(leader);
         if (addr == null) {

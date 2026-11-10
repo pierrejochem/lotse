@@ -702,10 +702,15 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     async fn call_admin(&self, req: &Request) -> Result<Response, Attempt> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
         // A leader whose address this client has not seen (a node added
-        // since it last asked): find it first, or the client keeps asking
-        // the others.
-        if let Some(l) = leader.filter(|l| !self.brokers.lock().expect("brokers lock").contains_key(l)) {
-            self.find_broker(l).await;
+        // since it last asked): learn the cluster's nodes first, or it
+        // keeps asking the others. If the broker that answers does not know
+        // it either (one that lags), ask the others for its address.
+        let unknown = |l: &u32| !self.brokers.lock().expect("brokers lock").contains_key(l);
+        if let Some(l) = leader.filter(unknown) {
+            let _ = self.metadata(&[]).await;
+            if unknown(&l) {
+                self.find_broker(l).await;
+            }
         }
         let addr = match leader.and_then(|l| self.brokers.lock().expect("brokers lock").get(&l).cloned()) {
             Some(a) => a,
