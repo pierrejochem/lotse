@@ -11,7 +11,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { leaderTerm } from "./support/failover.js";
+import { leaderTerm, retryIfLeaderMoved } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -380,39 +380,45 @@ describe("queues against three real nodes", { skip }, () => {
   });
 
   test("with a single active consumer the others wait and the oldest takes over", async () => {
-    await client.createQueue("single", { singleActiveConsumer: true });
-    await settled("single");
-    const clientA = newClient();
-    const clientB = newClient();
-    const active = await clientA.subscribe("single");
-    const standby = await clientB.subscribe("single");
-    try {
-      assert.equal(active.isStandby, false);
-      assert.equal(standby.isStandby, true);
-      await produce("single", 3);
-      const d = await take(active);
-      assert.equal(d.deliveryCount, 1);
-      assert.equal(await standby.poll(700), null, "a standby gets nothing");
-      assert.equal(standby.isStandby, true);
-      // The active consumer vanishes with its message unacked: the message goes back and the standby is next.
-      clientA.close();
-      const heir = await take(standby);
-      assert.equal(standby.isStandby, false);
-      assert.equal(heir.offset, d.offset, "the queue's order holds across the handover");
-      assert.equal(heir.deliveryCount, 2);
-      const next = [heir];
-      for (let i = 0; i < 2; i++) {
-        next.push(await take(standby));
+    // A leader that moves hands out again what was not acknowledged, to whoever is active then: the scenario runs
+    // again on a new queue if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const single = `single${attempt === 1 ? "" : `-${attempt}`}`;
+      await client.createQueue(single, { singleActiveConsumer: true });
+      await settled(single);
+      await steady.watch(single);
+      const clientA = newClient();
+      const clientB = newClient();
+      const active = await clientA.subscribe(single);
+      const standby = await clientB.subscribe(single);
+      try {
+        assert.equal(active.isStandby, false);
+        assert.equal(standby.isStandby, true);
+        await produce(single, 3);
+        const d = await take(active);
+        assert.equal(d.deliveryCount, 1);
+        assert.equal(await standby.poll(700), null, "a standby gets nothing");
+        assert.equal(standby.isStandby, true);
+        // The active consumer vanishes with its message unacked: the message goes back and the standby is next.
+        clientA.close();
+        const heir = await take(standby);
+        assert.equal(standby.isStandby, false);
+        assert.equal(heir.offset, d.offset, "the queue's order holds across the handover");
+        assert.equal(heir.deliveryCount, 2);
+        const next = [heir];
+        for (let i = 0; i < 2; i++) {
+          next.push(await take(standby));
+        }
+        assert.deepEqual(
+          next.map((x) => x.text()),
+          ["single-0", "single-1", "single-2"],
+        );
+        await standby.ack(next);
+      } finally {
+        active.close();
+        standby.close();
       }
-      assert.deepEqual(
-        next.map((x) => x.text()),
-        ["single-0", "single-1", "single-2"],
-      );
-      await standby.ack(next);
-    } finally {
-      active.close();
-      standby.close();
-    }
+    });
   });
 
   test("a standby is told when it becomes the active consumer, before any message", async () => {
