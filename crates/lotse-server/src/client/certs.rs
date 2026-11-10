@@ -234,9 +234,22 @@ impl Clients {
             .metadata()
             .cert_requests
             .get(&request)
-            .is_some_and(|r| r.signed.is_none() && r.at_ms.saturating_add(REQUEST_TTL_MS) >= view.unix_ms);
-        if !open {
+            .filter(|r| r.signed.is_none() && r.at_ms.saturating_add(REQUEST_TTL_MS) >= view.unix_ms);
+        let Some(open) = open else {
             return invalid("no open request has that id: it is unknown, signed already or lapsed");
+        };
+        // The certificate must answer the request and come from the
+        // cluster's CA, and say of itself what the CA holder says of it
+        // (ADR 0096).
+        let cas = view.admin.client_cas.get();
+        let facts = match lotse_auth::x509::check_signed(&req.certificate, &open.csr, &open.principal, &cas) {
+            Ok(f) => f,
+            Err(e) => return invalid(&e.to_string()),
+        };
+        if (facts.issuer, &facts.serial[..], facts.not_before_ms, facts.not_after_ms)
+            != (issuer, &req.serial[..], req.not_before_ms, req.not_after_ms)
+        {
+            return invalid("the certificate's issuer, serial or validity is not what the request says");
         }
         let change = Change::RecordCertificate {
             id: request,

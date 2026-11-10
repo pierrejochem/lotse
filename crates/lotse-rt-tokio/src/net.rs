@@ -48,17 +48,10 @@ struct Watch {
 }
 
 /// What a certificate (DER) says about itself: issuer fingerprint, serial and
-/// validity, for revoking it by serial (ADR 0090).
+/// validity, for revoking it by serial (ADR 0090, issuer as in ADR 0096).
 pub(crate) fn cert_info(cert: &[u8]) -> Option<CertInfo> {
-    use sha2::{Digest, Sha256};
-    let (_, c) = x509_parser::parse_x509_certificate(cert).ok()?;
-    let ms = |t: i64| u64::try_from(t).ok().map(|s| s.saturating_mul(1000));
-    Some(CertInfo {
-        issuer: Sha256::digest(c.issuer().as_raw()).into(),
-        serial: c.tbs_certificate.raw_serial().to_vec(),
-        not_before_ms: ms(c.validity().not_before.timestamp())?,
-        not_after_ms: ms(c.validity().not_after.timestamp())?,
-    })
+    let f = lotse_auth::x509::facts(cert)?;
+    Some(CertInfo { issuer: f.issuer, serial: f.serial, not_before_ms: f.not_before_ms, not_after_ms: f.not_after_ms })
 }
 
 /// The moment `cert` (DER) expires, on Tokio's clock.

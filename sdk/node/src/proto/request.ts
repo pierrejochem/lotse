@@ -212,7 +212,7 @@ export interface RevokeSessionsRequest {
 /** `RevokeCertificate` (key 52): one client certificate, named by its issuer hash and serial. */
 export interface RevokeCertificateRequest {
   readonly type: "RevokeCertificate";
-  /** SHA-256 of the issuer's distinguished name in DER form (32 bytes). */
+  /** SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes). */
   readonly issuer: Uint8Array;
   /** The serial number, big-endian. */
   readonly serial: Uint8Array;
@@ -243,7 +243,7 @@ export interface RecordCertificateRequest {
   readonly id: Uint8Array;
   /** The signed certificate, DER. */
   readonly certificate: Uint8Array;
-  /** SHA-256 of the issuer's name in DER form (32 bytes). */
+  /** SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes). */
   readonly issuer: Uint8Array;
   /** The serial number, big-endian. */
   readonly serial: Uint8Array;

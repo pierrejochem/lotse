@@ -13,7 +13,6 @@ use lotse_node::certs;
 use lotse_node::config::ClusterFile;
 use lotse_rt::{Conn, Link, Listener, Net};
 use lotse_rt_tokio::{TlsConfig, TokioConn, TokioRuntime};
-use sha2::Digest as _;
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
@@ -150,7 +149,11 @@ fn a_signing_request_gets_a_client_certificate_for_its_key_and_nothing_it_asks_b
     let (_, ca_pem) = x509_parser::pem::parse_x509_pem(ca.as_bytes()).unwrap();
     assert_eq!(cert.issuer().as_raw(), ca_pem.parse_x509().unwrap().subject().as_raw(), "issued by the cluster CA");
     assert_eq!(made.serial, cert.raw_serial());
-    assert_eq!(made.issuer.as_slice(), sha2::Sha256::digest(cert.issuer().as_raw()).as_slice());
+    assert_eq!(made.issuer, lotse_auth::x509::issuer_fingerprint(&cert), "the issuer as the broker names it");
+    // The broker takes what lotse certs signs (ADR 0096).
+    let ca_der = ca_pem.contents.clone();
+    let facts = lotse_auth::x509::check_signed(&made.der, &greedy, "alice", &[ca_der]).expect("the broker takes it");
+    assert_eq!((facts.issuer, facts.serial), (made.issuer, made.serial.clone()));
     assert!(made.not_after_ms > made.not_before_ms);
     let days_left = (made.not_after_ms - made.not_before_ms) / 86_400_000;
     assert!((29..=31).contains(&days_left), "valid for the days asked: {days_left}");
@@ -228,7 +231,9 @@ async fn a_running_node_takes_up_a_revocation_and_keeps_working_material() {
     let rt = lotse_node::runtime(&file, 1).unwrap();
     let l = rt.listen("127.0.0.1:0", Link::Client).await.unwrap();
     let addr = l.local_addr();
-    let reload = tokio::spawn(lotse_node::reload_tls_every(rt.clone(), file.clone(), 1, Duration::from_millis(50)));
+    let cas = lotse_server::ClientCas::default();
+    let reload =
+        tokio::spawn(lotse_node::reload_tls_every(rt.clone(), file.clone(), 1, cas.clone(), Duration::from_millis(50)));
     let a = client(&ca, &clients, "alice").connect(&addr, Link::Client).await.unwrap();
     let sa = accepted(&l).await.unwrap();
     let b = client(&ca, &clients, "bob").connect(&addr, Link::Client).await.unwrap();
@@ -252,5 +257,22 @@ async fn a_running_node_takes_up_a_revocation_and_keeps_working_material() {
         assert!(matches!(tokio::time::timeout(Duration::from_secs(5), conn.recv()).await, Ok(Err(_) | Ok(None))));
     }
     assert!(accepted(&l).await.is_none(), "alice cannot come back");
+
+    // A second CA in the bundle reaches the check of recorded certificates
+    // (ADR 0096), not only the handshakes.
+    let mut next = rcgen::CertificateParams::default();
+    next.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    next.distinguished_name.push(rcgen::DnType::CommonName, "Lotse cluster CA");
+    let next = next.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+    let bundle = format!("{}{}", std::fs::read_to_string(&ca).unwrap(), next.pem());
+    std::fs::write(&ca, &bundle).unwrap();
+    let mut waited = 0;
+    while cas.get() != lotse_node::pem_certificates(bundle.as_bytes()) {
+        waited += 1;
+        assert!(waited < 100, "the new bundle is taken up within 5 s");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(cas.get().len(), 2);
+    assert!(open(&b, &sb).await, "bob's connection goes on under the new bundle");
     reload.abort();
 }

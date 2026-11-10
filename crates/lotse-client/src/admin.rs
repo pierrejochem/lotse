@@ -417,7 +417,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Revokes one client certificate (ADR 0090): each node ends the
     /// connections that showed it and refuses it from then on, until it
     /// expires at `not_after_ms` (ms since the Unix epoch). `issuer` is the
-    /// SHA-256 of the issuer's name in DER form and `serial` the serial, as
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) and `serial` the serial, as
     /// [`lotse_rt::CertInfo`] has them. The CRL file stays as it is. Needs
     /// the cluster-admin role.
     pub async fn revoke_certificate(

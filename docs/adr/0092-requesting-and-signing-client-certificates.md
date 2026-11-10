@@ -1,6 +1,6 @@
 # 92. Requesting and signing client certificates
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0096](0096-recorded-certificates-are-checked.md) (the broker parses and checks a recorded certificate)
 - Date: 2026-11-09
 
 ## Context

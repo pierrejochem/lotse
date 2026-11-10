@@ -221,9 +221,10 @@ pub enum PeerIdentity {
 /// admin revokes a client certificate by these (ADR 0090).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CertInfo {
-    /// SHA-256 of the issuer's distinguished name in DER form: the issuer by
-    /// its name, as a revocation list names it. Two issuers with the same
-    /// name are one issuer here; a cluster has one CA.
+    /// SHA-256 of the issuer's distinguished name in DER form followed by
+    /// the certificate's authority key identifier, if it has one (ADR
+    /// 0096): two CAs with one name but different keys are two issuers.
+    /// `lotse_auth::x509::issuer_fingerprint` computes it.
     pub issuer: [u8; 32],
     /// The serial number, big-endian, as the certificate has it.
     pub serial: Vec<u8>,

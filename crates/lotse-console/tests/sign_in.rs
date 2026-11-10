@@ -243,6 +243,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         admins: vec!["admin".into()],
         tenants: vec!["shop".into()],
         resource_tenants: [("orders".to_string(), "shop".to_string())].into(),
+        client_cas: Default::default(),
     };
     let cfg = NodeConfig {
         id: 1,
