@@ -4,7 +4,6 @@ import dev.lotse.net.Address;
 import dev.lotse.net.LotseBinary;
 import dev.lotse.net.TlsConfig;
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -39,8 +38,8 @@ final class RealCluster implements AutoCloseable {
         text.append("[retention]\nms = -1\n\n[auth]\n");
         text.append(tls ? "admins = [\"alice\"]\n" : "required = false\n");
         for (int id = 1; id <= nodes; id++) {
-            int peer = freePort();
-            int client = freePort();
+            int peer = LotseBinary.freePort();
+            int client = LotseBinary.freePort();
             clientAddresses.add(new Address("127.0.0.1", client));
             text.append("\n[[node]]\nid = ").append(id).append("\npeer = \"127.0.0.1:").append(peer)
                     .append("\"\nclient = \"127.0.0.1:").append(client).append("\"\n");
@@ -98,12 +97,6 @@ final class RealCluster implements AutoCloseable {
             return Files.readString(dir.resolve("node-" + id + ".log"));
         } catch (IOException e) {
             return "(no log)";
-        }
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
         }
     }
 
