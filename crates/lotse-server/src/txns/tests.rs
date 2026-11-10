@@ -75,7 +75,11 @@ fn the_tail_counts_for_checks_and_is_cut_with_the_log() {
     assert!(s.has_open(7));
     s.appended(2, &marker(7, 1, true, 1));
     assert!(!s.has_open(7));
-    assert_eq!(s.check_marker(7, 1, 1), MarkerCheck::Done, "the marker in flight already closed it");
+    assert_eq!(
+        s.check_marker(7, 1, 1),
+        MarkerCheck::Covered,
+        "the marker in flight closes it, once it commits: it may yet be cut"
+    );
     s.truncated(2);
     assert_eq!(s.check_marker(7, 1, 1), MarkerCheck::Append, "truncated: the marker is needed again");
     s.truncated(1);
