@@ -102,7 +102,7 @@ struct Stats {
 impl World {
     fn new(seed: u64) -> Self {
         let rng = SimRng::new(seed);
-        let n = if seed % 2 == 0 { 3 } else { 5 };
+        let n = if seed.is_multiple_of(2) { 3 } else { 5 };
         let ids: Vec<NodeId> = (1..=n).collect();
         let f = Faults {
             crash: [30, 120, 500][rng.below(3) as usize],

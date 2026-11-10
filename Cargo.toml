@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/pierrejochem/lotse"
 publish = false
@@ -55,8 +55,8 @@ jsonwebtoken = { version = "10", default-features = false, features = ["rust_cry
 webpki-roots = "1"
 # Signing test tokens (lotse-auth's testing feature) and sealing console sessions; already in the tree through rustls.
 ring = "0.17"
-# Host metrics in lotse-rt-tokio; 0.36 is the newest that builds on rust-version 1.85.
-sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
+# Host metrics in lotse-rt-tokio; 0.38 is the newest that builds on rust-version 1.88.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

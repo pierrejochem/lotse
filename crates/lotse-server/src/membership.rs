@@ -181,7 +181,7 @@ pub(crate) fn hand_over_to(
 /// `nodes` active nodes: up to five, and odd where it can be.
 pub(crate) fn core_size(nodes: usize) -> usize {
     let n = nodes.min(MAX_CORE_VOTERS);
-    if n > 1 && n % 2 == 0 { n - 1 } else { n.max(1) }
+    if n > 1 && n.is_multiple_of(2) { n - 1 } else { n.max(1) }
 }
 
 /// What the metadata group's leader proposes now, given its applied state:
