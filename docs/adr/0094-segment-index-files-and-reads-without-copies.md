@@ -28,6 +28,6 @@ A stale index file can only be believed if it records the segment's exact length
 
 `ListOffsets` by time reads a bounded number of batches before its answer. It still answers with a batch, not a record.
 
-`Fetch` still copies the data once in user space, into the frame. Removing that copy would take frames of several parts through `Conn::send`; removing the TLS copy would take kernel TLS. Both stay open.
+`Fetch` still copies the data once in user space, into the frame. Removing that copy would take frames of several parts through `Conn::send`; removing the TLS copy would take kernel TLS. Both are limits by design (the maintainer's choice, 2026-11-10): copying memory is several times faster than the AES-GCM encryption that follows and copies anyway, so the gain does not pay for an API every transport must keep.
 
 Aborted ranges differ between replicas below their own log starts, which no read can see. Snapshots carry only the ranges at or after the log start of the replica that took them.
