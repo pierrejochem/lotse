@@ -81,13 +81,15 @@ impl Clients {
 
 /// The first data batch below `end` whose newest record is at or after `at`:
 /// its first offset and that record's timestamp. Segments whose newest
-/// record is older are skipped whole.
+/// record is older are skipped whole, and within a segment the search
+/// starts where its index says every batch before is older (ADR 0094).
 pub(crate) async fn by_time<D: Disk>(log: &Log<D>, at: i64, end: u64) -> Result<Option<(u64, i64)>, Error> {
     let start = log.start_offset();
     let candidates: Vec<_> =
         log.segments().filter(|s| s.max_timestamp >= at && s.next_offset > start && s.base_offset < end).collect();
     for seg in candidates {
-        let mut offset = seg.base_offset.max(start);
+        let from = log.time_search_start(seg.base_offset, at).unwrap_or(seg.base_offset);
+        let mut offset = from.max(start);
         while offset < seg.next_offset.min(end) {
             let mut bytes = log.read(offset, SCAN_BYTES).await?;
             if bytes.is_empty() {

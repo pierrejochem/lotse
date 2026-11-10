@@ -129,3 +129,31 @@ fn acks_open_a_transaction_without_holding_the_last_stable_offset_back() {
     assert!(back.has_open(9));
     assert_eq!(back.last_stable_offset(10), 10);
 }
+
+/// Aborted transactions whose marker lies below the log start are forgotten
+/// (ADR 0094); one whose data reaches the log start stays, so a fetch from
+/// there still skips it.
+#[test]
+fn aborted_transactions_below_the_log_start_are_forgotten_and_no_others() {
+    let mut s = TxnState::default();
+    // Producer 1: data at offsets 0..2, aborted at offset 2.
+    apply(&mut s, 1, &data(1, 0));
+    apply(&mut s, 2, &data(1, 0));
+    apply(&mut s, 3, &marker(1, 1, false, 1));
+    // Producer 2: data at offsets 3 and 6, aborted at offset 7; it spans the cut.
+    apply(&mut s, 4, &data(2, 0));
+    apply(&mut s, 7, &data(2, 0));
+    apply(&mut s, 8, &marker(2, 1, false, 1));
+    // Producer 3: data at offset 8, aborted at offset 9, after the cut.
+    apply(&mut s, 9, &data(3, 0));
+    apply(&mut s, 10, &marker(3, 1, false, 1));
+    let before_cut: Vec<_> = s.aborted_between(5, 20);
+    s.forget_aborted_before(5);
+    assert_eq!(s.aborted_between(0, 20), before_cut, "only what a fetch from offset 5 cannot meet is gone");
+    assert_eq!(s.aborted_between(0, 20), vec![(2, 3), (3, 8)]);
+    assert!(s.aborted_at(2, 6), "producer 2's data at offset 6 is still aborted");
+    assert!(!s.aborted_at(1, 1), "producer 1's range is forgotten");
+    let mut restored = TxnState::default();
+    restored.restore(&s.encode()).unwrap();
+    assert_eq!(restored.aborted_between(0, 20), vec![(2, 3), (3, 8)], "and snapshots say the same");
+}
