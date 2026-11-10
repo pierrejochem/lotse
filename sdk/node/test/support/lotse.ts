@@ -49,15 +49,23 @@ export function run(bin: string, ...args: string[]): string {
   return execFileSync(bin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
 }
 
+/**
+ * A port nothing listens on, for a node to listen on later. It is chosen below the ephemeral range (32768 and up on
+ * Linux): a port the kernel handed out for listening is handed out again to the next outgoing connection, and with many
+ * connections open before the node starts, one of them could take it.
+ */
 export async function freePort(): Promise<number> {
-  return new Promise((resolvePort, reject) => {
-    const s = net.createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const port = (s.address() as net.AddressInfo).port;
-      s.close(() => resolvePort(port));
+  for (;;) {
+    const port = 20_000 + Math.floor(Math.random() * 12_000);
+    const free = await new Promise<boolean>((done) => {
+      const s = net.createServer();
+      s.once("error", () => done(false));
+      s.listen(port, "127.0.0.1", () => s.close(() => done(true)));
     });
-  });
+    if (free) {
+      return port;
+    }
+  }
 }
 
 /** A one-node cluster file with TLS, certificates made by the real `lotse certs`, and a client certificate for alice. */

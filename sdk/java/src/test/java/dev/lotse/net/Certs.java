@@ -1,7 +1,6 @@
 package dev.lotse.net;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -22,8 +21,8 @@ final class Certs {
      */
     Certs(Path bin, String extra) throws IOException, InterruptedException {
         dir = Files.createTempDirectory("lotse-sdk-certs");
-        peerPort = freePort();
-        clientPort = freePort();
+        peerPort = LotseBinary.freePort();
+        clientPort = LotseBinary.freePort();
         config = dir.resolve("cluster.toml");
         Files.writeString(config, "[cluster]\ndata_dir = \"" + dir + "/data/node-{id}\"\n\n"
                 + "[tls]\nca = \"" + dir + "/tls/ca.pem\"\ncert = \"" + dir + "/tls/node-{id}.pem\"\n"
@@ -37,11 +36,5 @@ final class Certs {
         nodeKey = dir.resolve("tls/node-1.key");
         clientCert = dir.resolve("clients/alice.pem");
         clientKey = dir.resolve("clients/alice.key");
-    }
-
-    static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
     }
 }
