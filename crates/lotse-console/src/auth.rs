@@ -564,10 +564,9 @@ impl ServiceLogin {
             let t = self.provider.token(&form).await?;
             if let Some(sub) =
                 claims(&t.access_token).and_then(|c| c.get("sub").and_then(|s| s.as_str()).map(String::from))
+                && sub != self.principal
             {
-                if sub != self.principal {
-                    tracing::warn!(%sub, principal = %self.principal, "the sampler's token names another subject than metrics.principal");
-                }
+                tracing::warn!(%sub, principal = %self.principal, "the sampler's token names another subject than metrics.principal");
             }
             *held = Some((Secret(t.access_token.clone()), Instant::now() + t.lifetime()));
         }
@@ -756,16 +755,16 @@ pub async fn callback(
 /// too if it offers that.
 pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let mut to = "/".to_owned();
-    if let (Some(sessions), Some(value)) = (&state.sessions, session_cookie(&headers)) {
-        if let (Some(end), AuthConfig::Oidc(o)) = (sessions.end(&value).await, &*state.auth) {
-            let back = o.redirect_url.trim_end_matches("/auth/callback");
-            to = format!(
-                "{end}{}client_id={}&post_logout_redirect_uri={}",
-                if end.contains('?') { '&' } else { '?' },
-                url_encode(&o.client_id),
-                url_encode(if back.is_empty() { "/" } else { back }),
-            );
-        }
+    if let (Some(sessions), Some(value)) = (&state.sessions, session_cookie(&headers))
+        && let (Some(end), AuthConfig::Oidc(o)) = (sessions.end(&value).await, &*state.auth)
+    {
+        let back = o.redirect_url.trim_end_matches("/auth/callback");
+        to = format!(
+            "{end}{}client_id={}&post_logout_redirect_uri={}",
+            if end.contains('?') { '&' } else { '?' },
+            url_encode(&o.client_id),
+            url_encode(if back.is_empty() { "/" } else { back }),
+        );
     }
     let mut r = see_other(&to);
     if let Some(c) = cookie(&state, "", Some(0)) {

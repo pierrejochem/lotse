@@ -152,13 +152,10 @@ impl SimDisk {
                 }
                 _ => {}
             }
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                if !s.dirs.contains(parent) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("directory {} missing", parent.display()),
-                    ));
-                }
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                && !s.dirs.contains(parent)
+            {
+                return Err(io::Error::new(io::ErrorKind::NotFound, format!("directory {} missing", parent.display())));
             }
             s.files.entry(path.to_owned()).or_default();
             Ok(SimFile { disk: self.clone(), path: path.to_owned(), incarnation: s.incarnation })

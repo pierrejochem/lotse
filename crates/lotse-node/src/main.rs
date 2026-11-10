@@ -220,13 +220,13 @@ fn certs(a: &Args) -> Result<(), String> {
             Outcome::Kept(p) => println!("kept  {}", p.display()),
         }
     }
-    if a.client.is_none() {
-        if let Some(ca) = &file.tls.ca {
-            println!(
-                "\nThe CA key {} signs every certificate of the cluster: keep it off the nodes.",
-                certs::ca_key_path(std::path::Path::new(ca)).display()
-            );
-        }
+    if a.client.is_none()
+        && let Some(ca) = &file.tls.ca
+    {
+        println!(
+            "\nThe CA key {} signs every certificate of the cluster: keep it off the nodes.",
+            certs::ca_key_path(std::path::Path::new(ca)).display()
+        );
     }
     Ok(())
 }
