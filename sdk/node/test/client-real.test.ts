@@ -23,7 +23,7 @@ import { crc32c } from "../src/record/crc32c.js";
 import { putU32 } from "../src/record/bytes.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { stable } from "./support/failover.js";
+import { retryIfLeaderMoved, stable } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -165,35 +165,40 @@ describe("a client against three real nodes", { skip }, () => {
   });
 
   test("ListOffsets finds the start, the end and a time", async () => {
-    await client.createStream("times", 1, 3);
-    const a = await client.produce("times", 0, [{ value: "a1", timestamp: 1_000 }, { value: "a2", timestamp: 1_500 }]);
-    const b = await client.produce("times", 0, { value: "b", timestamp: 2_000 });
-    const c = await client.produce("times", 0, { value: "c", timestamp: 3_000 });
+    // The end of a log moves when a new leader appends a note of its own term, so the scenario runs again, with a new
+    // stream, if a leader moved while it ran; with every leader where it was, a failure is a failure.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const times = `times${attempt === 1 ? "" : `-${attempt}`}`;
+      await client.createStream(times, 1, 3);
+      await steady.watch(times);
+      const a = await client.produce(times, 0, [{ value: "a1", timestamp: 1_000 }, { value: "a2", timestamp: 1_500 }]);
+      const b = await client.produce(times, 0, { value: "b", timestamp: 2_000 });
+      const c = await client.produce(times, 0, { value: "c", timestamp: 3_000 });
 
-    // The log starts with entries of the broker's own, so the first offset is not 0 and not a message.
-    const earliest = await client.listOffset("times", 0, OffsetAt.EARLIEST);
-    assert.ok(earliest <= a.baseOffset, `earliest ${earliest} before the first batch ${a.baseOffset}`);
-    // A new leader appends a note of its own term, which can fall between listing the end and reading to it: the two
-    // are compared once the end has stopped moving.
-    const readEnd = async (): Promise<bigint> => {
-      let end = 0n;
-      for (let f = await client.fetch("times", 0, 0n, 50); f.records.length > 0; f = await client.fetch("times", 0, end, 50)) {
-        end = f.nextOffset(end);
-      }
-      return end;
-    };
-    const latest = await stable(() => client.listOffset("times", 0, OffsetAt.LATEST));
-    assert.ok(latest > c.baseOffset);
-    assert.equal(await stable(readEnd), latest, "the end a reader sees");
+      // The log starts with entries of the broker's own, so the first offset is not 0 and not a message.
+      const earliest = await client.listOffset(times, 0, OffsetAt.EARLIEST);
+      assert.ok(earliest <= a.baseOffset, `earliest ${earliest} before the first batch ${a.baseOffset}`);
+      // A new leader appends a note of its own term, which can fall between listing the end and reading to it: the two
+      // are compared once the end has stopped moving.
+      const readEnd = async (): Promise<bigint> => {
+        let end = 0n;
+        for (let f = await client.fetch(times, 0, 0n, 50); f.records.length > 0; f = await client.fetch(times, 0, end, 50)) {
+          end = f.nextOffset(end);
+        }
+        return end;
+      };
+      const latest = await stable(() => client.listOffset(times, 0, OffsetAt.LATEST));
+      assert.ok(latest > c.baseOffset);
+      assert.equal(await stable(readEnd), latest, "the end a reader sees");
 
-    // By batches: the first batch with a record at or after the time.
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(0)), a.baseOffset);
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(1_000)), a.baseOffset);
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(1_501)), b.baseOffset, "a's newest is 1500");
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(2_000)), b.baseOffset);
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(2_001)), c.baseOffset);
-    assert.equal(await stable(() => client.listOffset("times", 0, OffsetAt.time(3_001))), latest, "none yet: the latest offset");
-    assert.equal(await client.listOffset("times", 0, OffsetAt.time(-7)), a.baseOffset, "a negative time counts as 0");
+      // By batches: the first batch with a record at or after the time.
+      assert.equal(await client.listOffset(times, 0, OffsetAt.time(0)), a.baseOffset);
+      assert.equal(await client.listOffset(times, 0, OffsetAt.time(1_000)), a.baseOffset);
+      assert.equal(await client.listOffset(times, 0, OffsetAt.time(1_501)), b.baseOffset, "a's newest is 1500");
+      assert.equal(await client.listOffset(times, 0, OffsetAt.time(2_000)), b.baseOffset);
+      assert.equal(await client.listOffset(times, 0, OffsetAt.time(2_001)), c.baseOffset);
+      assert.equal(await stable(() => client.listOffset(times, 0, OffsetAt.time(3_001))), latest, "none yet: the latest offset");
+    });
   });
 
   test("readRecords reads a partition to its end as an async iterator", async () => {

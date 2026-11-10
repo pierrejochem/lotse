@@ -41,3 +41,46 @@ export async function stable<T>(read: () => Promise<T>, attempts = 20): Promise<
   }
   return last;
 }
+
+/** What a scenario watches: the leaders of the partitions it relies on, as they were when it began to rely on them. */
+export class Steady {
+  private readonly seen = new Map<string, string>();
+  constructor(private readonly client: LotseClient) {}
+
+  /** Starts watching `name`'s first partition: call it once the queue or stream has a leader the scenario relies on. */
+  async watch(name: string): Promise<void> {
+    this.seen.set(name, await leaderTerm(this.client, name));
+  }
+
+  /** Whether any watched partition has another leader or term than when it was first watched. */
+  async moved(): Promise<boolean> {
+    for (const [name, was] of this.seen) {
+      if ((await leaderTerm(this.client, name)) !== was) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * Runs a scenario that relies on its leaders staying where they are, and runs it again, with new names (the body gets
+ * the attempt number to add to them), if it fails after one of them moved. A failure with every leader where it was is
+ * a failure: it is thrown at once, so the check stays as strict as it was.
+ */
+export async function retryIfLeaderMoved<T>(
+  client: LotseClient,
+  body: (steady: Steady, attempt: number) => Promise<T>,
+  attempts = 4,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const steady = new Steady(client);
+    try {
+      return await body(steady, attempt);
+    } catch (e) {
+      if (attempt >= attempts || !((await steady.moved()) || isNotLeader(e))) {
+        throw e;
+      }
+    }
+  }
+}

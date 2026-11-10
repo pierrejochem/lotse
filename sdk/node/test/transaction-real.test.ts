@@ -19,7 +19,7 @@ import {
 } from "../src/index.js";
 import { Connection } from "../src/index.js";
 import { PlainCluster } from "./support/cluster.js";
-import { isNotLeader, leaderTerm } from "./support/failover.js";
+import { isNotLeader, leaderTerm, retryIfLeaderMoved } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -374,35 +374,40 @@ describe("transactions, publishing and groups against three real nodes", { skip 
   });
 
   test("of two transactions the first holds a message and the other gets MESSAGE_NOT_HELD", async () => {
-    await client.createQueue("held");
-    await settled("held");
-    await client.produce("held", 0, { value: "only" });
-    const one = newClient({ transactionalId: "held-1" });
-    const two = newClient({ transactionalId: "held-2" });
-    const c = await one.subscribe("held");
-    const d = await take(c);
-    const a = await one.beginTransaction();
-    const b = await two.beginTransaction();
-    await c.ackIn(a, d);
-    await assert.rejects(c.ackIn(b, d), (e: unknown) => e instanceof BrokerResponseError && e.code === ErrorCode.MESSAGE_NOT_HELD);
-    await assert.rejects(b.commit(), MustAbortError);
-    await b.abort();
-    await a.commit();
-    assert.equal(await c.poll(1_000), null, "settled by the first");
-    c.close();
+    // A transactional ack goes on the connection its message came on, so a leader that moves ends the attempt with
+    // NOT_LEADER: the scenario then runs again on a new queue.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const held = `held${attempt === 1 ? "" : `-${attempt}`}`;
+      await client.createQueue(held);
+      await settled(held);
+      await steady.watch(held);
+      await client.produce(held, 0, { value: "only" });
+      const one = newClient({ transactionalId: "held-1" });
+      const two = newClient({ transactionalId: "held-2" });
+      const c = await one.subscribe(held);
+      const d = await take(c);
+      const a = await one.beginTransaction();
+      const b = await two.beginTransaction();
+      await c.ackIn(a, d);
+      await assert.rejects(c.ackIn(b, d), (e: unknown) => e instanceof BrokerResponseError && e.code === ErrorCode.MESSAGE_NOT_HELD);
+      await assert.rejects(b.commit(), MustAbortError);
+      await b.abort();
+      await a.commit();
+      assert.equal(await c.poll(1_000), null, "settled by the first");
+      c.close();
 
-    // And when the holder aborts, the message is back.
-    await client.produce("held", 0, { value: "again" });
-    const c2 = await one.subscribe("held");
-    const d2 = await take(c2);
-    const t = await one.beginTransaction();
-    await c2.ackIn(t, d2);
-    await t.abort();
-    const back = await take(c2);
-    assert.equal(back.text(), "again");
-    assert.ok(back.deliveryCount >= 1);
-    await c2.ack(back);
-    c2.close();
+      // And when the holder aborts, the message is back.
+      await client.produce(held, 0, { value: "again" });
+      const c2 = await one.subscribe(held);
+      const d2 = await take(c2);
+      const t = await one.beginTransaction();
+      await c2.ackIn(t, d2);
+      await t.abort();
+      const back = await take(c2);
+      assert.equal(back.text(), "again");
+      assert.ok(back.deliveryCount >= 1);
+      await c2.ack(back);
+    });
   });
 
   // ---- groups ----
@@ -638,9 +643,17 @@ describe("transactions, publishing and groups against three real nodes", { skip 
 
     for (const q of ["txn-q1", "txn-q2"]) {
       const c = await client.subscribe(q);
-      assert.equal((await take(c)).text(), "p2", q);
-      assert.equal(await c.poll(500), null, `${q} holds nothing of the aborted publish`);
-      c.close();
+      // A leader that moves hands out again what was not acknowledged: p2 may come twice, p1 never.
+      const seen: string[] = [];
+      try {
+        for (let d: Delivery | null = await take(c); d !== null; d = await c.poll(500)) {
+          seen.push(d.text() as string);
+          await c.ack(d);
+        }
+      } finally {
+        c.close();
+      }
+      assert.deepEqual([...new Set(seen)], ["p2"], `${q} holds nothing of the aborted publish`);
     }
   });
 
