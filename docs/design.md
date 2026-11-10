@@ -38,13 +38,16 @@ Das Raft-Log **ist** das Partition-Log: Es gibt kein separates WAL, jeder Raft-E
 ```
 partition-0007/
   00000000000000000000.log        # Record-Batches (Raft-Entries)
-  00000000000000000000.index      # sparse: offset -> byte pos
-  00000000000000000000.timeindex  # sparse: timestamp -> offset
+  00000000000000000000.index      # sparse: offset -> byte pos, neuester Zeitstempel davor (nur versiegelte Segmente)
   raft.state                      # term, voted_for, commit_index
   snapshot                        # Raft-Snapshot: Producer-, Txn- und Koordinator-State, State Machine
 ```
 
 Geschlossene Segmente sind unveränderlich. Das ist die Grundlage für Snapshots per Referenz und für den Segment-Rewrite.
+
+Jedes versiegelte Segment hat eine Index-Datei daneben (ADR 0094): seinen sparse Index, je Eintrag erster Offset eines Batches, Byte-Position und der neueste Zeitstempel der Batches davor im Segment. Dieser Wert wächst nur, also beantworten dieselben Einträge die Suche nach einer Zeit; eine eigene `.timeindex`-Datei gibt es nicht. Der Kopf nennt Länge, nächsten Offset und neuesten Zeitstempel des Segments sowie Position und CRC seines letzten Batches, eine CRC32C sichert die Datei. Geschrieben wird sie, wenn ein Segment versiegelt wird (erst synct, dann indexiert, bevor das nächste Segment existiert), nach einem Compaction-Rewrite und beim Öffnen für ein versiegeltes Segment ohne Datei, immer über `<base>.index.tmp`, synct und umbenannt. Bevor sich ein Segment ändert (Raft-Truncation, Retention, Rewrite, Reset), wird seine Index-Datei gelöscht; das aktive Segment hat keine. Beim Öffnen gilt ein versiegeltes Segment, wie seine Datei es beschreibt, wenn Prüfsumme, Länge und der letzte Batch (gültig, mit dieser CRC, endet beim genannten Offset) stimmen; sonst wird es gescannt und die Datei neu geschrieben. Geöffnet wird also das aktive Segment ganz und von jedem versiegelten ein Batch. Ein beschädigter Batch in einem versiegelten Segment fällt beim Lesen auf, das jede CRC prüft, nicht beim Start.
+
+`Log::read` findet den Bereich über Index und Batch-Header und liest ihn mit einem Aufruf, wo ein Vorgriff (ein Index-Intervall plus die verlangten Bytes) ihn abdeckt; zurück kommt ein Ausschnitt dieses Puffers, jeder Batch geprüft, ohne Kopie pro Batch.
 
 ### Batch-Header (fest, little-endian)
 
@@ -124,11 +127,11 @@ Producer-IDs vergibt die Koordinator-Gruppe: `InitProducer` schlägt dort einen 
 
 - **High Watermark (HW)** = Raft-Commit-Index, von der Mehrheit bestätigt.
 - **Last Stable Offset (LSO)** = min(HW, `first_offset` aller offenen Txns).
-- `read_committed`-Consumer lesen bis LSO und überspringen abgebrochene Batches anhand der Liste, die `Fetch` mitliefert, ohne das Log zu scannen. Die Replica hält offene Transaktionen und abgebrochene Bereiche im Speicher und im Raft-Snapshot (ADR 0029). Der LSO liegt nie hinter dem angewendeten Index: Darüber ist das Schicksal einer Transaktion hier noch nicht bekannt.
+- `read_committed`-Consumer lesen bis LSO und überspringen abgebrochene Batches anhand der Liste, die `Fetch` mitliefert, ohne das Log zu scannen. Die Replica hält offene Transaktionen und abgebrochene Bereiche im Speicher und im Raft-Snapshot (ADR 0029). Einen abgebrochenen Bereich, dessen Marker unter dem Log-Anfang liegt, vergisst sie, wenn die Retention schneidet, ein Snapshot das Log neu beginnt und beim Öffnen (ADR 0094): Seine Daten liegen auch darunter, kein `Fetch` und keine Compaction trifft sie noch. Eine `.txnindex`-Datei gibt es nicht. Der LSO liegt nie hinter dem angewendeten Index: Darüber ist das Schicksal einer Transaktion hier noch nicht bekannt.
 
 ### Offsets nachschlagen
 
-`ListOffsets` (Key 5, ADR 0059) beantwortet der Leader einer Partition mit denselben Grenzen wie `Fetch`: `-2` ist der Log-Start, `-1` das Ende, das der Leser sieht (HW, bei read_committed LSO), eine Zeit in Millisekunden der erste Offset des ersten Daten-Batches, dessen neuester Record zu dieser Zeit oder später liegt, samt dessen Zeitstempel; gibt es keinen, kommt das Ende zurück. Segmente, deren neuester Zeitstempel älter ist, werden übersprungen, ab dem ersten passenden liest der Leader Batch-Header der Reihe nach; eine Zeitindex-Datei gibt es nicht. Ein Mitglied einer Consumer-Gruppe beginnt eine Partition ohne committeten Offset dort, wo `GroupConfig::start_from` es sagt: am Anfang (Standard), am Ende oder zu einer Zeit.
+`ListOffsets` (Key 5, ADR 0059) beantwortet der Leader einer Partition mit denselben Grenzen wie `Fetch`: `-2` ist der Log-Start, `-1` das Ende, das der Leser sieht (HW, bei read_committed LSO), eine Zeit in Millisekunden der erste Offset des ersten Daten-Batches, dessen neuester Record zu dieser Zeit oder später liegt, samt dessen Zeitstempel; gibt es keinen, kommt das Ende zurück. Segmente, deren neuester Zeitstempel älter ist, werden übersprungen; im ersten passenden beginnt der Leader beim letzten Index-Eintrag, vor dem alle Batches älter sind (ADR 0094), und liest von dort Batch-Header der Reihe nach, also höchstens ein Index-Intervall übersprungener Batches. Die Antwort bleibt der erste Offset eines Batches, nicht eines Records: Clients lesen und liefern ganze Batches. Ein Mitglied einer Consumer-Gruppe beginnt eine Partition ohne committeten Offset dort, wo `GroupConfig::start_from` es sagt: am Anfang (Standard), am Ende oder zu einer Zeit.
 
 ### Transaktions-Koordinator
 
@@ -283,7 +286,7 @@ Die API-Keys sind in der Reihenfolge der Tabelle nummeriert: `ApiVersions` 0, `M
 
 ### Zero-copy
 
-`Fetch` sendet Segmentbytes ohne Umkodierung. Ohne TLS über `sendfile`, mit TLS über kTLS (Linux), sonst über einen gepufferten Pfad. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste.
+`Fetch` sendet Segmentbytes ohne Umkodierung: einen Ausschnitt dessen, was `Log::read` mit einem Aufruf gelesen hat, den der Antwort-Frame einmal kopiert und TLS verschlüsselt. `sendfile` gibt es nicht (ADR 0094): Jede Client-Verbindung ist TLS 1.3, im Prozess verschlüsselt, und `sendfile` sendet nur Bytes, wie sie auf der Platte liegen; kTLS (Linux) brächte eine neue Abhängigkeit und einen Datei-Send in der `Net`-Naht für eine Kopie. Bei `read_committed` endet die Antwort am LSO; der Client filtert abgebrochene Batches anhand der mitgelieferten Liste.
 
 ## Flow Control & Quotas
 

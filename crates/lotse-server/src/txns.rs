@@ -230,6 +230,18 @@ impl TxnState {
         self.aborted.iter().any(|a| a.producer_id == producer_id && a.first - 1 <= offset && offset < a.last - 1)
     }
 
+    /// Forgets the aborted transactions whose marker lies below `start`,
+    /// the log's first offset (ADR 0094). Their data lies below it too, so
+    /// no fetch or compaction can meet it any more; one whose data reaches
+    /// `start` or later stays. Called after retention cuts the log and when
+    /// a snapshot restarts it, so the list grows with the data kept, not
+    /// with the partition's history.
+    pub(crate) fn forget_aborted_before(&mut self, start: u64) {
+        // `last` is the marker's Raft index; its offset, `last - 1`, must
+        // be at or after `start`.
+        self.aborted.retain(|a| a.last > start);
+    }
+
     /// Aborted transactions with data in the offsets `from..to`, as
     /// `(producer, first offset)`.
     pub(crate) fn aborted_between(&self, from: u64, to: u64) -> Vec<(u64, u64)> {
