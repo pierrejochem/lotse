@@ -31,7 +31,9 @@ pub fn issuer_fingerprint(cert: &X509Certificate<'_>) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn authority_key_id<'a>(cert: &'a X509Certificate<'_>) -> Option<&'a [u8]> {
+/// The certificate's authority key identifier: which key of its issuer
+/// signed it, if the certificate says.
+pub fn authority_key_id<'a>(cert: &'a X509Certificate<'_>) -> Option<&'a [u8]> {
     cert.extensions().iter().find_map(|e| match e.parsed_extension() {
         ParsedExtension::AuthorityKeyIdentifier(a) => a.key_identifier.as_ref().map(|k| k.0),
         _ => None,
