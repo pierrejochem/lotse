@@ -782,7 +782,7 @@ pub struct BindingRow {
 /// One client certificate the cluster has seen or had revoked (ADR 0091).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CertificateRow {
-    /// SHA-256 of the issuer's name in DER form, 64 hex digits.
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits.
     pub issuer: String,
     /// The serial number, hex.
     pub serial: String,
@@ -818,7 +818,7 @@ pub struct CertificatesView {
 /// serial is typed again.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct RevokeCertificate {
-    /// SHA-256 of the issuer's name in DER form, 64 hex digits.
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits.
     pub issuer: String,
     /// The serial number, hex.
     pub serial: String,

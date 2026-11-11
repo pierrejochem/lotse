@@ -398,7 +398,7 @@ public sealed partial class LotseClient
     /// Puts a certificate on the cluster's revocation list: every node refuses it in a handshake and ends its open
     /// connections once it has the entry. Needs the cluster-admin role.
     /// </summary>
-    /// <param name="issuer">SHA-256 of the issuer's distinguished name in DER form (32 bytes).</param>
+    /// <param name="issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="serial">The serial number, big-endian, as the certificate has it.</param>
     /// <param name="notAfterMs">When the certificate stops being valid, in milliseconds since the epoch; the entry is dropped after that.</param>
     /// <param name="reason">Why, for the people who read the list later; may be empty.</param>
@@ -453,12 +453,13 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
-    /// The CA holder records the certificate it signed for a request. The broker does not read the certificate: the
-    /// facts beside it are the CA holder's word. Needs the cluster-admin role.
+    /// The CA holder records the certificate it signed for a request. The broker checks that the certificate has the
+    /// request's key and principal, is signed by the cluster's CA and says what the facts beside it say (ADR 0096).
+    /// Needs the cluster-admin role.
     /// </summary>
     /// <param name="id">The request it answers: SHA-256 of its signing request (32 bytes).</param>
     /// <param name="certificate">The signed certificate, DER.</param>
-    /// <param name="issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="serial">The serial number, big-endian.</param>
     /// <param name="notBeforeMs">First millisecond it is valid in, since the epoch.</param>
     /// <param name="notAfterMs">Millisecond it stops being valid in, since the epoch.</param>

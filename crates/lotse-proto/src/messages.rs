@@ -3433,7 +3433,7 @@ impl RevokeSessionsRequest {
 /// [`AdminResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeCertificateRequest {
-    /// SHA-256 of the issuer's distinguished name in DER form (32 bytes),
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes),
     /// as `lotse_rt::CertInfo` has it.
     pub issuer: Bytes,
     /// The serial number, big-endian, as the certificate has it.
@@ -3506,7 +3506,7 @@ impl DescribeCertificatesRequest {
 /// One client certificate in the inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificateEntry {
-    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).
     pub issuer: Bytes,
     /// The serial number, big-endian.
     pub serial: Bytes,
@@ -3589,7 +3589,7 @@ impl DescribeCertificatesResponse {
 /// One accepted client certificate, as a node reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeenCertificate {
-    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).
     pub issuer: Bytes,
     /// The serial number, big-endian.
     pub serial: Bytes,
@@ -3758,16 +3758,16 @@ impl DescribeCertificateRequestsResponse {
 
 /// The CA holder records the certificate it signed for a request
 /// (cluster admin, ADR 0092). Answered with [`AdminResponse`]. The broker
-/// does not read the certificate: the facts beside it are the CA holder's
-/// word, and a certificate is only ever as good as its signature at the
-/// handshake.
+/// takes it only if it has the request's key and principal, is signed by
+/// one of the cluster's CA certificates and says of itself what the facts
+/// beside it say (ADR 0096).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordCertificateRequest {
     /// The request it answers: SHA-256 of its signing request.
     pub id: Bytes,
     /// The signed certificate, DER.
     pub certificate: Bytes,
-    /// SHA-256 of the issuer's name in DER form (32 bytes).
+    /// SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).
     pub issuer: Bytes,
     /// The serial number, big-endian.
     pub serial: Bytes,

@@ -508,9 +508,9 @@ pub async fn revoke_certificate(
     if !req.confirm.eq_ignore_ascii_case(&req.serial) {
         return Err(ApiError::BadRequest(format!("Type the serial, {}, to revoke the certificate.", req.serial)));
     }
-    let issuer: [u8; 32] = hex("issuer", &req.issuer)?
-        .try_into()
-        .map_err(|_| ApiError::BadRequest("The issuer is 64 hex digits: the SHA-256 of the issuer's name.".into()))?;
+    let issuer: [u8; 32] = hex("issuer", &req.issuer)?.try_into().map_err(|_| {
+        ApiError::BadRequest("The issuer is 64 hex digits: the SHA-256 of the issuer's name and key identifier.".into())
+    })?;
     cluster(&st, &id)?.revoke_certificate(&who, issuer, &serial, req.not_after_ms, &req.reason).await?;
     tracing::info!(principal = %who.principal, cluster = %id, serial = %req.serial, "certificate revoked");
     let message = format!(

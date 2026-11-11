@@ -543,7 +543,7 @@ export interface components {
              * @description When a node first accepted it; 0 if none did.
              */
             first_seen_ms: number;
-            /** @description SHA-256 of the issuer's name in DER form, 64 hex digits. */
+            /** @description SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits. */
             issuer: string;
             /**
              * Format: int64
@@ -1232,7 +1232,7 @@ export interface components {
         RevokeCertificate: {
             /** @description The serial, typed again. */
             confirm: string;
-            /** @description SHA-256 of the issuer's name in DER form, 64 hex digits. */
+            /** @description SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits. */
             issuer: string;
             /**
              * Format: int64
