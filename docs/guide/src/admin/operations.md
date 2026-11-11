@@ -13,9 +13,12 @@ This chapter says what the code supports: where the data is, what a restart does
 | `groups/<id>/log/<base offset>.log` | The segments of the group's log. The name is the first offset, 20 digits. The Raft log and the partition log are the same log. |
 | `groups/<id>/raft.state` | The group's term and vote. |
 | `groups/<id>/snapshot` | The group's latest snapshot. |
+| `groups/<id>/snapshot.<index>.boundary` | A snapshot taken where a segment begins, for retention to cut at later. |
+| `groups/<id>/snapshot.<index>.sent` | A replaced snapshot a follower is still being sent. |
+| `groups/<id>/snapshot.incoming` | The part of a snapshot received so far. |
 | `groups/<id>/moved` | A record of an earlier move of the replica off this node. |
 
-The node writes these files itself. The code does not offer a supported way to edit or copy them while the node runs. Resources, users, tenants, role bindings and the node list are in the metadata group, so they are in these files too; the cluster file does not hold them.
+The node writes these files itself. Of the snapshot files, only `snapshot` outlives a restart: the node removes the others when it opens the group ([ADR 0099](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0099-snapshots-live-in-files.md)). The code does not offer a supported way to edit or copy them while the node runs. Resources, users, tenants, role bindings and the node list are in the metadata group, so they are in these files too; the cluster file does not hold them.
 
 ## Restart and crash
 
