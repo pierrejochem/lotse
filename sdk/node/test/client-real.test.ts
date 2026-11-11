@@ -40,8 +40,7 @@ describe("a client against three real nodes", { skip }, () => {
   let client: LotseClient;
 
   before(async () => {
-    cluster = await PlainCluster.make(binary(), 3);
-    cluster.startAll();
+    cluster = await PlainCluster.started(binary(), 3);
     client = new LotseClient({
       bootstrap: cluster.bootstrap,
       plaintextOnLoopback: true,

@@ -41,8 +41,7 @@ describe("queues against three real nodes", { skip }, () => {
   };
 
   before(async () => {
-    cluster = await PlainCluster.make(binary(), 3);
-    cluster.startAll();
+    cluster = await PlainCluster.started(binary(), 3);
     client = new LotseClient(options(cluster.bootstrap));
   });
 

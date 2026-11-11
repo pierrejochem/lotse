@@ -1,6 +1,6 @@
 # 76. Single active consumer
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0097](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md) (a deposed leader stops delivering once no quorum answered it within an election timeout, not at check-quorum)
 - Date: 2026-11-07
 
 ## Context

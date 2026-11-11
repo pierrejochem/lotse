@@ -82,8 +82,7 @@ describe("admin calls against three real nodes", { skip }, () => {
   const eachNode = [1, 2, 3];
 
   before(async () => {
-    cluster = await PlainCluster.make(binary(), 3);
-    cluster.startAll();
+    cluster = await PlainCluster.started(binary(), 3);
     client = new LotseClient(options(cluster.bootstrap));
     await until("the cluster to answer", () => client.metadata());
     await until("three nodes", async () => assert.equal((await client.describeNodes()).length, 3));

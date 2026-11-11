@@ -60,6 +60,8 @@ public final class LotseBinary {
         return out;
     }
 
+    private static final java.util.Set<Integer> HANDED_OUT = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /**
      * A port nothing listens on, chosen below the ephemeral range (32768 and up on Linux): a port the kernel handed out
      * for listening is handed out again to the next outgoing connection, which could take it before the node starts.
@@ -67,6 +69,10 @@ public final class LotseBinary {
     public static int freePort() throws IOException {
         for (;;) {
             int port = 20_000 + ThreadLocalRandom.current().nextInt(12_000);
+            // Not one this JVM handed out already: those are free only until their node binds them.
+            if (!HANDED_OUT.add(port)) {
+                continue;
+            }
             try (ServerSocket s = new ServerSocket(port, 1, InetAddress.getLoopbackAddress())) {
                 return s.getLocalPort();
             } catch (BindException e) {
