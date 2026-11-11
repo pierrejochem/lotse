@@ -112,19 +112,30 @@ pub struct RetentionConfig {
     pub ms: Option<u64>,
     /// Each partition keeps this many bytes of log; `None`: no limit.
     pub bytes: Option<u64>,
+    /// Bytes the map of keys of a compaction sweep may take; the node runs
+    /// one sweep at a time (ADR 0098).
+    pub compaction_map_bytes: u64,
 }
+
+/// What a compaction sweep's map may take unless the node says otherwise:
+/// 64 MiB, about 1.4 million keys.
+pub const DEFAULT_COMPACTION_MAP_BYTES: u64 = 64 << 20;
 
 impl Default for RetentionConfig {
     /// Seven days, no size limit.
     fn default() -> Self {
-        RetentionConfig { ms: Some(7 * 24 * 3600 * 1000), bytes: None }
+        RetentionConfig {
+            ms: Some(7 * 24 * 3600 * 1000),
+            bytes: None,
+            compaction_map_bytes: DEFAULT_COMPACTION_MAP_BYTES,
+        }
     }
 }
 
 impl RetentionConfig {
     /// Keep everything.
     pub fn keep() -> Self {
-        RetentionConfig { ms: None, bytes: None }
+        RetentionConfig { ms: None, bytes: None, compaction_map_bytes: DEFAULT_COMPACTION_MAP_BYTES }
     }
 }
 
@@ -348,6 +359,8 @@ pub struct GroupStatus {
     pub commit: u64,
     /// Applied index here.
     pub applied: u64,
+    /// A compaction sweep is in progress here (ADR 0098).
+    pub sweeping: bool,
 }
 
 /// A decoded frame: its sender and the messages per group.
@@ -462,6 +475,11 @@ impl NodeHandle {
     /// The last known status of `group`.
     pub fn status(&self, group: GroupId) -> Option<GroupStatus> {
         self.shared.status.lock().expect("status lock").get(&group).copied()
+    }
+
+    /// The last known status of every group here.
+    pub fn statuses(&self) -> BTreeMap<GroupId, GroupStatus> {
+        self.shared.status.lock().expect("status lock").clone()
     }
 
     /// Asks the node to stop; its task finishes once everything is closed.
@@ -860,6 +878,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // measured between two reads.
     let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
     let mut next_retain = started + RETAIN_EVERY;
+    // Compacted partitions take turns at the node's one sweep (ADR 0098):
+    // the next one to start is the first after this group.
+    let mut sweep_turn: GroupId = 0;
     let mut links_at = 0;
     let mut links_learned: BTreeMap<NodeId, String> = BTreeMap::new();
     let (mut next_ask, asking) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -1046,11 +1067,26 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                         .collect()
                 })
                 .unwrap_or_default();
-            for (g, group) in groups.iter_mut() {
-                if let Some(r) = own.get(g) {
+            // One sweep at a time: the replica that holds one goes on with
+            // it; when none does, the groups after the last to start get the
+            // first chance.
+            let mut sweeping = groups.iter().find(|(_, r)| r.sweeping()).map(|(g, _)| *g);
+            let order: Vec<GroupId> =
+                groups.range(sweep_turn + 1..).chain(groups.range(..=sweep_turn)).map(|(g, _)| *g).collect();
+            for g in order {
+                let group = groups.get_mut(&g).expect("listed above");
+                if let Some(r) = own.get(&g) {
                     group.set_retention(*r);
                 }
-                group.retain(now_ms).await?;
+                let sweep = crate::replica::Sweep {
+                    may_start: sweeping.is_none_or(|s| s == g),
+                    map_bytes: cfg.retention.compaction_map_bytes,
+                };
+                group.retain_with(now_ms, sweep).await?;
+                if sweeping.is_none() && group.sweeping() {
+                    sweeping = Some(g);
+                    sweep_turn = g;
+                }
             }
         }
         if rt.now() >= next_membership {
@@ -1080,6 +1116,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     leader: r.leader(),
                     commit: r.commit(),
                     applied: group.applied(),
+                    sweeping: group.sweeping(),
                 },
             );
         }

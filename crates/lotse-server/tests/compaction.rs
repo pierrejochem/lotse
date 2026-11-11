@@ -109,6 +109,8 @@ impl World {
         let client_addrs: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:9000"))).collect();
         let pre_vote = rt.chance(1, 2);
         let log = LogConfig { segment_bytes: 400 + rt.below(1_600), index_interval_bytes: 64 };
+        let map_bytes =
+            if rt.chance(1, 2) { 48 * (6 + rt.below(7)) } else { lotse_server::DEFAULT_COMPACTION_MAP_BYTES };
         let cfgs = ids
             .iter()
             .map(|&id| {
@@ -133,7 +135,11 @@ impl World {
                         metadata: Some(1),
                         coordinator: Some(2),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
-                        retention: RetentionConfig::keep(),
+                        // Half the runs map 6 to 12 keys per sweep (ADR 0098),
+                        // fewer than the run writes now and then, so a
+                        // partition takes several sweeps; fewer still would
+                        // take longer than the run waits.
+                        retention: RetentionConfig { compaction_map_bytes: map_bytes, ..RetentionConfig::keep() },
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
                     },
@@ -350,6 +356,14 @@ async fn run(rt: SimRuntime) {
         if partition_until.is_some_and(|t| t <= rt.now()) {
             rt.net().heal();
             partition_until = None;
+        }
+        // A node runs one compaction sweep at a time (ADR 0098).
+        for (id, running) in &w.running {
+            if let Some((_, handle)) = running {
+                let sweeping: Vec<u64> =
+                    handle.statuses().into_iter().filter(|(_, s)| s.sweeping).map(|(g, _)| g).collect();
+                assert!(sweeping.len() <= 1, "node {id} sweeps groups {sweeping:?} at once");
+            }
         }
         let down = w.running.values().filter(|r| r.is_none()).count() as u64;
         if down < (n - 1) / 2 && rt.chance(1, 30) {

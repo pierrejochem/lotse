@@ -273,7 +273,7 @@ fn stream_settings_change_key_by_key_and_survive_a_snapshot() {
     s.apply(7, &payload(&Change::AlterStream { resource_id: id, change: unlimited })).unwrap();
     let want = StreamSettings { retention_ms: Some(-1), retention_bytes: Some(1 << 20), ..StreamSettings::default() };
     assert_eq!(s.streams[&id].settings, want);
-    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: None };
+    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: None, ..crate::RetentionConfig::keep() };
     assert_eq!(want.retention(defaults), crate::Retention::Stream { ms: None, bytes: Some(1 << 20), compact: None });
     assert_eq!(
         StreamSettings::default().retention(defaults),
@@ -291,7 +291,7 @@ fn compaction_settings_change_and_survive_a_snapshot_and_old_records_still_read(
     s.apply(4, &payload(&create)).unwrap();
     let id = resource_id(4);
     assert_eq!(s.streams[&id].settings, settings);
-    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: Some(10) };
+    let defaults = crate::RetentionConfig { ms: Some(1_000), bytes: Some(10), ..crate::RetentionConfig::keep() };
     assert_eq!(
         settings.retention(defaults),
         crate::Retention::Stream { ms: None, bytes: None, compact: Some(86_400_000) },
