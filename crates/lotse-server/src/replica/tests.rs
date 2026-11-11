@@ -858,3 +858,176 @@ fn a_replica_that_may_not_start_a_sweep_compacts_nothing() {
         assert!(r.sweeping(), "its turn: the sweep starts and holds its map");
     });
 }
+
+/// The names of the snapshot files in the group's directory on `host`.
+async fn snapshot_files(host: &SimRuntime) -> Vec<String> {
+    let names = host.list(Path::new("g")).await.unwrap();
+    names
+        .iter()
+        .filter_map(|p| p.file_name()?.to_str().map(String::from))
+        .filter(|n| n.starts_with("snapshot"))
+        .collect()
+}
+
+/// Three replicas of a stream that keeps 800 bytes, with snapshots sent in
+/// chunks of 16 bytes; node 3 is away while 40 values are written and the
+/// leader trims. Returns the hosts, the replicas, the leader's position and
+/// where its log starts.
+async fn behind_the_start(rt: &SimRuntime) -> (Vec<SimRuntime>, Vec<Replica<SimRuntime, Recorder>>, usize, u64) {
+    let hosts: Vec<SimRuntime> = (1..=3).map(|id| rt.node(&format!("n{id}"))).collect();
+    let mut rs = Vec::new();
+    for id in 1..=3u64 {
+        rs.push(open_member(&hosts[id as usize - 1], id).await);
+    }
+    let up = [true, true, false];
+    rounds(&mut rs, &up, 80).await;
+    let l = (0..2).find(|&i| rs[i].raft_ref().role() == lotse_raft::Role::Leader).expect("1 or 2 leads");
+    for i in 0..40 {
+        rs[l].propose(batch(1, &format!("value-{i:02}"))).unwrap();
+        rounds(&mut rs, &up, 3).await;
+    }
+    let start = rs[l].retain(0).await.unwrap().expect("old segments go");
+    (hosts, rs, l, start)
+}
+
+async fn open_member(host: &SimRuntime, id: u64) -> Replica<SimRuntime, Recorder> {
+    let retention = Retention::Stream { ms: None, bytes: Some(800), compact: None };
+    let options = ReplicaOptions { retention, ..ReplicaOptions::default() };
+    // Without pre-vote, a node cut off campaigns (and so gives a transfer up).
+    let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2, 3]) };
+    let mut r = Replica::open_with(host.clone(), "g", cfg, Recorder::default(), SMALL, options).await.unwrap();
+    r.max_snapshot_chunk = 16;
+    r
+}
+
+/// Rounds until node 3 is receiving a snapshot and has `bytes` of it.
+async fn until_received(rs: &mut [Replica<SimRuntime, Recorder>], host: &SimRuntime, bytes: u64) {
+    for _ in 0..400 {
+        rounds(rs, &[true; 3], 1).await;
+        // The chunks a node just took are written when it next processes.
+        if rs[2].raft_ref().receiving_snapshot()
+            && let Ok(f) = host.open(Path::new("g/snapshot.incoming"), OpenMode::Existing).await
+            && f.size().await.unwrap() >= bytes
+        {
+            return;
+        }
+    }
+    panic!("node 3 never received {bytes} bytes of a snapshot");
+}
+
+#[test]
+fn a_snapshot_is_received_into_a_file_and_a_restart_starts_it_over() {
+    Sim::new(27).run(|rt| async move {
+        let (hosts, mut rs, l, start) = behind_the_start(&rt).await;
+        // The leader keeps its snapshot and the boundaries above the cut in
+        // files, nothing at or below it.
+        let names = snapshot_files(&hosts[l]).await;
+        assert!(names.contains(&"snapshot".to_string()), "{names:?}");
+        for n in &names {
+            if let Some(index) = n.strip_prefix("snapshot.").and_then(|n| n.strip_suffix(".boundary")) {
+                assert!(index.parse::<u64>().unwrap() > start, "{n} is at or below the cut at {start}");
+            } else {
+                assert_eq!(n, "snapshot", "no other snapshot file: {names:?}");
+            }
+        }
+
+        // Node 3 comes back: the chunks wait in a file of their own.
+        until_received(&mut rs, &hosts[2], 48).await;
+        assert_eq!(snapshot_files(&hosts[2]).await, ["snapshot.incoming"]);
+        assert_eq!(rs[2].raft_ref().log().snapshot_index(), 0, "nothing installed before the end");
+
+        // Cut off, node 3 campaigns and gives the transfer up: the chunks go.
+        rounds(&mut rs, &[false, false, true], 40).await;
+        assert!(!rs[2].raft_ref().receiving_snapshot());
+        assert!(snapshot_files(&hosts[2]).await.is_empty(), "the abandoned chunks are gone");
+        until_received(&mut rs, &hosts[2], 48).await;
+
+        // A restart drops them too; the leader starts over and the transfer ends.
+        rs[2] = open_member(&hosts[2], 3).await;
+        assert!(snapshot_files(&hosts[2]).await.is_empty(), "the chunks are gone");
+        rounds(&mut rs, &[true; 3], 600).await;
+        let back = &rs[2];
+        assert_eq!(back.raft_ref().log().snapshot_index(), start, "the snapshot where the leader's log starts");
+        assert_eq!(kept(back).await, kept(&rs[l]).await, "the same data from the start on");
+        assert_eq!(applied(back), applied(&rs[l]), "and the same state");
+        let names = snapshot_files(&hosts[2]).await;
+        assert!(
+            names.contains(&"snapshot".to_string()) && !names.iter().any(|n| n.ends_with(".incoming")),
+            "{names:?}"
+        );
+        // What was installed is what the replica starts from.
+        let state = applied(back).iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        drop(rs);
+        let mut again = open_member(&hosts[2], 3).await;
+        again.raft().tick();
+        assert_eq!(again.raft_ref().log().snapshot_index(), start);
+        assert_eq!(applied(&again)[..], state[..applied(&again).len()], "the snapshot's state, then the log replayed");
+    });
+}
+
+#[test]
+fn a_snapshot_replaced_while_it_is_sent_goes_on_from_a_copy() {
+    Sim::new(28).run(|rt| async move {
+        let (hosts, mut rs, l, start) = behind_the_start(&rt).await;
+        until_received(&mut rs, &hosts[2], 32).await;
+        // The leader snapshots again while node 3 is part way through.
+        for i in 40..44 {
+            rs[l].propose(batch(1, &format!("value-{i:02}"))).unwrap();
+            rounds(&mut rs, &[true; 3], 2).await;
+        }
+        assert!(rs[2].raft_ref().receiving_snapshot(), "still under way");
+        let newer = rs[l].compact().await.unwrap();
+        assert!(newer > start);
+        let copy = format!("snapshot.{start}.sent");
+        assert!(snapshot_files(&hosts[l]).await.contains(&copy), "the replaced snapshot is copied");
+        // Node 3 installs the snapshot it began with; as the leader's core
+        // forgot the entries after it, the newer one follows.
+        let mut installed = Vec::new();
+        for _ in 0..600 {
+            rounds(&mut rs, &[true; 3], 1).await;
+            let at = rs[2].raft_ref().log().snapshot_index();
+            if at != 0 && installed.last() != Some(&at) {
+                installed.push(at);
+            }
+        }
+        assert_eq!(installed.first(), Some(&start), "the transfer ends with the snapshot it began: {installed:?}");
+        assert_eq!(applied(&rs[2]), applied(&rs[l]));
+        // Once no transfer needs it, the next snapshot removes the copy.
+        rs[l].propose(batch(1, "value-44")).unwrap();
+        rounds(&mut rs, &[true; 3], 5).await;
+        rs[l].compact().await.unwrap();
+        assert!(!snapshot_files(&hosts[l]).await.contains(&copy), "the copy goes");
+    });
+}
+
+#[test]
+fn a_snapshot_that_starts_over_replaces_the_chunks_of_another() {
+    Sim::new(29).run(|rt| async move {
+        let (hosts, mut rs, l, start) = behind_the_start(&rt).await;
+        let file = read_file(&hosts[l], Path::new("g/snapshot")).await.unwrap().unwrap();
+        let (meta, data) = decode_snapshot(file).unwrap();
+        assert_eq!(meta.index, start);
+        let term = rs[l].raft_ref().term();
+        let leader = l as u64 + 1;
+        let give = |meta: &SnapshotMeta, offset: usize, bytes: Bytes, done: bool| Message::Snapshot {
+            term,
+            meta: meta.clone(),
+            offset: offset as u64,
+            data: bytes,
+            done,
+            seq: 1,
+        };
+        // Part of another snapshot arrives, then the leader's starts over.
+        let other = SnapshotMeta { term: meta.term + 1, ..meta.clone() };
+        rs[2].raft().step(leader, give(&other, 0, Bytes::from_static(b"another snapshot's first bytes"), false));
+        rs[2].process().await.unwrap();
+        let half = data.len() / 2;
+        rs[2].raft().step(leader, give(&meta, 0, data.slice(..half), false));
+        rs[2].process().await.unwrap();
+        rs[2].raft().step(leader, give(&meta, half, data.slice(half..), true));
+        rs[2].process().await.unwrap();
+        assert_eq!(rs[2].raft_ref().log().snapshot_index(), start);
+        let installed = read_file(&hosts[2], Path::new("g/snapshot")).await.unwrap().unwrap();
+        assert_eq!(decode_snapshot(installed).unwrap(), (meta, data), "exactly the leader's snapshot");
+    });
+}

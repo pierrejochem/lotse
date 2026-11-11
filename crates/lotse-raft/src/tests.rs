@@ -723,6 +723,48 @@ fn a_snapshot_installs_only_when_its_last_chunk_arrives() {
 }
 
 #[test]
+fn the_driver_gets_each_chunk_once_in_order_and_installs_what_it_kept() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    let n = data.len();
+    let (a, b) = (n / 3, 2 * n / 3);
+    let step = |c: &mut Cluster, m: &SnapshotMeta, from: usize, to: usize| {
+        let msg = Message::Snapshot {
+            term: sn.term,
+            meta: m.clone(),
+            offset: from as u64,
+            data: data.slice(from..to),
+            done: to == n,
+            seq: 1,
+        };
+        let raft = &mut c.nodes.get_mut(&f).unwrap().raft;
+        raft.step(l, msg);
+        let ready = raft.ready();
+        raft.advance();
+        ready
+    };
+    let r = step(&mut c, &meta, 0, a);
+    let chunk = |offset: usize, to: usize| SnapshotChunk {
+        meta: meta.clone(),
+        offset: offset as u64,
+        data: data.slice(offset..to),
+    };
+    assert_eq!(r.snapshot_chunks, vec![chunk(0, a)]);
+    assert_eq!(r.snapshot, None);
+    // A repeat and a gap hand nothing over.
+    assert!(step(&mut c, &meta, 0, a).snapshot_chunks.is_empty());
+    assert!(step(&mut c, &meta, b, n).snapshot_chunks.is_empty());
+    assert_eq!(step(&mut c, &meta, a, b).snapshot_chunks, vec![chunk(a, b)]);
+    let r = step(&mut c, &meta, b, n);
+    assert_eq!(r.snapshot_chunks, vec![chunk(b, n)]);
+    assert_eq!(r.snapshot, Some(meta.clone()), "the last chunk installs what the driver kept");
+    // Another snapshot starts at offset 0 again.
+    let other = SnapshotMeta { index: meta.index + 1, ..meta.clone() };
+    let r = step(&mut c, &other, 0, a);
+    assert_eq!(r.snapshot_chunks, vec![SnapshotChunk { meta: other, offset: 0, data: data.slice(0..a) }]);
+}
+
+#[test]
 fn repeated_and_skipped_chunks_only_say_where_the_follower_stands() {
     let (mut c, sn) = snapshot_to_send();
     let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());

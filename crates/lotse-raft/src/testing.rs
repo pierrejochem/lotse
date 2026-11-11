@@ -33,6 +33,9 @@ pub struct MemNode {
     pub snapshot: Option<(SnapshotMeta, Bytes)>,
     /// Snapshots replaced while a transfer of them was under way.
     pub older: OlderSnapshots,
+    /// The chunks of a snapshot being received, as the core handed them
+    /// over; lost in a crash.
+    pub incoming: Option<(SnapshotMeta, BytesMut)>,
     /// Largest number of bytes (headers included) per append; at least one
     /// entry is always sent.
     pub max_fill_bytes: usize,
@@ -55,6 +58,7 @@ impl MemNode {
             applied: Vec::new(),
             snapshot: None,
             older: OlderSnapshots::default(),
+            incoming: None,
             max_fill_bytes: 64 * 1024,
             max_snapshot_chunk: 64 * 1024,
             reads: Vec::new(),
@@ -87,6 +91,7 @@ impl MemNode {
             configs,
         };
         self.raft = RaftGroup::new(self.cfg.clone(), restored);
+        self.incoming = None;
     }
 
     /// Index after which the log starts.
@@ -122,14 +127,26 @@ impl MemNode {
             return Vec::new();
         }
         let ready = self.raft.ready();
-        if let Some(snap) = ready.snapshot {
-            let entries = decode(&snap.data);
+        for c in ready.snapshot_chunks {
+            if c.offset == 0 {
+                self.incoming = Some((c.meta.clone(), BytesMut::new()));
+            }
+            let (meta, buf) = self.incoming.as_mut().expect("a snapshot starts at offset 0");
+            assert_eq!(*meta, c.meta, "node {}: a chunk of another snapshot without a start", self.cfg.id);
+            assert_eq!(buf.len() as u64, c.offset, "node {}: chunks arrive in order", self.cfg.id);
+            buf.extend_from_slice(&c.data);
+        }
+        if let Some(meta) = ready.snapshot {
+            let (kept, buf) = self.incoming.take().expect("a snapshot to install was received");
+            assert_eq!(kept, meta, "node {} installs the snapshot it received", self.cfg.id);
+            let data = buf.freeze();
+            let entries = decode(&data);
             let applied = self.applied.last().map_or(0, |e| e.last);
-            assert!(snap.meta.index > applied, "node {} installed a snapshot it had applied", self.cfg.id);
-            assert_eq!(entries.last().map_or(0, |e| e.last), snap.meta.index, "snapshot data matches its meta");
+            assert!(meta.index > applied, "node {} installed a snapshot it had applied", self.cfg.id);
+            assert_eq!(entries.last().map_or(0, |e| e.last), meta.index, "snapshot data matches its meta");
             self.applied = entries;
             self.log.clear();
-            let old = self.snapshot.replace((snap.meta, snap.data));
+            let old = self.snapshot.replace((meta, data));
             self.older.supersede(old, &self.raft);
         }
         if let Some(from) = ready.truncate_from {
