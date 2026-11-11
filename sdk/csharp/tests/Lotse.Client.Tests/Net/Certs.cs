@@ -62,11 +62,22 @@ internal sealed class Certs
     /// A port nothing listens on, chosen below the ephemeral range (32768 and up on Linux): a port the kernel handed out
     /// for listening is handed out again to the next outgoing connection, which could take it before the node starts.
     /// </summary>
+    private static readonly System.Collections.Generic.HashSet<int> HandedOut = new();
+
     internal static int FreePort()
     {
         while (true)
         {
-            var l = new TcpListener(IPAddress.Loopback, 20_000 + Random.Shared.Next(12_000));
+            int candidate = 20_000 + Random.Shared.Next(12_000);
+            // Not one this process handed out already: those are free only until their node binds them.
+            lock (HandedOut)
+            {
+                if (!HandedOut.Add(candidate))
+                {
+                    continue;
+                }
+            }
+            var l = new TcpListener(IPAddress.Loopback, candidate);
             try
             {
                 l.Start();
