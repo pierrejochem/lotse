@@ -99,6 +99,8 @@ struct World {
     cfgs: BTreeMap<NodeId, NodeConfig>,
     running: BTreeMap<NodeId, Option<(Node<SimRuntime>, NodeHandle)>>,
     down_until: BTreeMap<NodeId, lotse_rt::Instant>,
+    /// The nodes' `[compaction] map_bytes`.
+    map_bytes: u64,
 }
 
 impl World {
@@ -152,6 +154,7 @@ impl World {
             running: BTreeMap::new(),
             down_until: BTreeMap::new(),
             rt,
+            map_bytes,
         };
         for id in ids {
             w.start(id).await;
@@ -319,6 +322,7 @@ async fn read_all(client: &Client<SimRuntime>, p: u32, end: u64) -> (Vec<(u64, S
 async fn run(rt: SimRuntime) {
     let mut w = World::new(rt.clone()).await;
     let n = w.cfgs.len() as u64;
+    let map_bytes = w.map_bytes;
     let admin = Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(n) });
     let tombstones = TOMBSTONE_MS.to_string();
     let configs = [("cleanup.policy", "compact"), ("delete.retention.ms", tombstones.as_str())];
@@ -433,7 +437,11 @@ async fn run(rt: SimRuntime) {
                 }
                 assert!(rt.now() < deadline, "partition {p}: leadership does not move to {node}");
             }
-            let deadline = rt.now() + Duration::from_secs(120);
+            // A map of a few keys takes a sweep per few keys, each one
+            // rewriting at most a segment a second, and a node sweeps one
+            // partition at a time: that takes longer than one sweep of all.
+            let settle = if map_bytes < lotse_server::DEFAULT_COMPACTION_MAP_BYTES { 600 } else { 120 };
+            let deadline = rt.now() + Duration::from_secs(settle);
             let records = loop {
                 let leads = admin.node_metrics().await.ok().is_some_and(|ms| {
                     ms.into_iter().any(|(id, m)| {
@@ -456,7 +464,7 @@ async fn run(rt: SimRuntime) {
                 }
                 assert!(
                     rt.now() < deadline,
-                    "partition {p} on node {node}: not compacted after two minutes (leads: {leads})"
+                    "partition {p} on node {node}: not compacted after {settle} s (leads: {leads})"
                 );
                 rt.sleep(Duration::from_secs(1)).await;
             };
