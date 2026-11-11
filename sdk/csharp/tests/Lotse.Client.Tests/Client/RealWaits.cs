@@ -66,6 +66,43 @@ internal static class RealWaits
         });
     }
 
+    /// <summary>Who leads <paramref name="name"/>'s partition and since which term: <c>"leader@term"</c>, or <c>"none"</c>.</summary>
+    internal static async Task<string> LeaderTermAsync(LotseClient client, string name, int partition = 0)
+    {
+        Response.Metadata m = await client.MetadataAsync(new[] { name });
+        Messages.PartitionMetadata? p = m.Resources.Where(r => r.Name == name).SelectMany(r => r.Partitions)
+            .FirstOrDefault(x => x.Partition == partition);
+        return p is null || p.Leader == 0 ? "none" : $"{p.Leader}@{p.LeaderTerm}";
+    }
+
+    /// <summary>
+    /// Runs a scenario that relies on its leaders staying where they are, and runs it again, with new names (the body
+    /// gets the attempt number to add to them), if it fails after one of them moved or with <c>NOT_LEADER</c>. A leader
+    /// that a starved node's lost election moves is no fault, and an application meets it too. A failure with every
+    /// leader where it was is a failure: it is thrown at once, so the check stays as strict as it was. As the Node.js
+    /// tests do.
+    /// </summary>
+    internal static async Task RetryIfLeaderMovedAsync(LotseClient client, Func<Steady, int, Task> body, int attempts = 4)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            var steady = new Steady(client);
+            try
+            {
+                await body(steady, attempt);
+                return;
+            }
+            catch (Exception e) when (attempt < attempts)
+            {
+                bool notLeader = e is BrokerErrorException b && b.Code.Equals(ErrorCode.NotLeader);
+                if (!notLeader && !await steady.MovedAsync())
+                {
+                    throw;
+                }
+            }
+        }
+    }
+
     /// <summary>Polls <paramref name="condition"/> until it holds; fails with <paramref name="what"/> after <paramref name="seconds"/>.</summary>
     internal static async Task UntilAsync(string what, Func<Task<bool>> condition, int seconds = 60)
     {
@@ -94,5 +131,30 @@ internal static class RealWaits
                 return holds(m.Resources.FirstOrDefault(r => r.Name == name && r.Error.IsOk));
             });
         }
+    }
+}
+
+/// <summary>What a scenario watches: the leaders of the partitions it relies on, as they were when it began to rely on them.</summary>
+internal sealed class Steady
+{
+    private readonly LotseClient client;
+    private readonly System.Collections.Generic.Dictionary<string, string> seen = new();
+
+    internal Steady(LotseClient client) => this.client = client;
+
+    /// <summary>Starts watching <paramref name="name"/>'s first partition, once it has a leader the scenario relies on.</summary>
+    internal async Task WatchAsync(string name) => seen[name] = await RealWaits.LeaderTermAsync(client, name);
+
+    /// <summary>Whether any watched partition has another leader or term than when it was first watched.</summary>
+    internal async Task<bool> MovedAsync()
+    {
+        foreach (var (name, was) in seen)
+        {
+            if (await RealWaits.LeaderTermAsync(client, name) != was)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }
