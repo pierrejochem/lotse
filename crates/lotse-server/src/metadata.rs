@@ -57,6 +57,10 @@ pub(crate) enum Change {
     Unbind { exchange_id: u64, binding: Binding },
     /// A resource deleted, with its groups.
     Delete { resource_id: u64 },
+    /// Tombstones forgotten: every node listed had removed their groups'
+    /// files (ADR 0100). The metadata leader proposes it; an id is deleted
+    /// for good without one, as ids are never reused.
+    ForgetDeleted { resource_ids: Vec<u64> },
     /// Some of a queue's settings set or reset: the ack timeout (0 returns
     /// it to the default) and the limits of ADR 0055 (0 switches them off).
     /// The others stay as they are when this applies, so two changes of
@@ -121,6 +125,47 @@ pub(crate) enum Change {
     /// New partitions for a runtime stream, one voter set each, numbered on
     /// from its last (ADR 0074).
     AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
+}
+
+/// Which runtime resources a node knows to be deleted: those with a
+/// tombstone, and those created at or before the metadata index it has
+/// applied that are not there any more, whose tombstone may be forgotten
+/// (ADR 0100). An id newer than that may be one this node has not heard of
+/// yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Deleted {
+    pub(crate) tombstones: BTreeSet<u64>,
+    pub(crate) live: BTreeSet<u64>,
+    pub(crate) applied: u64,
+}
+
+impl Deleted {
+    /// Nothing deleted, nothing known.
+    #[cfg(test)]
+    pub(crate) const NONE: Deleted = Deleted { tombstones: BTreeSet::new(), live: BTreeSet::new(), applied: 0 };
+
+    /// What `state`, applied through `applied`, says.
+    pub(crate) fn of(state: &MetadataState, applied: u64) -> Self {
+        let live = state.streams.keys().chain(state.queues.keys()).chain(state.exchanges.keys()).copied().collect();
+        Deleted { tombstones: state.deleted.keys().copied().collect(), live, applied }
+    }
+
+    /// Whether `id` is a deleted resource.
+    pub(crate) fn contains(&self, id: &u64) -> bool {
+        let id = *id;
+        self.tombstones.contains(&id)
+            || (id >= DYNAMIC_BASE && id - DYNAMIC_BASE <= self.applied && !self.live.contains(&id))
+    }
+}
+
+/// A deleted resource, until every node has removed its groups' files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tombstone {
+    /// How many groups it had.
+    pub(crate) groups: u32,
+    /// The index of the record that deleted it; 0 for a tombstone from a
+    /// snapshot that did not record it.
+    pub(crate) at: u64,
 }
 
 /// A node added at runtime: where nodes and clients reach it.
@@ -367,8 +412,9 @@ pub(crate) struct MetadataState {
     pub(crate) exchanges: BTreeMap<u64, DynExchange>,
     /// Bindings added at runtime, per exchange (configured ones included).
     pub(crate) bindings: BTreeMap<u64, Vec<Binding>>,
-    /// Tombstones: deleted resources and how many groups each had.
-    pub(crate) deleted: BTreeMap<u64, u32>,
+    /// Tombstones: deleted resources whose groups' files some node may
+    /// still hold (ADR 0035, ADR 0100).
+    pub(crate) deleted: BTreeMap<u64, Tombstone>,
     /// Users with a SCRAM credential, set at runtime.
     pub(crate) users: BTreeMap<String, ScramCredential>,
     /// Tenants created at runtime.
@@ -490,15 +536,34 @@ impl MetadataState {
             + self.exchanges.values().filter(|x| x.tenant == tenant).count()
     }
 
-    /// Whether `id` is a deleted resource.
+    /// Whether `id`, which existed when a change naming it was checked, is
+    /// a deleted resource: a runtime id that is no longer there. Its
+    /// tombstone may be forgotten already (ADR 0100).
     pub(crate) fn is_deleted(&self, id: u64) -> bool {
-        self.deleted.contains_key(&id)
+        self.deleted.contains_key(&id) || (id >= DYNAMIC_BASE && !self.is_live(id))
     }
 
-    /// The groups of deleted resources.
+    /// Whether the runtime resource `id` is there.
+    pub(crate) fn is_live(&self, id: u64) -> bool {
+        self.streams.contains_key(&id) || self.queues.contains_key(&id) || self.exchanges.contains_key(&id)
+    }
+
+    /// The groups of deleted resources whose tombstones are kept.
     pub(crate) fn deleted_groups(&self) -> BTreeSet<GroupId> {
-        let groups = |(&id, &n): (&u64, &u32)| (0..n).map(move |p| group_id(id - DYNAMIC_BASE, p));
+        let groups = |(&id, t): (&u64, &Tombstone)| (0..t.groups).map(move |p| group_id(id - DYNAMIC_BASE, p));
         self.deleted.iter().flat_map(groups).collect()
+    }
+
+    /// The tombstones every node has removed the files of: those deleted
+    /// at or before the least index through which `nodes` report having
+    /// removed them (ADR 0100). A node that has not reported holds them all.
+    pub(crate) fn forgettable(&self, nodes: impl IntoIterator<Item = Option<u64>>) -> Vec<u64> {
+        // No node listed is no node that answered.
+        let through = nodes.into_iter().map(|n| n.unwrap_or(0)).min().unwrap_or(0);
+        if through == 0 {
+            return Vec::new();
+        }
+        self.deleted.iter().filter(|(_, t)| t.at <= through).map(|(id, _)| *id).collect()
     }
 
     /// The voters `g` is to have, if set at runtime (a runtime group's
@@ -600,7 +665,12 @@ impl MetadataState {
                     return Ok(());
                 };
                 self.bindings.remove(&resource_id);
-                self.deleted.insert(resource_id, groups);
+                self.deleted.insert(resource_id, Tombstone { groups, at: index });
+            }
+            Change::ForgetDeleted { resource_ids } => {
+                for id in resource_ids {
+                    self.deleted.remove(&id);
+                }
             }
             Change::AlterQueue { resource_id, change } => {
                 if let Some(q) = self.queues.get(&resource_id) {
@@ -836,9 +906,9 @@ impl MetadataState {
             }
         }
         b.put_u32_le(self.deleted.len() as u32);
-        for (id, groups) in &self.deleted {
+        for (id, t) in &self.deleted {
             b.put_u64_le(*id);
-            b.put_u32_le(*groups);
+            b.put_u32_le(t.groups);
         }
         b.put_u32_le(self.users.len() as u32);
         for (name, c) in &self.users {
@@ -888,7 +958,10 @@ impl MetadataState {
         // node from before them: pins (ADR 0065), compaction settings (ADR
         // 0067), tenants' incarnations (ADR 0069), revoked sessions (ADR
         // 0070), single active consumer queues (ADR 0076), priority levels
-        // (ADR 0078), revoked certificates (ADR 0090). A later section needs the ones before it, empty or not.
+        // (ADR 0078), revoked certificates (ADR 0090), the certificate
+        // inventory (ADR 0091), certificate requests (ADR 0092), the index
+        // that made each tombstone (ADR 0100). A later section needs the
+        // ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -897,7 +970,9 @@ impl MetadataState {
             .filter(|q| q.limits.priority_levels != 0)
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
-        let sections = if !self.cert_requests.is_empty() {
+        let sections = if !self.deleted.is_empty() {
+            10
+        } else if !self.cert_requests.is_empty() {
             9
         } else if !self.certs.is_empty() {
             8
@@ -980,6 +1055,13 @@ impl MetadataState {
                 put_request(&mut b, r);
             }
         }
+        if sections >= 10 {
+            b.put_u32_le(self.deleted.len() as u32);
+            for (id, t) in &self.deleted {
+                b.put_u64_le(*id);
+                b.put_u64_le(t.at);
+            }
+        }
         b.freeze()
     }
 
@@ -1038,7 +1120,7 @@ impl MetadataState {
         for _ in 0..count(b)? {
             need(b, 12)?;
             let id = b.get_u64_le();
-            s.deleted.insert(id, b.get_u32_le());
+            s.deleted.insert(id, Tombstone { groups: b.get_u32_le(), at: 0 });
         }
         for _ in 0..count(b)? {
             let name = get_str(b)?;
@@ -1145,6 +1227,13 @@ impl MetadataState {
                 let mut id = [0u8; 32];
                 b.copy_to_slice(&mut id);
                 s.cert_requests.insert(id, get_request(b)?);
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 16)?;
+                let id = b.get_u64_le();
+                s.deleted.get_mut(&id).ok_or("the index of an unknown tombstone")?.at = b.get_u64_le();
             }
         }
         if b.has_remaining() {
@@ -1308,6 +1397,13 @@ fn change_bytes(change: &Change) -> Bytes {
             put_str(&mut b, principal);
             put_bytes(&mut b, csr);
             put_str(&mut b, requested_by);
+        }
+        Change::ForgetDeleted { resource_ids } => {
+            b.put_u8(24);
+            b.put_u32_le(resource_ids.len() as u32);
+            for id in resource_ids {
+                b.put_u64_le(*id);
+            }
         }
         Change::RecordCertificate { id, certificate, cert, not_before_ms, not_after_ms, at_ms } => {
             b.put_u8(23);
@@ -1535,6 +1631,11 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let subject = get_subject(b)?;
             need(b, 8)?;
             Change::RevokeSessions { subject, before_ms: b.get_u64_le() }
+        }
+        24 => {
+            let n = count(b)?;
+            need(b, n as usize * 8)?;
+            Change::ForgetDeleted { resource_ids: (0..n).map(|_| b.get_u64_le()).collect() }
         }
         _ => return Err("unknown metadata change".into()),
     };

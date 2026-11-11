@@ -247,6 +247,9 @@ const NAMES: [&str; 7] = ["s1", "s2", "s3", "q1", "q2", "q3", "x1"];
 /// The stream the checks create after the run, to know that nothing the
 /// run proposed is still on its way.
 const BARRIER: &str = "barrier";
+/// A stream created and deleted after healing, and one created after that.
+const PROBE: &str = "probe";
+const PROBE_AFTER: &str = "probe-after";
 
 async fn admin(rt: SimRuntime, n: u64, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
     let client = Client::new(rt.clone(), client_config(n));
@@ -589,6 +592,95 @@ async fn run(rt: SimRuntime) {
     let queues: BTreeSet<u64> = view.values().filter(|(_, k, ..)| *k == kind::QUEUE).map(|(id, ..)| *id).collect();
     for (name, (_, _, _, bound)) in view {
         assert!(bound.is_subset(&queues), "{name} binds queues that do not exist: {bound:?}, queues {queues:?}");
+    }
+
+    // A node says it removed the files of what was deleted through an index
+    // only once it has: a stream deleted before another is created leaves
+    // nothing on a node that reports the second's index (ADR 0100). The
+    // last node is cut off from the others while the stream is deleted, so
+    // it lags behind what it is asked about.
+    let probe = loop {
+        match checker.create_stream(PROBE, 2, n as u8).await {
+            Ok(id) | Err(ClientError::ResourceExists { resource_id: id, .. }) => break id,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("the healed cluster creates {PROBE}: {e}"),
+        }
+    };
+    let lagging = n;
+    let deadline = rt.now() + Duration::from_secs(30);
+    loop {
+        let (_, handle) = w.running[&lagging].as_ref().expect("all nodes are up");
+        if (0..2).all(|p| handle.status(group_of(probe, p)).is_some()) {
+            break;
+        }
+        assert!(rt.now() < deadline, "node {lagging} never ran {PROBE}");
+        rt.sleep(TICK * 5).await;
+    }
+    for other in 1..n {
+        rt.net().block(&format!("n{lagging}"), &format!("n{other}"));
+    }
+    loop {
+        match checker.delete(PROBE).await {
+            Ok(_) => break,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("the cluster deletes {PROBE}: {e}"),
+        }
+    }
+    let after = loop {
+        match checker.create_stream(PROBE_AFTER, 1, 1).await {
+            Ok(id) | Err(ClientError::ResourceExists { resource_id: id, .. }) => break id,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("the cluster creates {PROBE_AFTER}: {e}"),
+        }
+    };
+    let mut confirmed = BTreeSet::new();
+    let check = async |confirmed: &mut BTreeSet<u32>| {
+        for (node, m) in checker.node_metrics().await.unwrap_or_default() {
+            let Ok(m) = m else { continue };
+            if m.removed_through.is_none_or(|i| i < after - lotse_server::DYNAMIC_BASE) {
+                continue;
+            }
+            for p in 0..2 {
+                let dir = std::path::PathBuf::from("groups").join(group_of(probe, p).to_string());
+                let host = &w.hosts[&NodeId::from(node)];
+                let on_disk = host.list(&dir).await.is_ok() || host.list(&dir.join("log")).await.is_ok();
+                assert!(
+                    !on_disk,
+                    "node {node} reports removals through {:?} but holds {PROBE}'s group {p}",
+                    m.removed_through
+                );
+            }
+            confirmed.insert(node);
+        }
+    };
+    for _ in 0..10 {
+        check(&mut confirmed).await;
+        rt.sleep(TICK * 5).await;
+    }
+    rt.net().heal();
+    let deadline = rt.now() + Duration::from_secs(30);
+    while (confirmed.len() as u64) < n {
+        check(&mut confirmed).await;
+        assert!(rt.now() < deadline, "nodes never reported removing {PROBE}: only {confirmed:?}");
+        rt.sleep(TICK * 5).await;
+    }
+
+    // Every node removed the deleted groups' files, so every tombstone is
+    // forgotten in time (ADR 0100); the checks below then find the ids
+    // deleted without one.
+    let deadline = rt.now() + Duration::from_secs(30);
+    loop {
+        let kept: Vec<(u64, usize)> = w
+            .running
+            .iter()
+            .map(|(id, entry)| (*id, entry.as_ref().expect("all nodes are up").1.tombstones()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        if kept.is_empty() {
+            break;
+        }
+        assert!(rt.now() < deadline, "tombstones kept after every node removed their files: {kept:?}");
+        rt.sleep(TICK * 20).await;
     }
 
     // A deleted resource is gone everywhere: every node calls it unknown.
