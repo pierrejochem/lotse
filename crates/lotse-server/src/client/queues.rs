@@ -679,6 +679,13 @@ impl Clients {
                 self.write_queue(None, g, replica, QueueBatch { release: held, ..QueueBatch::new(batch) }, view.now);
             }
 
+            // A leader that no quorum answered within an election timeout
+            // may be cut off and replaced by now: it hands out nothing and
+            // hands no single active consumer over until a quorum answers
+            // again or check-quorum steps it down (ADR 0097).
+            if !replica.raft_ref().leads_with_quorum() {
+                continue;
+            }
             let s = self.queues.get_mut(&g).expect("serving");
             s.hand_over(qc.single_active, replica.queue().expect("a queue group"));
             read_levels(s, replica, limit, qc.priority_levels).await?;
