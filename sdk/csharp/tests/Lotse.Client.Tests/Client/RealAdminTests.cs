@@ -403,11 +403,11 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task EveryNodeAnswersForItsOwnMetrics()
     {
-        await Client.CreateQueueAsync("adm-metrics");
+        // The id from the answer: a node asked for metadata right after may not know the queue yet.
+        ulong queueId = await Client.CreateQueueAsync("adm-metrics");
         // Produce counters are the leader's, in memory: the leader stays where it took the produce.
         await SettledAsync("adm-metrics");
         await ProduceAsync("adm-metrics", 4, "m");
-        ulong queueId = (await Client.MetadataAsync(new[] { "adm-metrics" })).Resources.First(r => r.Name == "adm-metrics").ResourceId;
         IReadOnlyList<NodeMetrics> all = await Client.NodeMetricsAsync();
         Assert.Equal(new uint[] { 1, 2, 3 }, all.Select(n => n.NodeId).OrderBy(i => i).ToArray());
         foreach (NodeMetrics n in all)
