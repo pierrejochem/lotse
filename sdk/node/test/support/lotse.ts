@@ -49,6 +49,8 @@ export function run(bin: string, ...args: string[]): string {
   return execFileSync(bin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
 }
 
+const handedOut = new Set<number>();
+
 /**
  * A port nothing listens on, for a node to listen on later. It is chosen below the ephemeral range (32768 and up on
  * Linux): a port the kernel handed out for listening is handed out again to the next outgoing connection, and with many
@@ -57,12 +59,17 @@ export function run(bin: string, ...args: string[]): string {
 export async function freePort(): Promise<number> {
   for (;;) {
     const port = 20_000 + Math.floor(Math.random() * 12_000);
+    // Not one this process handed out already: those are free only until their node binds them.
+    if (handedOut.has(port)) {
+      continue;
+    }
     const free = await new Promise<boolean>((done) => {
       const s = net.createServer();
       s.once("error", () => done(false));
       s.listen(port, "127.0.0.1", () => s.close(() => done(true)));
     });
     if (free) {
+      handedOut.add(port);
       return port;
     }
   }

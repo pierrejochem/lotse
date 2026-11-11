@@ -776,8 +776,9 @@ impl RaftGroup {
     /// answered a round it sent less than an election timeout ago. A
     /// deposed leader that has not heard of the new term yet, or one cut off
     /// from the others, says no; so does a new leader before its first
-    /// round is answered. For what a node reports about itself (ADR 0095),
-    /// never for a safety decision: reads go through [`Raft::read_index`].
+    /// round is answered. For what a node reports about itself (ADR 0095)
+    /// and for pausing what only a leader hands out (ADR 0097), never for a
+    /// safety decision: reads go through [`Raft::read_index`].
     pub fn leads_with_quorum(&self) -> bool {
         if !matches!(self.state, State::Leader { .. }) {
             return false;

@@ -1710,3 +1710,69 @@ fn higher_priorities_go_first_also_after_a_failover() {
         })
     });
 }
+
+// A queue's leader is cut off from every other node while a client can
+// still reach it. Until check-quorum steps it down it goes on saying it
+// leads; once no quorum has answered it for an election timeout it no
+// longer reports the queue in `DescribeMetrics` (ADR 0095), and from then
+// on it hands out nothing, also to a consumer that subscribes there now
+// (ADR 0097): another leader may already deliver the same messages.
+#[test]
+fn a_cut_off_leader_hands_out_nothing_once_no_quorum_answers() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::classic()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            for i in 0..3 {
+                c.produce("jobs", 0, message(&format!("j{i}"))).await.expect("written");
+            }
+            let meta = c.metadata(&["jobs"]).await.unwrap();
+            let jobs = meta.resources.iter().find(|r| r.name == "jobs").unwrap();
+            let (queue_id, leader) = (jobs.resource_id, u64::from(jobs.partitions[0].leader));
+            assert_ne!(leader, 0);
+            let cut = format!("n{leader}");
+            for other in w.cfgs.keys().filter(|id| **id != leader) {
+                rt.net().block(&cut, &format!("n{other}"));
+            }
+
+            // The cut-off node stops listing the queue as its own.
+            let deadline = rt.now() + Duration::from_secs(5);
+            loop {
+                assert!(rt.now() < deadline, "node {leader} still lists the queue");
+                let answers = c.node_metrics().await.expect("the nodes");
+                let mine = answers.into_iter().find(|(n, _)| u64::from(*n) == leader).and_then(|(_, r)| r.ok());
+                if mine.is_some_and(|m| !m.queues.iter().any(|q| q.resource_id == queue_id)) {
+                    break;
+                }
+                rt.sleep(TICK).await;
+            }
+
+            // A consumer that reaches only that node gets nothing from it:
+            // it is refused, or its subscription ends, or nothing comes.
+            let only = ClientConfig {
+                retry_for: Duration::from_millis(300),
+                ..ClientConfig::new(vec![format!("{cut}:9000")])
+            };
+            for other in w.cfgs.keys().filter(|id| **id != leader) {
+                rt.net().block("q", &format!("n{other}"));
+            }
+            let alone = Client::new(rt.node("q"), only);
+            if let Ok(mut sub) = alone.subscribe("jobs", 10).await {
+                let deadline = rt.now() + TICK * 40;
+                while rt.now() < deadline {
+                    match sub.next(TICK * 5).await {
+                        Ok(Some(m)) => panic!("node {leader} handed out {} without a quorum", value_of(&m)),
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+
+            rt.net().heal();
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}

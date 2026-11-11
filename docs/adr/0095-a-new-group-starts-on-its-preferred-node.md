@@ -1,6 +1,6 @@
 # 95. A new group starts on its preferred node
 
-- Status: Accepted
+- Status: Accepted; extended by [ADR 0097](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md) (the quorum flag also pauses a queue leader's deliveries)
 - Date: 2026-11-10
 
 ## Context

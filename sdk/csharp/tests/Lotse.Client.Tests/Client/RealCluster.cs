@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using Lotse.Net;
@@ -22,6 +20,7 @@ public sealed class RealCluster : IAsyncLifetime
 
     private readonly Process?[] _processes = new Process?[Nodes + 1];
     private string _bin = string.Empty;
+    private int _attempt = 1;
 
     internal string Dir { get; private set; } = string.Empty;
 
@@ -45,19 +44,38 @@ public sealed class RealCluster : IAsyncLifetime
         Available = true;
         _bin = bin;
         Dir = Directory.CreateTempSubdirectory("lotse-sdk-cluster").FullName;
-        Config = Path.Combine(Dir, "cluster.toml");
-        var text = new StringBuilder($"[cluster]\ndata_dir = \"{Dir}/data/node-{{id}}\"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n");
-        for (int id = 1; id <= Nodes; id++)
+        // A port chosen free can be taken before the node binds it (by another test process choosing the same one): a
+        // node that finds its port taken exits at once. Then the whole cluster starts again on new ports and a new data
+        // directory, up to five times.
+        for (_attempt = 1; ; _attempt++)
         {
-            int peer = FreePort();
-            int client = FreePort();
-            ClientAddresses.Add(new Address("127.0.0.1", client));
-            text.Append($"\n[[node]]\nid = {id}\npeer = \"127.0.0.1:{peer}\"\nclient = \"127.0.0.1:{client}\"\n");
-        }
-        await File.WriteAllTextAsync(Config, text.ToString());
-        for (int id = 1; id <= Nodes; id++)
-        {
-            Start(id);
+            Config = Path.Combine(Dir, $"cluster-{_attempt}.toml");
+            ClientAddresses.Clear();
+            var text = new StringBuilder($"[cluster]\ndata_dir = \"{Dir}/data-{_attempt}/node-{{id}}\"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n");
+            for (int id = 1; id <= Nodes; id++)
+            {
+                int peer = Lotse.Client.Tests.Net.Certs.FreePort();
+                int client = Lotse.Client.Tests.Net.Certs.FreePort();
+                ClientAddresses.Add(new Address("127.0.0.1", client));
+                text.Append($"\n[[node]]\nid = {id}\npeer = \"127.0.0.1:{peer}\"\nclient = \"127.0.0.1:{client}\"\n");
+            }
+            await File.WriteAllTextAsync(Config, text.ToString());
+            for (int id = 1; id <= Nodes; id++)
+            {
+                Start(id);
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(1500));
+            int[] exited = Enumerable.Range(1, Nodes).Where(id => _processes[id]?.HasExited ?? true).ToArray();
+            if (exited.Length == 0)
+            {
+                break;
+            }
+            await DisposeAsync();
+            if (_attempt >= 5)
+            {
+                throw new InvalidOperationException(
+                    $"nodes {string.Join(", ", exited)} exit at start\n" + string.Join("\n", exited.Select(Log)));
+            }
         }
         // Serving: every node answers metadata for itself.
         for (int id = 1; id <= Nodes; id++)
@@ -75,7 +93,7 @@ public sealed class RealCluster : IAsyncLifetime
         }
         Process p = Process.Start(info)!;
         // Both pipes drain into the node's log so the node never blocks on a full pipe.
-        FileStream log = new(Path.Combine(Dir, $"node-{id}.log"), FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        FileStream log = new(LogPath(id), FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
         _ = p.StandardOutput.BaseStream.CopyToAsync(log);
         _ = p.StandardError.BaseStream.CopyToAsync(log);
         _processes[id] = p;
@@ -112,19 +130,18 @@ public sealed class RealCluster : IAsyncLifetime
         _processes[id] = null;
     }
 
+    private string LogPath(int id) => Path.Combine(Dir, $"node-{id}-{_attempt}.log");
+
     internal string Log(int id)
     {
-        string path = Path.Combine(Dir, $"node-{id}.log");
-        return File.Exists(path) ? File.ReadAllText(path) : "(no log)";
-    }
-
-    private static int FreePort()
-    {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        int port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
+        string path = LogPath(id);
+        // The node may still be writing it.
+        if (!File.Exists(path))
+        {
+            return "(no log)";
+        }
+        using var reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
+        return reader.ReadToEnd();
     }
 
     public Task DisposeAsync()
