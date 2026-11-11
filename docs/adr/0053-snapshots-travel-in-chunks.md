@@ -1,6 +1,6 @@
 # 53. Snapshots travel in chunks
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0099](0099-snapshots-live-in-files.md) (the core hands chunks to the driver, which keeps them and every snapshot in files)
 - Date: 2026-11-01
 
 ## Context

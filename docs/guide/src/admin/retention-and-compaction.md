@@ -2,7 +2,7 @@
 
 ## Retention
 
-A log is trimmed only at a snapshot point. When applying reaches the base offset of a segment, a replica records a snapshot of its state there. Retention picks a point and the replica cuts at the newest such boundary at or below it, deleting whole segments ([ADR 0046](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0046-retention.md)). Each node runs retention for each of its groups once a second, by its own clock.
+A log is trimmed only at a snapshot point. When applying reaches the base offset of a segment, a replica records a snapshot of its state there, in a file of the group's directory. Retention picks a point and the replica cuts at the newest such boundary at or below it, deleting whole segments ([ADR 0046](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0046-retention.md)). Each node runs retention for each of its groups once a second, by its own clock.
 
 Because only whole segments go, a partition keeps up to a segment more than its limits. `cluster.segment_bytes` (default 128 MiB) sets the size of a segment. The active segment is never deleted. Nothing at or above the last stable offset is deleted, so an open transaction's records stay until it ends.
 

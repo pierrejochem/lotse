@@ -140,38 +140,53 @@ pub struct SnapshotMeta {
 }
 
 /// Snapshots a driver has replaced but still sends, because a transfer of
-/// them is under way ([`RaftGroup::snapshots_in_transfer`]).
-#[derive(Debug, Clone, Default)]
-pub struct OlderSnapshots(Vec<(SnapshotMeta, Bytes)>);
+/// them is under way ([`RaftGroup::snapshots_in_transfer`]). `T` is how the
+/// driver holds one: its bytes, or where it keeps them.
+#[derive(Debug, Clone)]
+pub struct OlderSnapshots<T = Bytes>(Vec<(SnapshotMeta, T)>);
 
-impl OlderSnapshots {
+impl<T> Default for OlderSnapshots<T> {
+    fn default() -> Self {
+        OlderSnapshots(Vec::new())
+    }
+}
+
+impl<T> OlderSnapshots<T> {
     /// Call when `old` is replaced as the driver's latest snapshot: keeps it
     /// if a transfer of it is under way, and drops what no transfer needs any
-    /// more.
-    pub fn supersede(&mut self, old: Option<(SnapshotMeta, Bytes)>, raft: &RaftGroup) {
+    /// more. Returns what it dropped, `old` included if it was not kept.
+    pub fn supersede(&mut self, old: Option<(SnapshotMeta, T)>, raft: &RaftGroup) -> Vec<(SnapshotMeta, T)> {
         let wanted = raft.snapshots_in_transfer();
-        self.0.retain(|(m, _)| wanted.contains(&m.index));
-        if let Some((m, d)) = old
-            && wanted.contains(&m.index)
-            && self.get(m.index).is_none()
-        {
-            self.0.push((m, d));
+        let (keep, mut dropped): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.0).into_iter().partition(|(m, _)| wanted.contains(&m.index));
+        self.0 = keep;
+        if let Some((m, d)) = old {
+            if wanted.contains(&m.index) && self.get(m.index).is_none() {
+                self.0.push((m, d));
+            } else {
+                dropped.push((m, d));
+            }
         }
+        dropped
     }
 
     /// The kept snapshot ending at `index`.
-    pub fn get(&self, index: u64) -> Option<(&SnapshotMeta, &Bytes)> {
+    pub fn get(&self, index: u64) -> Option<(&SnapshotMeta, &T)> {
         self.0.iter().find(|(m, _)| m.index == index).map(|(m, d)| (m, d))
     }
 }
 
-/// A snapshot to install: replace the state machine with `data` and drop the
-/// whole log; it continues after `meta.index`.
+/// A piece of a snapshot that arrived in order: the driver writes `data` at
+/// `offset` of the snapshot's data, where it keeps it until it is complete
+/// ([`Ready::snapshot`]). Offset 0 starts a snapshot: whatever an earlier
+/// transfer left is dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    /// Where it stands.
+pub struct SnapshotChunk {
+    /// The snapshot the chunk belongs to.
     pub meta: SnapshotMeta,
-    /// The driver's encoded state.
+    /// Where in the snapshot's data `data` starts; the end of what came before.
+    pub offset: u64,
+    /// The bytes.
     pub data: Bytes,
 }
 
@@ -296,7 +311,26 @@ impl Message {
         older: &OlderSnapshots,
         max_chunk: usize,
     ) {
-        let Message::Snapshot { meta, offset, data, done, .. } = self else { return };
+        let Some((source, offset)) = self.snapshot_chunk_source(latest, snapshot, older) else { return };
+        let start = (offset as usize).min(source.len());
+        let end = start.saturating_add(max_chunk.max(1)).min(source.len());
+        let data = source.slice(start..end);
+        self.set_snapshot_chunk(start as u64, data, end == source.len());
+    }
+
+    /// The first half of [`Message::attach_snapshot_chunk`], for a driver
+    /// that reads a snapshot's data from where it keeps it: picks the
+    /// snapshot as that does, puts its meta in, and returns how the driver
+    /// holds it and the offset to read from (it may lie past the end).
+    /// `None` if this is not a [`Message::Snapshot`]. The driver then reads
+    /// and calls [`Message::set_snapshot_chunk`].
+    pub fn snapshot_chunk_source<'a, T>(
+        &mut self,
+        latest: &'a SnapshotMeta,
+        snapshot: &'a T,
+        older: &'a OlderSnapshots<T>,
+    ) -> Option<(&'a T, u64)> {
+        let Message::Snapshot { meta, offset, .. } = self else { return None };
         let (source, snapshot) = if meta.index == latest.index {
             (latest, snapshot)
         } else if let Some((m, d)) = older.get(meta.index) {
@@ -306,11 +340,18 @@ impl Message {
             (latest, snapshot)
         };
         *meta = source.clone();
-        let start = (*offset as usize).min(snapshot.len());
-        let end = start.saturating_add(max_chunk.max(1)).min(snapshot.len());
-        *offset = start as u64;
-        *data = snapshot.slice(start..end);
-        *done = end == snapshot.len();
+        Some((snapshot, *offset))
+    }
+
+    /// The second half of [`Message::attach_snapshot_chunk`]: the chunk read
+    /// from `offset` (where reading started, at most the data's length) and
+    /// whether it ends the snapshot.
+    pub fn set_snapshot_chunk(&mut self, at: u64, chunk: Bytes, last: bool) {
+        if let Message::Snapshot { offset, data, done, .. } = self {
+            *offset = at;
+            *data = chunk;
+            *done = last;
+        }
     }
 
     /// Term carried by the message.
@@ -355,8 +396,14 @@ pub struct Send {
 pub struct Ready {
     /// New hard state, if it changed.
     pub hard_state: Option<HardState>,
-    /// Replace the state machine and the whole log with this.
-    pub snapshot: Option<Snapshot>,
+    /// Chunks of a snapshot that arrived, in order, to keep with the driver
+    /// before anything else here. They need not be synced: a node that
+    /// crashes forgets the transfer, and the leader starts it over.
+    pub snapshot_chunks: Vec<SnapshotChunk>,
+    /// Replace the state machine and the whole log with the snapshot whose
+    /// chunks the driver has kept (the last of them in this ready); it
+    /// continues after `index`. Durable before the rest.
+    pub snapshot: Option<SnapshotMeta>,
     /// Remove every index from here on before appending.
     pub truncate_from: Option<u64>,
     /// Entries to append, in order.
@@ -385,6 +432,7 @@ impl Ready {
     /// `true` if there is nothing to do.
     pub fn is_empty(&self) -> bool {
         self.hard_state.is_none()
+            && self.snapshot_chunks.is_empty()
             && self.snapshot.is_none()
             && self.truncate_from.is_none()
             && self.entries.is_empty()
@@ -548,9 +596,12 @@ pub struct RaftGroup {
     timeout: u32,
     rng: u64,
     hs_dirty: bool,
-    pending_snapshot: Option<Snapshot>,
-    /// The snapshot being received in chunks: what has arrived in order.
-    incoming: Option<(SnapshotMeta, Vec<u8>)>,
+    pending_snapshot: Option<SnapshotMeta>,
+    /// Chunks that arrived since the last ready, for the driver to keep.
+    pending_chunks: Vec<SnapshotChunk>,
+    /// The snapshot being received in chunks: how many bytes of it have
+    /// arrived in order (the driver keeps them).
+    incoming: Option<(SnapshotMeta, u64)>,
     pending_truncate: Option<u64>,
     pending_entries: Vec<Entry>,
     outbox: Vec<Send>,
@@ -621,6 +672,7 @@ impl RaftGroup {
             timeout: 0,
             hs_dirty: false,
             pending_snapshot: None,
+            pending_chunks: Vec::new(),
             incoming: None,
             pending_truncate: None,
             pending_entries: Vec::new(),
@@ -1623,25 +1675,28 @@ impl RaftGroup {
             // the transfer; a gap or a repeat only makes us say where we are.
             let same = matches!(&self.incoming, Some((m, _)) if *m == meta);
             let have = match &self.incoming {
-                Some((_, buf)) if same => buf.len() as u64,
+                Some((_, len)) if same => *len,
                 _ => 0,
             };
             if offset == 0 && !same {
                 // A transfer of another snapshot (or none) starts over.
-                self.incoming = Some((meta.clone(), Vec::new()));
+                self.incoming = Some((meta.clone(), 0));
             } else if offset != have {
                 let result = AppendResult::SnapshotChunk { index, next: have };
                 self.send(from, Message::AppendReply { term, result, seq });
                 return;
             }
-            let (_, buf) = self.incoming.as_mut().expect("a transfer is under way");
-            buf.extend_from_slice(&data);
+            // Here `offset` is where what arrived so far ends.
+            let (_, len) = self.incoming.as_mut().expect("a transfer is under way");
+            *len = offset + data.len() as u64;
+            let next = *len;
+            self.pending_chunks.push(SnapshotChunk { meta: meta.clone(), offset, data });
             if !done {
-                let result = AppendResult::SnapshotChunk { index, next: buf.len() as u64 };
+                let result = AppendResult::SnapshotChunk { index, next };
                 self.send(from, Message::AppendReply { term, result, seq });
                 return;
             }
-            let (meta, buf) = self.incoming.take().expect("a transfer is under way");
+            let (meta, _) = self.incoming.take().expect("a transfer is under way");
             self.log = TermRuns::with_snapshot(index, meta.term);
             self.base_membership = meta.membership.clone();
             self.configs.clear();
@@ -1652,7 +1707,7 @@ impl RaftGroup {
             self.persisted = index;
             self.ready_last = index;
             self.hs_dirty = true;
-            self.pending_snapshot = Some(Snapshot { meta, data: Bytes::from(buf) });
+            self.pending_snapshot = Some(meta);
         }
         // Either way the log now matches the leader's up to `index`.
         self.send(from, Message::AppendReply { term, result: AppendResult::Accepted { last: index }, seq });
@@ -1702,6 +1757,7 @@ impl RaftGroup {
     pub fn has_ready(&self) -> bool {
         self.hs_dirty
             || self.pending_snapshot.is_some()
+            || !self.pending_chunks.is_empty()
             || self.pending_truncate.is_some()
             || !self.pending_entries.is_empty()
             || !self.outbox.is_empty()
@@ -1732,6 +1788,7 @@ impl RaftGroup {
         self.applied = self.commit;
         Ready {
             hard_state,
+            snapshot_chunks: std::mem::take(&mut self.pending_chunks),
             snapshot: self.pending_snapshot.take(),
             truncate_from: self.pending_truncate.take(),
             entries,

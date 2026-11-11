@@ -57,7 +57,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted |
 | 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted |
 | 0052 | [Rebalancing weighs moves by size](0052-rebalancing-weighs-moves-by-size.md) | Accepted |
-| 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted |
+| 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted; in part superseded by 0099 |
 | 0054 | [A moved replica does not elect itself](0054-a-moved-replica-does-not-elect-itself.md) | Accepted |
 | 0055 | [Dead-letter queues and message TTL](0055-dead-letter-queues-and-message-ttl.md) | Accepted |
 | 0056 | [Client SDKs for the JVM](0056-client-sdks-for-the-jvm.md) | Accepted |
@@ -102,5 +102,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0096 | [Recorded certificates are checked; issuers by name and key identifier](0096-recorded-certificates-are-checked.md) | Accepted |
 | 0097 | [A queue leader delivers only with a recent quorum](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md) | Accepted |
 | 0098 | [Compaction maps a bounded number of keys per sweep](0098-compaction-maps-a-bounded-number-of-keys-per-sweep.md) | Accepted |
+| 0099 | [Snapshots live in files](0099-snapshots-live-in-files.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
