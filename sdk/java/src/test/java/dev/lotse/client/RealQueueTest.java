@@ -104,43 +104,60 @@ class RealQueueTest {
         return d;
     }
 
+    /** A name for the scenario's attempt: the first keeps the plain name, later ones start on a new queue. */
+    private static String named(String name, int attempt) {
+        return attempt == 1 ? name : name + "-" + attempt;
+    }
+
     @Test
-    void everyMessageIsDeliveredOnceAckedAndTheQueueDrains() {
-        client.createQueue("drain");
-        produce("drain", 20);
-        Set<String> seen = new HashSet<>();
-        try (QueueConsumer c = client.subscribe("drain", SubscribeOptions.withCredit(3))) {
-            for (int i = 0; i < 20; i++) {
-                Delivery d = take(c);
-                assertEquals(1, d.deliveryCount());
-                assertTrue(seen.add(d.value().toUtf8()), "no message twice");
-                assertEquals("k" + d.value().toUtf8().substring("drain-".length()), d.key().toUtf8());
-                assertEquals(1, d.headers().size());
-                c.ack(d);
+    void everyMessageIsDeliveredOnceAckedAndTheQueueDrains() throws Exception {
+        // What is in flight lives with the leader: a leader that moves hands it out again, so the scenario runs again
+        // on a new queue if a leader moved while it ran.
+        RealCluster.retryIfLeaderMoved(client, (steady, attempt) -> {
+            String drain = named("drain", attempt);
+            client.createQueue(drain);
+            settled(drain);
+            steady.watch(drain);
+            produce(drain, 20);
+            Set<String> seen = new HashSet<>();
+            try (QueueConsumer c = client.subscribe(drain, SubscribeOptions.withCredit(3))) {
+                for (int i = 0; i < 20; i++) {
+                    Delivery d = take(c);
+                    assertEquals(1, d.deliveryCount());
+                    assertTrue(seen.add(d.value().toUtf8()), "no message twice");
+                    assertEquals("k" + d.value().toUtf8().substring((drain + "-").length()), d.key().toUtf8());
+                    assertEquals(1, d.headers().size());
+                    c.ack(d);
+                }
+                assertNull(c.poll(Duration.ofMillis(500)), "nothing more");
             }
-            assertNull(c.poll(Duration.ofMillis(500)), "nothing more");
-        }
-        assertEquals(20, seen.size());
-        try (QueueConsumer again = client.subscribe("drain")) {
-            assertNull(again.poll(Duration.ofSeconds(1)), "acked messages do not come back");
-        }
+            assertEquals(20, seen.size());
+            try (QueueConsumer again = client.subscribe(drain)) {
+                assertNull(again.poll(Duration.ofSeconds(1)), "acked messages do not come back");
+            }
+        });
     }
 
     @Test
     void aRequeuedMessageComesBackWithACountOfTwo() throws Exception {
-        client.createQueue("requeue");
-        produce("requeue", 1);
-        settled("requeue");
-        try (QueueConsumer c = client.subscribe("requeue", SubscribeOptions.withCredit(2))) {
-            Delivery first = take(c);
-            assertEquals(1, first.deliveryCount());
-            c.nack(first, true);
-            Delivery second = take(c);
-            assertEquals(first.offset(), second.offset());
-            assertEquals(2, second.deliveryCount());
-            c.ack(second);
-            assertNull(c.poll(Duration.ofMillis(500)));
-        }
+        // Delivery counts live with the leader until written (ADR 0031): run again if a leader moved.
+        RealCluster.retryIfLeaderMoved(client, (steady, attempt) -> {
+            String requeue = named("requeue", attempt);
+            client.createQueue(requeue);
+            produce(requeue, 1);
+            settled(requeue);
+            steady.watch(requeue);
+            try (QueueConsumer c = client.subscribe(requeue, SubscribeOptions.withCredit(2))) {
+                Delivery first = take(c);
+                assertEquals(1, first.deliveryCount());
+                c.nack(first, true);
+                Delivery second = take(c);
+                assertEquals(first.offset(), second.offset());
+                assertEquals(2, second.deliveryCount());
+                c.ack(second);
+                assertNull(c.poll(Duration.ofMillis(500)));
+            }
+        });
     }
 
     @Test
@@ -167,25 +184,30 @@ class RealQueueTest {
 
     @Test
     void aConsumerThatDisappearsLeavesItsMessagesToTheNext() throws Exception {
-        client.createQueue("vanish");
-        produce("vanish", 3);
-        settled("vanish");
-        try (LotseClient other = newClient()) {
-            QueueConsumer gone = other.subscribe("vanish", SubscribeOptions.withCredit(10));
-            for (int i = 0; i < 3; i++) {
-                take(gone); // delivered to it, never acked
+        // Delivery counts live with the leader until written (ADR 0031): run again if a leader moved.
+        RealCluster.retryIfLeaderMoved(client, (steady, attempt) -> {
+            String vanish = named("vanish", attempt);
+            client.createQueue(vanish);
+            produce(vanish, 3);
+            settled(vanish);
+            steady.watch(vanish);
+            try (LotseClient other = newClient()) {
+                QueueConsumer gone = other.subscribe(vanish, SubscribeOptions.withCredit(10));
+                for (int i = 0; i < 3; i++) {
+                    take(gone); // delivered to it, never acked
+                }
+            } // closing the client closes the connection, and the messages go back
+            List<Long> offsets = new ArrayList<>();
+            try (QueueConsumer c = client.subscribe(vanish)) {
+                for (int i = 0; i < 3; i++) {
+                    Delivery d = take(c);
+                    assertEquals(2, d.deliveryCount());
+                    offsets.add(d.offset());
+                    c.ack(d);
+                }
             }
-        } // closing the client closes the connection, and the messages go back
-        List<Long> offsets = new ArrayList<>();
-        try (QueueConsumer c = client.subscribe("vanish")) {
-            for (int i = 0; i < 3; i++) {
-                Delivery d = take(c);
-                assertEquals(2, d.deliveryCount());
-                offsets.add(d.offset());
-                c.ack(d);
-            }
-        }
-        assertEquals(3, new HashSet<>(offsets).size());
+            assertEquals(3, new HashSet<>(offsets).size());
+        });
     }
 
     @Test
@@ -268,35 +290,41 @@ class RealQueueTest {
 
     @Test
     void aMessageDeliveredTooOftenLandsInTheDeadLetterQueueWithItsOrigin() throws Exception {
-        client.createQueue("dead-letters");
-        long jobsId = client.createQueue(
-                "capped", QueueOptions.builder().maxDeliveries(2).deadLetterQueue("dead-letters").build());
-        long offset = client.produce("capped", 0, OutMessage.value("poison").withKey("k")).baseOffset();
-        settled("capped");
-        try (QueueConsumer c = client.subscribe("capped")) {
-            Delivery d1 = take(c);
-            assertEquals(1, d1.deliveryCount());
-            assertTrue(d1.deadLetter().isEmpty());
-            c.nack(d1, true);
-            Delivery d2 = take(c);
-            assertEquals(2, d2.deliveryCount());
-            c.nack(d2, true);
-        }
-        try (QueueConsumer dl = client.subscribe("dead-letters")) {
-            Delivery d = take(dl);
-            assertEquals("poison", d.value().toUtf8());
-            assertEquals("k", d.key().toUtf8());
-            DeadLetter origin = d.deadLetter().orElseThrow();
-            assertEquals("max-deliveries", origin.reason());
-            assertEquals("capped", origin.queue());
-            assertEquals(jobsId, origin.queueId());
-            assertEquals(offset, origin.offset());
-            assertEquals(2, origin.deliveries());
-            dl.ack(d);
-        }
-        try (QueueConsumer c = client.subscribe("capped")) {
-            assertNull(c.poll(Duration.ofSeconds(1)), "retired, not delivered a third time");
-        }
+        // Delivery counts live with the leader until written (ADR 0031): run again, on new queues, if a leader moved.
+        RealCluster.retryIfLeaderMoved(client, (steady, attempt) -> {
+            String deadLetters = named("dead-letters", attempt);
+            String capped = named("capped", attempt);
+            client.createQueue(deadLetters);
+            long jobsId = client.createQueue(
+                    capped, QueueOptions.builder().maxDeliveries(2).deadLetterQueue(deadLetters).build());
+            long offset = client.produce(capped, 0, OutMessage.value("poison").withKey("k")).baseOffset();
+            settled(capped);
+            steady.watch(capped);
+            try (QueueConsumer c = client.subscribe(capped)) {
+                Delivery d1 = take(c);
+                assertEquals(1, d1.deliveryCount());
+                assertTrue(d1.deadLetter().isEmpty());
+                c.nack(d1, true);
+                Delivery d2 = take(c);
+                assertEquals(2, d2.deliveryCount());
+                c.nack(d2, true);
+            }
+            try (QueueConsumer dl = client.subscribe(deadLetters)) {
+                Delivery d = take(dl);
+                assertEquals("poison", d.value().toUtf8());
+                assertEquals("k", d.key().toUtf8());
+                DeadLetter origin = d.deadLetter().orElseThrow();
+                assertEquals("max-deliveries", origin.reason());
+                assertEquals(capped, origin.queue());
+                assertEquals(jobsId, origin.queueId());
+                assertEquals(offset, origin.offset());
+                assertEquals(2, origin.deliveries());
+                dl.ack(d);
+            }
+            try (QueueConsumer c = client.subscribe(capped)) {
+                assertNull(c.poll(Duration.ofSeconds(1)), "retired, not delivered a third time");
+            }
+        });
     }
 
     @Test

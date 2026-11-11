@@ -95,25 +95,33 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task EveryMessageIsDeliveredOnceAckedAndTheQueueDrains()
     {
-        await Client.CreateQueueAsync("drain");
-        await ProduceAsync("drain", 20);
-        var seen = new HashSet<string>();
-        await using (QueueConsumer c = await Client.SubscribeAsync("drain", SubscribeOptions.WithCredit(3)))
+        // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new
+        // queue, if a leader moved while it ran.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
         {
-            for (int i = 0; i < 20; i++)
+            string drain = attempt == 1 ? "drain" : "drain-" + attempt;
+            await Client.CreateQueueAsync(drain);
+            await SettledAsync(drain);
+            await steady.WatchAsync(drain);
+            await ProduceAsync(drain, 20);
+            var seen = new HashSet<string>();
+            await using (QueueConsumer c = await Client.SubscribeAsync(drain, SubscribeOptions.WithCredit(3)))
             {
-                Delivery d = await Take(c);
-                Assert.Equal(1, d.DeliveryCount);
-                Assert.True(seen.Add(d.Value!.ToUtf8()), "no message twice");
-                Assert.Equal("k" + d.Value.ToUtf8()["drain-".Length..], d.Key!.ToUtf8());
-                Assert.Single(d.Headers);
-                await c.AckAsync(d);
+                for (int i = 0; i < 20; i++)
+                {
+                    Delivery d = await Take(c);
+                    Assert.Equal(1, d.DeliveryCount);
+                    Assert.True(seen.Add(d.Value!.ToUtf8()), "no message twice");
+                    Assert.Equal("k" + d.Value.ToUtf8()[(drain + "-").Length..], d.Key!.ToUtf8());
+                    Assert.Single(d.Headers);
+                    await c.AckAsync(d);
+                }
+                Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(500))); // nothing more
             }
-            Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(500))); // nothing more
-        }
-        Assert.Equal(20, seen.Count);
-        await using QueueConsumer again = await Client.SubscribeAsync("drain");
-        Assert.Null(await again.PollAsync(TimeSpan.FromSeconds(1))); // acked messages do not come back
+            Assert.Equal(20, seen.Count);
+            await using QueueConsumer again = await Client.SubscribeAsync(drain);
+            Assert.Null(await again.PollAsync(TimeSpan.FromSeconds(1))); // acked messages do not come back
+        });
     }
 
     [LotseFact]
@@ -145,18 +153,25 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task ARequeuedMessageComesBackWithACountOfTwo()
     {
-        await Client.CreateQueueAsync("requeue");
-        await ProduceAsync("requeue", 1);
-        await SettledAsync("requeue");
-        await using QueueConsumer c = await Client.SubscribeAsync("requeue", SubscribeOptions.WithCredit(2));
-        Delivery first = await Take(c);
-        Assert.Equal(1, first.DeliveryCount);
-        await c.NackAsync(first, true);
-        Delivery second = await Take(c);
-        Assert.Equal(first.Offset, second.Offset);
-        Assert.Equal(2, second.DeliveryCount);
-        await c.AckAsync(second);
-        Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(500)));
+        // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new
+        // queue, if a leader moved while it ran.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
+        {
+            string requeue = attempt == 1 ? "requeue" : "requeue-" + attempt;
+            await Client.CreateQueueAsync(requeue);
+            await ProduceAsync(requeue, 1);
+            await SettledAsync(requeue);
+            await steady.WatchAsync(requeue);
+            await using QueueConsumer c = await Client.SubscribeAsync(requeue, SubscribeOptions.WithCredit(2));
+            Delivery first = await Take(c);
+            Assert.Equal(1, first.DeliveryCount);
+            await c.NackAsync(first, true);
+            Delivery second = await Take(c);
+            Assert.Equal(first.Offset, second.Offset);
+            Assert.Equal(2, second.DeliveryCount);
+            await c.AckAsync(second);
+            Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(500)));
+        });
     }
 
     [LotseFact]
@@ -214,27 +229,34 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task AConsumerThatDisappearsLeavesItsMessagesToTheNext()
     {
-        await Client.CreateQueueAsync("vanish");
-        await ProduceAsync("vanish", 3);
-        await SettledAsync("vanish");
-        using (LotseClient other = NewClient())
+        // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new
+        // queue, if a leader moved while it ran.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
         {
-            QueueConsumer gone = await other.SubscribeAsync("vanish", SubscribeOptions.WithCredit(10));
+            string vanish = attempt == 1 ? "vanish" : "vanish-" + attempt;
+            await Client.CreateQueueAsync(vanish);
+            await ProduceAsync(vanish, 3);
+            await SettledAsync(vanish);
+            await steady.WatchAsync(vanish);
+            using (LotseClient other = NewClient())
+            {
+                QueueConsumer gone = await other.SubscribeAsync(vanish, SubscribeOptions.WithCredit(10));
+                for (int i = 0; i < 3; i++)
+                {
+                    await Take(gone); // delivered to it, never acked
+                }
+            } // closing the client closes the connection, and the messages go back
+            var offsets = new List<ulong>();
+            await using QueueConsumer c = await Client.SubscribeAsync(vanish);
             for (int i = 0; i < 3; i++)
             {
-                await Take(gone); // delivered to it, never acked
+                Delivery d = await Take(c);
+                Assert.Equal(2, d.DeliveryCount);
+                offsets.Add(d.Offset);
+                await c.AckAsync(d);
             }
-        } // closing the client closes the connection, and the messages go back
-        var offsets = new List<ulong>();
-        await using QueueConsumer c = await Client.SubscribeAsync("vanish");
-        for (int i = 0; i < 3; i++)
-        {
-            Delivery d = await Take(c);
-            Assert.Equal(2, d.DeliveryCount);
-            offsets.Add(d.Offset);
-            await c.AckAsync(d);
-        }
-        Assert.Equal(3, offsets.Distinct().Count());
+            Assert.Equal(3, offsets.Distinct().Count());
+        });
     }
 
     [LotseFact]
@@ -299,36 +321,44 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task AMessageDeliveredTooOftenLandsInTheDeadLetterQueueWithItsOrigin()
     {
-        await Client.CreateQueueAsync("dead-letters");
-        ulong id = await Client.CreateQueueAsync(
-            "capped", QueueOptions.CreateBuilder().WithMaxDeliveries(2).WithDeadLetterQueue("dead-letters").Build());
-        ulong offset = (await Client.ProduceAsync("capped", 0, OutMessage.FromValue("poison").WithKey("k"))).BaseOffset;
-        await SettledAsync("capped");
-        await using (QueueConsumer c = await Client.SubscribeAsync("capped"))
+        // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new
+        // queue, if a leader moved while it ran.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
         {
-            Delivery d1 = await Take(c);
-            Assert.Equal(1, d1.DeliveryCount);
-            Assert.Null(d1.DeadLetter);
-            await c.NackAsync(d1, true);
-            Delivery d2 = await Take(c);
-            Assert.Equal(2, d2.DeliveryCount);
-            await c.NackAsync(d2, true);
-        }
-        await using (QueueConsumer dl = await Client.SubscribeAsync("dead-letters"))
-        {
-            Delivery d = await Take(dl);
-            Assert.Equal("poison", d.Value!.ToUtf8());
-            Assert.Equal("k", d.Key!.ToUtf8());
-            DeadLetter origin = d.DeadLetter!;
-            Assert.Equal("max-deliveries", origin.Reason);
-            Assert.Equal("capped", origin.Queue);
-            Assert.Equal(id, origin.QueueId);
-            Assert.Equal(offset, origin.Offset);
-            Assert.Equal(2, origin.Deliveries);
-            await dl.AckAsync(d);
-        }
-        await using QueueConsumer again = await Client.SubscribeAsync("capped");
-        Assert.Null(await again.PollAsync(TimeSpan.FromSeconds(1))); // retired, not delivered a third time
+            string deadLetters = attempt == 1 ? "dead-letters" : "dead-letters-" + attempt;
+            string capped = attempt == 1 ? "capped" : "capped-" + attempt;
+            await Client.CreateQueueAsync(deadLetters);
+            ulong id = await Client.CreateQueueAsync(
+                capped, QueueOptions.CreateBuilder().WithMaxDeliveries(2).WithDeadLetterQueue(deadLetters).Build());
+            ulong offset = (await Client.ProduceAsync(capped, 0, OutMessage.FromValue("poison").WithKey("k"))).BaseOffset;
+            await SettledAsync(capped);
+            await steady.WatchAsync(capped);
+            await using (QueueConsumer c = await Client.SubscribeAsync(capped))
+            {
+                Delivery d1 = await Take(c);
+                Assert.Equal(1, d1.DeliveryCount);
+                Assert.Null(d1.DeadLetter);
+                await c.NackAsync(d1, true);
+                Delivery d2 = await Take(c);
+                Assert.Equal(2, d2.DeliveryCount);
+                await c.NackAsync(d2, true);
+            }
+            await using (QueueConsumer dl = await Client.SubscribeAsync(deadLetters))
+            {
+                Delivery d = await Take(dl);
+                Assert.Equal("poison", d.Value!.ToUtf8());
+                Assert.Equal("k", d.Key!.ToUtf8());
+                DeadLetter origin = d.DeadLetter!;
+                Assert.Equal("max-deliveries", origin.Reason);
+                Assert.Equal(capped, origin.Queue);
+                Assert.Equal(id, origin.QueueId);
+                Assert.Equal(offset, origin.Offset);
+                Assert.Equal(2, origin.Deliveries);
+                await dl.AckAsync(d);
+            }
+            await using QueueConsumer again = await Client.SubscribeAsync(capped);
+            Assert.Null(await again.PollAsync(TimeSpan.FromSeconds(1))); // retired, not delivered a third time
+        });
     }
 
     [LotseFact]
@@ -350,49 +380,62 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task ASingleActiveConsumerGetsTheMessagesAndTheStandbyTakesOverWhenItEnds()
     {
-        await Client.CreateQueueAsync("ledger", QueueOptions.CreateBuilder().WithSingleActiveConsumer().Build());
-        await SettledAsync("ledger");
-        await using QueueConsumer active = await Client.SubscribeAsync("ledger");
-        await using QueueConsumer standby = await Client.SubscribeAsync("ledger");
-        Assert.False(active.IsStandby);
-        Assert.True(standby.IsStandby);
-        await ProduceAsync("ledger", 2);
-        for (int i = 0; i < 2; i++)
+        // Who is active lives with the leader (ADR 0076): the scenario runs again on a new queue if a leader moved.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
         {
-            Delivery d = await Take(active);
-            Assert.Equal("ledger-" + i, d.Value!.ToUtf8()); // in order
-            await active.AckAsync(d);
-        }
-        Assert.Null(await standby.PollAsync(TimeSpan.FromMilliseconds(500))); // the standby gets nothing
-        Assert.True(standby.IsStandby);
+            string ledger = attempt == 1 ? "ledger" : "ledger-a" + attempt;
+            await Client.CreateQueueAsync(ledger, QueueOptions.CreateBuilder().WithSingleActiveConsumer().Build());
+            await SettledAsync(ledger);
+            await steady.WatchAsync(ledger);
+            await using QueueConsumer active = await Client.SubscribeAsync(ledger);
+            await using QueueConsumer standby = await Client.SubscribeAsync(ledger);
+            Assert.False(active.IsStandby);
+            Assert.True(standby.IsStandby);
+            await ProduceAsync(ledger, 2);
+            for (int i = 0; i < 2; i++)
+            {
+                Delivery d = await Take(active);
+                Assert.Equal(ledger + "-" + i, d.Value!.ToUtf8()); // in order
+                await active.AckAsync(d);
+            }
+            Assert.Null(await standby.PollAsync(TimeSpan.FromMilliseconds(500))); // the standby gets nothing
+            Assert.True(standby.IsStandby);
 
-        await active.DisposeAsync();
-        await Client.ProduceAsync("ledger", 0, OutMessage.FromValue("ledger-after"));
-        Delivery next = await Take(standby);
-        Assert.Equal("ledger-after", next.Value!.ToUtf8());
-        Assert.False(standby.IsStandby);
-        await standby.AckAsync(next);
+            await active.DisposeAsync();
+            await Client.ProduceAsync(ledger, 0, OutMessage.FromValue(ledger + "-after"));
+            Delivery next = await Take(standby);
+            Assert.Equal(ledger + "-after", next.Value!.ToUtf8());
+            Assert.False(standby.IsStandby);
+            await standby.AckAsync(next);
+        });
     }
 
     [LotseFact]
     public async Task AStandbyTakesOverFromAConsumerThatDisappearsAndGetsItsMessage()
     {
-        await Client.CreateQueueAsync("ledger-2", QueueOptions.CreateBuilder().WithSingleActiveConsumer().Build());
-        await SettledAsync("ledger-2");
-        using LotseClient other = NewClient();
-        QueueConsumer first = await other.SubscribeAsync("ledger-2");
-        await using QueueConsumer second = await Client.SubscribeAsync("ledger-2");
-        Assert.False(first.IsStandby);
-        Assert.True(second.IsStandby);
-        await ProduceAsync("ledger-2", 1);
-        Delivery held = await Take(first); // out with the first, never acked
-        Assert.Equal(1, held.DeliveryCount);
-        other.Dispose(); // the connection ends: the message goes back and the standby is next
-        Delivery again = await Take(second);
-        Assert.Equal(held.Offset, again.Offset);
-        Assert.True(again.DeliveryCount >= 2, "was " + again.DeliveryCount);
-        Assert.False(second.IsStandby);
-        await second.AckAsync(again);
+        // Who is active and what is in flight live with the leader: the scenario runs again on a new queue if a leader
+        // moved while it ran.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
+        {
+            string ledger = attempt == 1 ? "ledger-2" : "ledger-2-" + attempt;
+            await Client.CreateQueueAsync(ledger, QueueOptions.CreateBuilder().WithSingleActiveConsumer().Build());
+            await SettledAsync(ledger);
+            await steady.WatchAsync(ledger);
+            using LotseClient other = NewClient();
+            QueueConsumer first = await other.SubscribeAsync(ledger);
+            await using QueueConsumer second = await Client.SubscribeAsync(ledger);
+            Assert.False(first.IsStandby);
+            Assert.True(second.IsStandby);
+            await ProduceAsync(ledger, 1);
+            Delivery held = await Take(first); // out with the first, never acked
+            Assert.Equal(1, held.DeliveryCount);
+            other.Dispose(); // the connection ends: the message goes back and the standby is next
+            Delivery again = await Take(second);
+            Assert.Equal(held.Offset, again.Offset);
+            Assert.True(again.DeliveryCount >= 2, "was " + again.DeliveryCount);
+            Assert.False(second.IsStandby);
+            await second.AckAsync(again);
+        });
     }
 
     [LotseFact]
