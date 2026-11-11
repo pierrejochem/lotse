@@ -14,13 +14,33 @@ export class PlainCluster {
     readonly config: string,
     private readonly bin: string,
     readonly clientAddresses: readonly Address[],
+    private readonly attempt = 1,
   ) {}
 
-  static async make(bin: string, nodes: number): Promise<PlainCluster> {
+  /**
+   * A cluster of `nodes` nodes, every one of them running. Test files run in parallel, each choosing free ports, and
+   * two of them can choose the same port before either node binds it: a node that finds its port taken exits at once.
+   * Then the whole cluster starts again on new ports and a new data directory, up to five times.
+   */
+  static async started(bin: string, nodes: number): Promise<PlainCluster> {
     const dir = mkdtempSync(join(tmpdir(), "lotse-sdk-node-cluster-"));
-    const config = join(dir, "cluster.toml");
+    for (let attempt = 1; ; attempt++) {
+      const cluster = await PlainCluster.make(dir, attempt, bin, nodes);
+      const exited = await cluster.startAll();
+      if (exited.length === 0) {
+        return cluster;
+      }
+      await cluster.stop();
+      if (attempt >= 5) {
+        throw new Error(`nodes ${exited.join(", ")} exit at start\n${exited.map((id) => cluster.log(id)).join("\n")}`);
+      }
+    }
+  }
+
+  private static async make(dir: string, attempt: number, bin: string, nodes: number): Promise<PlainCluster> {
+    const config = join(dir, `cluster-${attempt}.toml`);
     const addresses: Address[] = [];
-    let text = `[cluster]\ndata_dir = "${dir}/data/node-{id}"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n`;
+    let text = `[cluster]\ndata_dir = "${dir}/data-${attempt}/node-{id}"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n`;
     for (let id = 1; id <= nodes; id++) {
       const peer = await freePort();
       const client = await freePort();
@@ -28,7 +48,7 @@ export class PlainCluster {
       text += `\n[[node]]\nid = ${id}\npeer = "127.0.0.1:${peer}"\nclient = "127.0.0.1:${client}"\n`;
     }
     writeFileSync(config, text);
-    return new PlainCluster(dir, config, bin, addresses);
+    return new PlainCluster(dir, config, bin, addresses, attempt);
   }
 
   get bootstrap(): string[] {
@@ -39,14 +59,21 @@ export class PlainCluster {
     return this.clientAddresses[node - 1] as Address;
   }
 
-  startAll(): void {
-    for (let id = 1; id <= this.clientAddresses.length; id++) {
+  /** Starts every node and returns those that exited within 1.5 s (none, normally). */
+  private async startAll(): Promise<number[]> {
+    const ids = this.clientAddresses.map((_, i) => i + 1);
+    for (const id of ids) {
       this.start(id);
     }
+    await sleep(1_500);
+    return ids.filter((id) => {
+      const p = this.processes.get(id);
+      return p === undefined || p.exitCode !== null || p.signalCode !== null;
+    });
   }
 
   start(id: number): void {
-    const fd = openSync(join(this.dir, `node-${id}.log`), "a");
+    const fd = openSync(this.logFile(id), "a");
     this.processes.set(id, spawn(this.bin, ["run", "--config", this.config, "--node", String(id)], { stdio: ["ignore", fd, fd] }));
   }
 
@@ -94,8 +121,12 @@ export class PlainCluster {
     await Promise.all([...this.processes.keys()].map((id) => this.kill(id)));
   }
 
+  private logFile(id: number): string {
+    return join(this.dir, `node-${id}-${this.attempt}.log`);
+  }
+
   log(id: number): string {
-    const f = join(this.dir, `node-${id}.log`);
+    const f = this.logFile(id);
     return existsSync(f) ? readFileSync(f, "utf8") : "(no log)";
   }
 }
