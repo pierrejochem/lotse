@@ -25,6 +25,9 @@ const TAG_PRODUCER: u64 = 2;
 const TAG_NOTIFY_ACTIVE: u64 = 1;
 /// A subscription waits as a standby (ADR 0076), next to the leader hint.
 const TAG_STANDBY: u64 = 1;
+/// The metadata index through which a node has removed the files of every
+/// deleted resource (ADR 0100), in its `DescribeMetrics` answer.
+const TAG_REMOVED_THROUGH: u64 = 1;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -2355,6 +2358,10 @@ pub struct DescribeMetricsResponse {
     pub queues: Vec<QueueMetrics>,
     /// Consumer groups, if this node leads the coordinator group.
     pub groups: Vec<GroupMetrics>,
+    /// The metadata index through which this node has removed the files of
+    /// every resource deleted by then (ADR 0100); `None` until it has looked
+    /// once since it started. A tag: other clients may ignore it.
+    pub removed_through: Option<u64>,
 }
 
 /// The machine a node runs on; `None` where it cannot tell.
@@ -2567,7 +2574,14 @@ impl DescribeMetricsResponse {
                 w.u64(o.offset);
             });
         });
-        w.no_tags();
+        match self.removed_through {
+            Some(index) => {
+                let mut v = Writer::new();
+                v.u64(index);
+                w.tags(&[(TAG_REMOVED_THROUGH, v.finish())]);
+            }
+            None => w.no_tags(),
+        }
     }
 
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
@@ -2650,7 +2664,16 @@ impl DescribeMetricsResponse {
             })?;
             Ok(GroupMetrics { group_id, tenant, epoch, members, offsets })
         })?;
-        r.tags()?;
+        let mut removed_through = None;
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_REMOVED_THROUGH => removed_through = Some(v.u64()?),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
         Ok(DescribeMetricsResponse {
             error,
             node_id,
@@ -2668,6 +2691,7 @@ impl DescribeMetricsResponse {
             partitions,
             queues,
             groups,
+            removed_through,
         })
     }
 }

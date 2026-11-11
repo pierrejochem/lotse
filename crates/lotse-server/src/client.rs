@@ -36,7 +36,7 @@
 //! from the node configuration ([`StreamConfig`], [`QueueConfig`]), and so
 //! does the coordinator group.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -277,7 +277,7 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) queues: &'a [QueueConfig],
     pub(crate) exchanges: &'a [Exchange],
     /// Resources deleted at runtime: gone for good.
-    pub(crate) deleted: &'a BTreeSet<u64>,
+    pub(crate) deleted: &'a crate::metadata::Deleted,
     /// How long a group member may go without a heartbeat.
     pub(crate) group_session: Duration,
     /// How often group members send heartbeats.

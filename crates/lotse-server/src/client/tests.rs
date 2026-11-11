@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -18,7 +18,7 @@ static OPEN: std::sync::LazyLock<crate::access::Access> = std::sync::LazyLock::n
     crate::access::Access::build(&crate::AuthConfig::none(), &[], &crate::metadata::MetadataState::default())
 });
 
-static NOTHING_DELETED: BTreeSet<u64> = BTreeSet::new();
+static NOTHING_DELETED: crate::metadata::Deleted = crate::metadata::Deleted::NONE;
 
 #[derive(Debug, Default)]
 struct Nothing;

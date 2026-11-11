@@ -39,7 +39,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0032 | [Publish: exchanges routed by the client](0032-publish-routed-by-the-client.md) | Accepted |
 | 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
 | 0034 | [The metadata group: resources created at runtime](0034-metadata-group.md) | Accepted |
-| 0035 | [Deleting resources and changing settings](0035-deleting-resources-and-changing-settings.md) | Accepted |
+| 0035 | [Deleting resources and changing settings](0035-deleting-resources-and-changing-settings.md) | Accepted; in part superseded by 0100 |
 | 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted |
 | 0037 | [TLS and node identity](0037-tls-and-node-identity.md) | Accepted |
 | 0038 | [Authentication](0038-authentication.md) | Accepted |
@@ -103,5 +103,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0097 | [A queue leader delivers only with a recent quorum](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md) | Accepted |
 | 0098 | [Compaction maps a bounded number of keys per sweep](0098-compaction-maps-a-bounded-number-of-keys-per-sweep.md) | Accepted |
 | 0099 | [Snapshots live in files](0099-snapshots-live-in-files.md) | Accepted |
+| 0100 | [Tombstones go once every node removed the files](0100-tombstones-go-once-every-node-removed-the-files.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
