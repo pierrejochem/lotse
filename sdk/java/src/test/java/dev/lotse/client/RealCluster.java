@@ -146,6 +146,61 @@ final class RealCluster implements AutoCloseable {
         }
     }
 
+    /** Who leads {@code name}'s first partition and since which term: {@code "leader@term"}, or {@code "none"}. */
+    static String leaderTerm(LotseClient client, String name) {
+        dev.lotse.proto.Messages.PartitionMetadata p = partition0(client, name);
+        return p == null || p.leader() == 0 ? "none" : p.leader() + "@" + p.leaderTerm();
+    }
+
+    /** What a scenario watches: the leaders of the partitions it relies on, as they were when it began to rely on them. */
+    static final class Steady {
+        private final LotseClient client;
+        private final java.util.Map<String, String> seen = new java.util.LinkedHashMap<>();
+
+        Steady(LotseClient client) {
+            this.client = client;
+        }
+
+        /** Starts watching {@code name}'s first partition, once it has a leader the scenario relies on. */
+        void watch(String name) {
+            seen.put(name, leaderTerm(client, name));
+        }
+
+        /** Whether any watched partition has another leader or term than when it was first watched. */
+        boolean moved() {
+            return seen.entrySet().stream().anyMatch(e -> !leaderTerm(client, e.getKey()).equals(e.getValue()));
+        }
+    }
+
+    /** A scenario: the attempt number goes into its names, so an attempt starts on new queues or streams. */
+    @FunctionalInterface
+    interface Scenario {
+        void run(Steady steady, int attempt) throws Exception;
+    }
+
+    /**
+     * Runs a scenario that relies on its leaders staying where they are, and runs it again, with new names, if it
+     * fails after one of them moved or with {@code NOT_LEADER}. A leader that a starved node's lost election moves is no
+     * fault, and an application meets it too. A failure with every leader where it was is a failure: it is thrown at
+     * once, so the check stays as strict as it was. As the Node.js tests do.
+     */
+    static void retryIfLeaderMoved(LotseClient client, Scenario body) throws Exception {
+        int attempts = 4;
+        for (int attempt = 1; ; attempt++) {
+            Steady steady = new Steady(client);
+            try {
+                body.run(steady, attempt);
+                return;
+            } catch (Exception | AssertionError e) {
+                boolean notLeader =
+                        e instanceof ClientException.Broker b && b.code().equals(dev.lotse.proto.ErrorCode.NOT_LEADER);
+                if (attempt >= attempts || !(notLeader || steady.moved())) {
+                    throw e;
+                }
+            }
+        }
+    }
+
     private static dev.lotse.proto.Messages.PartitionMetadata partition0(LotseClient client, String name) {
         for (var r : client.metadata(name).resources()) {
             if (r.name().equals(name)) {
