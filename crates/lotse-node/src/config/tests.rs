@@ -64,6 +64,16 @@ fn a_cluster_file_becomes_each_nodes_configuration() {
 }
 
 #[test]
+fn the_compaction_map_has_a_default_and_may_be_set() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.retention.compaction_map_bytes, lotse_server::DEFAULT_COMPACTION_MAP_BYTES);
+    let set = format!("{THREE}\n[compaction]\nmap_bytes = 1048576\n");
+    let c = ClusterFile::parse(&set, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.retention.compaction_map_bytes, 1 << 20);
+    assert!(ClusterFile::parse(&format!("{THREE}\n[compaction]\nmap = 1\n"), "t").is_err(), "an unknown key");
+}
+
+#[test]
 fn minus_one_means_no_limit() {
     let f = ClusterFile::parse(&THREE.replace("bytes = 1073741824", "ms = -1"), "t").unwrap();
     let c = f.node_config(2).unwrap();

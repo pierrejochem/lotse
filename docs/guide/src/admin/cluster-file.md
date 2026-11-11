@@ -93,6 +93,14 @@ What streams keep unless they say otherwise. A stream created at runtime can ove
 
 Any other value must be positive.
 
+## `[compaction]`
+
+How compacted streams are compacted; see [Retention and compaction](retention-and-compaction.md).
+
+| Key | Type, unit | Default | Meaning |
+| --- | --- | --- | --- |
+| `map_bytes` | integer, bytes | 67108864 (64 MiB) | Memory the key map of the node's one compaction sweep may take, 48 bytes per key. |
+
 ## `[auth]`
 
 | Key | Type, unit | Default | Meaning |

@@ -52,6 +52,9 @@ pub struct ClusterFile {
     /// What streams keep unless they say otherwise.
     #[serde(default)]
     pub retention: Retention,
+    /// How compacted streams are compacted.
+    #[serde(default)]
+    pub compaction: Compaction,
     /// How clients authenticate.
     #[serde(default)]
     pub auth: Auth,
@@ -141,6 +144,16 @@ pub struct Retention {
     /// Each partition keeps at least this much, bytes (default no limit).
     #[serde(default)]
     pub bytes: Option<i64>,
+}
+
+/// How compacted streams are compacted (ADR 0098).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Compaction {
+    /// Bytes the map of keys of the node's one compaction sweep may take
+    /// (default 64 MiB, about 1.4 million keys).
+    #[serde(default)]
+    pub map_bytes: Option<u64>,
 }
 
 /// How clients authenticate.
@@ -368,6 +381,7 @@ impl ClusterFile {
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),
                 bytes: pick(self.retention.bytes, defaults.bytes),
+                compaction_map_bytes: self.compaction.map_bytes.unwrap_or(lotse_server::DEFAULT_COMPACTION_MAP_BYTES),
             },
             join: false,
         })

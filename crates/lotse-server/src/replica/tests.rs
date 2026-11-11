@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use lotse_record::{BatchBuilder, BatchOptions};
+use lotse_rt::Rng as _;
 use lotse_sim::{Sim, SimRuntime};
 
 use super::*;
@@ -618,7 +619,14 @@ fn a_follower_keeps_tombstones_and_a_young_one_stays() {
         // An hour later it may go, but only on a leader that knows every
         // member holds it.
         let later = now as u64 + 3_600_000;
-        let limits = compaction::Limits { stable: r.applied, tombstones_below: 0, tombstone_ms: 60_000, now_ms: later };
+        let limits = compaction::Limits {
+            stable: r.applied,
+            tombstones_below: 0,
+            tombstone_ms: 60_000,
+            now_ms: later,
+            may_start: true,
+            map_keys: usize::MAX,
+        };
         for _ in 0..200 {
             r.compactor.step(&mut r.log, &r.state.txns, limits).await.unwrap();
         }
@@ -698,8 +706,14 @@ fn a_tombstone_goes_only_in_a_sweep_that_knew_it_from_the_start() {
         assert!(at >= 3 && at + 1 < segs.len(), "{segs:?}");
         let before_it = segs[at - 1].next_offset;
         let with_it = segs[at].next_offset;
-        let limits =
-            |stable| compaction::Limits { stable, tombstones_below: u64::MAX, tombstone_ms: 1, now_ms: now as u64 };
+        let limits = |stable| compaction::Limits {
+            stable,
+            tombstones_below: u64::MAX,
+            tombstone_ms: 1,
+            now_ms: now as u64,
+            may_start: true,
+            map_keys: usize::MAX,
+        };
 
         // A sweep starts before the tombstone is sealed; then it is.
         r.compactor.step(&mut r.log, &r.state.txns, limits(before_it)).await.unwrap();
@@ -769,5 +783,78 @@ fn a_leader_keeps_a_tombstone_a_member_lacks() {
         let ks: Vec<_> =
             records_of(&rs[away]).await.into_iter().filter(|(_, key, _)| key.as_deref() == Some("K")).collect();
         assert!(ks.last().is_none_or(|(_, _, v)| v.is_none()), "node 3 sees K's old value again: {ks:?}");
+    });
+}
+
+#[test]
+fn a_map_of_a_few_keys_compacts_as_fully_over_several_sweeps() {
+    // Six keys, values and tombstones, a map that holds 1 to 4 keys: sweeps
+    // map on from where the last ended, and in the end each key keeps only
+    // its newest value, a tombstone goes once it is old, and no older value
+    // of a key whose newest record is a tombstone comes back (ADR 0098).
+    for seed in 0..16 {
+        Sim::new(seed).run(|rt| async move {
+            let retention = Retention::Stream { ms: None, bytes: None, compact: Some(60_000) };
+            let mut r = open_kept(&rt, "m", retention, false).await;
+            elect(&mut r).await;
+            let now: i64 = 10_000_000;
+            for i in 0..80 {
+                let key = format!("k{}", rt.below(6));
+                let value = (!rt.chance(1, 4)).then(|| format!("v{i:02}"));
+                commit(&mut r, keyed(&key, value.as_deref(), now - 3_600_000)).await;
+            }
+            let before = records_of(&r).await;
+            let keys = 1 + rt.below(4) as usize;
+            let sweep = crate::Sweep { may_start: true, map_bytes: keys as u64 * compaction::MAP_ENTRY_BYTES };
+            let mut at = now as u64;
+            for step in 0..600 {
+                if step % 20 == 0 {
+                    at += 61_000; // the next sweep is due
+                }
+                r.retain_with(at, sweep).await.unwrap();
+                assert!(r.compactor.mapped() <= keys, "the map holds {} of {keys} keys", r.compactor.mapped());
+            }
+            let after = records_of(&r).await;
+
+            let sealed_end = {
+                let segs: Vec<_> = r.log().segments().collect();
+                segs[segs.len() - 2].next_offset
+            };
+            let mut newest: BTreeMap<String, (u64, Option<String>)> = BTreeMap::new();
+            for (o, k, v) in before.iter().filter(|(o, ..)| *o < sealed_end) {
+                newest.insert(k.clone().unwrap(), (*o, v.clone()));
+            }
+            for (key, (o, v)) in &newest {
+                let left: Vec<u64> =
+                    after.iter().filter(|(a, k, _)| *a < sealed_end && k.as_ref() == Some(key)).map(|x| x.0).collect();
+                let expect = if v.is_some() { vec![*o] } else { Vec::new() };
+                assert_eq!(left, expect, "seed {seed}, map of {keys}: key {key}, newest {o} {v:?}: {after:?}");
+            }
+            let unsealed = |l: &[(u64, Option<String>, Option<String>)]| {
+                l.iter().filter(|(o, ..)| *o >= sealed_end).cloned().collect::<Vec<_>>()
+            };
+            assert_eq!(unsealed(&after), unsealed(&before), "what is not sealed stays");
+        });
+    }
+}
+
+#[test]
+fn a_replica_that_may_not_start_a_sweep_compacts_nothing() {
+    Sim::new(26).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: Some(60_000) };
+        let mut r = open_kept(&rt, "w", retention, false).await;
+        elect(&mut r).await;
+        for i in 0..40 {
+            commit(&mut r, keyed("k", Some(&format!("v{i:02}")), 10_000_000)).await;
+        }
+        let before = records_of(&r).await;
+        let wait = crate::Sweep { may_start: false, ..crate::Sweep::default() };
+        for _ in 0..100 {
+            r.retain_with(10_000_000, wait).await.unwrap();
+            assert!(!r.sweeping());
+        }
+        assert_eq!(records_of(&r).await, before, "another replica of the node sweeps");
+        r.retain_with(10_000_000, crate::Sweep::default()).await.unwrap();
+        assert!(r.sweeping(), "its turn: the sweep starts and holds its map");
     });
 }
