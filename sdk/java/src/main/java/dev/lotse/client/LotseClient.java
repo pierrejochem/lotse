@@ -1477,7 +1477,7 @@ public final class LotseClient implements AutoCloseable {
      *
      * @param id the request it answers: SHA-256 of its signing request
      * @param certificate the signed certificate, DER
-     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian
      * @param notBeforeMs first millisecond it is valid in
      * @param notAfterMs millisecond it stops being valid in
@@ -1565,7 +1565,7 @@ public final class LotseClient implements AutoCloseable {
      * Adds a certificate to the cluster's revocation list: every node refuses it from then on and ends its
      * connections. Needs the cluster-admin role.
      *
-     * @param issuer SHA-256 of the issuer's distinguished name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian
      * @param notAfterMs milliseconds since the Unix epoch at which the certificate stops being valid; the entry is
      *     dropped after that

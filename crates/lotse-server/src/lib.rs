@@ -23,7 +23,7 @@ mod txns;
 pub mod wire;
 
 pub use access::DEFAULT_TENANT;
-pub use auth::{AuthConfig, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal};
+pub use auth::{AuthConfig, ClientCas, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal};
 pub use client::{QueueConfig, StreamConfig};
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};
 pub use node::{GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig};

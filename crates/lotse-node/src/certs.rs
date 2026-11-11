@@ -200,8 +200,8 @@ pub struct Signed {
     pub pem: String,
     /// The certificate, DER: what the cluster records.
     pub der: Vec<u8>,
-    /// SHA-256 of the issuer's name as the certificate carries it: how a
-    /// node tells issuers apart (ADR 0090).
+    /// The issuer fingerprint: SHA-256 of the issuer's name and the
+    /// authority key identifier, as a node tells issuers apart (ADR 0096).
     pub issuer: [u8; 32],
     /// The serial number, big-endian.
     pub serial: Vec<u8>,
@@ -251,14 +251,14 @@ pub fn sign_csr(file: &ClusterFile, der: &[u8], principal: &str, days: u32) -> R
     let params = client_params(principal, days);
     let cert = params.signed_by(&csr.public_key, ca.issuer()).map_err(|e| cert_err(principal, e))?;
     let bytes = cert.der().to_vec();
-    let (_, parsed) = x509_parser::parse_x509_certificate(&bytes).map_err(|e| cert_err(principal, e))?;
-    let millis = |t: x509_parser::time::ASN1Time| u64::try_from(t.timestamp()).unwrap_or(0) * 1000;
+    let facts =
+        lotse_auth::x509::facts(&bytes).ok_or_else(|| cert_err(principal, "the signed certificate does not parse"))?;
     Ok(Signed {
         pem: cert.pem(),
-        issuer: Sha256::digest(parsed.issuer().as_raw()).into(),
-        serial: parsed.raw_serial().to_vec(),
-        not_before_ms: millis(parsed.validity().not_before),
-        not_after_ms: millis(parsed.validity().not_after),
+        issuer: facts.issuer,
+        serial: facts.serial,
+        not_before_ms: facts.not_before_ms,
+        not_after_ms: facts.not_after_ms,
         der: bytes,
     })
 }

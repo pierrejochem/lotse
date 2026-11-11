@@ -76,11 +76,14 @@ pub(crate) struct AdminView<'a> {
     pub(crate) configured_voters: &'a [NodeId],
     /// The node's retention for streams that set none of their own.
     pub(crate) retention: crate::RetentionConfig,
+    /// The cluster's CA certificates, for recorded certificates.
+    pub(crate) client_cas: &'a crate::auth::ClientCas,
 }
 
 static NO_VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
 static NO_USERS: BTreeMap<String, ScramCredential> = BTreeMap::new();
 static NO_MEMBERS: BTreeMap<NodeId, (String, String)> = BTreeMap::new();
+static NO_CAS: std::sync::LazyLock<crate::auth::ClientCas> = std::sync::LazyLock::new(Default::default);
 
 impl Default for AdminView<'_> {
     fn default() -> Self {
@@ -93,6 +96,7 @@ impl Default for AdminView<'_> {
             retention: crate::RetentionConfig::keep(),
             members: &NO_MEMBERS,
             configured_voters: &[],
+            client_cas: &NO_CAS,
         }
     }
 }

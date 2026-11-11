@@ -1738,7 +1738,7 @@
           },
           "issuer": {
             "type": "string",
-            "description": "SHA-256 of the issuer's name in DER form, 64 hex digits."
+            "description": "SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits."
           },
           "last_seen_ms": {
             "type": "integer",
@@ -3165,7 +3165,7 @@
           },
           "issuer": {
             "type": "string",
-            "description": "SHA-256 of the issuer's name in DER form, 64 hex digits."
+            "description": "SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 64 hex digits."
           },
           "not_after_ms": {
             "type": "integer",

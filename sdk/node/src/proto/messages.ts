@@ -481,7 +481,7 @@ export const CertificateState = {
 
 /** One client certificate in the inventory (`DescribeCertificates`). */
 export interface CertificateEntry {
-  /** SHA-256 of the issuer's name in DER form (32 bytes). */
+  /** SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes). */
   readonly issuer: Uint8Array;
   /** The serial number, big-endian. */
   readonly serial: Uint8Array;

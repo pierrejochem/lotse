@@ -1179,7 +1179,7 @@ public sealed interface Request {
      * Adds a certificate to the cluster's revocation list (cluster admin): every node refuses it from then on and
      * ends its connections. Answered with {@link Response.Admin}.
      *
-     * @param issuer SHA-256 of the issuer's distinguished name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian, as the certificate has it
      * @param notAfterMs milliseconds since the Unix epoch at which the certificate stops being valid, a
      *     {@code u64}; the entry is dropped after that
@@ -1272,7 +1272,7 @@ public sealed interface Request {
      *
      * @param id the request it answers: SHA-256 of its signing request
      * @param certificate the signed certificate, DER
-     * @param issuer SHA-256 of the issuer's name in DER form, 32 bytes
+     * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes
      * @param serial the serial number, big-endian
      * @param notBeforeMs first millisecond it is valid in, a {@code u64}
      * @param notAfterMs millisecond it stops being valid in, a {@code u64}

@@ -1,6 +1,6 @@
 # 90. Revoking client certificates in the metadata group
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0096](0096-recorded-certificates-are-checked.md) (an issuer is its name and the authority key identifier, not its name alone)
 - Date: 2026-11-09
 
 ## Context

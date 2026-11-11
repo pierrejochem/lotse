@@ -16,6 +16,8 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 jsonwebtoken.workspace = true
+# X.509 for client certificates (ADR 0096); `verify` checks signatures with ring.
+x509-parser = { workspace = true, features = ["verify"] }
 ring = { workspace = true, optional = true }
 
 [features]
@@ -24,6 +26,7 @@ testing = ["dep:ring"]
 
 [dev-dependencies]
 lotse-auth = { path = ".", features = ["testing"] }
+rcgen.workspace = true
 
 [lints]
 workspace = true

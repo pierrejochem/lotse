@@ -944,6 +944,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 retention: cfg.retention,
                 members: &known.nodes,
                 configured_voters: &configured_voters,
+                client_cas: &cfg.auth.client_cas,
             },
             client_addrs: &known.client_addrs,
             coordinator: cfg.coordinator,

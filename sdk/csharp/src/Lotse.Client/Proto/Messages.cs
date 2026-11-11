@@ -743,7 +743,7 @@ public static class Messages
     }
 
     /// <summary>One client certificate in the cluster's inventory.</summary>
-    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian.</param>
     /// <param name="Principal">The principal it names (its common name); empty for a certificate revoked before any node saw it.</param>
     /// <param name="NotBeforeMs">First millisecond it is valid in, since the epoch; 0 if unknown.</param>
@@ -795,7 +795,7 @@ public static class Messages
     public sealed record CertificateRequests(ulong NowMs, IReadOnlyList<CertificateRequestEntry> Requests);
 
     /// <summary>One accepted client certificate, as a node reports it (internal, ADR 0091).</summary>
-    /// <param name="Issuer">SHA-256 of the issuer's name in DER form (32 bytes).</param>
+    /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian.</param>
     /// <param name="Principal">The principal it names.</param>
     /// <param name="NotBeforeMs">First millisecond it is valid in.</param>
