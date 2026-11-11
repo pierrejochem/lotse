@@ -421,25 +421,36 @@ public sealed class RealTransactionTests : IClassFixture<RealCluster>, IAsyncLif
     public async Task TwoTransactionsCannotHoldTheSameMessage()
     {
         LotseClient admin = NewClient();
-        await CreateQueueAsync(admin, "held");
-        await admin.ProduceAsync("held", 0, OutMessage.FromValue("one"));
+        // A transactional ack goes on the connection its message came on, so a leader that moves ends the attempt with
+        // NOT_LEADER: the scenario then runs again on a new queue.
+        await RealWaits.RetryIfLeaderMovedAsync(admin, async (steady, attempt) =>
+        {
+            string held = attempt == 1 ? "held" : "held-" + attempt;
+            await CreateQueueAsync(admin, held);
+            await steady.WatchAsync(held);
+            await admin.ProduceAsync(held, 0, OutMessage.FromValue("one"));
 
-        LotseClient x = NewClient("held-x");
-        LotseClient y = NewClient("held-y");
-        await using QueueConsumer c = await admin.SubscribeAsync("held");
-        Delivery d = (await TakeAsync(c))!;
+            LotseClient x = NewClient("held-x");
+            LotseClient y = NewClient("held-y");
+            await using QueueConsumer c = await admin.SubscribeAsync(held);
+            Delivery d = (await TakeAsync(c))!;
 
-        await using Transaction first = await x.BeginTransactionAsync();
-        await using Transaction second = await y.BeginTransactionAsync();
-        await c.AckInAsync(first, d);
-        var refused = await Assert.ThrowsAsync<BrokerErrorException>(() => c.AckInAsync(second, d));
-        Assert.Equal(ErrorCode.MessageNotHeld, refused.Code);
-        await Assert.ThrowsAsync<MustAbortException>(() => second.CommitAsync());
-        await second.AbortAsync();
-        await first.CommitAsync();
+            await using Transaction first = await x.BeginTransactionAsync();
+            await using Transaction second = await y.BeginTransactionAsync();
+            await c.AckInAsync(first, d);
+            var refused = await Assert.ThrowsAsync<BrokerErrorException>(() => c.AckInAsync(second, d));
+            if (refused.Code.Equals(ErrorCode.NotLeader))
+            {
+                throw refused; // the leader moved: the next attempt
+            }
+            Assert.Equal(ErrorCode.MessageNotHeld, refused.Code);
+            await Assert.ThrowsAsync<MustAbortException>(() => second.CommitAsync());
+            await second.AbortAsync();
+            await first.CommitAsync();
 
-        await using QueueConsumer after = await admin.SubscribeAsync("held");
-        Assert.Null(await after.PollAsync(TimeSpan.FromSeconds(2))); // the first transaction settled it
+            await using QueueConsumer after = await admin.SubscribeAsync(held);
+            Assert.Null(await after.PollAsync(TimeSpan.FromSeconds(2))); // the first transaction settled it
+        });
     }
 
     // ---- publishing ----

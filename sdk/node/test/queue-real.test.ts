@@ -95,6 +95,9 @@ describe("queues against three real nodes", { skip }, () => {
     }
   }
 
+  /** A name for a scenario's attempt: the first keeps the plain name, later ones start on a new queue. */
+  const named = (name: string, attempt: number): string => (attempt === 1 ? name : `${name}-${attempt}`);
+
   async function take(c: QueueConsumer, ms = 30_000): Promise<Delivery> {
     const d = await c.poll(ms);
     assert.notEqual(d, null, "a message should have come");
@@ -102,33 +105,39 @@ describe("queues against three real nodes", { skip }, () => {
   }
 
   test("every message is delivered once, acked, and the queue drains", async () => {
-    await client.createQueue("drain");
-    await settled("drain");
-    await produce("drain", 20);
-    const seen = new Set<string>();
-    const c = await client.subscribe("drain", { credit: 3 });
-    try {
-      for (let i = 0; i < 20; i++) {
-        const d = await take(c);
-        assert.equal(d.deliveryCount, 1);
-        const v = d.text() as string;
-        assert.ok(!seen.has(v), "no message twice");
-        seen.add(v);
-        assert.equal(Buffer.from(d.key as Uint8Array).toString(), `k${v.slice("drain-".length)}`);
-        assert.equal(d.headers.length, 1);
-        await c.ack(d);
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const drain = named("drain", attempt);
+      await client.createQueue(drain);
+      await settled(drain);
+      await steady.watch(drain);
+      await produce(drain, 20);
+      const seen = new Set<string>();
+      const c = await client.subscribe(drain, { credit: 3 });
+      try {
+        for (let i = 0; i < 20; i++) {
+          const d = await take(c);
+          assert.equal(d.deliveryCount, 1);
+          const v = d.text() as string;
+          assert.ok(!seen.has(v), "no message twice");
+          seen.add(v);
+          assert.equal(Buffer.from(d.key as Uint8Array).toString(), `k${v.slice(`${drain}-`.length)}`);
+          assert.equal(d.headers.length, 1);
+          await c.ack(d);
+        }
+        assert.equal(await c.poll(500), null, "nothing more");
+      } finally {
+        c.close();
       }
-      assert.equal(await c.poll(500), null, "nothing more");
-    } finally {
-      c.close();
-    }
-    assert.equal(seen.size, 20);
-    const again = await client.subscribe("drain");
-    try {
-      assert.equal(await again.poll(1_000), null, "acked messages do not come back");
-    } finally {
-      again.close();
-    }
+      assert.equal(seen.size, 20);
+      const again = await client.subscribe(drain);
+      try {
+        assert.equal(await again.poll(1_000), null, "acked messages do not come back");
+      } finally {
+        again.close();
+      }
+    });
   });
 
   test("a queue is created once and an unknown one is reported", async () => {
@@ -143,69 +152,87 @@ describe("queues against three real nodes", { skip }, () => {
   });
 
   test("messages are read with for await and acked in a batch", async () => {
-    await client.createQueue("iter");
-    await settled("iter");
-    await produce("iter", 6);
-    const c = await client.subscribe("iter", { credit: 4 });
-    try {
-      const got: Delivery[] = [];
-      for await (const d of c) {
-        got.push(d);
-        if (got.length === 6) {
-          break;
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const iter = named("iter", attempt);
+      await client.createQueue(iter);
+      await settled(iter);
+      await steady.watch(iter);
+      await produce(iter, 6);
+      const c = await client.subscribe(iter, { credit: 4 });
+      try {
+        const got: Delivery[] = [];
+        for await (const d of c) {
+          got.push(d);
+          if (got.length === 6) {
+            break;
+          }
         }
+        assert.deepEqual(
+          got.map((d) => d.text()),
+          Array.from({ length: 6 }, (_, i) => `${iter}-${i}`),
+          "in the order they were produced",
+        );
+        await c.ack(got);
+        assert.equal(await c.poll(500), null);
+      } finally {
+        c.close();
       }
-      assert.deepEqual(
-        got.map((d) => d.text()),
-        Array.from({ length: 6 }, (_, i) => `iter-${i}`),
-        "in the order they were produced",
-      );
-      await c.ack(got);
-      assert.equal(await c.poll(500), null);
-    } finally {
-      c.close();
-    }
+    });
   });
 
   test("a requeued message comes back with a count of two", async () => {
-    await client.createQueue("requeue");
-    await produce("requeue", 1);
-    await settled("requeue");
-    const c = await client.subscribe("requeue", { credit: 2 });
-    try {
-      const first = await take(c);
-      assert.equal(first.deliveryCount, 1);
-      await c.nack(first, true);
-      const second = await take(c);
-      assert.equal(second.offset, first.offset);
-      assert.equal(second.deliveryCount, 2);
-      await c.ack(second);
-      assert.equal(await c.poll(500), null);
-    } finally {
-      c.close();
-    }
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const requeue = named("requeue", attempt);
+      await client.createQueue(requeue);
+      await produce(requeue, 1);
+      await settled(requeue);
+      await steady.watch(requeue);
+      const c = await client.subscribe(requeue, { credit: 2 });
+      try {
+        const first = await take(c);
+        assert.equal(first.deliveryCount, 1);
+        await c.nack(first, true);
+        const second = await take(c);
+        assert.equal(second.offset, first.offset);
+        assert.equal(second.deliveryCount, 2);
+        await c.ack(second);
+        assert.equal(await c.poll(500), null);
+      } finally {
+        c.close();
+      }
+    });
   });
 
   test("a message given back with nackAfter waits for its delay", async () => {
-    await client.createQueue("delayed");
-    await produce("delayed", 1);
-    await settled("delayed");
-    const c = await client.subscribe("delayed");
-    try {
-      const first = await take(c);
-      const start = performance.now();
-      await c.nackAfter(first, 1_500);
-      assert.equal(await c.poll(600), null, "not delivered before its time");
-      const second = await take(c);
-      const waited = performance.now() - start;
-      assert.equal(second.offset, first.offset);
-      assert.equal(second.deliveryCount, 2);
-      // The leader counts the delay from its own clock, so allow some slack below the delay.
-      assert.ok(waited >= 1_200, `came back after only ${waited} ms`);
-      await c.ack(second);
-    } finally {
-      c.close();
-    }
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const delayed = named("delayed", attempt);
+      await client.createQueue(delayed);
+      await produce(delayed, 1);
+      await settled(delayed);
+      await steady.watch(delayed);
+      const c = await client.subscribe(delayed);
+      try {
+        const first = await take(c);
+        const start = performance.now();
+        await c.nackAfter(first, 1_500);
+        assert.equal(await c.poll(600), null, "not delivered before its time");
+        const second = await take(c);
+        const waited = performance.now() - start;
+        assert.equal(second.offset, first.offset);
+        assert.equal(second.deliveryCount, 2);
+        // The leader counts the delay from its own clock, so allow some slack below the delay.
+        assert.ok(waited >= 1_200, `came back after only ${waited} ms`);
+        await c.ack(second);
+      } finally {
+        c.close();
+      }
+    });
   });
 
   test("a producer delays a message with a header", async () => {
@@ -250,28 +277,34 @@ describe("queues against three real nodes", { skip }, () => {
   });
 
   test("a consumer that disappears leaves its messages to the next", async () => {
-    await client.createQueue("vanish");
-    await produce("vanish", 3);
-    await settled("vanish");
-    const other = newClient();
-    const gone = await other.subscribe("vanish", { credit: 10 });
-    for (let i = 0; i < 3; i++) {
-      await take(gone); // delivered to it, never acked
-    }
-    other.close(); // closing the client closes the connection, and the messages go back
-    const offsets = new Set<bigint>();
-    const c = await client.subscribe("vanish");
-    try {
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const vanish = named("vanish", attempt);
+      await client.createQueue(vanish);
+      await produce(vanish, 3);
+      await settled(vanish);
+      await steady.watch(vanish);
+      const other = newClient();
+      const gone = await other.subscribe(vanish, { credit: 10 });
       for (let i = 0; i < 3; i++) {
-        const d = await take(c);
-        assert.equal(d.deliveryCount, 2);
-        offsets.add(d.offset);
-        await c.ack(d);
+        await take(gone); // delivered to it, never acked
       }
-    } finally {
-      c.close();
-    }
-    assert.equal(offsets.size, 3);
+      other.close(); // closing the client closes the connection, and the messages go back
+      const offsets = new Set<bigint>();
+      const c = await client.subscribe(vanish);
+      try {
+        for (let i = 0; i < 3; i++) {
+          const d = await take(c);
+          assert.equal(d.deliveryCount, 2);
+          offsets.add(d.offset);
+          await c.ack(d);
+        }
+      } finally {
+        c.close();
+      }
+      assert.equal(offsets.size, 3);
+    });
   });
 
   test("a closed consumer gives back what it did not read", async () => {
@@ -305,44 +338,51 @@ describe("queues against three real nodes", { skip }, () => {
   });
 
   test("a message delivered too often lands in the dead-letter queue with its origin", async () => {
-    await client.createQueue("dead-letters");
-    const cappedId = await client.createQueue("capped", { maxDeliveries: 2, deadLetterQueue: "dead-letters" });
-    const offset = (await client.produce("capped", 0, { value: "poison", key: "k" })).baseOffset;
-    await settled("capped");
-    const c = await client.subscribe("capped");
-    try {
-      const d1 = await take(c);
-      assert.equal(d1.deliveryCount, 1);
-      assert.equal(d1.deadLetter(), null);
-      await c.nack(d1, true);
-      const d2 = await take(c);
-      assert.equal(d2.deliveryCount, 2);
-      await c.nack(d2, true);
-    } finally {
-      c.close();
-    }
-    const dl = await client.subscribe("dead-letters");
-    try {
-      const d = await take(dl);
-      assert.equal(d.text(), "poison");
-      assert.equal(Buffer.from(d.key as Uint8Array).toString(), "k");
-      const origin = d.deadLetter();
-      assert.ok(origin);
-      assert.equal(origin.reason, "max-deliveries");
-      assert.equal(origin.queue, "capped");
-      assert.equal(origin.queueId, cappedId);
-      assert.equal(origin.offset, offset);
-      assert.equal(origin.deliveries, 2);
-      await dl.ack(d);
-    } finally {
-      dl.close();
-    }
-    const again = await client.subscribe("capped");
-    try {
-      assert.equal(await again.poll(1_000), null, "retired, not delivered a third time");
-    } finally {
-      again.close();
-    }
+    // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new queue,
+    // if a leader moved while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const deadLetters = named("dead-letters", attempt);
+      const capped = named("capped", attempt);
+      await client.createQueue(deadLetters);
+      const cappedId = await client.createQueue(capped, { maxDeliveries: 2, deadLetterQueue: deadLetters });
+      const offset = (await client.produce(capped, 0, { value: "poison", key: "k" })).baseOffset;
+      await settled(capped);
+      await steady.watch(capped);
+      const c = await client.subscribe(capped);
+      try {
+        const d1 = await take(c);
+        assert.equal(d1.deliveryCount, 1);
+        assert.equal(d1.deadLetter(), null);
+        await c.nack(d1, true);
+        const d2 = await take(c);
+        assert.equal(d2.deliveryCount, 2);
+        await c.nack(d2, true);
+      } finally {
+        c.close();
+      }
+      const dl = await client.subscribe(deadLetters);
+      try {
+        const d = await take(dl);
+        assert.equal(d.text(), "poison");
+        assert.equal(Buffer.from(d.key as Uint8Array).toString(), "k");
+        const origin = d.deadLetter();
+        assert.ok(origin);
+        assert.equal(origin.reason, "max-deliveries");
+        assert.equal(origin.queue, capped);
+        assert.equal(origin.queueId, cappedId);
+        assert.equal(origin.offset, offset);
+        assert.equal(origin.deliveries, 2);
+        await dl.ack(d);
+      } finally {
+        dl.close();
+      }
+      const again = await client.subscribe(capped);
+      try {
+        assert.equal(await again.poll(1_000), null, "retired, not delivered a third time");
+      } finally {
+        again.close();
+      }
+    });
   });
 
   test("a message that waits too long expires into the dead-letter queue", async () => {

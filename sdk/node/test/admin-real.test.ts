@@ -191,9 +191,10 @@ describe("admin calls against three real nodes", { skip }, () => {
   });
 
   test("a purge settles the messages that are ready and leaves what a consumer holds", async () => {
-    await client.createQueue("purge-q");
+    // The id from the answer: a node asked for metadata right after may not know the queue yet, and the id it gives
+    // then matches nothing in the metrics.
+    const queueId = await client.createQueue("purge-q");
     await pinLeader(client, "purge-q");
-    const queueId = (await client.metadata("purge-q")).resources.find((r) => r.name === "purge-q")?.resourceId;
     await client.produce("purge-q", 0, [{ value: "m0" }, { value: "m1" }, { value: "m2" }, { value: "m3" }]);
     const c = await client.subscribe("purge-q", { credit: 1 });
     const kept: string[] = [];
@@ -353,10 +354,9 @@ describe("admin calls against three real nodes", { skip }, () => {
   });
 
   test("every node reports its metrics, and what was produced shows on the leader", async () => {
-    await client.createStream("metrics-s", 1, 3);
+    const id = await client.createStream("metrics-s", 1, 3);
     // Produce counters are the leader's, in memory: the leader stays where it took the produce.
     await pinLeader(client, "metrics-s");
-    const id = (await client.metadata("metrics-s")).resources.find((r) => r.name === "metrics-s")?.resourceId;
     await client.produce("metrics-s", 0, [{ value: "a" }, { value: "b" }, { value: "c" }]);
     await until("the leader's counters", async () => {
       const all = await client.nodeMetrics();

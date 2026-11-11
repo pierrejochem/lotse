@@ -158,22 +158,30 @@ public sealed class RealClusterTests : IClassFixture<RealCluster>, IAsyncLifetim
     [LotseFact]
     public async Task ListOffsetsFindsTheStartTheEndAndATime()
     {
-        await Client.CreateStreamAsync("offsets", 1, 3);
-        long t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        ProduceResult a = await Client.ProduceAsync("offsets", 0, OutMessage.FromValue("a").WithTimestamp(t0 + 1_000));
-        ProduceResult b = await Client.ProduceAsync("offsets", 0, OutMessage.FromValue("b").WithTimestamp(t0 + 5_000));
-        ProduceResult c = await Client.ProduceAsync("offsets", 0, OutMessage.FromValue("c").WithTimestamp(t0 + 9_000));
+        // The end of a log moves when a new leader appends a note of its own term, so the scenario runs again, with a
+        // new stream, if a leader moved while it ran; with every leader where it was, a failure is a failure.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
+        {
+            string offsets = attempt == 1 ? "offsets" : "offsets-" + attempt;
+            await Client.CreateStreamAsync(offsets, 1, 3);
+            await RealWaits.PinLeaderAsync(Client, offsets);
+            await steady.WatchAsync(offsets);
+            long t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            ProduceResult a = await Client.ProduceAsync(offsets, 0, OutMessage.FromValue("a").WithTimestamp(t0 + 1_000));
+            ProduceResult b = await Client.ProduceAsync(offsets, 0, OutMessage.FromValue("b").WithTimestamp(t0 + 5_000));
+            ProduceResult c = await Client.ProduceAsync(offsets, 0, OutMessage.FromValue("c").WithTimestamp(t0 + 9_000));
 
-        Assert.Equal(0UL, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Earliest));
-        Assert.Equal(c.BaseOffset + 1, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Latest));
-        // Batches are found by their newest record: the first with a record at or after the time.
-        Assert.Equal(a.BaseOffset, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0)));
-        Assert.Equal(a.BaseOffset, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0 + 1_000)));
-        Assert.Equal(b.BaseOffset, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0 + 1_001)));
-        Assert.Equal(b.BaseOffset, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0 + 5_000)));
-        Assert.Equal(c.BaseOffset, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0 + 9_000)));
-        // No batch that new yet: the latest offset.
-        Assert.Equal(c.BaseOffset + 1, await Client.ListOffsetAsync("offsets", 0, OffsetAt.Time(t0 + 9_001)));
+            Assert.Equal(0UL, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Earliest));
+            Assert.Equal(c.BaseOffset + 1, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Latest));
+            // Batches are found by their newest record: the first with a record at or after the time.
+            Assert.Equal(a.BaseOffset, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0)));
+            Assert.Equal(a.BaseOffset, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0 + 1_000)));
+            Assert.Equal(b.BaseOffset, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0 + 1_001)));
+            Assert.Equal(b.BaseOffset, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0 + 5_000)));
+            Assert.Equal(c.BaseOffset, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0 + 9_000)));
+            // No batch that new yet: the latest offset.
+            Assert.Equal(c.BaseOffset + 1, await Client.ListOffsetAsync(offsets, 0, OffsetAt.Time(t0 + 9_001)));
+        });
     }
 
     [LotseFact]
