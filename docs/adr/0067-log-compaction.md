@@ -1,6 +1,6 @@
 # 67. Log compaction
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0098](0098-compaction-maps-a-bounded-number-of-keys-per-sweep.md) (a bounded map of key hashes per sweep, one sweep per node)
 - Date: 2026-11-06
 
 ## Context

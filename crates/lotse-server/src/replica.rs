@@ -150,6 +150,22 @@ impl Default for ReplicaOptions {
     }
 }
 
+/// How a compaction sweep may run (ADR 0098).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sweep {
+    /// A new sweep may start (no other replica of the node sweeps).
+    pub may_start: bool,
+    /// Bytes the sweep's map of keys may take.
+    pub map_bytes: u64,
+}
+
+impl Default for Sweep {
+    /// May start, with the default budget.
+    fn default() -> Self {
+        Sweep { may_start: true, map_bytes: crate::DEFAULT_COMPACTION_MAP_BYTES }
+    }
+}
+
 /// What a replica may delete from its log (ADR 0046). Old data goes in
 /// whole segments, and only up to a snapshot of the replica's state taken
 /// exactly where the log then starts, so a follower that has fallen behind
@@ -783,8 +799,14 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// [`Retention::State`], a snapshot taken now), and only whole segments.
     /// Returns the log's new start, if it moved.
     pub async fn retain(&mut self, now_ms: u64) -> Result<Option<u64>, Error> {
+        self.retain_with(now_ms, Sweep::default()).await
+    }
+
+    /// [`Replica::retain`], with a compaction sweep allowed to start only
+    /// as `sweep` says: a node runs one at a time (ADR 0098).
+    pub async fn retain_with(&mut self, now_ms: u64, sweep: Sweep) -> Result<Option<u64>, Error> {
         if let Retention::Stream { compact: Some(tombstone_ms), .. } = self.retention {
-            self.compact_log(tombstone_ms, now_ms).await?;
+            self.compact_log(tombstone_ms, now_ms, sweep).await?;
         }
         let Some(point) = self.retention_point(now_ms) else { return Ok(None) };
         let current = self.raft.log().snapshot_index();
@@ -820,14 +842,22 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
 
     /// One step of compaction (ADR 0067). Returns the base of the segment
     /// it rewrote, if any.
-    async fn compact_log(&mut self, tombstone_ms: u64, now_ms: u64) -> Result<Option<u64>, Error> {
+    async fn compact_log(&mut self, tombstone_ms: u64, now_ms: u64, sweep: Sweep) -> Result<Option<u64>, Error> {
         let applied = self.applied;
         let stable = self.state.txns.last_stable_offset(applied).min(applied);
         // Below what every member holds (indices are offsets + 1).
         let tombstones_below =
             self.raft.matched().and_then(|m| m.values().copied().min()).map_or(0, |index| index.saturating_sub(1));
-        let limits = compaction::Limits { stable, tombstones_below, tombstone_ms, now_ms };
+        let map_keys = usize::try_from(sweep.map_bytes / compaction::MAP_ENTRY_BYTES).unwrap_or(usize::MAX);
+        let limits =
+            compaction::Limits { stable, tombstones_below, tombstone_ms, now_ms, may_start: sweep.may_start, map_keys };
         self.compactor.step(&mut self.log, &self.state.txns, limits).await
+    }
+
+    /// Whether a compaction sweep is in progress here: it holds a map of
+    /// keys until it ends.
+    pub fn sweeping(&self) -> bool {
+        self.compactor.sweeping()
     }
 
     async fn fill(&self, s: &mut Send) -> Result<(), Error> {
