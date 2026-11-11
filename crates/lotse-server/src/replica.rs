@@ -302,12 +302,16 @@ pub struct Replica<D: Disk, S> {
     raft: RaftGroup,
     sm: S,
     applied: u64,
-    snapshot: Option<(SnapshotMeta, Bytes)>,
-    /// Snapshots replaced while being sent to a follower in chunks.
-    older: OlderSnapshots,
-    /// Snapshots taken where segments begin, newer than `snapshot`: where
-    /// retention may later cut (see [`Retention`]).
-    boundaries: std::collections::BTreeMap<u64, (SnapshotMeta, Bytes)>,
+    /// The latest snapshot; its data stays in its file (ADR 0099).
+    snapshot: Option<(SnapshotMeta, SnapshotFile)>,
+    /// Snapshots replaced while being sent to a follower in chunks, copied
+    /// to files of their own.
+    older: OlderSnapshots<SnapshotFile>,
+    /// Snapshots taken where segments begin, newer than `snapshot`, each in
+    /// a file: where retention may later cut (see [`Retention`]).
+    boundaries: std::collections::BTreeMap<u64, (SnapshotMeta, SnapshotFile)>,
+    /// The file the chunks of a snapshot being received go to.
+    incoming: Option<D::File>,
     retention: Retention,
     compactor: compaction::Compactor,
     state: PartitionState,
@@ -372,6 +376,14 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             let d = state.restore(data)?;
             sm.restore(&d).map_err(Error::Corrupt)?;
         }
+        // What a run before this one kept besides its latest snapshot is of
+        // no use now: boundaries are taken again as the log is applied, and
+        // transfers in either direction start over.
+        snapshots::remove_others(&disk, &dir).await?;
+        let snapshot = snapshot.map(|(m, data)| {
+            let f = SnapshotFile::latest(&m, data.len() as u64);
+            (m, f)
+        });
         let hard_state = match read_file(&disk, &dir.join(HARD_STATE)).await? {
             Some(bytes) => decode_hard_state(bytes)?,
             None => HardState::default(),
@@ -430,6 +442,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             snapshot,
             older: OlderSnapshots::default(),
             boundaries: std::collections::BTreeMap::new(),
+            incoming: None,
             retention: options.retention,
             compactor: compaction::Compactor::default(),
             state,
@@ -654,16 +667,41 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             return Ok(Output::default());
         }
         let ready = self.raft.ready();
-        if let Some(snap) = ready.snapshot {
-            write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&snap.meta, &snap.data)).await?;
-            let d = self.state.restore(&snap.data)?;
+        for c in ready.snapshot_chunks {
+            if c.offset == 0 {
+                let f = self.disk.open(&self.dir.join(snapshots::INCOMING), OpenMode::CreateOrOpen).await?;
+                f.truncate(0).await?;
+                self.incoming = Some(f);
+            }
+            let Some(f) = &self.incoming else {
+                return Err(Error::Corrupt(format!("a snapshot chunk at {} without its start", c.offset)));
+            };
+            // Not synced: a crash ends the transfer (see `Ready`).
+            let at = f.append(c.data).await?;
+            if at != c.offset {
+                return Err(Error::Corrupt(format!("a snapshot chunk at {} lands at {at}", c.offset)));
+            }
+        }
+        if let Some(meta) = ready.snapshot {
+            let Some(f) = self.incoming.take() else {
+                return Err(Error::Corrupt("a snapshot to install without its chunks".into()));
+            };
+            let len = f.size().await?;
+            let data = f.read_at(0, usize::try_from(len).unwrap_or(usize::MAX)).await?;
+            drop(f);
+            self.keep_for_transfer().await?;
+            write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
+            snapshots::remove(&self.disk, &self.dir, snapshots::INCOMING).await?;
+            let d = self.state.restore(&data)?;
             self.sm.restore(&d).map_err(Error::Corrupt)?;
-            self.log.reset(snap.meta.index).await?;
+            self.log.reset(meta.index).await?;
             self.state.txns.forget_aborted_before(self.log.start_offset());
-            self.applied = snap.meta.index;
-            let old = self.snapshot.replace((snap.meta, snap.data));
-            self.older.supersede(old, &self.raft);
-            self.boundaries.clear();
+            self.applied = meta.index;
+            let file = SnapshotFile::latest(&meta, data.len() as u64);
+            self.snapshot = Some((meta, file));
+            for (_, (_, f)) in std::mem::take(&mut self.boundaries) {
+                snapshots::remove(&self.disk, &self.dir, &f.name).await?;
+            }
             self.compactor.reset();
         }
         if let Some(from) = ready.truncate_from {
@@ -691,6 +729,12 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         if let Some((first, last)) = ready.committed {
             self.apply(first, last).await?;
         }
+        if self.incoming.is_some() && !self.raft.receiving_snapshot() {
+            // The core gave the transfer up (another snapshot or none comes
+            // next): its chunks go.
+            self.incoming = None;
+            snapshots::remove(&self.disk, &self.dir, snapshots::INCOMING).await?;
+        }
         self.raft.advance();
         let mut out = Output { messages: ready.messages, reads: ready.reads, reads_aborted: ready.reads_aborted };
         for s in &mut out.messages {
@@ -713,7 +757,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                         batch.base_offset()
                     )));
                 }
-                self.note_boundary(batch.base_offset());
+                self.note_boundary(batch.base_offset()).await?;
                 self.state.applied(batch.base_offset() + 1, batch.next_offset(), &batch)?;
                 // Control batches (Raft's own, transaction markers) are not data.
                 if !batch.attributes().control {
@@ -732,18 +776,42 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// Before applying the batch at `offset`, every batch before it applied:
     /// if a segment begins there, the state as it is now (index `offset`)
     /// is a place retention can cut.
-    fn note_boundary(&mut self, offset: u64) {
+    async fn note_boundary(&mut self, offset: u64) -> Result<(), Error> {
         let cuts = matches!(self.retention, Retention::Stream { .. } | Retention::Queue);
         if !cuts || offset <= self.raft.log().snapshot_index() {
-            return;
+            return Ok(());
         }
         if self.boundaries.contains_key(&offset) || !self.log.segments().any(|s| s.base_offset == offset) {
-            return;
+            return Ok(());
         }
         if let Some(meta) = self.raft.meta_at(offset) {
             let data = self.state.snapshot(&self.sm.snapshot());
-            self.boundaries.insert(offset, (meta, data));
+            // Synced, as retention may make it the snapshot by a rename.
+            let name = snapshots::boundary_name(offset);
+            write_atomic(&self.disk, &self.dir, &name, encode_snapshot(&meta, &data)).await?;
+            let file = SnapshotFile::at(name, &meta, data.len() as u64);
+            self.boundaries.insert(offset, (meta, file));
         }
+        Ok(())
+    }
+
+    /// Call before the snapshot file is replaced: copies the current
+    /// snapshot to a file of its own if a transfer of it is under way, and
+    /// removes the copies no transfer needs any more.
+    async fn keep_for_transfer(&mut self) -> Result<(), Error> {
+        let wanted = self.raft.snapshots_in_transfer();
+        let old = match &self.snapshot {
+            Some((m, f)) if wanted.contains(&m.index) && self.older.get(m.index).is_none() => {
+                let name = snapshots::sent_name(m.index);
+                snapshots::copy(&self.disk, &self.dir, &f.name, &name).await?;
+                Some((m.clone(), SnapshotFile { name, ..f.clone() }))
+            }
+            _ => None,
+        };
+        for (_, f) in self.older.supersede(old, &self.raft) {
+            snapshots::remove(&self.disk, &self.dir, &f.name).await?;
+        }
+        Ok(())
     }
 
     /// What may be deleted now.
@@ -810,31 +878,46 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         }
         let Some(point) = self.retention_point(now_ms) else { return Ok(None) };
         let current = self.raft.log().snapshot_index();
-        let (meta, data) = if self.retention == Retention::State {
+        let cut = if self.retention == Retention::State {
             // Worth a snapshot only once a whole segment can go.
             let active = self.log.segments().last().map_or(0, |s| s.base_offset);
             if !self.log.segments().any(|s| s.base_offset != active && s.next_offset <= point) {
                 return Ok(None);
             }
             let Some(meta) = self.raft.meta_at(point) else { return Ok(None) };
-            (meta, self.state.snapshot(&self.sm.snapshot()))
-        } else {
-            match self.boundaries.range(..=point).next_back() {
-                Some((_, (meta, data))) => (meta.clone(), data.clone()),
-                None => return Ok(None),
+            if meta.index <= current {
+                return Ok(None);
             }
+            let data = self.state.snapshot(&self.sm.snapshot());
+            // The snapshot first: a crash after it finds the log continuing
+            // it and cuts it again on open.
+            self.keep_for_transfer().await?;
+            write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
+            let file = SnapshotFile::latest(&meta, data.len() as u64);
+            let cut = meta.index;
+            self.snapshot = Some((meta, file));
+            cut
+        } else {
+            let Some((&at, _)) = self.boundaries.range(..=point).next_back() else { return Ok(None) };
+            if self.boundaries[&at].0.index <= current {
+                return Ok(None);
+            }
+            let (meta, file) = self.boundaries.remove(&at).expect("just found");
+            // The boundary's file, synced when it was taken, becomes the
+            // snapshot in one rename: no copy of its data in memory.
+            self.keep_for_transfer().await?;
+            self.disk.rename(&self.dir.join(&file.name), &self.dir.join(SNAPSHOT)).await?;
+            let cut = meta.index;
+            self.snapshot = Some((meta, SnapshotFile { name: SNAPSHOT.into(), ..file }));
+            cut
         };
-        let cut = meta.index;
-        if cut <= current {
-            return Ok(None);
-        }
-        // The snapshot first: a crash after it finds the log continuing it
-        // and cuts it again on open.
-        write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
         self.raft.compact(cut);
-        let old = self.snapshot.replace((meta, data));
-        self.older.supersede(old, &self.raft);
-        self.boundaries.retain(|&i, _| i > cut);
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.boundaries).into_iter().partition(|(i, _)| *i <= cut);
+        self.boundaries = kept.into_iter().collect();
+        for (_, (_, f)) in gone {
+            snapshots::remove(&self.disk, &self.dir, &f.name).await?;
+        }
         self.log.trim_before(cut).await?;
         self.state.txns.forget_aborted_before(self.log.start_offset());
         Ok(Some(cut))
@@ -862,10 +945,13 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
 
     async fn fill(&self, s: &mut Send) -> Result<(), Error> {
         if s.attach_snapshot {
-            if let Some((m, d)) = &self.snapshot {
-                s.msg.attach_snapshot_chunk(m, d, &self.older, self.max_snapshot_chunk);
-            }
             s.attach_snapshot = false;
+            let Some((m, f)) = &self.snapshot else { return Ok(()) };
+            let Some((source, offset)) = s.msg.snapshot_chunk_source(m, f, &self.older) else { return Ok(()) };
+            let source = source.clone();
+            let (start, data) = source.read(&self.disk, &self.dir, offset, self.max_snapshot_chunk).await?;
+            let done = start + data.len() as u64 == source.len;
+            s.msg.set_snapshot_chunk(start, data, done);
             return Ok(());
         }
         let (Some(from), Message::Append { entries, .. }) = (s.fill_from, &mut s.msg) else { return Ok(()) };
@@ -893,9 +979,10 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.raft.compact(index);
         let meta = self.raft.snapshot_meta();
         let data = self.state.snapshot(&self.sm.snapshot());
+        self.keep_for_transfer().await?;
         write_atomic(&self.disk, &self.dir, SNAPSHOT, encode_snapshot(&meta, &data)).await?;
-        let old = self.snapshot.replace((meta, data));
-        self.older.supersede(old, &self.raft);
+        let file = SnapshotFile::latest(&meta, data.len() as u64);
+        self.snapshot = Some((meta, file));
         Ok(index)
     }
 }
@@ -1079,6 +1166,9 @@ fn decode_snapshot(bytes: Bytes) -> Result<(SnapshotMeta, Bytes), Error> {
 }
 
 mod compaction;
+mod snapshots;
+
+use snapshots::SnapshotFile;
 
 #[cfg(test)]
 mod tests;
