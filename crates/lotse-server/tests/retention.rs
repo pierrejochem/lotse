@@ -364,9 +364,9 @@ async fn run(rt: SimRuntime) {
     let ms = 300 + rt.below(1_200);
     let bytes = 1_000 + rt.below(3_000);
     let retention = match rt.below(3) {
-        0 => RetentionConfig { ms: Some(ms), bytes: None },
-        1 => RetentionConfig { ms: None, bytes: Some(bytes) },
-        _ => RetentionConfig { ms: Some(ms), bytes: Some(bytes) },
+        0 => RetentionConfig { ms: Some(ms), bytes: None, ..RetentionConfig::keep() },
+        1 => RetentionConfig { ms: None, bytes: Some(bytes), ..RetentionConfig::keep() },
+        _ => RetentionConfig { ms: Some(ms), bytes: Some(bytes), ..RetentionConfig::keep() },
     };
     let mut w = World::new(rt.clone(), retention).await;
     let n = w.cfgs.len() as u64;

@@ -26,11 +26,11 @@ pub use access::DEFAULT_TENANT;
 pub use auth::{AuthConfig, ClientCas, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal};
 pub use client::{QueueConfig, StreamConfig};
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};
-pub use node::{GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig};
+pub use node::{DEFAULT_COMPACTION_MAP_BYTES, GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig};
 pub use producers::DEFAULT_MAX_PRODUCERS;
 
 /// How long a group member may go without a heartbeat (Kafka's default).
 pub const DEFAULT_GROUP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// How often group members send heartbeats (Kafka's default).
 pub const DEFAULT_GROUP_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, Retention, StateMachine};
+pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, Retention, StateMachine, Sweep};

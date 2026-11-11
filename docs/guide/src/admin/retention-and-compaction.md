@@ -61,12 +61,13 @@ A stream with `cleanup.policy` set to `compact` or `compact,delete` is compacted
 - Each replica compacts its own log, at its own pace. Compaction is not replicated, so replicas' bytes may differ. Their entries never do.
 - Sealed segments below the last stable offset and the applied index are rewritten whole. Batches keep their offsets, term and producer fields; records go.
 - A record with a key goes once a newer record of the same key is in a sealed segment. A record of an aborted transaction goes. A record without a key stays.
-- A tombstone, once it is the newest record of its key, goes when all three hold: it is older than `delete.retention.ms` by its timestamp; the replica leads and every member of the group, learners included, is known to hold it; and the sweep that drops it knew it from its start.
-- A sweep starts when new sealed data is there, or a minute after the last one began. A step looks at up to eight segments and rewrites at most one.
+- A tombstone, once it is the newest record of its key, goes when all three hold: it is older than `delete.retention.ms` by its timestamp; the replica leads and every member of the group, learners included, is known to hold it; and this replica's older values of the key are gone.
+- A sweep first maps keys to their newest offset, from where the last sweep's map ended, until the map is full or the sealed data ends; then it rewrites the segments below that point. A node runs one sweep at a time and its map may take `[compaction] map_bytes` (default 64 MiB, about 1.4 million keys); partitions take turns. A partition with more keys than that takes several sweeps.
+- A sweep starts when new sealed data is there or the last one did not reach the end, otherwise a minute after the last one began. A step looks at up to eight segments and rewrites at most one.
 - A segment is written as `<base>.log.cleaned`, synced and renamed over the old one. A crash leaves the old segment or the new one whole, and opening the log removes a leftover `.cleaned` file.
 
 ### Limits
 
-- Every key of a partition is held in memory. After a restart the map is rebuilt from the log. There is no dirty ratio, minimum lag or bound on memory.
+- Keys are told apart by 16 bytes of their SHA-256: two keys with one hash (odds of 2^-128 per pair) would count as one. There is no dirty ratio or minimum lag. After a restart the sweeps start from the log start again.
 - Markers, Raft entries and the broker's own batches are never compacted.
 - A tombstone dropped while a replica that left the group still holds an older value is not covered by a test.

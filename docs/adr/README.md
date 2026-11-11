@@ -101,5 +101,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0095 | [A new group starts on its preferred node](0095-a-new-group-starts-on-its-preferred-node.md) | Accepted |
 | 0096 | [Recorded certificates are checked; issuers by name and key identifier](0096-recorded-certificates-are-checked.md) | Accepted |
 | 0097 | [A queue leader delivers only with a recent quorum](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md) | Accepted |
+| 0098 | [Compaction maps a bounded number of keys per sweep](0098-compaction-maps-a-bounded-number-of-keys-per-sweep.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
