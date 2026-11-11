@@ -19,8 +19,16 @@
 //! given new material ([`crate::TokioRuntime::reload_tls`]) closes the
 //! connections of certificates it now revokes. Only end-entity certificates
 //! are checked; a certificate whose issuer has no list here is not revoked.
+//! Each CA certificate of the bundle verifies on its own, with only the
+//! lists its key signed: webpki takes the first list whose issuer has the
+//! certificate's issuer name, so with two CAs of one name (a rotation that
+//! keeps it) another CA's list would refuse every certificate of the
+//! other. A handshake passes if one CA's verification passes. Closing
+//! connections on a reload matches the issuer's name and, where the list
+//! and the certificate both carry one, the authority key identifier
+//! (ADR 0096).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -30,6 +38,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme};
 
 /// What is wrong with TLS material.
@@ -69,10 +78,16 @@ impl fmt::Debug for TlsConfig {
     }
 }
 
+/// Revoked certificates by issuer name and serial (both DER), with the
+/// authority key identifier of each list that names them (`None`: a list
+/// without one, which matches by name).
+type Revoked = BTreeMap<(Vec<u8>, Vec<u8>), Vec<Option<Vec<u8>>>>;
+
 pub(crate) struct Tls {
-    /// `(issuer, serial)` of every certificate the revocation list names,
-    /// both as their DER encodings.
-    revoked: BTreeSet<(Vec<u8>, Vec<u8>)>,
+    /// Every certificate the revocation lists name, by issuer name and
+    /// serial (both DER), with the authority key identifier of each list
+    /// that names it (`None`: a list without one, which matches by name).
+    revoked: Revoked,
     node_server: Option<Arc<ServerConfig>>,
     client_server: Option<Arc<ServerConfig>>,
     node_client: Arc<ClientConfig>,
@@ -95,15 +110,21 @@ impl TlsConfig {
         crl: Option<&[u8]>,
     ) -> Result<TlsConfig, TlsError> {
         let mut crls = Vec::new();
-        let mut revoked = BTreeSet::new();
+        let mut revoked = Revoked::new();
         if let Some(pem) = crl {
             for der in CertificateRevocationListDer::pem_slice_iter(pem) {
                 let der = der.map_err(|e| TlsError::Pem { what: "the revocation list", detail: e.to_string() })?;
                 let (_, list) = <x509_parser::revocation_list::CertificateRevocationList as x509_parser::prelude::FromDer<_>>::from_der(der.as_ref())
                     .map_err(|e| TlsError::Pem { what: "the revocation list", detail: e.to_string() })?;
                 let issuer = list.issuer().as_raw().to_vec();
+                let key_id = list.extensions().iter().find_map(|e| match e.parsed_extension() {
+                    x509_parser::extensions::ParsedExtension::AuthorityKeyIdentifier(a) => {
+                        a.key_identifier.as_ref().map(|k| k.0.to_vec())
+                    }
+                    _ => None,
+                });
                 for r in list.iter_revoked_certificates() {
-                    revoked.insert((issuer.clone(), r.raw_serial().to_vec()));
+                    revoked.entry((issuer.clone(), r.raw_serial().to_vec())).or_default().push(key_id.clone());
                 }
                 crls.push(der);
             }
@@ -111,17 +132,35 @@ impl TlsConfig {
                 return Err(TlsError::Pem { what: "the revocation list", detail: "no CRL found".into() });
             }
         }
-        let mut roots = RootCertStore::empty();
-        let mut any = false;
-        for cert in CertificateDer::pem_slice_iter(ca) {
-            let cert = cert.map_err(|e| TlsError::Pem { what: "the CA certificate", detail: e.to_string() })?;
-            roots.add(cert)?;
-            any = true;
-        }
-        if !any {
+        let cas: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(ca)
+            .collect::<Result<_, _>>()
+            .map_err(|e| TlsError::Pem { what: "the CA certificate", detail: e.to_string() })?;
+        if cas.is_empty() {
             return Err(TlsError::Pem { what: "the CA certificate", detail: "no certificate found".into() });
         }
-        let roots = Arc::new(roots);
+        // One anchor per CA certificate, with the lists it signed. A list
+        // no CA here signed names no certificate a handshake lets in.
+        let mut anchors = Vec::new();
+        for ca in &cas {
+            let mut roots = RootCertStore::empty();
+            roots.add(ca.clone())?;
+            let (_, parsed) = x509_parser::parse_x509_certificate(ca.as_ref())
+                .map_err(|e| TlsError::Pem { what: "the CA certificate", detail: e.to_string() })?;
+            let signed: Vec<CertificateRevocationListDer<'static>> = crls
+                .iter()
+                .filter(|der| {
+                    <x509_parser::revocation_list::CertificateRevocationList as x509_parser::prelude::FromDer<_>>::from_der(
+                        der.as_ref(),
+                    )
+                    .is_ok_and(|(_, l)| {
+                        l.issuer().as_raw() == parsed.subject().as_raw()
+                            && l.verify_signature(parsed.public_key()).is_ok()
+                    })
+                })
+                .cloned()
+                .collect();
+            anchors.push((Arc::new(roots), signed));
+        }
         let identity = match identity {
             Some((chain, key)) => {
                 let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain)
@@ -141,12 +180,16 @@ impl TlsConfig {
 
         let server = |required: bool| -> Result<Option<Arc<ServerConfig>>, TlsError> {
             let Some((chain, key)) = &identity else { return Ok(None) };
-            let verifier = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
-                .with_crls(crls.clone())
-                .only_check_end_entity_revocation()
-                .allow_unknown_revocation_status();
-            let verifier = if required { verifier } else { verifier.allow_unauthenticated() };
-            let verifier = verifier.build().map_err(|e| rustls::Error::General(e.to_string()))?;
+            let mut each = Vec::new();
+            for (roots, crls) in &anchors {
+                let verifier = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+                    .with_crls(crls.clone())
+                    .only_check_end_entity_revocation()
+                    .allow_unknown_revocation_status();
+                let verifier = if required { verifier } else { verifier.allow_unauthenticated() };
+                each.push(verifier.build().map_err(|e| rustls::Error::General(e.to_string()))?);
+            }
+            let verifier = Arc::new(AnyClientVerifier::new(each));
             let mut cfg = ServerConfig::builder_with_provider(provider.clone())
                 .with_protocol_versions(versions)?
                 .with_client_cert_verifier(verifier)
@@ -157,12 +200,18 @@ impl TlsConfig {
             cfg.send_tls13_tickets = 0;
             Ok(Some(Arc::new(cfg)))
         };
-        let webpki = WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
-            .with_crls(crls.clone())
-            .only_check_end_entity_revocation()
-            .allow_unknown_revocation_status()
-            .build()
-            .map_err(|e| rustls::Error::General(e.to_string()))?;
+        let mut each: Vec<Arc<dyn ServerCertVerifier>> = Vec::new();
+        for (roots, crls) in &anchors {
+            each.push(
+                WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
+                    .with_crls(crls.clone())
+                    .only_check_end_entity_revocation()
+                    .allow_unknown_revocation_status()
+                    .build()
+                    .map_err(|e| rustls::Error::General(e.to_string()))?,
+            );
+        }
+        let webpki: Arc<dyn ServerCertVerifier> = Arc::new(AnyServerVerifier(each));
         let client = |verifier: Arc<dyn ServerCertVerifier>| -> Result<Arc<ClientConfig>, TlsError> {
             let builder = ClientConfig::builder_with_provider(provider.clone())
                 .with_protocol_versions(versions)?
@@ -215,13 +264,25 @@ impl TlsConfig {
     }
 
     /// Whether the revocation list names `cert` (an end-entity certificate,
-    /// DER), by its issuer and serial number.
+    /// DER), by its issuer and serial number: a list of its issuer's name
+    /// whose authority key identifier is the certificate's, or one of
+    /// them lacks it.
     pub fn revokes(&self, cert: &[u8]) -> bool {
         if self.inner.revoked.is_empty() {
             return false;
         }
         match x509_parser::parse_x509_certificate(cert) {
-            Ok((_, c)) => self.inner.revoked.contains(&(c.issuer().as_raw().to_vec(), c.raw_serial().to_vec())),
+            Ok((_, c)) => {
+                let Some(lists) = self.inner.revoked.get(&(c.issuer().as_raw().to_vec(), c.raw_serial().to_vec()))
+                else {
+                    return false;
+                };
+                let key_id = lotse_auth::x509::authority_key_id(&c);
+                lists.iter().any(|l| match (l, key_id) {
+                    (Some(l), Some(k)) => l == k,
+                    _ => true,
+                })
+            }
             // It passed a handshake, so it parses; if not, it is no
             // certificate this list could name.
             Err(_) => false,
@@ -246,7 +307,7 @@ impl TlsConfig {
 /// Checks the chain against the CA and ignores the host name; the node
 /// checks the node id the certificate names instead.
 #[derive(Debug)]
-struct ChainOnly(Arc<WebPkiServerVerifier>);
+struct ChainOnly(Arc<dyn ServerCertVerifier>);
 
 impl ServerCertVerifier for ChainOnly {
     fn verify_server_cert(
@@ -287,6 +348,139 @@ impl ServerCertVerifier for ChainOnly {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.supported_verify_schemes()
+    }
+}
+
+/// Of several verifications' errors, the most telling: one from a CA that
+/// knew the certificate's issuer rather than an unknown issuer.
+fn telling(errors: Vec<rustls::Error>) -> rustls::Error {
+    let unknown = |e: &rustls::Error| matches!(e, rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer));
+    let mut errors = errors.into_iter();
+    let first = errors.next().unwrap_or(rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer));
+    if !unknown(&first) {
+        return first;
+    }
+    errors.find(|e| !unknown(e)).unwrap_or(first)
+}
+
+/// A client certificate passes if one CA's verification, with that CA's
+/// own revocation lists, passes.
+#[derive(Debug)]
+struct AnyClientVerifier {
+    each: Vec<Arc<dyn ClientCertVerifier>>,
+    hints: Vec<rustls::DistinguishedName>,
+}
+
+impl AnyClientVerifier {
+    fn new(each: Vec<Arc<dyn ClientCertVerifier>>) -> AnyClientVerifier {
+        let mut hints = Vec::new();
+        for v in &each {
+            for h in v.root_hint_subjects() {
+                if !hints.iter().any(|k: &rustls::DistinguishedName| k.as_ref() == h.as_ref()) {
+                    hints.push(h.clone());
+                }
+            }
+        }
+        AnyClientVerifier { each, hints }
+    }
+}
+
+impl ClientCertVerifier for AnyClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.each[0].offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.each[0].client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &self.hints
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let mut errors = Vec::new();
+        for v in &self.each {
+            match v.verify_client_cert(end_entity, intermediates, now) {
+                Ok(ok) => return Ok(ok),
+                Err(e) => errors.push(e),
+            }
+        }
+        Err(telling(errors))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.each[0].verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.each[0].verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.each[0].supported_verify_schemes()
+    }
+}
+
+/// A server certificate passes if one CA's verification, with that CA's
+/// own revocation lists, passes.
+#[derive(Debug)]
+struct AnyServerVerifier(Vec<Arc<dyn ServerCertVerifier>>);
+
+impl ServerCertVerifier for AnyServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let mut errors = Vec::new();
+        for v in &self.0 {
+            match v.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
+                Ok(ok) => return Ok(ok),
+                Err(e) => errors.push(e),
+            }
+        }
+        Err(telling(errors))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0[0].verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0[0].verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0[0].supported_verify_schemes()
     }
 }
 
