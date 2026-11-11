@@ -291,6 +291,14 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     for change in crate::membership::plan(state, &core, configured_voters, &known.active, &sizes) {
         let _ = meta.propose_internal(crate::metadata::record(&change));
     }
+    // Tombstones go once every node the cluster lists has removed their
+    // groups' files (ADR 0100); one that has not answered holds them.
+    let removed = shared.removed_through.lock().expect("removed lock");
+    let resource_ids = state.forgettable(known.nodes.keys().map(|id| removed.get(id).copied().flatten()));
+    if !resource_ids.is_empty() {
+        let change = crate::metadata::Change::ForgetDeleted { resource_ids };
+        let _ = meta.propose_internal(crate::metadata::record(&change));
+    }
 }
 
 /// Tells the metadata group which client certificates this node accepted
@@ -411,7 +419,7 @@ struct Shared {
     commands: Mutex<VecDeque<Command>>,
     status: Mutex<BTreeMap<GroupId, GroupStatus>>,
     /// Resources deleted at runtime, for marker jobs.
-    deleted: Mutex<BTreeSet<u64>>,
+    deleted: Mutex<crate::metadata::Deleted>,
     /// Traffic and connections, for metrics.
     net: Arc<NetStats>,
     /// The other nodes of the cluster: only they may open a node link.
@@ -431,6 +439,9 @@ struct Shared {
     /// metadata leader last asked the nodes: what rebalancing weighs moves
     /// by (ADR 0052).
     sizes: Mutex<BTreeMap<GroupId, u64>>,
+    /// On the metadata leader: the metadata index through which each node
+    /// that answered has removed the files of deleted resources (ADR 0100).
+    removed_through: Mutex<BTreeMap<NodeId, Option<u64>>>,
     work: Signal,
     stop: Signal,
 }
@@ -480,6 +491,12 @@ impl NodeHandle {
     /// The last known status of every group here.
     pub fn statuses(&self) -> BTreeMap<GroupId, GroupStatus> {
         self.shared.status.lock().expect("status lock").clone()
+    }
+
+    /// How many tombstones of deleted resources this node's metadata view
+    /// keeps (ADR 0100).
+    pub fn tombstones(&self) -> usize {
+        self.shared.deleted.lock().expect("deleted lock").tombstones.len()
     }
 
     /// Asks the node to stop; its task finishes once everything is closed.
@@ -932,7 +949,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             next_sizes = rt.now() + cfg.tick * SIZES_EVERY_TICKS;
             ask_for_sizes(rt, cfg, groups, &marker_client, shared, jobs, &sizing);
         }
-        if shared.deleted.lock().expect("deleted lock").len() != known.deleted.len() {
+        if *shared.deleted.lock().expect("deleted lock") != known.deleted {
             // Marker jobs look before each attempt.
             shared.deleted.lock().expect("deleted lock").clone_from(&known.deleted);
         }
@@ -1200,13 +1217,16 @@ fn ask_for_sizes<R: Runtime, S: StateMachine>(
     jobs.spawn(rt, async move {
         if let Some(Ok(nodes)) = race(client.node_metrics(), &[&stop]).await {
             let mut sizes = BTreeMap::new();
+            let mut removed = BTreeMap::new();
             for m in nodes.into_iter().filter_map(|(_, m)| m.ok()) {
+                removed.insert(NodeId::from(m.node_id), m.removed_through);
                 for p in m.partitions {
                     let s = sizes.entry(p.group).or_insert(0u64);
                     *s = (*s).max(p.size_bytes);
                 }
             }
             *shared.sizes.lock().expect("sizes lock") = sizes;
+            *shared.removed_through.lock().expect("removed lock") = removed;
         }
         sizing.store(false, std::sync::atomic::Ordering::Relaxed);
     });
@@ -1380,7 +1400,7 @@ struct Known {
     /// Voters of runtime groups.
     voters: BTreeMap<GroupId, Vec<NodeId>>,
     /// Resources deleted at runtime.
-    deleted: BTreeSet<u64>,
+    deleted: crate::metadata::Deleted,
     /// Groups of deleted resources whose files this process has removed.
     removed: BTreeSet<GroupId>,
     /// Groups moved off this node whose logs this process has removed.
@@ -1407,7 +1427,7 @@ impl Known {
             queues: cfg.queues.clone(),
             exchanges: cfg.exchanges.clone(),
             voters: BTreeMap::new(),
-            deleted: BTreeSet::new(),
+            deleted: crate::metadata::Deleted::default(),
             removed: BTreeSet::new(),
             forgotten: BTreeSet::new(),
             applied: 0,
@@ -1450,7 +1470,7 @@ impl Known {
         known.applied = self.applied;
         known.removed = std::mem::take(&mut self.removed);
         known.forgotten = std::mem::take(&mut self.forgotten);
-        known.deleted = state.deleted.keys().copied().collect();
+        known.deleted = crate::metadata::Deleted::of(&state, self.applied);
         for (id, n) in &state.nodes {
             known.nodes.insert(*id, (n.peer.clone(), n.client.clone()));
         }

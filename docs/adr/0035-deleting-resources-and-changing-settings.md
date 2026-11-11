@@ -1,6 +1,6 @@
 # 35. Deleting resources and changing settings
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0100](0100-tombstones-go-once-every-node-removed-the-files.md) (a tombstone goes once every node removed the files)
 - Date: 2026-10-28
 
 ## Context

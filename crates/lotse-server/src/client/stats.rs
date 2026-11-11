@@ -139,6 +139,9 @@ impl Clients {
             peer_out_bytes: load(&node.net.peer_out),
             commit_latency: self.stats.latency.to_vec(),
             host,
+            // The view is rebuilt from the metadata only once the groups of
+            // what it shows deleted are closed and their files removed.
+            removed_through: (view.deleted.applied > 0).then_some(view.deleted.applied),
             ..DescribeMetricsResponse::default()
         };
         for (&g, replica) in groups {
