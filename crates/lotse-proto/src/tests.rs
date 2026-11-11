@@ -197,6 +197,8 @@ fn metrics_round_trip_in_full() {
     let req = Request::DescribeMetrics(DescribeMetricsRequest);
     assert_eq!(decode_request(encode_request(9, &req)).unwrap().1, req);
     metrics_round_trip(samples::metrics());
+    metrics_round_trip(DescribeMetricsResponse { removed_through: Some(1 << 40), ..samples::metrics() });
+    metrics_round_trip(DescribeMetricsResponse { removed_through: Some(0), ..DescribeMetricsResponse::default() });
 }
 
 /// Each array of a metrics answer filled with its smallest elements, one

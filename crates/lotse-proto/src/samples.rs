@@ -1027,7 +1027,8 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
     ]
 }
 
-/// A metrics answer with every array and every optional filled.
+/// A metrics answer with every array and every optional filled but the
+/// one nodes alone read.
 pub fn metrics() -> DescribeMetricsResponse {
     DescribeMetricsResponse {
         error: ErrorCode::NONE,
@@ -1089,6 +1090,8 @@ pub fn metrics() -> DescribeMetricsResponse {
             }],
             offsets: vec![CommittedOffset { resource_id: 7, partition: 0, offset: 42 }],
         }],
+        // Between nodes only: the SDKs need not know the tag (ADR 0100).
+        removed_through: None,
     }
 }
 

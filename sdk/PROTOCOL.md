@@ -64,7 +64,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 
 - `Metadata`: a resource carries its own `error`. An unknown name is a resource with `UNKNOWN_RESOURCE`, not a frame error. Leader `0` means unknown.
 - `OffsetFetch`: an offset of `u64::MAX` means none.
-- `DescribeMetrics`: `connections` is sent as a `u64` but must fit a `u32`.
+- `DescribeMetrics`: `connections` is sent as a `u64` but must fit a `u32`. Between nodes the answer may carry tag 1, `removed_through` (one `u64`, ADR 0100); a client skips it like any unknown tag.
 - `Produce` and `Fetch`: every partition has its own error; a request can partly succeed.
 
 ## Error codes

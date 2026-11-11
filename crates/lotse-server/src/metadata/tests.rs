@@ -174,7 +174,13 @@ fn a_delete_leaves_a_tombstone_and_takes_its_bindings() {
     let bytes = s.encode();
     assert_eq!(MetadataState::decode(&bytes).unwrap(), s);
     for cut in 0..bytes.len() {
-        assert!(MetadataState::decode(&bytes[..cut]).is_err(), "cut at {cut}");
+        // A cut where an optional section begins reads as a snapshot from
+        // before that section (the snapshot file's checksum catches it):
+        // here, tombstones without the index that made them.
+        assert!(
+            MetadataState::decode(&bytes[..cut]).is_ok_and(|d| d != s) || MetadataState::decode(&bytes[..cut]).is_err(),
+            "cut at {cut}"
+        );
     }
 }
 
@@ -698,4 +704,49 @@ fn only_a_dead_letter_change_can_be_reported_refused() {
     let ghost = QueueChange { dead_letter: Some(resource_id(99)), ..Default::default() };
     s.apply(6, &payload(&alter(ghost))).unwrap();
     assert!(ghost.refused_in(&s.queues[&work]));
+}
+
+#[test]
+fn a_tombstone_goes_once_every_node_removed_its_files_and_the_id_stays_deleted() {
+    let mut s = MetadataState::default();
+    let queue = |name: &str| Change::CreateQueue {
+        name: name.into(),
+        tenant: "t".into(),
+        voters: vec![1],
+        ack_timeout_ms: 0,
+        limits: QueueLimits::default(),
+    };
+    s.apply(1, &payload(&queue("a"))).unwrap();
+    s.apply(2, &payload(&queue("b"))).unwrap();
+    s.apply(3, &payload(&Change::DeclareExchange { name: "x".into(), tenant: "t".into(), kind: ExchangeKind::Fanout }))
+        .unwrap();
+    s.apply(4, &payload(&Change::Delete { resource_id: resource_id(1) })).unwrap();
+    s.apply(5, &payload(&Change::Delete { resource_id: resource_id(2) })).unwrap();
+    assert_eq!(s.deleted[&resource_id(1)], Tombstone { groups: 1, at: 4 });
+
+    // Every node must have removed the files through the delete's index.
+    assert!(s.forgettable([Some(9), None]).is_empty(), "a node that has not answered holds them all");
+    assert!(s.forgettable([Some(9), Some(3)]).is_empty(), "nor one that is behind both deletes");
+    assert_eq!(s.forgettable([Some(9), Some(4)]), vec![resource_id(1)]);
+    assert_eq!(s.forgettable([Some(5), Some(7)]), vec![resource_id(1), resource_id(2)]);
+    assert!(s.forgettable(std::iter::empty()).is_empty(), "no node listed is no node that answered");
+
+    let forget = Change::ForgetDeleted { resource_ids: vec![resource_id(1), resource_id(7)] };
+    assert_eq!(decode_change(&payload(&forget)[..]).unwrap(), forget);
+    s.apply(6, &payload(&forget)).unwrap();
+    assert!(!s.deleted.contains_key(&resource_id(1)) && s.deleted.contains_key(&resource_id(2)));
+    assert!(s.deleted_groups().iter().all(|g| *g == group_id(2, 0)), "its groups are no longer removed");
+    // Forgotten, the id is deleted all the same: a bind admitted before the
+    // delete changes nothing, and nodes call it gone.
+    assert!(s.is_deleted(resource_id(1)) && !s.is_deleted(resource_id(3)));
+    let to_a = Binding { queue_id: resource_id(1), key: String::new(), headers: vec![], match_all: true };
+    s.apply(7, &payload(&Change::Bind { exchange_id: resource_id(3), binding: to_a })).unwrap();
+    assert!(s.bindings.values().all(Vec::is_empty));
+    let seen = Deleted::of(&s, 7);
+    assert!(seen.contains(&resource_id(1)) && seen.contains(&resource_id(2)), "with or without a tombstone");
+    assert!(!seen.contains(&resource_id(3)), "live");
+    assert!(!seen.contains(&resource_id(8)), "newer than what this node applied: maybe not heard of yet");
+    assert!(!seen.contains(&9), "configured");
+    // The index of a tombstone survives a snapshot.
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
