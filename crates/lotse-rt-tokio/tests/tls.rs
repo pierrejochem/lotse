@@ -337,3 +337,84 @@ async fn a_connection_reports_the_certificate_it_showed() {
     let _c = anon.connect(&addr, Link::Client).await.unwrap();
     assert_eq!(accepted(&l).await.unwrap().peer_cert(), None);
 }
+
+#[test]
+fn a_reload_matches_a_revocation_list_by_issuer_name_and_key_identifier() {
+    // Two CAs with one name, as an old and a new one during a rotation.
+    let (old, new) = (DevCa::new(), DevCa::new());
+    let n = old.node(1, &["127.0.0.1"]);
+    let bob = new.principal("bob");
+    let bob_der = {
+        use rustls::pki_types::pem::PemObject as _;
+        rustls::pki_types::CertificateDer::from_pem_slice(bob.cert_pem.as_bytes()).unwrap()
+    };
+    let with = |crl: String| {
+        let bundle = format!("{}{}", old.ca_pem(), new.ca_pem());
+        TlsConfig::from_pem_with_crl(
+            bundle.as_bytes(),
+            Some((n.cert_pem.as_bytes(), n.key_pem.as_bytes())),
+            Some(crl.as_bytes()),
+        )
+        .unwrap()
+    };
+    // The old CA's list names bob's serial: not bob's issuer.
+    assert!(!with(old.crl(&[&bob.cert_pem])).revokes(&bob_der), "another CA's list");
+    assert!(with(new.crl(&[&bob.cert_pem])).revokes(&bob_der), "his issuer's list");
+}
+
+#[tokio::test]
+async fn a_handshake_takes_a_revocation_list_only_from_the_certificates_issuer() {
+    // Two CAs with one name in the bundle, a list of each: bob, from the
+    // new CA, is let in although the old CA's list names his serial, and
+    // refused once the new CA's list names it.
+    let (old, new) = (DevCa::new(), DevCa::new());
+    let n = old.node(1, &["127.0.0.1"]);
+    let bob = new.principal("bob");
+    let bundle = format!("{}{}", old.ca_pem(), new.ca_pem());
+    let server_with = |crls: String| {
+        rt().with_tls(
+            TlsConfig::from_pem_with_crl(
+                bundle.as_bytes(),
+                Some((n.cert_pem.as_bytes(), n.key_pem.as_bytes())),
+                Some(crls.as_bytes()),
+            )
+            .unwrap(),
+        )
+    };
+    let bob_client = || {
+        rt().with_tls(
+            TlsConfig::from_pem(bundle.as_bytes(), Some((bob.cert_pem.as_bytes(), bob.key_pem.as_bytes()))).unwrap(),
+        )
+    };
+
+    let server = server_with(format!("{}{}", old.crl(&[&bob.cert_pem]), new.crl(&[])));
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let b = bob_client().connect(&l.local_addr(), Link::Client).await.expect("the old CA's list is not his");
+    let s = accepted(&l).await.expect("let in");
+    assert!(talks(&b, &s).await);
+
+    let server = server_with(format!("{}{}", old.crl(&[]), new.crl(&[&bob.cert_pem])));
+    let l = server.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    if let Ok(conn) = bob_client().connect(&l.local_addr(), Link::Client).await {
+        assert!(refused(&conn).await, "his issuer's list revokes him");
+    }
+    assert!(accepted(&l).await.is_none());
+
+    // A dialler checks the other end the same way.
+    let n2 = new.node(2, &["127.0.0.1"]);
+    let with = |c: &lotse_rt_tokio::dev_certs::Issued, crls: String| {
+        rt().with_tls(
+            TlsConfig::from_pem_with_crl(
+                bundle.as_bytes(),
+                Some((c.cert_pem.as_bytes(), c.key_pem.as_bytes())),
+                Some(crls.as_bytes()),
+            )
+            .unwrap(),
+        )
+    };
+    let l2 = with(&n2, new.crl(&[])).listen("127.0.0.1:0", Link::Node).await.unwrap();
+    let dialler = with(&n, old.crl(&[&n2.cert_pem]));
+    assert!(dialler.connect(&l2.local_addr(), Link::Node).await.is_ok(), "the old CA's list is not node 2's");
+    let dialler = with(&n, new.crl(&[&n2.cert_pem]));
+    assert!(dialler.connect(&l2.local_addr(), Link::Node).await.is_err(), "its issuer's list revokes node 2");
+}
