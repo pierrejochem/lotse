@@ -408,7 +408,14 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
         // Produce counters are the leader's, in memory: the leader stays where it took the produce.
         await SettledAsync("adm-metrics");
         await ProduceAsync("adm-metrics", 4, "m");
+        // A node names itself leader only while a quorum answered it within an election timeout (ADR 0095): on a busy
+        // machine a late round leaves a moment in which no node does. Ask again until one does.
         IReadOnlyList<NodeMetrics> all = await Client.NodeMetricsAsync();
+        await RealWaits.UntilAsync("a node to report it leads adm-metrics", async () =>
+        {
+            all = await Client.NodeMetricsAsync();
+            return all.Any(n => n.Metrics is { } m && m.Partitions.Any(p => p.ResourceId == queueId && p.Leader));
+        });
         Assert.Equal(new uint[] { 1, 2, 3 }, all.Select(n => n.NodeId).OrderBy(i => i).ToArray());
         foreach (NodeMetrics n in all)
         {
