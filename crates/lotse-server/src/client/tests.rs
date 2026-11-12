@@ -436,6 +436,26 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
         });
         let Response::AddPartitionsToTxn(a) = ask(&mut clients, &mut groups, now, add).await else { panic!() };
         assert_eq!(a.resources[0].partitions[0].error, ErrorCode::NONE);
+        // A runtime stream this node has not heard of yet may have been
+        // created a moment ago: the client asks again. A configured stream's
+        // missing partition is unknown for good.
+        let add_to = |resource_id: u64, partition: u32| {
+            Request::AddPartitionsToTxn(lotse_proto::AddPartitionsToTxnRequest {
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
+                txn_id: "t".into(),
+                producer_id: p.producer_id,
+                producer_epoch: p.producer_epoch,
+                resources: vec![lotse_proto::TxnResource { resource_id, partitions: vec![partition] }],
+            })
+        };
+        let new = crate::metadata::DYNAMIC_BASE + 1000;
+        let Response::AddPartitionsToTxn(a) = ask(&mut clients, &mut groups, now, add_to(new, 0)).await else {
+            panic!()
+        };
+        assert_eq!(a.resources[0].partitions[0].error, ErrorCode::NOT_LEADER);
+        assert!(a.resources[0].partitions[0].error.retriable());
+        let Response::AddPartitionsToTxn(a) = ask(&mut clients, &mut groups, now, add_to(7, 5)).await else { panic!() };
+        assert_eq!(a.resources[0].partitions[0].error, ErrorCode::UNKNOWN_RESOURCE);
 
         // The timeout passes: the coordinator proposes the abort, which is not
         // committed yet when the commit arrives.
