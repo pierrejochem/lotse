@@ -43,7 +43,8 @@
 //!
 //! Leader election with optional pre-vote, check-quorum and leader stickiness (a node
 //! that heard from a leader recently ignores vote requests), log replication with one
-//! in-flight append per follower and conflict-term backtracking, a no-op
+//! in-flight append per follower and conflict-term backtracking (after a rejection the
+//! leader probes with empty appends until one matches, ADR 0102), a no-op
 //! entry when a leader takes over so earlier entries commit, the commit rule
 //! that only counts entries of the leader's own term, snapshots, learners and
 //! joint consensus.
@@ -558,6 +559,10 @@ struct Progress {
     /// again meanwhile; otherwise a snapshot taken more often than a
     /// transfer takes would never arrive.
     snap: Option<(SnapshotMeta, u64)>,
+    /// After a rejection, appends carry no entries until one matches: the
+    /// leader learns where the logs agree before it sends entries, instead
+    /// of sending from a guess that may be wrong again.
+    probing: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1010,6 +1015,7 @@ impl RaftGroup {
                     acked: 0,
                     since: self.seq + 1,
                     snap: None,
+                    probing: false,
                 });
             }
         }
@@ -1273,12 +1279,15 @@ impl RaftGroup {
             });
             return;
         }
-        let fill = p.next;
+        // A probe carries no entries; the follower only says whether it has
+        // `prev_index` in the leader's term.
+        let fill = (!p.probing).then_some(p.next);
         let prev_term = self.log.term_at(prev_index).expect("prev is in the log");
+        let commit = if p.probing { commit.min(prev_index) } else { commit };
         self.outbox.push(Send {
             to: f,
             msg: Message::Append { term, prev_index, prev_term, entries: Vec::new(), commit, seq },
-            fill_from: Some(fill),
+            fill_from: fill,
             attach_snapshot: false,
         });
     }
@@ -1329,9 +1338,11 @@ impl RaftGroup {
         match result {
             AppendResult::Accepted { last } => {
                 // A heartbeat's answer (last < next) says nothing about the
-                // append in flight; only an answer covering it clears it.
-                if last >= p.next {
+                // append in flight; only an answer covering it clears it. A
+                // probe asks only about `next - 1`, so that answers it.
+                if last >= p.next || (p.probing && last + 1 >= p.next) {
                     p.inflight = false;
+                    p.probing = false;
                 }
                 if last > p.matched {
                     p.matched = last;
@@ -1378,6 +1389,7 @@ impl RaftGroup {
                 };
                 let candidate = candidate.min(prev_index).max(p.matched + 1);
                 p.next = self.boundary(candidate, p.matched);
+                p.probing = true;
             }
         }
         self.put_progress(from, p);

@@ -105,5 +105,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0099 | [Snapshots live in files](0099-snapshots-live-in-files.md) | Accepted |
 | 0100 | [Tombstones go once every node removed the files](0100-tombstones-go-once-every-node-removed-the-files.md) | Accepted |
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
+| 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
