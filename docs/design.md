@@ -168,7 +168,7 @@ Eine Queue ist ein Log plus Ack-Index. Acks, Zustellzähler und Timer sind selbs
 
 ## Replikation & Snapshots
 
-Jede Partition und jede Queue ist eine eigene Raft-Gruppe. Heartbeats und Append-Requests aller Gruppen zwischen zwei Nodes werden gebündelt (Multi-Raft). Eine Schreiboperation ist bestätigt, sobald 2 von 3 Replikaten sie persistiert haben.
+Jede Partition und jede Queue ist eine eigene Raft-Gruppe. Heartbeats und Append-Requests aller Gruppen zwischen zwei Nodes werden gebündelt (Multi-Raft). Eine Schreiboperation ist bestätigt, sobald 2 von 3 Replikaten sie persistiert haben. Der Leader hat pro Follower ein Append unterwegs. Lehnt ein Follower ab, weil sein Log abweicht, schätzt der Leader aus dem genannten Term, wo die Logs übereinstimmen, und schickt ab dann Appends ohne Einträge, bis eines angenommen wird; erst dann wieder Einträge (ADR 0102).
 
 ### Snapshot-Inhalt
 

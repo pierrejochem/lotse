@@ -189,7 +189,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 ### Not built yet
 
-- **Raft:** pipelined snapshot chunks; probing instead of resending a whole term's entries after a conflict; followers serving reads themselves (the server forwards them to the leader).
+- **Raft:** pipelined snapshot chunks; followers serving reads themselves (the server forwards them to the leader).
 - **Certificates and sessions:** a user asking for a certificate in their own name (cluster admins ask, ADR 0092); anything that tells the CA holder a request is waiting; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** replication and queue length limits cannot change after creation; a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
 - **`DescribeMetrics`:** which subscription of a single active consumer queue is active, and counts per priority level.
