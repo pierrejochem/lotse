@@ -115,6 +115,11 @@ public final class LotseClient implements AutoCloseable {
 
     private final Map<Long, Address> brokers = new TreeMap<>();
     private final Map<PartitionKey, Route> routes = new HashMap<>();
+    /** Each node's zone and each partition's voters, for fetching in this client's zone (ADR 0104). */
+    private final Map<Long, String> zones = new TreeMap<>();
+    private final Map<PartitionKey, List<Long>> voters = new HashMap<>();
+    /** Partitions whose replica in the zone failed: read from the leader until metadata is asked for again. */
+    private final java.util.Set<PartitionKey> notInZone = new java.util.HashSet<>();
     private final Map<Long, String> names = new HashMap<>();
     /** Exchanges by name, and when metadata said so ({@link System#nanoTime}). Guarded by {@link #state}. */
     private final Map<String, Exchange> exchanges = new HashMap<>();
@@ -253,6 +258,7 @@ public final class LotseClient implements AutoCloseable {
         synchronized (state) {
             for (Messages.Broker b : m.brokers()) {
                 brokers.put(b.nodeId(), new Address(b.host(), b.port()));
+                zones.put(b.nodeId(), b.rack());
             }
             for (ResourceMetadata r : m.resources()) {
                 if (!r.error().isOk()) {
@@ -264,9 +270,10 @@ public final class LotseClient implements AutoCloseable {
                     exchangesAt.put(r.name(), System.nanoTime());
                 }
                 for (PartitionMetadata p : r.partitions()) {
-                    routes.put(
-                            new PartitionKey(r.name(), (int) p.partition()),
-                            new Route(r.resourceId(), p.leader(), p.leaderTerm()));
+                    PartitionKey key = new PartitionKey(r.name(), (int) p.partition());
+                    routes.put(key, new Route(r.resourceId(), p.leader(), p.leaderTerm()));
+                    voters.put(key, List.copyOf(p.voters()));
+                    notInZone.remove(key);
                 }
             }
         }
@@ -960,8 +967,45 @@ public final class LotseClient implements AutoCloseable {
         return retrying(() -> fetchOnce(stream, partition, offset, maxWait, isolation));
     }
 
+    /**
+     * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104).
+     * {@code null} without a zone, when the leader is in it, or when there is none.
+     */
+    private Address replicaInZone(String stream, int partition, long leader) {
+        String zone = cfg.zone();
+        if (zone == null) {
+            return null;
+        }
+        PartitionKey key = new PartitionKey(stream, partition);
+        synchronized (state) {
+            if (notInZone.contains(key) || zone.equals(zones.get(leader))) {
+                return null;
+            }
+            for (long v : voters.getOrDefault(key, List.of())) {
+                if (zone.equals(zones.get(v))) {
+                    return brokers.get(v);
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Leaves a partition's replica in the zone for the leader until metadata is asked for again: an older node,
+     * one that left, or one whose log starts later.
+     */
+    private Attempt leaveReplica(String stream, int partition, String why) {
+        synchronized (state) {
+            notInZone.add(new PartitionKey(stream, partition));
+        }
+        return Attempt.retry(why);
+    }
+
     private Fetched fetchOnce(String stream, int partition, long offset, Duration maxWait, int isolation) {
         Routed routed = route(stream, partition);
+        Address replica = replicaInZone(stream, partition, routed.route().leader());
+        boolean allowFollower = replica != null;
+        Address addr = allowFollower ? replica : routed.address();
         Request.Fetch req = new Request.Fetch(
                 Math.min(maxWait.toMillis(), U32_MAX),
                 1,
@@ -969,11 +1013,15 @@ public final class LotseClient implements AutoCloseable {
                 isolation,
                 List.of(new FetchResource(
                         routed.route().resourceId(),
-                        List.of(new FetchPartition(partition, offset, routed.route().term(), 1L << 20)))));
+                        List.of(new FetchPartition(partition, offset, routed.route().term(), 1L << 20)))),
+                allowFollower);
         Response resp;
         try {
-            resp = call(routed.address(), req);
+            resp = call(addr, req);
         } catch (CallFailure e) {
+            if (allowFollower) {
+                throw leaveReplica(stream, partition, addr + ": " + e.getMessage());
+            }
             forget(stream, partition);
             throw e.toAttempt();
         }
@@ -985,6 +1033,9 @@ public final class LotseClient implements AutoCloseable {
         }
         FetchPartitionResponse p = fetched.resources().get(0).partitions().get(0);
         ErrorCode code = p.error();
+        if (allowFollower && !code.isOk()) {
+            throw leaveReplica(stream, partition, addr + ": " + code);
+        }
         if (code.isOk()) {
             return new Fetched(p.records(), p.highWatermark(), p.lastStableOffset(), p.logStartOffset(), p.abortedTxns());
         }

@@ -370,7 +370,19 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// by clients at `client`; start it with `join` afterwards. Ids are
     /// never used twice.
     pub async fn add_node(&self, node_id: u64, peer: &str, client: &str) -> Result<(), ClientError> {
-        let req = AddNodeRequest { node_id, peer: peer.into(), client: client.into() };
+        self.add_node_in_zone(node_id, peer, client, None).await
+    }
+
+    /// As [`Client::add_node`], with the node's zone: clients in that zone
+    /// fetch from its replicas (ADR 0104).
+    pub async fn add_node_in_zone(
+        &self,
+        node_id: u64,
+        peer: &str,
+        client: &str,
+        zone: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let req = AddNodeRequest { node_id, peer: peer.into(), client: client.into(), zone: zone.map(Into::into) };
         self.admin_change(Request::AddNode(req)).await
     }
 

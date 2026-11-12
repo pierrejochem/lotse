@@ -18,7 +18,7 @@ usage:
   lotse certs --config <cluster.toml> --revoke <cert.pem>
   lotse certs --config <cluster.toml> --sign [--request <id>] [--yes] [--out <dir>] [--days <n>] <admin>
   lotse check --config <cluster.toml>
-  lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port>] <admin>
+  lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port> --zone <zone>] <admin>
   lotse node remove --config <cluster.toml> --node <id> <admin>
   lotse node list   --config <cluster.toml> <admin>
   lotse --version
@@ -55,6 +55,7 @@ struct Args {
     join: bool,
     peer: Option<String>,
     client_addr: Option<String>,
+    zone: Option<String>,
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
     user: Option<String>,
@@ -80,6 +81,7 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
             "--join" => a.join = true,
             "--peer" => a.peer = Some(value()?),
             "--client-addr" => a.client_addr = Some(value()?),
+            "--zone" => a.zone = Some(value()?),
             "--cert" => a.cert = Some(PathBuf::from(value()?)),
             "--key" => a.key = Some(PathBuf::from(value()?)),
             "--user" => a.user = Some(value()?),
@@ -402,7 +404,8 @@ fn node(what: &str, a: &Args) -> Result<(), String> {
                 let (Some(peer), Some(addr)) = (peer, addr) else {
                     return Err(format!("node {id} is not in the file: give --peer and --client-addr"));
                 };
-                client.add_node(id, &peer, &addr).await.map_err(|e| e.to_string())?;
+                let zone = a.zone.clone().or_else(|| entry.and_then(|n| n.zone.clone()));
+                client.add_node_in_zone(id, &peer, &addr, zone.as_deref()).await.map_err(|e| e.to_string())?;
                 println!("node {id} added; start it with: lotse run --config <file> --node {id} --join");
             }
             "remove" => {

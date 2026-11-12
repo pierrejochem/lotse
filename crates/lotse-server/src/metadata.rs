@@ -81,7 +81,7 @@ pub(crate) enum Change {
     /// Role bindings removed, then added.
     SetBindings { add: Vec<RoleBinding>, remove: Vec<RoleBinding> },
     /// A node joins the cluster (ADR 0048). Ids are never used twice.
-    AddNode { id: NodeId, peer: String, client: String },
+    AddNode { id: NodeId, peer: String, client: String, zone: String },
     /// A node is to leave: nothing new is placed on it, and its replicas
     /// move to other nodes.
     DrainNode { id: NodeId },
@@ -173,6 +173,8 @@ pub(crate) struct Tombstone {
 pub(crate) struct NodeMeta {
     pub(crate) peer: String,
     pub(crate) client: String,
+    /// Its zone; empty for none (ADR 0104).
+    pub(crate) zone: String,
 }
 
 /// A stream's own settings; `None` is the node configuration's default,
@@ -723,11 +725,11 @@ impl MetadataState {
                 }
                 self.bindings_of_roles.extend(add);
             }
-            Change::AddNode { id, peer, client } => {
+            Change::AddNode { id, peer, client, zone } => {
                 // Checked against the configuration when proposed; here
                 // only against what applied since.
                 if !self.gone.contains(&id) && !self.nodes.contains_key(&id) {
-                    self.nodes.insert(id, NodeMeta { peer, client });
+                    self.nodes.insert(id, NodeMeta { peer, client, zone });
                 }
             }
             Change::DrainNode { id } => {
@@ -960,8 +962,9 @@ impl MetadataState {
         // 0070), single active consumer queues (ADR 0076), priority levels
         // (ADR 0078), revoked certificates (ADR 0090), the certificate
         // inventory (ADR 0091), certificate requests (ADR 0092), the index
-        // that made each tombstone (ADR 0100). A later section needs the
-        // ones before it, empty or not.
+        // that made each tombstone (ADR 0100), the zones of nodes added at
+        // runtime (ADR 0104). A later section needs the ones before it,
+        // empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -970,7 +973,10 @@ impl MetadataState {
             .filter(|q| q.limits.priority_levels != 0)
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
-        let sections = if !self.deleted.is_empty() {
+        let zoned: Vec<(&NodeId, &NodeMeta)> = self.nodes.iter().filter(|(_, n)| !n.zone.is_empty()).collect();
+        let sections = if !zoned.is_empty() {
+            11
+        } else if !self.deleted.is_empty() {
             10
         } else if !self.cert_requests.is_empty() {
             9
@@ -1062,6 +1068,13 @@ impl MetadataState {
                 b.put_u64_le(t.at);
             }
         }
+        if sections >= 11 {
+            b.put_u32_le(zoned.len() as u32);
+            for (id, n) in zoned {
+                b.put_u64_le(*id);
+                put_str(&mut b, &n.zone);
+            }
+        }
         b.freeze()
     }
 
@@ -1137,7 +1150,7 @@ impl MetadataState {
             need(b, 8)?;
             let id = b.get_u64_le();
             let (peer, client) = (get_str(b)?, get_str(b)?);
-            s.nodes.insert(id, NodeMeta { peer, client });
+            s.nodes.insert(id, NodeMeta { peer, client, zone: String::new() });
         }
         s.draining = get_nodes(b)?.into_iter().collect();
         s.gone = get_nodes(b)?.into_iter().collect();
@@ -1234,6 +1247,13 @@ impl MetadataState {
                 need(b, 16)?;
                 let id = b.get_u64_le();
                 s.deleted.get_mut(&id).ok_or("the index of an unknown tombstone")?.at = b.get_u64_le();
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let id = b.get_u64_le();
+                s.nodes.get_mut(&id).ok_or("the zone of an unknown node")?.zone = get_str(b)?;
             }
         }
         if b.has_remaining() {
@@ -1338,11 +1358,15 @@ fn change_bytes(change: &Change) -> Bytes {
                 }
             }
         }
-        Change::AddNode { id, peer, client } => {
+        Change::AddNode { id, peer, client, zone } => {
             b.put_u8(12);
             b.put_u64_le(*id);
             put_str(&mut b, peer);
             put_str(&mut b, client);
+            // Only when set: a node without zones writes what older nodes read.
+            if !zone.is_empty() {
+                put_str(&mut b, zone);
+            }
         }
         Change::DrainNode { id } => {
             b.put_u8(13);
@@ -1570,7 +1594,9 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         12 => {
             need(b, 8)?;
             let id = b.get_u64_le();
-            Change::AddNode { id, peer: get_str(b)?, client: get_str(b)? }
+            let (peer, client) = (get_str(b)?, get_str(b)?);
+            let zone = if b.has_remaining() { get_str(b)? } else { String::new() };
+            Change::AddNode { id, peer, client, zone }
         }
         13 | 14 => {
             need(b, 8)?;

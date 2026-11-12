@@ -173,6 +173,11 @@ export class LotseClient {
 
   private readonly brokers = new Map<number, Address>();
   private readonly routes = new Map<string, Route>();
+  /** Each node's zone and each partition's voters, for fetching in this client's zone (ADR 0104). */
+  private readonly zones = new Map<number, string>();
+  private readonly voters = new Map<string, readonly number[]>();
+  /** Partitions whose replica in the zone failed: read from the leader until metadata is asked for again. */
+  private readonly notInZone = new Set<string>();
   /** The names of the resources this client has looked up, by id, and their newest ids by name. */
   private readonly names = new Map<bigint, string>();
   private readonly idsByName = new Map<string, bigint>();
@@ -295,6 +300,7 @@ export class LotseClient {
   private learn(m: Extract<Response, { type: "Metadata" }>): void {
     for (const b of m.brokers) {
       this.brokers.set(b.nodeId, { host: b.host, port: b.port });
+      this.zones.set(b.nodeId, b.rack);
     }
     for (const r of m.resources) {
       if (r.error !== ErrorCode.NONE) {
@@ -310,7 +316,10 @@ export class LotseClient {
         this.exchanges.set(r.name, { exchange: Exchange.of(r.name, r.resourceId, r.exchange), at: nowMs() });
       }
       for (const p of r.partitions) {
-        this.routes.set(routeKey(r.name, p.partition), { resourceId: r.resourceId, leader: p.leader, term: p.leaderTerm });
+        const key = routeKey(r.name, p.partition);
+        this.routes.set(key, { resourceId: r.resourceId, leader: p.leader, term: p.leaderTerm });
+        this.voters.set(key, p.voters);
+        this.notInZone.delete(key);
       }
     }
   }
@@ -869,6 +878,33 @@ export class LotseClient {
     return this.retrying(() => this.fetchOnce(stream, partition, offset, maxWaitMs, isolation, signal), signal);
   }
 
+  /**
+   * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). `null` without
+   * a zone, when the leader is in it, or when there is none.
+   */
+  private replicaInZone(stream: string, partition: number, leader: number): Address | null {
+    const zone = this.cfg.zone;
+    const key = routeKey(stream, partition);
+    if (zone === null || this.notInZone.has(key) || this.zones.get(leader) === zone) {
+      return null;
+    }
+    for (const v of this.voters.get(key) ?? []) {
+      if (this.zones.get(v) === zone) {
+        return this.brokers.get(v) ?? null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Leaves a partition's replica in the zone for the leader until metadata is asked for again: an older node, one that
+   * left, or one whose log starts later.
+   */
+  private leaveReplica(stream: string, partition: number, why: string): Attempt {
+    this.notInZone.add(routeKey(stream, partition));
+    return Attempt.retry(why);
+  }
+
   private async fetchOnce(
     stream: string,
     partition: number,
@@ -878,6 +914,9 @@ export class LotseClient {
     signal?: AbortSignal,
   ): Promise<Fetched> {
     const routed = await this.route(stream, partition, signal);
+    const replica = this.replicaInZone(stream, partition, routed.route.leader);
+    const allowFollower = replica !== null;
+    const addr = replica ?? routed.address;
     const req: Request = {
       type: "Fetch",
       maxWaitMs: Math.min(Math.max(0, Math.trunc(maxWaitMs)), U32_MAX),
@@ -890,12 +929,16 @@ export class LotseClient {
           partitions: [{ partition, fetchOffset: offset, leaderTerm: routed.route.term, maxBytes: 1 << 20 }],
         },
       ],
+      ...(allowFollower ? { allowFollower } : {}),
     };
     let resp: Response;
     try {
-      resp = await this.call(routed.address, req);
+      resp = await this.call(addr, req);
     } catch (e) {
       if (e instanceof CallFailure) {
+        if (allowFollower) {
+          throw this.leaveReplica(stream, partition, `${formatAddress(addr)}: ${e.describe()}`);
+        }
         this.forget(stream, partition);
         throw e.toAttempt();
       }
@@ -907,6 +950,9 @@ export class LotseClient {
     const p = resp.resources[0]?.partitions[0];
     if (p === undefined) {
       throw Attempt.retry("empty fetch response");
+    }
+    if (allowFollower && p.error !== ErrorCode.NONE) {
+      throw this.leaveReplica(stream, partition, `${formatAddress(addr)}: ${describeError(p.error)}`);
     }
     if (p.error === ErrorCode.NONE) {
       return new Fetched(p.records, p.highWatermark, p.lastStableOffset, p.logStartOffset, p.abortedTxns);

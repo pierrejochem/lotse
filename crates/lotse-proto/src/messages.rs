@@ -510,7 +510,13 @@ pub struct FetchRequest {
     pub isolation: u8,
     /// What to read.
     pub resources: Vec<FetchResource>,
+    /// A follower may answer with the committed data it has instead of
+    /// `NOT_LEADER` (ADR 0104). Tag 0.
+    pub allow_follower: bool,
 }
+
+/// Fetch: a follower may answer (ADR 0104).
+const TAG_ALLOW_FOLLOWER: u64 = 0;
 
 impl FetchRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
@@ -529,7 +535,11 @@ impl FetchRequest {
             });
             w.no_tags();
         });
-        w.no_tags();
+        if self.allow_follower {
+            w.tags(&[(TAG_ALLOW_FOLLOWER, Bytes::from_static(&[1]))]);
+        } else {
+            w.no_tags();
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let (max_wait_ms, min_bytes, max_bytes, isolation) = (r.u32()?, r.u32()?, r.u32()?, r.u8()?);
@@ -548,8 +558,17 @@ impl FetchRequest {
             r.tags()?;
             Ok(FetchResource { resource_id, partitions })
         })?;
-        r.tags()?;
-        Ok(FetchRequest { max_wait_ms, min_bytes, max_bytes, isolation, resources })
+        let mut allow_follower = false;
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_ALLOW_FOLLOWER => allow_follower = v.u8()? != 0,
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
+        Ok(FetchRequest { max_wait_ms, min_bytes, max_bytes, isolation, resources, allow_follower })
     }
 }
 
@@ -3225,18 +3244,39 @@ pub struct AddNodeRequest {
     pub peer: String,
     /// Where clients reach it (`host:port`).
     pub client: String,
+    /// Its zone, for clients that fetch from a replica in theirs (ADR
+    /// 0104). Tag 0.
+    pub zone: Option<String>,
 }
+
+/// AddNode: the node's zone (ADR 0104).
+const TAG_ZONE: u64 = 0;
 
 impl AddNodeRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
         w.u64(self.node_id);
         w.string(&self.peer);
         w.string(&self.client);
-        w.no_tags();
+        match &self.zone {
+            Some(zone) => {
+                let mut v = Writer::new();
+                v.string(zone);
+                w.tags(&[(TAG_ZONE, v.finish())]);
+            }
+            None => w.no_tags(),
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = AddNodeRequest { node_id: r.u64()?, peer: r.string()?, client: r.string()? };
-        r.tags()?;
+        let mut req = AddNodeRequest { node_id: r.u64()?, peer: r.string()?, client: r.string()?, zone: None };
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_ZONE => req.zone = Some(v.string()?),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
         Ok(req)
     }
 }

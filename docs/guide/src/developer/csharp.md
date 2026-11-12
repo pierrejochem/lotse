@@ -41,7 +41,7 @@ ClientConfig config = ClientConfig.CreateBuilder("127.0.0.1:9092", "127.0.0.1:90
 using var client = new LotseClient(config);
 ```
 
-Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)).
+Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithZone`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)).
 
 ## Streams
 

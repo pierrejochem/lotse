@@ -265,6 +265,66 @@ public sealed class FetchTests : IDisposable
         Assert.Equal(6UL, _b.Requests<Request.Fetch>()[0].Resources[0].Partitions[0].LeaderTerm);
     }
 
+    /// <summary>Node 1 leads in zone a, node 2 follows in zone b; node 2 answers with <paramref name="followerCode"/>.</summary>
+    private void Zones(ErrorCode followerCode)
+    {
+        FakeNode[] both = { _a, _b };
+        string[] zones = { "a", "b" };
+        var meta = new Response.Metadata(
+            both.Select(n => new Messages.Broker(n.Id, "127.0.0.1", (ushort)n.Address.Port, zones[n.Id - 1])).ToList(),
+            new[] { Fx.Stream("s", StreamId, Fx.Partition(0, 1, 5, 1, 2)) });
+        Func<FakeNode, Request, Response?> handler = (node, request) =>
+        {
+            if (request is Request.Metadata)
+            {
+                return meta;
+            }
+            ErrorCode code = node.Id == 2 ? followerCode : ErrorCode.None;
+            ByteString records = code.IsOk ? Data(0, 0, false, "from " + node.Id) : ByteString.Empty;
+            return Fx.Fetched(StreamId, 0, code, records, 1, 1, 0);
+        };
+        _a.On(handler);
+        _b.On(handler);
+    }
+
+    [Fact]
+    public async Task AClientInAZoneFetchesFromTheReplicaThere()
+    {
+        Zones(ErrorCode.None);
+        _client = new LotseClient(Fx.Config(_a).WithZone("b").Build());
+        Assert.Equal(new[] { "from 2" }, Values(await _client.FetchAsync("s", 0, 0, TimeSpan.FromMilliseconds(1))));
+        Assert.Equal(new[] { "from 2" }, Values(await _client.FetchAsync("s", 0, 0, TimeSpan.FromMilliseconds(1))));
+        Assert.Equal(0, _a.Count<Request.Fetch>()); // the leader is in another zone
+        Assert.True(_b.Requests<Request.Fetch>()[0].AllowFollower);
+        _client.Dispose();
+        // In the leader's zone, or in one without a replica, the leader serves, as without a zone.
+        foreach (string? zone in new[] { "a", "c", null })
+        {
+            _client = new LotseClient(Fx.Config(_a).WithZone(zone).Build());
+            Assert.Equal(new[] { "from 1" }, Values(await _client.FetchAsync("s", 0, 0, TimeSpan.FromMilliseconds(1))));
+            _client.Dispose();
+        }
+        Assert.All(_a.Requests<Request.Fetch>(), r => Assert.False(r.AllowFollower));
+        _client = null;
+    }
+
+    [Fact]
+    public async Task AReplicaThatFailsIsLeftForTheLeader()
+    {
+        // An older node answers NOT_LEADER; one whose log starts later, OFFSET_OUT_OF_RANGE.
+        foreach (ErrorCode code in new[] { ErrorCode.NotLeader, ErrorCode.OffsetOutOfRange })
+        {
+            Zones(code);
+            int before = _b.Count<Request.Fetch>();
+            _client = new LotseClient(Fx.Config(_a).WithZone("b").Build());
+            Assert.Equal(new[] { "from 1" }, Values(await _client.FetchAsync("s", 0, 0, TimeSpan.FromMilliseconds(1))));
+            Assert.Equal(new[] { "from 1" }, Values(await _client.FetchAsync("s", 0, 0, TimeSpan.FromMilliseconds(1))));
+            Assert.Equal(before + 1, _b.Count<Request.Fetch>()); // asked once, then left
+            _client.Dispose();
+        }
+        _client = null;
+    }
+
     [Fact]
     public async Task AFetchThatNeverGetsALeaderGivesUp()
     {

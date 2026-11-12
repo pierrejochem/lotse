@@ -49,6 +49,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     private readonly object _state = new();
     private readonly SortedDictionary<uint, Address> _brokers = new();
     private readonly Dictionary<PartitionKey, Route> _routes = new();
+    // Each node's zone and each partition's voters, for fetching in this client's zone (ADR 0104); and partitions whose
+    // replica in the zone failed, read from the leader until metadata is asked for again.
+    private readonly SortedDictionary<uint, string> _zones = new();
+    private readonly Dictionary<PartitionKey, IReadOnlyList<uint>> _voters = new();
+    private readonly HashSet<PartitionKey> _notInZone = new();
     private readonly Dictionary<ulong, string> _names = new();
 
     // Exchanges by name, and when metadata said so (Stopwatch ticks). Guarded by _state.
@@ -238,6 +243,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 {
                     _brokers[b.NodeId] = new Address(b.Host, b.Port);
                 }
+                _zones[b.NodeId] = b.Rack;
             }
             foreach (Messages.ResourceMetadata r in m.Resources)
             {
@@ -252,7 +258,10 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 }
                 foreach (Messages.PartitionMetadata p in r.Partitions)
                 {
-                    _routes[new PartitionKey(r.Name, (int)p.Partition)] = new Route(r.ResourceId, p.Leader, p.LeaderTerm);
+                    var key = new PartitionKey(r.Name, (int)p.Partition);
+                    _routes[key] = new Route(r.ResourceId, p.Leader, p.LeaderTerm);
+                    _voters[key] = p.Voters;
+                    _notInZone.Remove(key);
                 }
             }
         }
@@ -902,10 +911,59 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         return RetryingAsync(() => FetchOnceAsync(stream, partition, offset, maxWait, isolation, ct), ct);
     }
 
+    /// <summary>
+    /// A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). <c>null</c>
+    /// without a zone, when the leader is in it, or when there is none.
+    /// </summary>
+    private Address? ReplicaInZone(string stream, int partition, uint leader)
+    {
+        string? zone = _cfg.Zone;
+        if (zone is null)
+        {
+            return null;
+        }
+        var key = new PartitionKey(stream, partition);
+        lock (_state)
+        {
+            if (_notInZone.Contains(key) || (_zones.TryGetValue(leader, out string? z) && z == zone))
+            {
+                return null;
+            }
+            if (!_voters.TryGetValue(key, out IReadOnlyList<uint>? voters))
+            {
+                return null;
+            }
+            foreach (uint v in voters)
+            {
+                if (_zones.TryGetValue(v, out string? vz) && vz == zone && _brokers.TryGetValue(v, out Address? a))
+                {
+                    return a;
+                }
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Leaves a partition's replica in the zone for the leader until metadata is asked for again: an older node, one
+    /// that left, or one whose log starts later.
+    /// </summary>
+    private Attempt LeaveReplica(string stream, int partition, string why)
+    {
+        lock (_state)
+        {
+            _notInZone.Add(new PartitionKey(stream, partition));
+        }
+        return Attempt.Retry(why);
+    }
+
     private async Task<Fetched> FetchOnceAsync(
         string stream, int partition, ulong offset, TimeSpan maxWait, byte isolation, CancellationToken ct)
     {
         Routed routed = await RouteAsync(stream, partition, ct).ConfigureAwait(false);
+        Address? replica = ReplicaInZone(stream, partition, routed.Route.Leader);
+        bool allowFollower = replica is not null;
+        Address addr = replica ?? routed.Address;
         var req = new Request.Fetch(
             (uint)Math.Min(maxWait.TotalMilliseconds, U32Max),
             1,
@@ -916,14 +974,19 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 new Messages.FetchResource(
                     routed.Route.ResourceId,
                     new[] { new Messages.FetchPartition((uint)partition, offset, routed.Route.Term, 1u << 20) }),
-            });
+            },
+            allowFollower);
         Response resp;
         try
         {
-            resp = await CallAsync(routed.Address, req, ct).ConfigureAwait(false);
+            resp = await CallAsync(addr, req, ct).ConfigureAwait(false);
         }
         catch (CallFailure e)
         {
+            if (allowFollower)
+            {
+                throw LeaveReplica(stream, partition, addr + ": " + e.Message);
+            }
             Forget(stream, partition);
             throw e.ToAttempt();
         }
@@ -937,6 +1000,10 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         }
         Messages.FetchPartitionResponse p = fetched.Resources[0].Partitions[0];
         ErrorCode code = p.Error;
+        if (allowFollower && !code.IsOk)
+        {
+            throw LeaveReplica(stream, partition, addr + ": " + code);
+        }
         if (code.IsOk)
         {
             return new Fetched(p.Records, p.HighWatermark, p.LastStableOffset, p.LogStartOffset, p.AbortedTxns);

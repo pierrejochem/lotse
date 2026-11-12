@@ -27,7 +27,7 @@ try (var client = new LotseClient(config)) {
 }
 ```
 
-Other builder methods: `requestTimeout`, `retryFor`, `backoff`, `produceTimeout`, `idempotent`, `txnTimeout`, `producerName`, `transactionalId`, `metadataMaxAge`, `tenant`, `credentials`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
+Other builder methods: `requestTimeout`, `retryFor`, `backoff`, `produceTimeout`, `idempotent`, `txnTimeout`, `producerName`, `transactionalId`, `metadataMaxAge`, `tenant`, `zone`, `credentials`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
 
 ## Streams
 
