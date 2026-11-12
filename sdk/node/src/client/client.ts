@@ -1362,7 +1362,14 @@ export class LotseClient {
               r = await Promise.race([sending, guard.promise]);
             }
             if (r.type === "Publish" && r.entries.length === 1) {
-              return r.entries[0] as PublishResult;
+              const first = r.entries[0] as PublishResult;
+              // Refused before anything was written, by a node that may not know the exchange yet:
+              // another node, or later.
+              if (!isRetriable(first.error)) {
+                return first;
+              }
+              why = `${formatAddress(addr)}: ${describeError(first.error)}`;
+              continue;
             }
             why = `unexpected response ${r.type}`;
           } catch (e) {

@@ -163,6 +163,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             addrs.dedup();
             for addr in addrs {
                 match self.call(&addr, &req).await {
+                    // Refused before anything was written, by a node that
+                    // may not know the exchange yet: another node, or later.
+                    Ok(Response::Publish(r)) if r.entries.len() == 1 && r.entries[0].error.retriable() => {
+                        why = format!("{addr}: {}", r.entries[0].error);
+                    }
                     Ok(Response::Publish(mut r)) if r.entries.len() == 1 => return Ok(r.entries.remove(0)),
                     Ok(other) => why = format!("unexpected response {other:?}"),
                     Err(CallError::Denied(why)) => return Err(ClientError::Authentication(why)),

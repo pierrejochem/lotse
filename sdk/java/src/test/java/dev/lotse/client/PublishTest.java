@@ -102,6 +102,18 @@ class PublishTest {
     }
 
     @Test
+    void aRefusalFromANodeBehindIsSentAgain() {
+        // Refused before anything was written, by a node that has not heard of the exchange yet.
+        java.util.concurrent.atomic.AtomicInteger refusals = new java.util.concurrent.atomic.AtomicInteger(2);
+        answer(p -> refusals.getAndDecrement() > 0
+                ? new Response.Publish(0, List.of(new Messages.PublishResult(ErrorCode.NOT_LEADER, List.of())))
+                : routed(new Messages.RoutedMessage(7, "a", ErrorCode.NONE, 41)));
+        Published got = client.publish("x", "k", OutMessage.value("m"), false);
+        assertEquals(List.of(new Published.Routed("a", 41)), got.routed());
+        assertEquals(3, a.requests(Request.Publish.class).size(), "two refused, then taken");
+    }
+
+    @Test
     void aLostAnswerIsNotSentAgain() {
         answer(p -> {
             throw new FakeNode.Drop();
