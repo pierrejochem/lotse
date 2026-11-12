@@ -433,8 +433,10 @@ struct Shared {
     learned: Mutex<BTreeMap<NodeId, String>>,
     /// Set when the node stopped because it was drained (ADR 0051).
     removed: std::sync::atomic::AtomicBool,
-    /// Set when the metadata leader listed the nodes without this one.
-    unlisted: std::sync::atomic::AtomicBool,
+    /// Set when an answer of the metadata leader at least as new as this
+    /// node's own metadata state left out this node, which that state lists:
+    /// the cluster forgot it (ADR 0105).
+    forgotten: std::sync::atomic::AtomicBool,
     /// Bytes of each group's log, the largest any replica reported, as the
     /// metadata leader last asked the nodes: what rebalancing weighs moves
     /// by (ADR 0052).
@@ -909,14 +911,14 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
         }
         // Drained: nothing here is needed any more, and what it would tell
-        // clients only gets staler. It stops (ADR 0051). So does a draining
-        // node the cluster forgot while it was cut off: the metadata leader
-        // no longer lists it, and ids are never used twice.
-        if known.state.draining.contains(&cfg.id) {
+        // clients only gets staler. It stops (ADR 0051). So does a node the
+        // cluster forgot while it was down or cut off, whether or not it
+        // saw its drain (ADR 0105): ids are never used twice.
+        let forgotten = shared.forgotten.load(std::sync::atomic::Ordering::Relaxed);
+        if forgotten || known.state.draining.contains(&cfg.id) {
             let core = core_groups(cfg);
             let managed = crate::client::managed_groups(&known.state, &core, &configured_voters);
-            let unlisted = shared.unlisted.load(std::sync::atomic::Ordering::Relaxed);
-            if crate::membership::stops(&known.state, &managed, &core, cfg.id, unlisted) {
+            if crate::membership::stops(&known.state, &managed, &core, cfg.id, forgotten) {
                 shared.removed.store(true, std::sync::atomic::Ordering::Relaxed);
                 shared.stop.set();
                 break;
@@ -943,7 +945,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         if rt.now() >= next_ask {
             next_ask = rt.now() + cfg.tick * ASK_NODES_EVERY_TICKS;
-            ask_for_nodes(rt, cfg, groups, &known, &marker_client, shared, jobs, &asking);
+            ask_for_nodes(rt, cfg, groups, &known, &configured_voters, &marker_client, shared, jobs, &asking);
         }
         if rt.now() >= next_sizes {
             next_sizes = rt.now() + cfg.tick * SIZES_EVERY_TICKS;
@@ -1150,13 +1152,16 @@ const ASK_NODES_EVERY_TICKS: u32 = 100;
 /// it has no address to answer them at, so it would never catch up. It asks
 /// the metadata leader, through a node it lists, for the node list, and
 /// links to those it is missing for the metadata group alone (ADR 0050).
-/// A draining node asks as well, and notes when the list leaves it out.
+/// A draining node asks as well. A node its own metadata state lists asks
+/// for an answer at least as new as that state, and notes when the answer
+/// leaves it out: the cluster forgot it (ADR 0105).
 #[allow(clippy::too_many_arguments)]
 fn ask_for_nodes<R: Runtime, S: StateMachine>(
     rt: &R,
     cfg: &NodeConfig,
     groups: &BTreeMap<GroupId, Replica<R, S>>,
     known: &Known,
+    first_voters: &[NodeId],
     client: &Arc<lotse_client::Client<R>>,
     shared: &Arc<Shared>,
     jobs: &Live,
@@ -1165,7 +1170,9 @@ fn ask_for_nodes<R: Runtime, S: StateMachine>(
     let Some(meta) = cfg.metadata.and_then(|g| groups.get(&g)) else { return };
     let leader = meta.raft_ref().leader();
     // A draining node asks too: it learns so that the cluster forgot it,
-    // should it have been cut off when its drain finished (ADR 0051).
+    // should it have been cut off when its drain finished (ADR 0051). One
+    // that never saw its drain asks because its metadata group has no
+    // leader any more: nobody sends it anything once it is forgotten.
     let draining = known.state.draining.contains(&cfg.id);
     if leader.is_some_and(|l| l == cfg.id || known.nodes.contains_key(&l)) && !draining {
         return;
@@ -1175,10 +1182,14 @@ fn ask_for_nodes<R: Runtime, S: StateMachine>(
     }
     let (client, shared, asking, me) = (client.clone(), shared.clone(), asking.clone(), cfg.id);
     let stop = shared.stop.clone();
+    let listed = crate::membership::listed(&known.state, first_voters, me);
+    let applied = meta.applied();
     jobs.spawn(rt, async move {
-        if let Some(Ok(nodes)) = race(client.describe_nodes(), &[&stop]).await {
-            if !nodes.iter().any(|n| n.node_id == me) {
-                shared.unlisted.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ask =
+            async { if listed { client.describe_nodes_since(applied).await } else { client.describe_nodes().await } };
+        if let Some(Ok(nodes)) = race(ask, &[&stop]).await {
+            if crate::membership::forgotten(listed, nodes.iter().any(|n| n.node_id == me)) {
+                shared.forgotten.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             let mut learned = shared.learned.lock().expect("learned lock");
             for n in nodes {

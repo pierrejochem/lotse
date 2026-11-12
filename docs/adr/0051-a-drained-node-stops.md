@@ -1,6 +1,6 @@
 # 51. A drained node stops
 
-- Status: Accepted
+- Status: Accepted; the stop of a node the cluster forgot is superseded by [ADR 0105](0105-a-forgotten-node-stops-without-seeing-its-drain.md)
 - Date: 2026-10-31
 
 ## Context

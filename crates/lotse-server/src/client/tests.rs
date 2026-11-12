@@ -918,6 +918,61 @@ fn offsets_for_a_released_partition_are_refused() {
 /// another queue, a queue others dead-letter into cannot be deleted, and the
 /// settings are described and changed like the ack timeout.
 #[test]
+fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
+    // ADR 0105: a node that asks with the metadata index it has applied gets
+    // an answer at least that new, or NOT_LEADER (a leader behind it, or one
+    // deposed without knowing it). Without the index anything goes.
+    Sim::new(9).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "m", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let applied = groups[&G].applied();
+        assert!(applied > 0);
+        let (addrs, voters) = (BTreeMap::new(), BTreeMap::new());
+        let view = ClusterView {
+            streams: &[],
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            admin: AdminView {
+                metadata: Some(G),
+                nodes: &[1],
+                configured_groups: 1,
+                voters: &voters,
+                ..AdminView::default()
+            },
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let mut clients = Clients::default();
+        for (applied_at_least, expected) in
+            [(None, ErrorCode::NONE), (Some(applied), ErrorCode::NONE), (Some(applied + 1), ErrorCode::NOT_LEADER)]
+        {
+            let request = Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least });
+            let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+            let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+            match &drain(&outbox, key).0[..] {
+                [Response::DescribeNodes(d)] => assert_eq!(d.error, expected, "{applied_at_least:?}"),
+                other => panic!("expected one answer, got {other:?}"),
+            }
+        }
+    });
+}
+
+#[test]
 fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() {
     Sim::new(9).run(|rt| async move {
         let cfg = Config::new(1, vec![1]);
