@@ -441,7 +441,12 @@ public abstract record Request
     /// <param name="Ranges">The offsets, as ranges.</param>
     /// <param name="Requeue">Deliver them again.</param>
     /// <param name="DelayMs">With requeue: how long they wait first (ADR 0077).</param>
-    public sealed record Nack(ulong QueueId, IReadOnlyList<OffsetRange> Ranges, bool Requeue, uint DelayMs) : Request
+    /// <param name="SubscriptionId">
+    /// The subscription the messages came on, a tag (ADR 0106): a requeue then takes back only what that subscription
+    /// holds, not what a newer one on the connection received since. Null: every subscription of the connection.
+    /// </param>
+    public sealed record Nack(
+        ulong QueueId, IReadOnlyList<OffsetRange> Ranges, bool Requeue, uint DelayMs, uint? SubscriptionId = null) : Request
     {
         /// <inheritdoc/>
         public override ApiKey ApiKey => ApiKey.Nack;
@@ -451,14 +456,36 @@ public abstract record Request
         {
             w.U64(QueueId);
             PutRanges(w, Ranges);
-            w.Bool(Requeue).U32(DelayMs).NoTags();
+            w.Bool(Requeue).U32(DelayMs);
+            if (SubscriptionId is uint id)
+            {
+                var v = new Writer();
+                v.U32(id);
+                w.Tags(new[] { new Tag(TagNackSubscription, ByteString.CopyOf(v.ToByteArray())) });
+            }
+            else
+            {
+                w.NoTags();
+            }
         }
 
         internal static Nack Read(Reader r)
         {
-            var x = new Nack(r.U64(), GetRanges(r), r.Bool(), r.U32());
-            r.Tags();
-            return x;
+            ulong queueId = r.U64();
+            List<OffsetRange> ranges = GetRanges(r);
+            bool requeue = r.Bool();
+            uint delayMs = r.U32();
+            uint? subscription = null;
+            foreach (Tag t in r.Tags())
+            {
+                if (t.Number == TagNackSubscription)
+                {
+                    var vr = new Reader(t.Value.ToByteArray());
+                    subscription = vr.U32();
+                    vr.Finish();
+                }
+            }
+            return new Nack(queueId, ranges, requeue, delayMs, subscription);
         }
     }
 

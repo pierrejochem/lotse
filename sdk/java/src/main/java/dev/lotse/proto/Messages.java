@@ -187,6 +187,9 @@ public final class Messages {
     /** Tag of a transactional ack's producer id and epoch (ADR 0075). */
     static final long TAG_PRODUCER = 2;
 
+    /** The subscription a requeueing {@code Nack} came on (ADR 0106). */
+    static final long TAG_NACK_SUBSCRIPTION = 0;
+
     /** A tag holding one string. */
     static Tag stringTag(long tag, String value) {
         Writer v = new Writer();

@@ -313,7 +313,8 @@ public final class QueueConsumer implements AutoCloseable {
             synchronized (mu) {
                 queueId = resourceId;
             }
-            sendQuietly(from.conn, new Request.Nack(queueId, OffsetRanges.of(offsets.stream().mapToLong(Long::longValue).toArray()), true, 0));
+            // Named (ADR 0106): a newer subscription on the connection keeps what it received since.
+            sendQuietly(from.conn, new Request.Nack(queueId, OffsetRanges.of(offsets.stream().mapToLong(Long::longValue).toArray()), true, 0, from.id));
         }
     }
 
@@ -482,7 +483,7 @@ public final class QueueConsumer implements AutoCloseable {
         if (held.isEmpty()) {
             return;
         }
-        Request req = new Request.Nack(queueId, OffsetRanges.of(offsets(held)), true, delayMs);
+        Request req = new Request.Nack(queueId, OffsetRanges.of(offsets(held)), true, delayMs, on.id);
         Response resp;
         try {
             resp = client.callOn(on.conn, req);
@@ -567,7 +568,8 @@ public final class QueueConsumer implements AutoCloseable {
                     }
                 }
                 if (!back.isEmpty()) {
-                    requests.add(new Request.Nack(resourceId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0));
+                    // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+                    requests.add(new Request.Nack(resourceId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0, ending.id));
                 }
             }
             buffered.clear();

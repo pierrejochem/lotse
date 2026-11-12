@@ -83,7 +83,20 @@ pub fn requests() -> Vec<Request> {
             producer: Some((4000, 3)),
             ranges: vec![(7, 9)],
         }),
-        Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
+        Request::Nack(NackRequest {
+            queue_id: 9,
+            ranges: vec![(4, 5)],
+            requeue: true,
+            delay_ms: 0,
+            subscription_id: None,
+        }),
+        Request::Nack(NackRequest {
+            queue_id: 9,
+            ranges: vec![(4, 6)],
+            requeue: true,
+            delay_ms: 250,
+            subscription_id: Some(3),
+        }),
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
         Request::CreateStream(CreateStreamRequest {
             name: "orders".into(),

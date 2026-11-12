@@ -41,6 +41,8 @@ export const TAG_PATTERN = 3;
 export const TAG_NOTIFY_ACTIVE = 1;
 export const TAG_STANDBY = 1;
 export const TAG_PRODUCER = 2;
+/** The subscription a requeueing `Nack` came on (ADR 0106). */
+export const TAG_NACK_SUBSCRIPTION = 0;
 
 /** Where a new leader is, after `NOT_LEADER` or `FENCED_LEADER_TERM`. */
 export interface LeaderHint {

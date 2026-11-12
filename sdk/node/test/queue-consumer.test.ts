@@ -503,6 +503,7 @@ describe("a queue consumer against scripted brokers", () => {
       assert.equal(nack.delayMs, 0);
       assert.equal(nack.queueId, QUEUE_ID);
       assert.deepEqual(nack.ranges, [{ from: 10n, to: 11n }]);
+      assert.equal(nack.subscriptionId, undefined, "a discard takes nothing back: no subscription named");
       c.close();
     });
 
@@ -517,6 +518,7 @@ describe("a queue consumer against scripted brokers", () => {
       assert.equal(mine[0]?.requeue, true);
       assert.equal(mine[0]?.delayMs, 0);
       assert.deepEqual(mine[0]?.ranges, [{ from: 10n, to: 11n }]);
+      assert.equal(mine[0]?.subscriptionId, s.id, "names its subscription (ADR 0106)");
       c.close();
     });
 
@@ -530,6 +532,7 @@ describe("a queue consumer against scripted brokers", () => {
       const first = requestsOf(s.peer, "Nack")[0];
       assert.equal(first?.delayMs, 1_500);
       assert.equal(first?.requeue, true);
+      assert.equal(first?.subscriptionId, s.id, "names its subscription (ADR 0106)");
       assert.deepEqual(first?.ranges, [{ from: 10n, to: 11n }]);
       await c.nack(await take(c), true);
       assert.equal(requestsOf(s.peer, "Nack")[1]?.delayMs, 0, "a plain requeue waits not");
@@ -775,6 +778,7 @@ describe("a queue consumer against scripted brokers", () => {
       assert.equal(un[0]?.subscriptionId, s.id);
       assert.equal(nacks[0]?.requeue, true);
       assert.equal(nacks[0]?.queueId, QUEUE_ID);
+      assert.equal(nacks[0]?.subscriptionId, s.id, "names the subscription it ends (ADR 0106)");
       assert.deepEqual(nacks[0]?.ranges, [{ from: 11n, to: 14n }], "the three not handed out, as one range");
       assert.ok(sent.indexOf(un[0] as Request) < sent.indexOf(nacks[0] as Request), "unsubscribe first");
       c.close(); // twice is harmless

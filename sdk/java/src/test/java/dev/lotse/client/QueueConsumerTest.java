@@ -506,6 +506,7 @@ class QueueConsumerTest {
             Request.Nack nack = where.get().requests(Request.Nack.class).get(0);
             assertEquals(1500, nack.delayMs());
             assertEquals(true, nack.requeue());
+            assertEquals(sub.get(), nack.subscriptionId(), "names its subscription (ADR 0106)");
             assertEquals(List.of(new Range(10, 11)), nack.ranges());
             c.nack(take(c), true);
             assertEquals(0, where.get().requests(Request.Nack.class).get(1).delayMs(), "a plain requeue waits not");
@@ -606,6 +607,7 @@ class QueueConsumerTest {
             Request.Nack nack = a.requests(Request.Nack.class).get(0);
             assertEquals(false, nack.requeue());
             assertEquals(0, nack.delayMs());
+            assertEquals(-1L, nack.subscriptionId(), "a discard takes nothing back: no subscription named");
             assertEquals(QUEUE_ID, nack.queueId());
             assertEquals(List.of(new Range(10, 11)), nack.ranges());
         }
@@ -631,6 +633,7 @@ class QueueConsumerTest {
             assertEquals(1, where.get().requests(Request.Nack.class).size(), "on the connection of the subscription");
             Request.Nack nack = where.get().requests(Request.Nack.class).get(0);
             assertEquals(true, nack.requeue());
+            assertEquals(sub.get(), nack.subscriptionId(), "names its subscription (ADR 0106)");
             assertEquals(0, nack.delayMs());
             assertEquals(List.of(new Range(10, 11)), nack.ranges());
         }
@@ -827,6 +830,7 @@ class QueueConsumerTest {
         Request.Nack nack = where.get().requests(Request.Nack.class).get(0);
         assertEquals(true, nack.requeue());
         assertEquals(QUEUE_ID, nack.queueId());
+        assertEquals(sub.get(), nack.subscriptionId(), "names the subscription it ends (ADR 0106)");
         assertEquals(List.of(new Range(11, 14)), nack.ranges(), "the three not handed out, as one range");
         assertTrue(sent.indexOf(un) < sent.indexOf(nack), "unsubscribe first");
         c.close(); // twice is harmless

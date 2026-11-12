@@ -107,5 +107,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 | 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
 | 0105 | [A forgotten node stops without seeing its drain](0105-a-forgotten-node-stops-without-seeing-its-drain.md) | Accepted |
+| 0106 | [A requeue names its subscription](0106-a-requeue-names-its-subscription.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
