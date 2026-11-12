@@ -875,7 +875,7 @@ fn a_newer_snapshot_replaces_a_partial_one_and_an_unknown_one_must_start_over() 
 fn a_leader_sends_a_snapshot_in_chunks_and_resumes_where_the_follower_stands() {
     let (mut c, sn) = snapshot_to_send();
     let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
-    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
     let chunks = data.len().div_ceil(40);
     assert!(chunks >= 4);
     // Lose the second and the fourth chunk once each.
@@ -885,6 +885,35 @@ fn a_leader_sends_a_snapshot_in_chunks_and_resumes_where_the_follower_stands() {
     assert_eq!(c.nodes[&f].snapshot_index(), meta.index, "caught up from chunks");
     assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
     assert!(c.lose_chunks.is_empty(), "the chunks were lost as planned");
+}
+
+#[test]
+fn a_leader_sends_a_window_of_chunks_and_goes_back_to_a_lost_one() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_window(3);
+    let chunks = data.len().div_ceil(40) as u64;
+    assert!(chunks >= 5);
+    c.lose_chunks.insert(40);
+    c.cut.clear();
+    c.ticks(3 * chunks as u32 + 60);
+    assert_eq!(c.nodes[&f].snapshot_index(), meta.index, "caught up from chunks");
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    let sent: Vec<u64> = c.chunks_sent.iter().filter(|s| s.0 == meta.index).map(|s| s.1).collect();
+    // Three chunks go out before any answer is back.
+    assert_eq!(sent[..3], [0, 40, 80], "{sent:?}");
+    // The lost one goes again, once the follower says it still stands there.
+    assert_eq!(sent.iter().filter(|&&o| o == 40).count(), 2, "{sent:?}");
+    // Never more than three ahead: a chunk goes out only after the one
+    // three before it. (Past the end the driver says the end, so an offset
+    // that is no multiple of 40 stands for the next multiple.)
+    for (i, &o) in sent.iter().enumerate() {
+        let before = &sent[..i];
+        let nominal = o.div_ceil(40) * 40;
+        let resent = before.contains(&o);
+        assert!(resent || nominal <= 80 || before.contains(&(nominal - 120)), "{o} went out too early: {sent:?}");
+    }
 }
 
 #[test]
@@ -925,7 +954,10 @@ fn a_replaced_snapshot_is_sent_from_its_start_and_the_last_chunk_is_marked() {
 fn a_transfer_finishes_with_its_snapshot_although_the_leader_snapshots_again() {
     let (mut c, sn) = snapshot_to_send();
     let (l, f, first) = (sn.leader, sn.follower, sn.meta.index);
-    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
+    // One chunk at a time, so the follower's answer to the first arrives
+    // before it is cut off and the leader knows where it stands.
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_window(1);
     // Let a few chunks through, then the follower is cut off and the leader
     // snapshots again.
     c.cut_after_chunks = Some(2);

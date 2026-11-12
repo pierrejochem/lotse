@@ -473,13 +473,30 @@ pub struct Config {
     pub lease_ticks: Option<u32>,
     /// Seed for the randomised election timeout.
     pub seed: u64,
+    /// The most bytes of a snapshot one [`Message::Snapshot`] carries; the
+    /// driver fills chunks of this size ([`RaftGroup::snapshot_chunk_bytes`]).
+    pub snapshot_chunk_bytes: u64,
+    /// How many chunks of a snapshot may be on their way to one follower
+    /// at once (ADR 0103).
+    pub snapshot_window: u32,
 }
 
 impl Config {
     /// Defaults for node `id` among `voters`: 10-tick elections,
-    /// heartbeats every 2 ticks, pre-vote on.
+    /// heartbeats every 2 ticks, pre-vote on, snapshots in chunks of 1 MiB
+    /// with four on their way at once.
     pub fn new(id: NodeId, voters: Vec<NodeId>) -> Self {
-        Config { id, voters, election_ticks: 10, heartbeat_ticks: 2, pre_vote: true, lease_ticks: None, seed: id }
+        Config {
+            id,
+            voters,
+            election_ticks: 10,
+            heartbeat_ticks: 2,
+            pre_vote: true,
+            lease_ticks: None,
+            seed: id,
+            snapshot_chunk_bytes: 1 << 20,
+            snapshot_window: 4,
+        }
     }
 }
 
@@ -559,6 +576,13 @@ struct Progress {
     /// again meanwhile; otherwise a snapshot taken more often than a
     /// transfer takes would never arrive.
     snap: Option<(SnapshotMeta, u64)>,
+    /// Where the next chunk of `snap` to send starts: chunks from the
+    /// follower's offset up to here are on their way (ADR 0103).
+    snap_sent: u64,
+    /// The leader went back to the follower's offset and has not heard it
+    /// move on since: answers to chunks sent before that say the same and
+    /// must not send the window again each time.
+    snap_rewound: bool,
     /// After a rejection, appends carry no entries until one matches: the
     /// leader learns where the logs agree before it sends entries, instead
     /// of sending from a guess that may be wrong again.
@@ -697,6 +721,22 @@ impl RaftGroup {
         };
         g.reset_timeout();
         g
+    }
+
+    /// How many bytes of a snapshot a driver puts in one chunk.
+    pub fn snapshot_chunk_bytes(&self) -> usize {
+        usize::try_from(self.cfg.snapshot_chunk_bytes.max(1)).unwrap_or(usize::MAX)
+    }
+
+    /// Changes [`Config::snapshot_chunk_bytes`]; for tests that want a
+    /// snapshot in many chunks.
+    pub fn set_snapshot_chunk_bytes(&mut self, bytes: u64) {
+        self.cfg.snapshot_chunk_bytes = bytes;
+    }
+
+    /// Changes [`Config::snapshot_window`].
+    pub fn set_snapshot_window(&mut self, chunks: u32) {
+        self.cfg.snapshot_window = chunks;
     }
 
     /// This node.
@@ -859,9 +899,12 @@ impl RaftGroup {
             for p in progress.values_mut() {
                 if p.inflight {
                     p.inflight_ticks += 1;
-                    // The append or its reply got lost: try again.
+                    // The append or its reply got lost: try again, chunks of a
+                    // snapshot from where the follower last stood.
                     if p.inflight_ticks >= election {
                         p.inflight = false;
+                        p.snap_sent = p.snap.as_ref().map_or(0, |s| s.1);
+                        p.snap_rewound = true;
                     }
                 }
             }
@@ -1015,6 +1058,8 @@ impl RaftGroup {
                     acked: 0,
                     since: self.seq + 1,
                     snap: None,
+                    snap_sent: 0,
+                    snap_rewound: false,
                     probing: false,
                 });
             }
@@ -1259,6 +1304,7 @@ impl RaftGroup {
         let last = self.log.last_index();
         let (term, commit, seq) = (self.term, self.commit, self.seq);
         let snapshot = self.snapshot_meta();
+        let (chunk, window) = (self.cfg.snapshot_chunk_bytes.max(1), u64::from(self.cfg.snapshot_window.max(1)));
         let State::Leader { progress } = &mut self.state else { return };
         let Some(p) = progress.get_mut(&f) else { return };
         if p.inflight || p.next > last {
@@ -1269,14 +1315,22 @@ impl RaftGroup {
         let prev_index = p.next - 1;
         if prev_index < snapshot.index {
             // The entries it needs are compacted: send the snapshot, going on
-            // with the one in transfer from where the follower said it stands.
-            let (meta, offset) = p.snap.clone().unwrap_or((snapshot, 0));
-            self.outbox.push(Send {
-                to: f,
-                msg: Message::Snapshot { term, meta, offset, data: Bytes::new(), done: false, seq },
-                fill_from: None,
-                attach_snapshot: true,
-            });
+            // with the one in transfer from where the follower said it
+            // stands, up to `window` chunks ahead of it. The core does not
+            // know the snapshot's length: chunks past its end come back
+            // empty and marked last, and a follower that has installed it
+            // just accepts them.
+            let (meta, offset) = p.snap.get_or_insert((snapshot, 0)).clone();
+            p.snap_sent = p.snap_sent.max(offset);
+            let mut sends = Vec::new();
+            while p.snap_sent < offset + window * chunk {
+                sends.push(p.snap_sent);
+                p.snap_sent += chunk;
+            }
+            for offset in sends {
+                let msg = Message::Snapshot { term, meta: meta.clone(), offset, data: Bytes::new(), done: false, seq };
+                self.outbox.push(Send { to: f, msg, fill_from: None, attach_snapshot: true });
+            }
             return;
         }
         // A probe carries no entries; the follower only says whether it has
@@ -1350,17 +1404,30 @@ impl RaftGroup {
                 p.next = p.next.max(p.matched + 1);
                 if p.snap.as_ref().is_some_and(|s| last >= s.0.index) {
                     p.snap = None;
+                    p.snap_sent = 0;
                 }
             }
             AppendResult::SnapshotChunk { index, next } => {
                 // Only an answer about the snapshot we are sending counts. The
                 // driver sends the latest one instead if it no longer holds
                 // the one in transfer, and the follower starts over.
+                // Each chunk that arrives in order moves the follower on. One
+                // that does not (a chunk was lost, or came twice) leaves it
+                // where it stood: then the leader sends again from there.
                 if p.snap.as_ref().is_some_and(|s| s.0.index == index) {
+                    let stood = p.snap.as_ref().map_or(0, |s| s.1);
+                    if next > stood {
+                        p.snap_rewound = false;
+                    } else if !p.snap_rewound || next < stood {
+                        p.snap_sent = next;
+                        p.snap_rewound = true;
+                    }
                     p.snap = p.snap.take().map(|s| (s.0, next));
                     p.inflight = false;
                 } else if index == self.log.snapshot_index() {
                     p.snap = Some((self.snapshot_meta(), next));
+                    p.snap_sent = next;
+                    p.snap_rewound = true;
                     p.inflight = false;
                 }
             }
