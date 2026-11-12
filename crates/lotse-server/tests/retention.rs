@@ -565,22 +565,32 @@ async fn run(rt: SimRuntime) {
             }
         }
     }
+    // Checked once every replica has what its leader has: a follower still
+    // catching up holds less than the limit without having deleted more.
     let deadline = rt.now() + Duration::from_secs(30);
     loop {
         let mut replicas = Vec::new();
         for (_, m) in reader.node_metrics().await.expect("the healed cluster describes itself") {
             let Ok(m) = m else { continue };
             replicas.extend(
-                m.partitions.iter().filter(|pm| pm.resource_id == events).map(|pm| (pm.log_start, pm.size_bytes)),
+                m.partitions
+                    .iter()
+                    .filter(|pm| pm.resource_id == events)
+                    .map(|pm| (pm.log_start, pm.log_end, pm.size_bytes, pm.leader)),
             );
         }
-        if !replicas.is_empty() && replicas.iter().all(|(start, _)| *start > 0) {
-            for (start, size) in replicas {
+        let leader_end = replicas.iter().find(|r| r.3).map(|r| r.1);
+        let caught_up = replicas.iter().all(|r| Some(r.1) == leader_end);
+        if !replicas.is_empty() && caught_up && replicas.iter().all(|(start, ..)| *start > 0) {
+            for (start, _, size, _) in replicas {
                 assert!(size >= own, "events keeps {size} bytes from {start}, below its own limit {own}");
             }
             break;
         }
-        assert!(rt.now() < deadline, "events keeps everything, its own limit is {own} bytes: {replicas:?}");
+        assert!(
+            rt.now() < deadline,
+            "events keeps everything or its replicas do not catch up, its own limit is {own} bytes: {replicas:?}"
+        );
         rt.sleep(TICK * 20).await;
     }
     drop(reader);
