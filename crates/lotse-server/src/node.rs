@@ -71,6 +71,10 @@ pub struct NodeConfig {
     pub client_listen: Option<String>,
     /// Every node's client address, as `Metadata` reports it.
     pub client_addrs: BTreeMap<NodeId, String>,
+    /// The zone of each configured node that names one, as `Metadata`
+    /// reports it for clients that fetch from a replica in their zone
+    /// (ADR 0104).
+    pub zones: BTreeMap<NodeId, String>,
     /// Streams and the groups of their partitions.
     pub streams: Vec<StreamConfig>,
     /// Queues and their groups (each one of `groups`).
@@ -987,6 +991,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 client_cas: &cfg.auth.client_cas,
             },
             client_addrs: &known.client_addrs,
+            zones: &known.zones,
             coordinator: cfg.coordinator,
             node: NodeView { id: cfg.id, started, net: &shared.net, host },
             now: rt.now(),
@@ -1427,6 +1432,8 @@ struct Known {
     active: Vec<NodeId>,
     /// Every node's client address, for `Metadata`.
     client_addrs: BTreeMap<NodeId, String>,
+    /// The zones of the nodes that have one, for `Metadata`.
+    zones: BTreeMap<NodeId, String>,
     /// The metadata state these were built from.
     state: MetadataState,
 }
@@ -1450,6 +1457,7 @@ impl Known {
                 .collect(),
             active: cfg.peers.keys().copied().collect(),
             client_addrs: cfg.client_addrs.clone(),
+            zones: cfg.zones.clone(),
             state: MetadataState::default(),
         }
     }
@@ -1484,6 +1492,9 @@ impl Known {
         known.deleted = crate::metadata::Deleted::of(&state, self.applied);
         for (id, n) in &state.nodes {
             known.nodes.insert(*id, (n.peer.clone(), n.client.clone()));
+            if !n.zone.is_empty() {
+                known.zones.insert(*id, n.zone.clone());
+            }
         }
         known.nodes.retain(|id, _| !state.gone.contains(id));
         known.active = known.nodes.keys().copied().filter(|id| !state.draining.contains(id)).collect();

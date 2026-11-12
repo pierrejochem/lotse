@@ -85,6 +85,7 @@ async fn every_way_in_on_real_sockets() {
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),
             client_addrs: clients.clone(),
+            zones: Default::default(),
             streams: vec![StreamConfig { name: "s".into(), resource_id: 7, partitions: vec![3] }],
             queues: Vec::new(),
             exchanges: Vec::new(),

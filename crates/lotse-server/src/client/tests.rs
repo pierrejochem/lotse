@@ -19,6 +19,7 @@ static OPEN: std::sync::LazyLock<crate::access::Access> = std::sync::LazyLock::n
 });
 
 static NOTHING_DELETED: crate::metadata::Deleted = crate::metadata::Deleted::NONE;
+static NO_ZONES: BTreeMap<NodeId, String> = BTreeMap::new();
 
 #[derive(Debug, Default)]
 struct Nothing;
@@ -159,6 +160,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -235,6 +237,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -331,6 +334,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -352,6 +356,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
                     max_bytes: 1 << 20,
                 }],
             }],
+            allow_follower: false,
         });
         let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
         let mut clients = Clients::default();
@@ -369,6 +374,130 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
         assert_eq!(p.error, ErrorCode::NONE);
         assert!(p.records.is_empty(), "nothing is stable before it is applied");
         assert_eq!(p.last_stable_offset, 0);
+    });
+}
+
+fn plain_value(value: &[u8]) -> Bytes {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, None, Some(value), &[]);
+    b.finish().unwrap()
+}
+
+/// A follower asked for what it has serves committed data only: entries it
+/// holds beyond its commit index stay unread (ADR 0104).
+#[test]
+fn a_follower_serves_committed_data_and_nothing_beyond() {
+    Sim::new(4).run(|rt| async move {
+        let mut rs = Vec::new();
+        for id in 1..=2u64 {
+            let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2]) };
+            let host = rt.node(&format!("n{id}"));
+            rs.push(Replica::open(host, "g", cfg, Nothing, LogConfig::default()).await.unwrap());
+        }
+        // Delivers what both send, `n` times; node 2 hears node 1 only if `to_2`.
+        async fn pump(rs: &mut [Replica<SimRuntime, Nothing>], n: usize, to_2: bool) {
+            for _ in 0..n {
+                let mut mail = Vec::new();
+                for (i, r) in rs.iter_mut().enumerate() {
+                    for s in r.process().await.unwrap().messages {
+                        mail.push((i as u64 + 1, s.to, s.msg));
+                    }
+                }
+                for (from, to, msg) in mail {
+                    if to == 2 && !to_2 {
+                        continue;
+                    }
+                    rs[to as usize - 1].raft().step(from, msg);
+                }
+            }
+        }
+        while rs[0].raft_ref().role() != Role::Leader {
+            rs[0].raft().tick();
+            pump(&mut rs, 3, true).await;
+        }
+        rs[0].propose(plain_value(b"committed")).unwrap();
+        for _ in 0..10 {
+            rs[0].raft().tick();
+            pump(&mut rs, 3, true).await;
+        }
+        let committed = rs[1].raft_ref().commit();
+        assert!(committed >= 2, "the follower knows the first value is committed");
+        // A second value reaches the follower, but not the news that it
+        // is committed: the leader hears no answer.
+        rs[0].propose(plain_value(b"not yet")).unwrap();
+        let mail: Vec<_> = rs[0].process().await.unwrap().messages;
+        for s in mail.into_iter().filter(|s| s.to == 2) {
+            rs[1].raft().step(1, s.msg);
+        }
+        rs[1].process().await.unwrap();
+        assert!(rs[1].raft_ref().last_index() > committed, "it holds more than is committed");
+        assert_eq!(rs[1].raft_ref().commit(), committed);
+
+        let follower = rs.pop().unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, follower)]);
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let mut clients = Clients::default();
+        let mut ask = async |offset: u64, isolation: u8, allow_follower: bool| {
+            let outbox = Arc::new(Outbox::default());
+            let fetch = Request::Fetch(lotse_proto::FetchRequest {
+                max_wait_ms: 0,
+                min_bytes: 1,
+                max_bytes: 1 << 20,
+                isolation,
+                resources: vec![lotse_proto::FetchResource {
+                    resource_id: 7,
+                    partitions: vec![lotse_proto::FetchPartition {
+                        partition: 0,
+                        fetch_offset: offset,
+                        leader_term: 99,
+                        max_bytes: 1 << 20,
+                    }],
+                }],
+                allow_follower,
+            });
+            let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
+            let request =
+                ClientRequest { outbox: outbox.clone(), header, request: fetch, principal: Principal::Anonymous };
+            clients.handle(request, &view, &mut groups).await.unwrap();
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
+            let Response::Fetch(f) = lotse_proto::decode_response(frame, ApiKey::FETCH).unwrap().1 else { panic!() };
+            f.resources[0].partitions[0].clone()
+        };
+        // Not asked for what it has, a follower names no data.
+        assert_eq!(ask(0, lotse_proto::isolation::COMMITTED, false).await.error, ErrorCode::NOT_LEADER);
+        for isolation in [lotse_proto::isolation::COMMITTED, lotse_proto::isolation::UNCOMMITTED] {
+            let p = ask(0, isolation, true).await;
+            assert_eq!(p.error, ErrorCode::NONE, "a term it does not know does not matter");
+            assert_eq!(p.high_watermark, committed);
+            let mut rest = p.records.clone();
+            let mut end = 0;
+            while !rest.is_empty() {
+                let (b, r) = lotse_record::Batch::parse(&rest).unwrap();
+                end = b.next_offset();
+                rest = r;
+            }
+            assert!(end > 0 && end <= committed, "committed batches only: up to {end}, commit {committed}");
+            // Past what it has, it has nothing yet: no error, the client waits.
+            let past = ask(committed + 10, isolation, true).await;
+            assert_eq!((past.error, past.records.len()), (ErrorCode::NONE, 0));
+        }
     });
 }
 
@@ -397,6 +526,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 group_heartbeat: Duration::from_secs(5),
                 admin: AdminView::default(),
                 client_addrs: &addrs,
+                zones: &NO_ZONES,
                 coordinator: Some(G),
                 node: NodeView::default(),
                 now,
@@ -469,6 +599,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: Some(G),
             node: NodeView::default(),
             now,
@@ -536,6 +667,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -617,6 +749,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
+            zones: &NO_ZONES,
             streams: &[],
             queues: &queues,
             exchanges: &[],
@@ -734,6 +867,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -833,6 +967,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             group_heartbeat: Duration::from_millis(100),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
@@ -928,6 +1063,7 @@ fn offsets_for_a_released_partition_are_refused() {
             group_heartbeat: Duration::from_millis(100),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
@@ -1049,6 +1185,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
         assert!(applied > 0);
         let (addrs, voters) = (BTreeMap::new(), BTreeMap::new());
         let view = ClusterView {
+            zones: &NO_ZONES,
             streams: &[],
             queues: &[],
             exchanges: &[],
@@ -1120,6 +1257,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                     ..AdminView::default()
                 },
                 client_addrs: &addrs,
+                zones: &NO_ZONES,
                 coordinator: None,
                 node: NodeView::default(),
                 now: rt.now(),
@@ -1290,6 +1428,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                     ..AdminView::default()
                 },
                 client_addrs: &addrs,
+                zones: &NO_ZONES,
                 coordinator: None,
                 node: NodeView::default(),
                 now: rt.now(),
@@ -1516,6 +1655,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -1707,6 +1847,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -1780,6 +1921,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 group_heartbeat: Duration::from_secs(5),
                 admin: AdminView::default(),
                 client_addrs: &addrs,
+                zones: &NO_ZONES,
                 coordinator: Some(G),
                 node: NodeView::default(),
                 now,
@@ -1840,6 +1982,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: Some(G),
             node: NodeView::default(),
             now: later,
@@ -1890,6 +2033,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
             group_heartbeat: Duration::from_millis(100),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: Some(G),
             node: NodeView::default(),
             now: start + Duration::from_millis(ms),
@@ -2000,6 +2144,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     group_heartbeat: Duration::from_millis(100),
                     admin: AdminView::default(),
                     client_addrs: &addrs,
+                    zones: &NO_ZONES,
                     coordinator: Some(G),
                     node: NodeView::default(),
                     now: start + Duration::from_millis(ms),
@@ -2069,6 +2214,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),
@@ -2202,6 +2348,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
             group_heartbeat: Duration::from_secs(5),
             admin: AdminView::default(),
             client_addrs: &addrs,
+            zones: &NO_ZONES,
             coordinator: None,
             node: NodeView::default(),
             now: rt.now(),

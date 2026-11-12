@@ -265,6 +265,55 @@ class FetchTest {
         assertEquals(1, a.count(Request.Fetch.class), "not retried");
     }
 
+    /** Node 1 leads in zone a, node 2 follows in zone b; node 2 answers with {@code followerCode}. */
+    private void zones(ErrorCode followerCode) {
+        List<FakeNode> both = List.of(a, b);
+        FakeNode.Handler h = (node, request) -> {
+            if (request instanceof Request.Metadata) {
+                return Fx.metadataInZones(both, List.of("a", "b"), Fx.stream("s", STREAM_ID, Fx.partition(0, 1, 5, 1L, 2L)));
+            }
+            ErrorCode code = node.id == 2 ? followerCode : ErrorCode.NONE;
+            ByteString records = code.isOk() ? data(0, 0, false, "from " + node.id) : ByteString.EMPTY;
+            return Fx.fetched(STREAM_ID, 0, code, records, 1, 1, 0, List.of(), null);
+        };
+        a.on(h);
+        b.on(h);
+    }
+
+    @Test
+    void aClientInAZoneFetchesFromTheReplicaThere() {
+        zones(ErrorCode.NONE);
+        client = new LotseClient(Fx.config(a).zone("b").build());
+        assertEquals(List.of("from 2"), values(client.fetch("s", 0, 0, Duration.ofMillis(1))));
+        assertEquals(List.of("from 2"), values(client.fetch("s", 0, 0, Duration.ofMillis(1))));
+        assertEquals(0, a.count(Request.Fetch.class), "the leader is in another zone");
+        assertTrue(b.requests(Request.Fetch.class).get(0).allowFollower(), "the follower is asked for what it has");
+        client.close();
+        // In the leader's zone, or in one without a replica, the leader serves, as without a zone.
+        for (String zone : new String[] {"a", "c", null}) {
+            client = new LotseClient(Fx.config(a).zone(zone).build());
+            assertEquals(List.of("from 1"), values(client.fetch("s", 0, 0, Duration.ofMillis(1))), "zone " + zone);
+            client.close();
+        }
+        assertTrue(a.requests(Request.Fetch.class).stream().noneMatch(Request.Fetch::allowFollower));
+        client = null;
+    }
+
+    @Test
+    void aReplicaThatFailsIsLeftForTheLeader() {
+        // An older node answers NOT_LEADER; one whose log starts later, OFFSET_OUT_OF_RANGE.
+        for (ErrorCode code : List.of(ErrorCode.NOT_LEADER, ErrorCode.OFFSET_OUT_OF_RANGE)) {
+            zones(code);
+            int before = b.count(Request.Fetch.class);
+            client = new LotseClient(Fx.config(a).zone("b").build());
+            assertEquals(List.of("from 1"), values(client.fetch("s", 0, 0, Duration.ofMillis(1))), code.toString());
+            assertEquals(List.of("from 1"), values(client.fetch("s", 0, 0, Duration.ofMillis(1))), code.toString());
+            assertEquals(before + 1, b.count(Request.Fetch.class), "asked once, then left: " + code);
+            client.close();
+        }
+        client = null;
+    }
+
     @Test
     void aRetriableFetchErrorFollowsTheLeaderHint() {
         List<FakeNode> both = List.of(a, b);

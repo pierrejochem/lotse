@@ -129,6 +129,13 @@ impl World {
         let pre_vote = rt.chance(1, 2);
         let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
         let streams = vec![StreamConfig { name: STREAM.into(), resource_id: 7, partitions: vec![1, 2] }];
+        // In half the runs nodes sit in two zones, and consumers in a zone
+        // fetch from a follower there (ADR 0104).
+        let zones: BTreeMap<NodeId, String> = if rt.chance(1, 2) {
+            ids.iter().map(|id| (*id, if id % 2 == 0 { "a" } else { "b" }.to_string())).collect()
+        } else {
+            BTreeMap::new()
+        };
         let cfgs = ids
             .iter()
             .map(|&id| {
@@ -145,6 +152,7 @@ impl World {
                         log,
                         client_listen: Some(client_addrs[&id].clone()),
                         client_addrs: client_addrs.clone(),
+                        zones: zones.clone(),
                         streams: streams.clone(),
                         queues: Vec::new(),
                         exchanges: Vec::new(),
@@ -289,7 +297,8 @@ async fn transactional(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<Atom
 }
 
 async fn consumer(rt: SimRuntime, partition: u32, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
-    let client = Client::new(rt.clone(), client_config());
+    let zone = [None, Some("a"), Some("b")][rt.below(3) as usize].map(String::from);
+    let client = Client::new(rt.clone(), ClientConfig { zone, ..client_config() });
     let mut offset = 0u64;
     while !stop.load(Ordering::Relaxed) {
         match client.fetch(STREAM, partition, offset, TICK * 20).await {

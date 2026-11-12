@@ -115,6 +115,7 @@ impl World {
                         log,
                         client_listen: Some(client_addrs[&id].clone()),
                         client_addrs: client_addrs.clone(),
+                        zones: Default::default(),
                         streams: streams.clone(),
                         queues: Vec::new(),
                         exchanges: Vec::new(),

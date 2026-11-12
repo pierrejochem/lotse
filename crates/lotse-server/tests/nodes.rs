@@ -101,6 +101,7 @@ impl World {
                         log,
                         client_listen: None,
                         client_addrs: BTreeMap::new(),
+                        zones: Default::default(),
                         streams: Vec::new(),
                         queues: Vec::new(),
                         exchanges: Vec::new(),

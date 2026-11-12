@@ -53,6 +53,11 @@ export interface ClientOptions {
   readonly metadataMaxAgeMs?: number;
   /** The tenant resources created by this client go to, and the one its producer names live in (ADR 0062). Default `default`. */
   readonly tenant?: string;
+  /**
+   * The zone this client runs in. With one, it fetches from a replica of the partition in that zone, which serves the
+   * committed data it has, and from the leader if there is none (ADR 0104). Default none: fetches go to the leader.
+   */
+  readonly zone?: string;
   /** For the TCP connect and the TLS handshake together. Default 10 000. */
   readonly connectTimeoutMs?: number;
 }
@@ -70,6 +75,7 @@ export interface ClientConfig {
   readonly transactionalId: string | null;
   readonly metadataMaxAgeMs: number;
   readonly tenant: string;
+  readonly zone: string | null;
   readonly connection: ConnectionOptions;
 }
 
@@ -110,6 +116,7 @@ export function resolveClientOptions(o: ClientOptions): ClientConfig {
     transactionalId: o.transactionalId ?? null,
     metadataMaxAgeMs: positive("metadataMaxAgeMs", o.metadataMaxAgeMs, 30_000),
     tenant: o.tenant ?? DEFAULT_TENANT,
+    zone: o.zone ?? null,
     connection,
   };
 }

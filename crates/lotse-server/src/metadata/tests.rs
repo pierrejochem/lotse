@@ -342,9 +342,18 @@ fn compaction_settings_change_and_survive_a_snapshot_and_old_records_still_read(
 #[test]
 fn nodes_come_and_go_and_groups_get_new_voters() {
     let mut s = MetadataState::default();
-    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into() };
+    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into(), zone: "eu-1b".into() };
     s.apply(1, &payload(&add)).unwrap();
-    assert_eq!(s.nodes[&4], NodeMeta { peer: "n4:7000".into(), client: "n4:9000".into() });
+    assert_eq!(s.nodes[&4], NodeMeta { peer: "n4:7000".into(), client: "n4:9000".into(), zone: "eu-1b".into() });
+    // A zone is written only when there is one, so records without stay
+    // as older nodes read them; both decode as they were, and a snapshot
+    // keeps the zone.
+    assert_eq!(decode_change(&payload(&add)[..]).unwrap(), add);
+    let plain = Change::AddNode { id: 5, peer: "n5:7000".into(), client: "n5:9000".into(), zone: String::new() };
+    let old = Change::AddNode { id: 5, peer: "n5:7000".into(), client: "n5:9000".into(), zone: "x".into() };
+    assert!(payload(&plain).len() < payload(&old).len());
+    assert_eq!(decode_change(&payload(&plain)[..]).unwrap(), plain);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
     // A runtime stream's partition and a configured group get new voters.
     let create = Change::CreateStream {
         name: "o".into(),
@@ -370,7 +379,7 @@ fn nodes_come_and_go_and_groups_get_new_voters() {
     s.apply(7, &payload(&Change::ForgetNode { id: 2 })).unwrap();
     assert!(s.gone.contains(&2) && !s.draining.contains(&2));
     // A gone id is never added again, nor drained.
-    let again = Change::AddNode { id: 2, peer: "x:1".into(), client: "x:2".into() };
+    let again = Change::AddNode { id: 2, peer: "x:1".into(), client: "x:2".into(), zone: String::new() };
     s.apply(8, &payload(&again)).unwrap();
     s.apply(9, &payload(&Change::DrainNode { id: 2 })).unwrap();
     assert!(!s.nodes.contains_key(&2) && !s.draining.contains(&2));

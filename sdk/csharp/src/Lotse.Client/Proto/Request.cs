@@ -178,9 +178,14 @@ public abstract record Request
     /// <param name="MaxBytes">The limit for the whole response.</param>
     /// <param name="Isolation">See <see cref="Messages.Isolation"/>.</param>
     /// <param name="Resources">The partitions to read.</param>
+    /// <param name="AllowFollower">A follower may answer with the committed data it has instead of NOT_LEADER (ADR 0104); tag 0.</param>
     public sealed record Fetch(
-        uint MaxWaitMs, uint MinBytes, uint MaxBytes, byte Isolation, IReadOnlyList<FetchResource> Resources) : Request
+        uint MaxWaitMs, uint MinBytes, uint MaxBytes, byte Isolation, IReadOnlyList<FetchResource> Resources,
+        bool AllowFollower = false) : Request
     {
+        /// <summary>Fetch's tag: a follower may answer.</summary>
+        internal const long TagAllowFollower = 0;
+
         /// <inheritdoc/>
         public override ApiKey ApiKey => ApiKey.Fetch;
 
@@ -201,7 +206,14 @@ public abstract record Request
                 });
                 w1.NoTags();
             });
-            w.NoTags();
+            if (AllowFollower)
+            {
+                w.Tags(new[] { new Tag(TagAllowFollower, ByteString.CopyOf(new byte[] { 1 })) });
+            }
+            else
+            {
+                w.NoTags();
+            }
         }
 
         internal static Fetch Read(Reader r)
@@ -222,8 +234,17 @@ public abstract record Request
                 r1.Tags();
                 return new FetchResource(id, partitions);
             });
-            r.Tags();
-            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources);
+            bool allowFollower = false;
+            foreach (Tag t in r.Tags())
+            {
+                if (t.Number == TagAllowFollower)
+                {
+                    var vr = new Reader(t.Value.ToByteArray());
+                    allowFollower = vr.U8() != 0;
+                    vr.Finish();
+                }
+            }
+            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower);
         }
     }
 
