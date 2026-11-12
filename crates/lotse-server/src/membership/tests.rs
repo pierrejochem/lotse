@@ -352,8 +352,7 @@ fn a_node_is_drained_once_no_group_needs_it() {
     assert!(drained(&s, &managed(&s), &[], 2));
     assert!(!drained(&s, &managed(&s), &[], 1), "a node that does not drain");
     assert!(stops(&s, &managed(&s), &[], 2, false));
-    assert!(!stops(&s, &managed(&s), &[], 5, true), "a joining node is not listed until added: it stays");
-    assert!(!stops(&s, &managed(&s), &[], 1, true), "nor does a node that does not drain");
+    assert!(!stops(&s, &managed(&s), &[], 1, false), "a node that does not drain stays");
 }
 
 #[test]
@@ -363,7 +362,40 @@ fn a_draining_node_the_cluster_forgot_stops() {
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
     let managed = crate::client::managed_groups(&s, &[], &[]);
     assert!(!stops(&s, &managed, &[], 2, false), "its view still has it holding a group");
-    assert!(stops(&s, &managed, &[], 2, true), "but the metadata leader no longer lists it");
+    assert!(stops(&s, &managed, &[], 2, true), "but the cluster forgot it");
+}
+
+#[test]
+fn a_node_the_cluster_forgot_stops_though_it_never_saw_its_drain() {
+    // Switched off before the drain, or cut off after the drain's entry
+    // reached it but not its commit (ADR 0105): its own state has it active
+    // and holding a group, and still it stops once forgotten.
+    let s = with_stream(&[&[1, 2, 3]]);
+    let managed = crate::client::managed_groups(&s, &[], &[]);
+    assert!(!s.draining.contains(&2));
+    assert!(!stops(&s, &managed, &[], 2, false));
+    assert!(stops(&s, &managed, &[], 2, true));
+}
+
+#[test]
+fn a_node_is_listed_by_its_own_state_once_it_was_a_first_voter_or_added() {
+    let mut s = MetadataState::default();
+    let mut at = 1;
+    assert!(listed(&s, &[1, 2, 3], 2), "a first voter");
+    assert!(!listed(&s, &[1, 2, 3], 4), "a joining node its configuration names, before it is added");
+    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into() };
+    apply_all(&mut s, &mut at, &[add]);
+    assert!(listed(&s, &[1, 2, 3], 4), "added");
+    apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }, Change::ForgetNode { id: 2 }]);
+    assert!(!listed(&s, &[1, 2, 3], 2), "forgotten");
+}
+
+#[test]
+fn only_a_node_its_own_state_lists_can_be_forgotten() {
+    assert!(forgotten(true, false), "listed once, left out by a newer answer");
+    assert!(!forgotten(true, true), "still listed");
+    assert!(!forgotten(false, false), "a joining node is not listed until added: it stays");
+    assert!(!forgotten(false, true));
 }
 
 #[test]

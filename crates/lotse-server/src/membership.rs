@@ -309,19 +309,35 @@ pub(crate) fn plan(
     changes
 }
 
-/// Whether this node (`me`) stops for good (ADR 0051): it is draining and
-/// either drained by its own metadata state or no longer listed by the
-/// metadata leader (`unlisted`), which forgot it while it was cut off. A
-/// node not draining never stops for being unlisted: a joining node is not
-/// listed until it has been added.
+/// Whether this node (`me`) stops for good (ADR 0051): drained by its own
+/// metadata state, or `forgotten` by the cluster (ADR 0105), which it may
+/// learn without ever having seen that it was draining.
 pub(crate) fn stops(
     state: &MetadataState,
     managed: &[(GroupId, Vec<NodeId>)],
     core: &[GroupId],
     me: NodeId,
-    unlisted: bool,
+    forgotten: bool,
 ) -> bool {
-    state.draining.contains(&me) && (unlisted || drained(state, managed, core, me))
+    forgotten || drained(state, managed, core, me)
+}
+
+/// Whether this node (`me`) is listed by its own metadata state: one of the
+/// first voters (the nodes the cluster started with, kept on disk), or
+/// added since, and not forgotten. A joining node is neither until its
+/// addition is applied, whatever its configuration file names.
+pub(crate) fn listed(state: &MetadataState, first_voters: &[NodeId], me: NodeId) -> bool {
+    (first_voters.contains(&me) || state.nodes.contains_key(&me)) && !state.gone.contains(&me)
+}
+
+/// Whether the cluster forgot this node (ADR 0105), from an answer of the
+/// metadata leader that is at least as new as the node's own metadata
+/// state: its own state lists it ([`listed`]), the answer does not. Between
+/// the two the cluster drained and forgot it, and ids are never used twice.
+/// A joining node never counts as forgotten: its own state does not list it
+/// until it has been added.
+pub(crate) fn forgotten(listed_by_own_state: bool, listed_by_answer: bool) -> bool {
+    listed_by_own_state && !listed_by_answer
 }
 
 /// Bytes of the groups `node` is a voter of, as far as `sizes` knows them.

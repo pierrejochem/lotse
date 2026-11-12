@@ -3236,15 +3236,39 @@ impl RemoveNodeRequest {
 
 /// Lists the cluster's nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DescribeNodesRequest;
+pub struct DescribeNodesRequest {
+    /// Internal, for nodes (ADR 0105): the metadata index the asking node
+    /// has applied. The metadata leader answers only once it has applied as
+    /// much, so a node its own state lists, and that the answer leaves out,
+    /// knows it was forgotten. Tag 0; clients leave it out.
+    pub applied_at_least: Option<u64>,
+}
+
+/// Tag of [`DescribeNodesRequest::applied_at_least`].
+const TAG_APPLIED_AT_LEAST: u64 = 0;
 
 impl DescribeNodesRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
-        w.no_tags();
+        match self.applied_at_least {
+            Some(index) => {
+                let mut v = Writer::new();
+                v.u64(index);
+                w.tags(&[(TAG_APPLIED_AT_LEAST, v.finish())]);
+            }
+            None => w.no_tags(),
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        r.tags()?;
-        Ok(DescribeNodesRequest)
+        let mut applied_at_least = None;
+        for (tag, value) in r.tags()? {
+            if tag == TAG_APPLIED_AT_LEAST {
+                let mut v = Reader::new(value);
+                applied_at_least = Some(v.u64()?);
+                v.finish()?;
+            }
+            // Unknown tags come from newer versions: skipped.
+        }
+        Ok(DescribeNodesRequest { applied_at_least })
     }
 }
 

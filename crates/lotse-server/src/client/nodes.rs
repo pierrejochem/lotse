@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use lotse_proto::{
-    AddNodeRequest, DescribeNodesResponse, ErrorCode, MoveLeaderRequest, NodeEntry, RemoveNodeRequest, Response,
-    SettleVotersRequest, node_state,
+    AddNodeRequest, DescribeNodesRequest, DescribeNodesResponse, ErrorCode, MoveLeaderRequest, NodeEntry,
+    RemoveNodeRequest, Response, SettleVotersRequest, node_state,
 };
 use lotse_raft::NodeId;
 use lotse_rt::Runtime;
@@ -169,6 +169,7 @@ impl Clients {
         &mut self,
         outbox: &Outbox,
         id: u32,
+        req: DescribeNodesRequest,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
@@ -179,6 +180,14 @@ impl Clients {
                 return outbox.push(id, &Response::DescribeNodes(resp));
             }
         };
+        // A node that asks how far it is behind gets an answer at least as
+        // new as its own state, or none (ADR 0105): a leader deposed without
+        // knowing it, or one that has not applied as much yet, says
+        // NOT_LEADER, and the node asks again.
+        if req.applied_at_least.is_some_and(|i| replica.applied() < i) {
+            let resp = DescribeNodesResponse { error: ErrorCode::NOT_LEADER, leader_hint: None, nodes: Vec::new() };
+            return outbox.push(id, &Response::DescribeNodes(resp));
+        }
         let state = replica.metadata();
         let core: Vec<GroupId> = view.admin.metadata.into_iter().chain(view.coordinator).collect();
         let managed = managed_groups(state, &core, view.admin.configured_voters);

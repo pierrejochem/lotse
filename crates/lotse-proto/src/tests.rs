@@ -14,6 +14,17 @@ fn every_request_round_trips() {
 }
 
 #[test]
+fn a_node_says_how_much_metadata_it_has_applied_and_clients_say_nothing() {
+    // The tag is internal (ADR 0105): a client's request is as it was.
+    let plain = encode_request(1, &Request::DescribeNodes(DescribeNodesRequest::default()));
+    assert_eq!(plain.last(), Some(&0), "a client's request ends in an empty tag block, as before");
+    let plain = decode_request(plain).unwrap().1;
+    assert_eq!(plain, Request::DescribeNodes(DescribeNodesRequest { applied_at_least: None }));
+    let req = Request::DescribeNodes(DescribeNodesRequest { applied_at_least: Some(u64::MAX - 1) });
+    assert_eq!(decode_request(encode_request(1, &req)).unwrap().1, req);
+}
+
+#[test]
 fn every_response_round_trips() {
     for (i, (key, resp)) in responses().into_iter().enumerate() {
         let frame = encode_response(i as u32, &resp);

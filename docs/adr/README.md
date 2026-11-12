@@ -55,7 +55,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0048 | [Adding and removing nodes](0048-adding-and-removing-nodes.md) | Accepted, in part superseded by 0050 |
 | 0049 | [Packaging: an image, a systemd unit, a Debian package and releases](0049-packaging.md) | Accepted |
 | 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted |
-| 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted |
+| 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted, in part superseded by [0105](0105-a-forgotten-node-stops-without-seeing-its-drain.md) |
 | 0052 | [Rebalancing weighs moves by size](0052-rebalancing-weighs-moves-by-size.md) | Accepted |
 | 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted; in part superseded by 0099 |
 | 0054 | [A moved replica does not elect itself](0054-a-moved-replica-does-not-elect-itself.md) | Accepted |
@@ -106,5 +106,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0100 | [Tombstones go once every node removed the files](0100-tombstones-go-once-every-node-removed-the-files.md) | Accepted |
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 | 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
+| 0105 | [A forgotten node stops without seeing its drain](0105-a-forgotten-node-stops-without-seeing-its-drain.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
