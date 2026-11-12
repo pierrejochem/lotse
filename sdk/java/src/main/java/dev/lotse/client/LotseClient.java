@@ -1033,7 +1033,14 @@ public final class LotseClient implements AutoCloseable {
                 try {
                     Response r = call(addr, req);
                     if (r instanceof Response.Publish p && p.entries().size() == 1) {
-                        return p.entries().get(0);
+                        Messages.PublishResult entry0 = p.entries().get(0);
+                        // Refused before anything was written, by a node that may not know the exchange yet:
+                        // another node, or later.
+                        if (!entry0.error().retriable()) {
+                            return entry0;
+                        }
+                        why = addr + ": " + entry0.error();
+                        continue;
                     }
                     why = "unexpected response " + r;
                 } catch (CallFailure e) {

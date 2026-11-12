@@ -2083,6 +2083,8 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
                     entry(20, "k", false, two.clone()),
                     entry(20, "nobody", true, one("m")),
                     entry(20, "nobody", false, one("m")),
+                    // A runtime exchange this node has not heard of yet.
+                    entry(crate::metadata::DYNAMIC_BASE + 1000, "k", false, one("m")),
                 ],
             ),
         )
@@ -2090,7 +2092,13 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
         let got: Vec<ErrorCode> = answer(&outbox).iter().map(error).collect();
         assert_eq!(
             got,
-            [ErrorCode::UNKNOWN_RESOURCE, ErrorCode::INVALID_REQUEST, ErrorCode::UNROUTABLE, ErrorCode::NONE]
+            [
+                ErrorCode::UNKNOWN_RESOURCE,
+                ErrorCode::INVALID_REQUEST,
+                ErrorCode::UNROUTABLE,
+                ErrorCode::NONE,
+                ErrorCode::NOT_LEADER
+            ]
         );
         assert!(clients.take_publish_jobs().is_empty());
         send(&mut clients, &mut groups, publish(Some("t"), vec![entry(20, "k", false, one("m"))])).await;

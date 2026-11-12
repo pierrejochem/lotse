@@ -49,6 +49,7 @@ The routing rules are those of the `lotse-route` crate; the Java SDK is checked 
 - **Lost answer.** `ClientException.Unknown`. The publish is **not** sent again, because the node may have written it and a second try could write it twice. Decide whether a duplicate matters.
 - **Not allowed.** If you lack the producer role on any routed queue, nothing is written and no queue is named (`UNAUTHORIZED`).
 - **Unknown exchange.** The name is looked up once more, in case it was deleted and made again with a new id.
+- **Exchange declared a moment ago.** A node that has not heard of it yet refuses the publish before writing anything, and the client sends it again to another node or after a pause, for up to `retry_for`.
 
 Inside a [transaction](transactions.md), the client routes and writes to each queue itself, so the message reaches all its queues or none.
 
