@@ -255,8 +255,10 @@ async fn fanout_broker_refusing(
                     }
                     Request::Publish(p) => {
                         assert_eq!((p.entries.len(), p.entries[0].exchange_id), (1, 3));
-                        let refuse = refusals.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
-                        if refuse.is_ok() {
+                        let left = refusals.load(Ordering::Relaxed);
+                        let refuse = left > 0
+                            && refusals.compare_exchange(left, left - 1, Ordering::Relaxed, Ordering::Relaxed).is_ok();
+                        if refuse {
                             let refused = PublishResult { error: ErrorCode::NOT_LEADER, routed: vec![] };
                             let resp = Response::Publish(PublishResponse { throttle_ms: 0, entries: vec![refused] });
                             if conn.send(encode_response(h.correlation_id, &resp)).await.is_err() {
