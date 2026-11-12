@@ -134,6 +134,82 @@ class ProducerTest {
         assertEquals(1, node.count(Request.InitProducer.class), "the producer id stayed");
     }
 
+    /**
+     * Stream {@code s} has the resource id in {@code current}. A produce to another id is refused with NOT_LEADER
+     * (nothing written), as a node that applied the delete would; with {@code swallowThen} set, the next produce's
+     * answer is lost and the stream moves to that id meanwhile.
+     */
+    private void serveIncarnations(AtomicLong current, AtomicLong swallowThen) {
+        node.on((n, request) -> {
+            if (request instanceof Request.Metadata) {
+                return Fx.metadata(List.of(n), Fx.stream("s", current.get(), Fx.partition(0, 1, 1, 1L)));
+            }
+            if (request instanceof Request.FindCoordinator) {
+                return Fx.coordinator(n);
+            }
+            if (request instanceof Request.InitProducer) {
+                return Fx.producer(nextProducerId.getAndIncrement(), 3);
+            }
+            if (request instanceof Request.Produce p) {
+                long id = p.resources().get(0).resourceId();
+                long then = swallowThen.getAndSet(0);
+                if (then != 0) {
+                    current.set(then);
+                    throw new FakeNode.Drop();
+                }
+                return id == current.get()
+                        ? Fx.produced(id, 0, offsets.getAndAdd(1))
+                        : Fx.produced(id, 0, ErrorCode.NOT_LEADER, 0, null);
+            }
+            throw new AssertionError("unexpected " + request);
+        });
+    }
+
+    private List<long[]> sentIncarnations() {
+        return node.requests(Request.Produce.class).stream()
+                .map(p -> new long[] {p.resources().get(0).resourceId(), Fx.batchOf(p).producerId(), Fx.batchOf(p).baseSequence()})
+                .toList();
+    }
+
+    @Test
+    void eachIncarnationOfAStreamCountsItsOwnSequences() {
+        AtomicLong current = new AtomicLong(7);
+        serveIncarnations(current, new AtomicLong());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(1));
+        lotse.produce("s", 0, messages(1));
+        // Deleted and created again: the cached route still names 7, which is refused; the produce does not
+        // follow the name to 9 (ADR 0107).
+        current.set(9);
+        assertThrows(ClientException.UnknownStream.class, () -> lotse.produce("s", 0, messages(1)));
+        lotse.produce("s", 0, messages(1));
+        // A node behind still serves 7: back there, its sequences go on.
+        current.set(7);
+        assertThrows(ClientException.UnknownStream.class, () -> lotse.produce("s", 0, messages(1)));
+        lotse.produce("s", 0, messages(1));
+        List<String> seen = sentIncarnations().stream().map(java.util.Arrays::toString).toList();
+        assertEquals(
+                List.of("[7, 100, 0]", "[7, 100, 1]", "[7, 100, 2]", "[9, 100, 0]", "[9, 100, 1]", "[7, 100, 2]"),
+                seen,
+                "a refused batch keeps its sequence; 9 starts at 0; 7 goes on at 2");
+    }
+
+    @Test
+    void aProduceInDoubtWhenItsStreamMovesStartsANewProducer() {
+        AtomicLong current = new AtomicLong(7);
+        AtomicLong swallowThen = new AtomicLong();
+        serveIncarnations(current, swallowThen);
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(1));
+        // The next produce's answer is lost while the stream is created again: it may be in 7.
+        swallowThen.set(9);
+        assertThrows(ClientException.UnknownStream.class, () -> lotse.produce("s", 0, messages(1)));
+        lotse.produce("s", 0, messages(1));
+        List<long[]> seen = sentIncarnations();
+        assertEquals("[7, 100, 1]", java.util.Arrays.toString(seen.get(1)));
+        assertEquals("[9, 101, 0]", java.util.Arrays.toString(seen.get(seen.size() - 1)), "a new producer id");
+    }
+
     @Test
     void anOutcomeStillUnknownWhenTimeRunsOutIsReportedAndTheNextProduceGetsANewProducerId() {
         AtomicInteger phase = new AtomicInteger();

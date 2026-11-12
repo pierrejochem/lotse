@@ -195,7 +195,7 @@ The client keeps `(stream, partition) -> {resource_id, leader, term}`, learnt fr
 ### Idempotent produce
 
 1. On the first produce the client asks any broker `FindCoordinator(key_type = PRODUCER, key = "")` and then the coordinator `InitProducer(txn_id = null)`. The answer is `producer_id` and `epoch`; both are kept for the client's session.
-2. Per `(stream, partition)` the client counts the next sequence, starting at 0. It stamps the batch (`set_producer(id, epoch, sequence)`, which recomputes the CRC) and sends it.
+2. Per `(resource_id, partition)` the client counts the next sequence, starting at 0 (ADR 0107): a stream deleted and created again under its name has a new resource id and sequences of its own. Note the resource id the partition routes to before stamping; if a retry routes to another resource id, end the produce with an unknown-stream error rather than send the batch there, and if an earlier attempt's outcome was unknown, drop the session as in step 6. It stamps the batch (`set_producer(id, epoch, sequence)`, which recomputes the CRC) and sends it.
 3. **Produces to one partition go out one at a time.** A second batch is not sent until the first has an answer, so the leader sees sequences in order. Different partitions run in parallel.
 4. Retrying a batch whose outcome is unknown (lost connection, `REQUEST_TIMED_OUT`) sends **the same bytes**: same id, epoch and sequence. The leader recognises a batch it has and answers with its offset.
 5. On success the sequence advances by the batch's record count (a wrapping `i32`).

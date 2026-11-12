@@ -84,13 +84,17 @@ public final class LotseClient implements AutoCloseable {
 
     private record PartitionKey(String stream, int partition) {}
 
+    /** A partition of one incarnation of a stream: sequences belong to it (ADR 0107). */
+    private record IncarnationKey(long resourceId, int partition) {}
+
     record ProducerIds(long producerId, int epoch) {}
 
     /** The producer id this client writes with. */
     private static final class Session {
         final long producerId;
         final int epoch;
-        final Map<PartitionKey, Integer> next = new HashMap<>();
+        /** By resource id: a stream deleted and created again under its name has sequences of its own. */
+        final Map<IncarnationKey, Integer> next = new HashMap<>();
 
         Session(long producerId, int epoch) {
             this.producerId = producerId;
@@ -528,14 +532,27 @@ public final class LotseClient implements AutoCloseable {
         ReentrantLock lock = partitionLocks.computeIfAbsent(key, k -> new ReentrantLock(true));
         lock.lock();
         try {
-            Stamp stamp = nextSequence(key);
+            // The sequence belongs to the incarnation the stream has now; the produce stays with it (ADR 0107).
+            long resourceId = retrying(() -> route(stream, partition).route().resourceId());
+            IncarnationKey incarnation = new IncarnationKey(resourceId, partition);
+            Stamp stamp = nextSequence(incarnation);
             byte[] bytes = batch.toByteArray();
             Batch.setProducer(bytes, stamp.producerId(), stamp.epoch(), stamp.sequence());
             ByteString stamped = ByteString.view(bytes, 0, bytes.length);
             ProduceResult result;
+            boolean[] inDoubt = {false};
             try {
                 // Every attempt sends the same bytes: the same producer id and the same sequence.
-                result = retrying(() -> produceOnce(stream, partition, stamped, true, null));
+                result = retrying(() -> {
+                    try {
+                        return produceOnce(stream, partition, stamped, true, null, resourceId);
+                    } catch (Attempt a) {
+                        if (a.kind == Attempt.Kind.RETRY_MAYBE_DONE) {
+                            inDoubt[0] = true;
+                        }
+                        throw a;
+                    }
+                });
             } catch (ClientException e) {
                 synchronized (sessionLock) {
                     // Written or not, nobody can tell: later batches would wait behind a gap that may never fill.
@@ -546,8 +563,11 @@ public final class LotseClient implements AutoCloseable {
                     boolean fencedByName = cfg.producerName() != null
                             && e instanceof ClientException.Broker f
                             && f.code().equals(ErrorCode.PRODUCER_FENCED);
+                    // The stream went to another incarnation after an attempt that may have been written to this one:
+                    // in doubt as well.
                     boolean startOver = !fencedByName
                             && (e instanceof ClientException.Unknown
+                                    || (e instanceof ClientException.UnknownStream && inDoubt[0])
                                     || (e instanceof ClientException.Broker b
                                             && (b.code().equals(ErrorCode.OUT_OF_ORDER_SEQUENCE)
                                                     || b.code().equals(ErrorCode.PRODUCER_FENCED))));
@@ -559,7 +579,7 @@ public final class LotseClient implements AutoCloseable {
             }
             synchronized (sessionLock) {
                 if (session != null && session.producerId == stamp.producerId()) {
-                    session.next.put(key, stamp.sequence() + (int) records);
+                    session.next.put(incarnation, stamp.sequence() + (int) records);
                 }
             }
             return result;
@@ -569,7 +589,7 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /** The producer id, epoch and next sequence for a partition, getting a producer id first if there is none. */
-    private Stamp nextSequence(PartitionKey key) {
+    private Stamp nextSequence(IncarnationKey key) {
         synchronized (sessionLock) {
             if (session != null) {
                 return stampOf(session, key);
@@ -585,13 +605,26 @@ public final class LotseClient implements AutoCloseable {
         }
     }
 
-    private static Stamp stampOf(Session s, PartitionKey key) {
+    private static Stamp stampOf(Session s, IncarnationKey key) {
         return new Stamp(s.producerId, s.epoch, s.next.getOrDefault(key, 0));
     }
 
     ProduceResult produceOnce(String stream, int partition, ByteString batch, boolean idempotent, String txnId) {
+        return produceOnce(stream, partition, batch, idempotent, txnId, -1);
+    }
+
+    /**
+     * {@link #produceOnce} to the incarnation {@code pin} if it is not -1: a route to another one (the stream was
+     * deleted and created again) ends the produce with {@link ClientException.UnknownStream}, since its sequence
+     * belongs to the one it was taken for (ADR 0107).
+     */
+    ProduceResult produceOnce(
+            String stream, int partition, ByteString batch, boolean idempotent, String txnId, long pin) {
         // An idempotent batch may be sent again whatever happened to it.
         Routed routed = route(stream, partition);
+        if (pin != -1 && routed.route().resourceId() != pin) {
+            throw Attempt.fail(new ClientException.UnknownStream(stream, partition));
+        }
         Request.Produce req = new Request.Produce(
                 txnId,
                 Math.min(cfg.produceTimeout().toMillis(), U32_MAX),
