@@ -896,7 +896,7 @@ async fn open_member(host: &SimRuntime, id: u64) -> Replica<SimRuntime, Recorder
     // Without pre-vote, a node cut off campaigns (and so gives a transfer up).
     let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2, 3]) };
     let mut r = Replica::open_with(host.clone(), "g", cfg, Recorder::default(), SMALL, options).await.unwrap();
-    r.max_snapshot_chunk = 16;
+    r.raft().set_snapshot_chunk_bytes(16);
     r
 }
 

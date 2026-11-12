@@ -39,8 +39,6 @@ pub struct MemNode {
     /// Largest number of bytes (headers included) per append; at least one
     /// entry is always sent.
     pub max_fill_bytes: usize,
-    /// Largest chunk of a snapshot in one message.
-    pub max_snapshot_chunk: usize,
     /// Reads confirmed so far, with the index applied when each was served.
     pub reads: Vec<(ReadState, u64)>,
     /// Reads aborted so far.
@@ -60,7 +58,6 @@ impl MemNode {
             older: OlderSnapshots::default(),
             incoming: None,
             max_fill_bytes: 64 * 1024,
-            max_snapshot_chunk: 64 * 1024,
             reads: Vec::new(),
             reads_aborted: Vec::new(),
             cfg,
@@ -195,7 +192,7 @@ impl MemNode {
     pub fn fill(&self, s: &mut Send) {
         if s.attach_snapshot {
             if let Some((m, d)) = &self.snapshot {
-                s.msg.attach_snapshot_chunk(m, d, &self.older, self.max_snapshot_chunk);
+                s.msg.attach_snapshot_chunk(m, d, &self.older, self.raft.snapshot_chunk_bytes());
             }
             s.attach_snapshot = false;
             return;

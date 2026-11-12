@@ -432,10 +432,16 @@ impl World {
 }
 
 fn fresh(rng: &SimRng, id: NodeId, voters: Vec<NodeId>, pre_vote: bool, lease_ticks: Option<u32>) -> MemNode {
-    let cfg = Config { seed: rng.next_u64(), pre_vote, lease_ticks, ..Config::new(id, voters) };
+    let cfg = Config {
+        seed: rng.next_u64(),
+        pre_vote,
+        lease_ticks,
+        snapshot_chunk_bytes: 32 + rng.below(1_500), // snapshots in several chunks
+        snapshot_window: 1 + rng.below(6) as u32,    // one to six of them on the way
+        ..Config::new(id, voters)
+    };
     let mut node = MemNode::new(cfg);
     node.max_fill_bytes = 1 + rng.below(250) as usize; // often one entry per append
-    node.max_snapshot_chunk = 32 + rng.below(1_500) as usize; // snapshots in several chunks
     node
 }
 
