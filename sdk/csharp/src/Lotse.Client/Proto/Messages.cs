@@ -50,6 +50,9 @@ public static class Messages
     /// <summary>Tag of a transactional ack's producer id and epoch (ADR 0075).</summary>
     internal const long TagProducer = 2;
 
+    /// <summary>Tag of the subscription a requeueing <c>Nack</c> came on (ADR 0106).</summary>
+    internal const long TagNackSubscription = 0;
+
     /// <summary>The smallest <see cref="RoleBinding"/>: two flags and three empty strings.</summary>
     internal const int BindingMin = 1 + 2 + 1 + 2 + 2;
 

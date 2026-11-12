@@ -512,6 +512,7 @@ public sealed class QueueConsumerTests : IDisposable
         Request.Nack nack = seen.Conn!.Requests<Request.Nack>()[0];
         Assert.Equal(1500u, nack.DelayMs);
         Assert.True(nack.Requeue);
+        Assert.Equal(seen.Id, nack.SubscriptionId); // names its subscription (ADR 0106)
         Assert.Equal(Ranges((10, 11)), nack.Ranges);
         await c.NackAsync(await Take(c), true);
         Assert.Equal(0u, seen.Conn!.Requests<Request.Nack>()[1].DelayMs); // a plain requeue waits not
@@ -592,6 +593,7 @@ public sealed class QueueConsumerTests : IDisposable
         Assert.Equal(0u, nack.DelayMs);
         Assert.Equal(QueueId, nack.QueueId);
         Assert.Equal(Ranges((10, 11)), nack.Ranges);
+        Assert.Null(nack.SubscriptionId); // a discard takes nothing back: no subscription named
     }
 
     [Fact]
@@ -606,6 +608,7 @@ public sealed class QueueConsumerTests : IDisposable
         await c.NackAsync(d, true);
         Request.Nack nack = Assert.Single(seen.Conn!.Requests<Request.Nack>()); // on the connection of the subscription
         Assert.True(nack.Requeue);
+        Assert.Equal(seen.Id, nack.SubscriptionId); // names its subscription (ADR 0106)
         Assert.Equal(0u, nack.DelayMs);
         Assert.Equal(Ranges((10, 11)), nack.Ranges);
     }
@@ -846,6 +849,7 @@ public sealed class QueueConsumerTests : IDisposable
         Assert.Equal(seen.Id, un.SubscriptionId);
         Assert.True(nack.Requeue);
         Assert.Equal(QueueId, nack.QueueId);
+        Assert.Equal(seen.Id, nack.SubscriptionId); // names the subscription it ends (ADR 0106)
         Assert.Equal(Ranges((11, 14)), nack.Ranges); // the three not handed out, as one range
         Assert.True(sent.IndexOf(un) < sent.IndexOf(nack), "unsubscribe first");
         c.Dispose(); // twice is harmless

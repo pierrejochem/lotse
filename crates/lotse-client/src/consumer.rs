@@ -34,6 +34,9 @@ pub struct Message {
     /// How often the message has been delivered, this time included. More
     /// than 1 means an earlier delivery was not acknowledged.
     pub delivery_count: u16,
+    /// The subscription it came on: a requeue names it, so that it takes
+    /// back only this delivery (ADR 0106).
+    subscription: u32,
 }
 
 impl Message {
@@ -225,7 +228,8 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
                         push.deliveries.iter().map(|d| (d.offset, d.delivery_count)).collect();
                     for record in batch.records().map_err(corrupt)? {
                         if let Some(&delivery_count) = mine.get(&record.offset) {
-                            self.buffered.push_back(Message { record, delivery_count });
+                            let subscription = push.subscription_id;
+                            self.buffered.push_back(Message { record, delivery_count, subscription });
                         }
                     }
                     self.used.1 = self.used.1.saturating_add(push.batch.len() as u32);
@@ -331,7 +335,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         if !requeue {
             return self.client.retrying(|| self.settle_once(message.offset(), Some(false))).await;
         }
-        self.requeue(message.offset(), 0).await
+        self.requeue(message, 0).await
     }
 
     /// Gives a message back to be delivered again, to any consumer, once
@@ -341,18 +345,22 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     /// with it, without a delay.
     pub async fn nack_after(&self, message: &Message, delay: Duration) -> Result<(), ClientError> {
         let ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
-        self.requeue(message.offset(), ms).await
+        self.requeue(message, ms).await
     }
 
-    async fn requeue(&self, offset: u64, delay_ms: u32) -> Result<(), ClientError> {
+    async fn requeue(&self, message: &Message, delay_ms: u32) -> Result<(), ClientError> {
         // Only the subscription's connection can give a message back; if it
         // is gone, so is the message (it went back with the subscription).
         let Some(sub) = &self.sub else { return Ok(()) };
+        let offset = message.offset();
         let req = Request::Nack(NackRequest {
             queue_id: self.resource_id,
             ranges: vec![(offset, offset + 1)],
             requeue: true,
             delay_ms,
+            // A message from an earlier subscription went back when that
+            // ended; a newer one may hold it again now and keeps it.
+            subscription_id: Some(message.subscription),
         });
         match sub.conn.call(&req, &self.client.rt, self.client.cfg.request_timeout).await {
             Ok(Response::Outcome(r)) if !r.error.retriable() && r.error != ErrorCode::NONE => {
@@ -371,7 +379,13 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         let ranges = vec![(offset, offset + 1)];
         let req = match nack {
             None => Request::Ack(AckRequest::plain(route.resource_id, ranges)),
-            Some(requeue) => Request::Nack(NackRequest { queue_id: route.resource_id, ranges, requeue, delay_ms: 0 }),
+            Some(requeue) => Request::Nack(NackRequest {
+                queue_id: route.resource_id,
+                ranges,
+                requeue,
+                delay_ms: 0,
+                subscription_id: None,
+            }),
         };
         match c.call(&addr, &req).await {
             Ok(Response::Outcome(r)) => match r.error {
@@ -422,7 +436,16 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         }
         if !offsets.is_empty() {
             let ranges = offsets.iter().map(|o| (*o, o + 1)).collect();
-            reqs.push(Request::Nack(NackRequest { queue_id: self.resource_id, ranges, requeue: true, delay_ms: 0 }));
+            // Named, so that a newer subscription on this connection keeps
+            // what it received since, should this arrive late (ADR 0106).
+            let subscription_id = Some(sub.id);
+            reqs.push(Request::Nack(NackRequest {
+                queue_id: self.resource_id,
+                ranges,
+                requeue: true,
+                delay_ms: 0,
+                subscription_id,
+            }));
         }
         Some((sub.conn, reqs))
     }
