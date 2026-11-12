@@ -83,7 +83,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0076 | [Single active consumer](0076-single-active-consumer.md) | Accepted |
 | 0077 | [Delayed delivery](0077-delayed-delivery.md) | Accepted |
 | 0078 | [Queue priorities](0078-queue-priorities.md) | Accepted |
-| 0079 | [Publish: routed by the node](0079-publish-routed-by-the-node.md) | Accepted |
+| 0079 | [Publish: routed by the node](0079-publish-routed-by-the-node.md) | Accepted; changed by 0101 |
 | 0080 | [Kotlin layer: suspend functions on Dispatchers.IO](0080-kotlin-layer-on-dispatchers-io.md) | Accepted |
 | 0081 | [User guides with mdBook on GitHub Pages](0081-user-guides-with-mdbook-on-github-pages.md) | Accepted |
 | 0082 | [Simulations run on pull requests; merging needs a green CI](0082-simulations-run-on-pull-requests-and-merging-needs-green.md) | Accepted; amends 0027 and 0030; where the simulations run changed by 0088 |
@@ -104,5 +104,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0098 | [Compaction maps a bounded number of keys per sweep](0098-compaction-maps-a-bounded-number-of-keys-per-sweep.md) | Accepted |
 | 0099 | [Snapshots live in files](0099-snapshots-live-in-files.md) | Accepted |
 | 0100 | [Tombstones go once every node removed the files](0100-tombstones-go-once-every-node-removed-the-files.md) | Accepted |
+| 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

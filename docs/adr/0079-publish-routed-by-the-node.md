@@ -1,6 +1,6 @@
 # 79. Publish: routed by the node
 
-- Status: Accepted
+- Status: Accepted; changed by [ADR 0101](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) (a node behind refuses with `NOT_LEADER`, and the publish is sent again)
 - Date: 2026-11-07
 - Changes: [ADR 0032](0032-publish-routed-by-the-client.md) for publishes outside a transaction
 

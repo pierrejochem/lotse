@@ -147,11 +147,24 @@ async fn fanout_broker_counting(
     end_called: Arc<AtomicBool>,
     publishes: Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    fanout_broker_refusing(rt, end_called, publishes, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await
+}
+
+/// As [`fanout_broker_counting`], but the first `refusals` publishes are
+/// refused, before anything is written, as by a node that does not know
+/// the exchange yet; `publishes` counts only the others.
+async fn fanout_broker_refusing(
+    rt: SimRuntime,
+    end_called: Arc<AtomicBool>,
+    publishes: Arc<std::sync::atomic::AtomicUsize>,
+    refusals: Arc<std::sync::atomic::AtomicUsize>,
+) {
     let listener = rt.listen("b1:9000", lotse_rt::Link::Client).await.unwrap();
     loop {
         let Ok((conn, _)) = listener.accept().await else { return };
         let end_called = end_called.clone();
         let publishes = publishes.clone();
+        let refusals = refusals.clone();
         drop(rt.spawn(async move {
             while let Ok(Some(frame)) = conn.recv().await {
                 let (h, req) = decode_request(frame).unwrap();
@@ -242,6 +255,15 @@ async fn fanout_broker_counting(
                     }
                     Request::Publish(p) => {
                         assert_eq!((p.entries.len(), p.entries[0].exchange_id), (1, 3));
+                        let refuse = refusals.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+                        if refuse.is_ok() {
+                            let refused = PublishResult { error: ErrorCode::NOT_LEADER, routed: vec![] };
+                            let resp = Response::Publish(PublishResponse { throttle_ms: 0, entries: vec![refused] });
+                            if conn.send(encode_response(h.correlation_id, &resp)).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         if publishes.fetch_add(1, Ordering::Relaxed) > 0 {
                             continue;
                         }
@@ -287,6 +309,38 @@ fn a_publish_whose_answer_is_lost_is_not_sent_again() {
         let res = client.publish("x", "", lotse_client::OutMessage::value("v"), false).await;
         assert!(matches!(res, Err(ClientError::Unknown(_))), "{res:?}");
         assert_eq!(publishes.load(Ordering::Relaxed), 2, "one publish, not sent again");
+        drop(client);
+    });
+}
+
+/// A publish refused before anything was written, by a node that has not
+/// heard of the exchange yet, is sent again until a node takes it.
+#[test]
+fn a_publish_refused_by_a_node_behind_is_sent_again() {
+    Sim::new(4).run(|rt| async move {
+        let publishes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let broker = fanout_broker_refusing(
+            rt.node("b1"),
+            Arc::new(AtomicBool::new(false)),
+            publishes.clone(),
+            refusals.clone(),
+        );
+        drop(rt.spawn(broker));
+        let client = Client::new(
+            rt.node("c1"),
+            ClientConfig {
+                request_timeout: Duration::from_millis(100),
+                retry_for: Duration::from_millis(500),
+                idempotent: false,
+                ..ClientConfig::new(vec!["b1:9000".into()])
+            },
+        );
+        let res = client.publish("x", "", lotse_client::OutMessage::value("v"), false).await;
+        // The broker routes the third to queue a and refuses queue b.
+        assert!(matches!(&res, Err(ClientError::NotAllWritten { written, .. }) if written.len() == 1), "{res:?}");
+        assert_eq!(refusals.load(Ordering::Relaxed), 0, "both refusals were met");
+        assert_eq!(publishes.load(Ordering::Relaxed), 1, "and then one publish taken");
         drop(client);
     });
 }

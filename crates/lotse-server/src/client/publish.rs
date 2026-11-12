@@ -85,8 +85,10 @@ impl Clients {
                 response.entries.push(refused(ErrorCode::INVALID_REQUEST));
                 continue;
             }
+            // An exchange declared a moment ago may not have reached this
+            // node yet: a retriable answer then, as nothing was written.
             let Some(x) = view.exchanges.iter().find(|x| x.resource_id == e.exchange_id) else {
-                response.entries.push(refused(ErrorCode::UNKNOWN_RESOURCE));
+                response.entries.push(refused(view.absent(e.exchange_id, None)));
                 continue;
             };
             let Some(record) = message(&e.batch) else {

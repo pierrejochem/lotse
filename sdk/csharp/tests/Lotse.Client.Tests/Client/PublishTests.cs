@@ -127,6 +127,19 @@ public sealed class PublishTests : IDisposable
     }
 
     [Fact]
+    public async Task ARefusalFromANodeBehindIsSentAgain()
+    {
+        // Refused before anything was written, by a node that has not heard of the exchange yet.
+        int publishes = 0;
+        Answer(p => Interlocked.Increment(ref publishes) <= 2
+            ? new Response.Publish(0, new[] { new Messages.PublishResult(ErrorCode.NotLeader, Array.Empty<Messages.RoutedMessage>()) })
+            : Routed(new Messages.RoutedMessage(7, "a", ErrorCode.None, 41)));
+        Published got = await _client!.PublishAsync("x", "k", OutMessage.FromValue("m"));
+        Assert.Equal(new[] { new RoutedQueue("a", 41) }, got.Routed.ToArray());
+        Assert.Equal(3, publishes); // two refused, then taken
+    }
+
+    [Fact]
     public async Task ALostAnswerIsNotSentAgain()
     {
         Answer(_ => throw new FakeNode.Drop());

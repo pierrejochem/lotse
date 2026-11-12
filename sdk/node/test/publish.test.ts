@@ -145,6 +145,18 @@ describe("publishing through exchanges and binding them", () => {
     await assert.rejects(lotse().publish("x", "k", { value: "m" }), BrokerResponseError);
   });
 
+  test("a refusal from a node that has not heard of the exchange yet is sent again", async () => {
+    // Refused before anything was written; the next node, or a later try, takes it.
+    let refusals = 2;
+    publishAnswer = () =>
+      refusals-- > 0
+        ? { type: "Publish", throttleMs: 0, entries: [{ error: ErrorCode.NOT_LEADER, routed: [] }] }
+        : routed(written(7, "a", 41));
+    const got = await lotse().publish("x", "k", { value: "m" });
+    assert.deepEqual(got.routed, [{ queue: "a", offset: 41n }]);
+    assert.equal(publishes.length, 3, "two refused, then taken");
+  });
+
   test("a lost answer is not sent again: the outcome is unknown", async () => {
     publishAnswer = () => DROP;
     await assert.rejects(lotse().publish("x", "k", { value: "m" }), UnknownOutcomeError);

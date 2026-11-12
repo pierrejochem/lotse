@@ -99,7 +99,14 @@ public sealed partial class LotseClient
                     Response r = await CallAsync(addr, req, ct).ConfigureAwait(false);
                     if (r is Response.Publish p && p.Entries.Count == 1)
                     {
-                        return p.Entries[0];
+                        // Refused before anything was written, by a node that may not know the exchange yet:
+                        // another node, or later.
+                        if (!p.Entries[0].Error.Retriable)
+                        {
+                            return p.Entries[0];
+                        }
+                        why = $"{addr}: {p.Entries[0].Error}";
+                        continue;
                     }
                     why = "unexpected response " + r;
                 }
