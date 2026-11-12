@@ -13,6 +13,7 @@ import {
   type OutMessage,
   type Response,
   UnknownOutcomeError,
+  UnknownStreamError,
 } from "../src/index.js";
 import { eventually } from "./support/lotse.js";
 import * as fx from "./support/fx.js";
@@ -112,6 +113,77 @@ describe("produce against a scripted broker", () => {
     assert.equal(batchOf(sent[2] as never).baseSequence, 0);
     assert.equal(batchOf(sent[3] as never).baseSequence, 2, "advanced once, by the two records");
     assert.equal(node.count("InitProducer"), 1, "the producer id stayed");
+  });
+
+  /**
+   * Stream `s` has the resource id in `script.current`. A produce to another id is refused with NOT_LEADER (nothing
+   * written), as a node that applied the delete would; with `swallowThen` set, the next produce's answer is lost and the
+   * stream moves to that id meanwhile (ADR 0107).
+   */
+  function serveIncarnations(script: { current: bigint; swallowThen: bigint }): void {
+    node.on((n, request) => {
+      switch (request.type) {
+        case "Metadata":
+          return fx.metadata([n], fx.stream("s", script.current, fx.partition(0, 1, 1, 1)));
+        case "FindCoordinator":
+          return fx.coordinator(n);
+        case "InitProducer":
+          return fx.producer(nextProducerId++, 3);
+        case "Produce": {
+          const id = request.resources[0]?.resourceId ?? 0n;
+          if (script.swallowThen !== 0n) {
+            script.current = script.swallowThen;
+            script.swallowThen = 0n;
+            return DROP;
+          }
+          return id === script.current ? fx.produced(id, 0, offsets++) : fx.produced(id, 0, 0, ErrorCode.NOT_LEADER);
+        }
+        default:
+          throw new Error(`unexpected ${request.type}`);
+      }
+    });
+  }
+
+  const incarnationsSent = (): string[] =>
+    node.requests("Produce").map((p) => {
+      const b = batchOf(p);
+      return `${p.resources[0]?.resourceId}/${b.producerId}/${b.baseSequence}`;
+    });
+
+  test("each incarnation of a stream counts its own sequences", async () => {
+    const script = { current: 7n, swallowThen: 0n };
+    serveIncarnations(script);
+    const lotse = client(true);
+    await lotse.produce("s", 0, messages(1));
+    await lotse.produce("s", 0, messages(1));
+    // Deleted and created again: the cached route still names 7, which is refused; the produce does not follow the
+    // name to 9.
+    script.current = 9n;
+    await assert.rejects(lotse.produce("s", 0, messages(1)), UnknownStreamError);
+    await lotse.produce("s", 0, messages(1));
+    // A node behind still serves 7: back there, its sequences go on.
+    script.current = 7n;
+    await assert.rejects(lotse.produce("s", 0, messages(1)), UnknownStreamError);
+    await lotse.produce("s", 0, messages(1));
+    assert.deepEqual(
+      incarnationsSent(),
+      ["7/100/0", "7/100/1", "7/100/2", "9/100/0", "9/100/1", "7/100/2"],
+      "a refused batch keeps its sequence; 9 starts at 0; 7 goes on at 2",
+    );
+  });
+
+  test("a produce in doubt when its stream moves starts a new producer", async () => {
+    const script = { current: 7n, swallowThen: 0n };
+    serveIncarnations(script);
+    const lotse = client(true, { requestTimeoutMs: 200 });
+    await lotse.produce("s", 0, messages(1));
+    // The next produce's answer is lost while the stream is created again: it may be in 7.
+    script.swallowThen = 9n;
+    await assert.rejects(lotse.produce("s", 0, messages(1)), UnknownStreamError);
+    await lotse.produce("s", 0, messages(1));
+    const sent = incarnationsSent();
+    assert.equal(sent[1], "7/100/1");
+    assert.equal(sent.at(-1), "9/101/0", "a new producer id");
   });
 
   test("an outcome still unknown when time runs out is reported, and the next produce gets a new producer id", async () => {
