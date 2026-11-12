@@ -19,7 +19,7 @@ import {
 } from "../src/index.js";
 import { Connection } from "../src/index.js";
 import { PlainCluster } from "./support/cluster.js";
-import { isNotLeader, leaderTerm, pinLeader, retryIfLeaderMoved } from "./support/failover.js";
+import { isNotLeader, leaderTerm, pinLeader, retryIfLeaderMoved, Steady } from "./support/failover.js";
 import { binary, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -315,6 +315,11 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     await client.createQueue("eq-in");
     await client.createStream("eq-out", 1, 3);
     await settled("eq-in");
+    // What is in flight lives in the leader's memory: pin it, so the move to the preferred node (ADR 0050) does not fall
+    // inside the scenario.
+    await pinLeader(client, "eq-in");
+    const steady = new Steady(client);
+    await steady.watch("eq-in");
     for (let i = 0; i < 6; i++) {
       await client.produce("eq-in", 0, { value: `job-${i}` });
     }
@@ -330,12 +335,16 @@ describe("transactions, publishing and groups against three real nodes", { skip 
         await txn.produce("eq-out", 0, { value: `done-${v}` });
         await c.ackIn(txn, d);
       } catch (e) {
-        // The queue's leader moved after the message was handed out: the message was not held by this transaction, and
-        // it comes again. Giving the transaction up and taking the next delivery is what a consumer does.
-        if (!isNotLeader(e)) {
+        // The queue's leader moved after the message was handed out (a starved node can lose an election even with the
+        // leader pinned): the old leader answers NOT_LEADER, or the new one MESSAGE_NOT_HELD (ADR 0075), and the message
+        // comes again. Giving the transaction up and taking the next delivery is what a consumer does. MESSAGE_NOT_HELD
+        // with the leader where it was is a failure.
+        const notHeld = e instanceof BrokerResponseError && e.code === ErrorCode.MESSAGE_NOT_HELD;
+        if (!(isNotLeader(e) || (notHeld && (await steady.moved())))) {
           throw e;
         }
         await txn.abort().catch(() => undefined);
+        await steady.watch("eq-in");
         continue;
       }
       if (aborted === 0 && done.size === 2) {
