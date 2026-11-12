@@ -272,12 +272,14 @@ impl Clients {
         let all = |resp: &mut AddPartitionsToTxnResponse, error| {
             resp.resources.iter_mut().flat_map(|r| r.partitions.iter_mut()).for_each(|p| p.error = error);
         };
-        // Unknown partitions are refused, and then nothing is added.
+        // Unknown partitions are refused, and then nothing is added. A
+        // runtime stream created a moment ago may not have reached this
+        // node's metadata yet: that is a retriable answer, not a final one.
         let mut unknown = false;
         for r in &mut resp.resources {
             for p in &mut r.partitions {
                 if view.group_of(r.resource_id, p.partition).is_none() {
-                    p.error = ErrorCode::UNKNOWN_RESOURCE;
+                    p.error = view.absent(r.resource_id, None);
                     unknown = true;
                 }
             }
