@@ -133,12 +133,23 @@ async fn every_way_in_on_real_sockets() {
     ];
     admin.alter_role_bindings(add, Vec::new()).await.expect("grants roles");
     admin.set_user_password("alice", "alice-pw").await.expect("creates a user");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let alice = client(
-        ca.client_tls(None).unwrap(),
-        Some(Credentials::Scram { user: "alice".into(), password: "alice-pw".into() }),
-    );
-    alice.produce("s", 0, batch("alice")).await.expect("a runtime user");
+    // The user is committed in the metadata group, but the node a client reaches may not have applied it
+    // yet, and it refuses a user it does not know. A client keeps a refused login for good, so each try
+    // is a new client; within the deadline the user must become known everywhere.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let alice = loop {
+        let alice = client(
+            ca.client_tls(None).unwrap(),
+            Some(Credentials::Scram { user: "alice".into(), password: "alice-pw".into() }),
+        );
+        match alice.produce("s", 0, batch("alice")).await {
+            Ok(_) => break alice,
+            Err(ClientError::Authentication(_)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(200)).await
+            }
+            Err(e) => panic!("a runtime user: {e:?}"),
+        }
+    };
 
     // A token.
     let now = TokioRuntime::new(&root).unix_time().as_secs();
