@@ -438,7 +438,18 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 
     /// The cluster's nodes, as the metadata group knows them.
     pub async fn describe_nodes(&self) -> Result<Vec<NodeEntry>, ClientError> {
-        let req = Request::DescribeNodes(DescribeNodesRequest);
+        self.nodes_answer(DescribeNodesRequest::default()).await
+    }
+
+    /// Internal, for nodes (ADR 0105): the cluster's nodes from a metadata
+    /// leader that has applied at least `index`, so the answer is at least
+    /// as new as the asking node's own metadata state.
+    pub async fn describe_nodes_since(&self, index: u64) -> Result<Vec<NodeEntry>, ClientError> {
+        self.nodes_answer(DescribeNodesRequest { applied_at_least: Some(index) }).await
+    }
+
+    async fn nodes_answer(&self, req: DescribeNodesRequest) -> Result<Vec<NodeEntry>, ClientError> {
+        let req = Request::DescribeNodes(req);
         self.retrying(|| async {
             match self.call_admin(&req).await? {
                 Response::DescribeNodes(d) => {

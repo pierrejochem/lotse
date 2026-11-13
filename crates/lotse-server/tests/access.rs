@@ -264,6 +264,7 @@ fn every_request_needs_its_role() {
                     ranges: vec![(0, 1)],
                     requeue: true,
                     delay_ms: 0,
+                    subscription_id: None,
                 }),
                 Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
                     tenant: "shop".into(),

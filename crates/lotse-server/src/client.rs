@@ -471,7 +471,7 @@ impl Clients {
             Request::RecordCertificate(req) => self.record_certificate(outbox, id, req, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
-            Request::DescribeNodes(_) => self.describe_nodes(&outbox, id, view, groups),
+            Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}

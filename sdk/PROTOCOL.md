@@ -65,6 +65,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 - `Metadata`: a resource carries its own `error`. An unknown name is a resource with `UNKNOWN_RESOURCE`, not a frame error. Leader `0` means unknown.
 - `OffsetFetch`: an offset of `u64::MAX` means none.
 - `DescribeMetrics`: `connections` is sent as a `u64` but must fit a `u32`. Between nodes the answer may carry tag 1, `removed_through` (one `u64`, ADR 0100); a client skips it like any unknown tag.
+- `DescribeNodes`: between nodes the request may carry tag 0, `applied_at_least` (one `u64`, ADR 0105), and the answer is then `NOT_LEADER` from a leader that has applied less. Clients do not send it.
 - `Produce` and `Fetch`: every partition has its own error; a request can partly succeed.
 
 ## Error codes
@@ -194,7 +195,7 @@ The client keeps `(stream, partition) -> {resource_id, leader, term}`, learnt fr
 ### Idempotent produce
 
 1. On the first produce the client asks any broker `FindCoordinator(key_type = PRODUCER, key = "")` and then the coordinator `InitProducer(txn_id = null)`. The answer is `producer_id` and `epoch`; both are kept for the client's session.
-2. Per `(stream, partition)` the client counts the next sequence, starting at 0. It stamps the batch (`set_producer(id, epoch, sequence)`, which recomputes the CRC) and sends it.
+2. Per `(resource_id, partition)` the client counts the next sequence, starting at 0 (ADR 0107): a stream deleted and created again under its name has a new resource id and sequences of its own. Note the resource id the partition routes to before stamping; if a retry routes to another resource id, end the produce with an unknown-stream error rather than send the batch there, and if an earlier attempt's outcome was unknown, drop the session as in step 6. It stamps the batch (`set_producer(id, epoch, sequence)`, which recomputes the CRC) and sends it.
 3. **Produces to one partition go out one at a time.** A second batch is not sent until the first has an answer, so the leader sees sequences in order. Different partitions run in parallel.
 4. Retrying a batch whose outcome is unknown (lost connection, `REQUEST_TIMED_OUT`) sends **the same bytes**: same id, epoch and sequence. The leader recognises a batch it has and answers with its offset.
 5. On success the sequence advances by the batch's record count (a wrapping `i32`).
@@ -256,11 +257,11 @@ The consumer keeps two counters: messages handed out and bytes received (the len
 
 - **Ack** goes to the queue's leader, on any connection, with ranges `[from, to)` built from the offsets: sorted as `u64`, duplicates dropped, neighbours joined. `txn_id` is null outside a transaction (see below for one inside). An ack names an offset, not a delivery, so it settles a message that went to someone else meanwhile, and settling twice is harmless: a lost answer is retried, and so is `NOT_LEADER` after following the hint.
 - **Nack without requeue** discards the message (or dead-letters it, if the queue's limits say so) and is sent like an ack.
-- **Nack with requeue** is sent **on the subscription's own connection**: the broker takes back only what that connection holds. `delay_ms` is the ms the message waits before it is delivered again (ADR 0077; refused without `requeue`); the Java client's `nack` sends 0 and `nackAfter` the delay asked for. A producer delays a message with the header `x-lotse-delay-ms` (decimal ms up to 4294967295), counted from the leader's append time; messages of a queue carry that time as their batch's base timestamp. If the subscription has ended or the connection fails, the message has gone back already, and the call does nothing. The Java client also does nothing for a message of an earlier subscription, rather than ask the new connection for something it does not hold.
+- **Nack with requeue** is sent **on the subscription's own connection** and names the subscription its messages came on in tag 0, `subscription_id` (one `u32`, ADR 0106): the broker takes back only what that subscription holds. Without the tag it takes back what any subscription of the connection holds, so a late `Nack` from a consumer that ended could take a message a newer subscription on the connection received again since; always send it. `delay_ms` is the ms the message waits before it is delivered again (ADR 0077; refused without `requeue`); the Java client's `nack` sends 0 and `nackAfter` the delay asked for. A producer delays a message with the header `x-lotse-delay-ms` (decimal ms up to 4294967295), counted from the leader's append time; messages of a queue carry that time as their batch's base timestamp. If the subscription has ended or the connection fails, the message has gone back already, and the call does nothing. The Java client also does nothing for a message of an earlier subscription, rather than ask the new connection for something it does not hold.
 
 ### Closing
 
-Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out (the ones parsed into the buffer and those in pushes that arrived but were not read yet, which the node holds in flight just the same), one `Nack(requeue = true)` with their offsets as ranges, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
+Send `Unsubscribe(subscription_id)` and then, for the messages received but not handed out (the ones parsed into the buffer and those in pushes that arrived but were not read yet, which the node holds in flight just the same), one `Nack(requeue = true)` with their offsets as ranges and the ending subscription in tag 0, both on the subscription's connection and without waiting for answers. Messages handed out stay with the consumer until it acknowledges them or the connection closes.
 
 ### Publishing through an exchange
 

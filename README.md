@@ -189,7 +189,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 ### Not built yet
 
-- **Raft:** pipelined snapshot chunks; probing instead of resending a whole term's entries after a conflict; followers serving reads themselves (the server forwards them to the leader).
+- **Raft:** pipelined snapshot chunks; followers serving reads themselves (the server forwards them to the leader).
 - **Certificates and sessions:** a user asking for a certificate in their own name (cluster admins ask, ADR 0092); anything that tells the CA holder a request is waiting; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** replication and queue length limits cannot change after creation; a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
 - **`DescribeMetrics`:** which subscription of a single active consumer queue is active, and counts per priority level.
@@ -207,6 +207,6 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 - **Deleted resources:** a tombstone stays in the metadata state until every node the cluster lists has removed its groups' files, so a listed node that is down holds the tombstones made since it last answered (ADR 0100).
 - **Changes reach brokers one by one:** right after a change some brokers do not know it yet; a removed role binding takes effect on each node once it applies the metadata group; a conditional delete (`if_empty`) checks first and deletes after, so a message produced in between goes with the resource (ADR 0063).
 - **Certificates:** the CRL file is copied to every node by the operator (ADR 0060), and revoking a client certificate by issuer and serial (ADR 0090) does not cover node certificates. The inventory lists only the client certificates nodes accepted, its "last seen" is up to an hour late, and it does not show certificates revoked only in the CRL file (ADR 0091). A request lapses after 7 days, and at most 256 are held (ADR 0092).
-- **Nodes:** four groups move at a time, each as a full copy through Raft; rebalancing moves by replica count and uses size only to choose which group goes, so nodes with equal counts and very different sizes stay as they are, and traffic is not weighed (ADR 0052). A drained node exits by itself and must join under a new id to come back (ADR 0051); one that cannot reach any node it lists keeps running until it can.
+- **Nodes:** four groups move at a time, each as a full copy through Raft; rebalancing moves by replica count and uses size only to choose which group goes, so nodes with equal counts and very different sizes stay as they are, and traffic is not weighed (ADR 0052). A drained node exits by itself, even one that was down or cut off during its drain, and must join under a new id to come back (ADR 0051, ADR 0105); one that cannot reach any node it lists keeps running until it can.
 - **Console:** chart history (about 10 KiB per stream or queue for 24 h) covers only what the sampler may see (ADR 0045).
 - **Native protocol:** keys 0 to 57 except 18, which is free because queue acks join a transaction through `Ack` (ADR 0075), plus the internal `WriteTxnMarkers`.

@@ -77,6 +77,10 @@ interface Routed {
 interface Session {
   readonly producerId: bigint;
   readonly epoch: number;
+  /**
+   * Next sequence per partition, keyed by resource id and partition: a stream deleted and created again under its
+   * name is another partition, with sequences of its own (ADR 0107).
+   */
   readonly next: Map<string, number>;
 }
 
@@ -564,13 +568,33 @@ export class LotseClient {
       guard?.dispose();
     }
     try {
-      const stamp = await this.nextSequence(key, signal);
+      // The sequence belongs to the incarnation the stream has now; the produce stays with it (ADR 0107).
+      const resourceId = await this.retrying(
+        async () => (await this.route(stream, partition, signal)).route.resourceId,
+        signal,
+      );
+      const incarnation = `${resourceId}/${partition}`;
+      const stamp = await this.nextSequence(incarnation, signal);
       const stamped = batch.slice();
       Batch.setProducer(stamped, stamp.producerId, stamp.epoch, stamp.sequence);
       let result: ProduceResult;
+      let inDoubt = false;
       try {
         // Every attempt sends the same bytes: the same producer id and the same sequence.
-        result = await this.retrying(() => this.produceOnce(stream, partition, stamped, true, signal), signal, true);
+        result = await this.retrying(
+          async () => {
+            try {
+              return await this.produceOnce(stream, partition, stamped, true, signal, null, resourceId);
+            } catch (a) {
+              if (a instanceof Attempt && a.kind === "RETRY_MAYBE_DONE") {
+                inDoubt = true;
+              }
+              throw a;
+            }
+          },
+          signal,
+          true,
+        );
       } catch (e) {
         // Written or not, nobody can tell: later batches would wait behind a gap that may never fill. Start over with
         // a new producer id. Anything else was definitely not written, and the sequence is free for the next batch.
@@ -581,6 +605,8 @@ export class LotseClient {
         const startOver =
           !fencedByName &&
           (e instanceof UnknownOutcomeError ||
+            // The stream went to another incarnation after an attempt that may have been written to this one.
+            (e instanceof UnknownStreamError && inDoubt) ||
             (e instanceof BrokerResponseError &&
               (e.code === ErrorCode.OUT_OF_ORDER_SEQUENCE || e.code === ErrorCode.PRODUCER_FENCED)) ||
             !(e instanceof ClientError));
@@ -590,7 +616,7 @@ export class LotseClient {
         throw e;
       }
       if (this.session !== null && this.session.producerId === stamp.producerId) {
-        this.session.next.set(key, (stamp.sequence + records) | 0);
+        this.session.next.set(incarnation, (stamp.sequence + records) | 0);
       }
       return result;
     } finally {
@@ -618,9 +644,15 @@ export class LotseClient {
     idempotent: boolean,
     signal?: AbortSignal,
     txnId: string | null = null,
+    pin: bigint | null = null,
   ): Promise<ProduceResult> {
     // An idempotent batch may be sent again whatever happened to it.
     const routed = await this.route(stream, partition, signal);
+    // Pinned to an incarnation: a route to another one (the stream was deleted and created again) ends the produce,
+    // since its sequence belongs to the one it was taken for (ADR 0107).
+    if (pin !== null && routed.route.resourceId !== pin) {
+      throw Attempt.fail(new UnknownStreamError(stream, partition));
+    }
     const req: Request = {
       type: "Produce",
       txnId,

@@ -83,7 +83,20 @@ pub fn requests() -> Vec<Request> {
             producer: Some((4000, 3)),
             ranges: vec![(7, 9)],
         }),
-        Request::Nack(NackRequest { queue_id: 9, ranges: vec![(4, 5)], requeue: true, delay_ms: 0 }),
+        Request::Nack(NackRequest {
+            queue_id: 9,
+            ranges: vec![(4, 5)],
+            requeue: true,
+            delay_ms: 0,
+            subscription_id: None,
+        }),
+        Request::Nack(NackRequest {
+            queue_id: 9,
+            ranges: vec![(4, 6)],
+            requeue: true,
+            delay_ms: 250,
+            subscription_id: Some(3),
+        }),
         Request::Unsubscribe(UnsubscribeRequest { subscription_id: 3 }),
         Request::CreateStream(CreateStreamRequest {
             name: "orders".into(),
@@ -188,7 +201,7 @@ pub fn requests() -> Vec<Request> {
         }),
         Request::AddNode(AddNodeRequest { node_id: 4, peer: "10.0.0.4:7000".into(), client: "10.0.0.4:9000".into() }),
         Request::RemoveNode(RemoveNodeRequest { node_id: 2 }),
-        Request::DescribeNodes(DescribeNodesRequest),
+        Request::DescribeNodes(DescribeNodesRequest::default()),
         Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
         Request::DeadLetter(DeadLetterRequest { queue_id: 1_099_511_627_777, batches: vec![Bytes::from_static(b"x")] }),
         Request::VerifyTxn(VerifyTxnRequest {

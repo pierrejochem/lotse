@@ -373,8 +373,9 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 // Closed while this push was being read: close could not know about it, so give its messages back here.
                 if (_closed && push.Deliveries.Count > 0)
                 {
+                    // Named (ADR 0106): a newer subscription on the connection keeps what it received since.
                     giveBack = new Request.Nack(
-                        _resourceId, OffsetRanges.Of(push.Deliveries.Select(d => d.Offset).ToList()), true, 0);
+                        _resourceId, OffsetRanges.Of(push.Deliveries.Select(d => d.Offset).ToList()), true, 0, from.Id);
                 }
             }
             else
@@ -600,7 +601,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         {
             return;
         }
-        var request = new Request.Nack(queueId, OffsetRanges.Of(Offsets(held)), true, delayMs);
+        var request = new Request.Nack(queueId, OffsetRanges.Of(Offsets(held)), true, delayMs, on.Id);
         Response response;
         try
         {
@@ -724,7 +725,8 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 }
                 if (back.Count > 0)
                 {
-                    requests.Add(new Request.Nack(_resourceId, OffsetRanges.Of(back), true, 0));
+                    // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+                    requests.Add(new Request.Nack(_resourceId, OffsetRanges.Of(back), true, 0, ending.Id));
                 }
             }
             _buffered.Clear();
