@@ -107,6 +107,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 | 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
 | 0103 | [Snapshot chunks travel in a window](0103-snapshot-chunks-travel-in-a-window.md) | Accepted |
+| 0104 | [Followers serve fetches in their zone](0104-followers-serve-fetches-in-their-zone.md) | Accepted |
 | 0105 | [A forgotten node stops without seeing its drain](0105-a-forgotten-node-stops-without-seeing-its-drain.md) | Accepted |
 | 0106 | [A requeue names its subscription](0106-a-requeue-names-its-subscription.md) | Accepted |
 | 0107 | [Sequences belong to a stream's incarnation](0107-sequences-belong-to-a-stream-s-incarnation.md) | Accepted |

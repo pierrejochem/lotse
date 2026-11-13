@@ -31,6 +31,7 @@ public final class ClientConfig {
     private final String transactionalId;
     private final Duration metadataMaxAge;
     private final String tenant;
+    private final String zone;
     private final Credentials credentials;
     private final TlsConfig tls;
     private final boolean plaintextOnLoopback;
@@ -47,6 +48,7 @@ public final class ClientConfig {
         this.transactionalId = b.transactionalId;
         this.metadataMaxAge = b.metadataMaxAge;
         this.tenant = b.tenant;
+        this.zone = b.zone;
         this.credentials = b.credentials;
         this.tls = b.tls;
         this.plaintextOnLoopback = b.plaintextOnLoopback;
@@ -127,6 +129,14 @@ public final class ClientConfig {
         return tenant;
     }
 
+    /**
+     * The zone this client runs in, or {@code null}. With one, it fetches from a replica of the partition in that
+     * zone, which serves the committed data it has, and from the leader if there is none (ADR 0104).
+     */
+    public String zone() {
+        return zone;
+    }
+
     /** The SASL credentials, or {@code null}. */
     public Credentials credentials() {
         return credentials;
@@ -155,6 +165,7 @@ public final class ClientConfig {
         private String transactionalId;
         private Duration metadataMaxAge = Duration.ofSeconds(30);
         private String tenant = DEFAULT_TENANT;
+        private String zone;
         private Credentials credentials;
         private TlsConfig tls;
         private boolean plaintextOnLoopback;
@@ -246,6 +257,15 @@ public final class ClientConfig {
          */
         public Builder tenant(String tenant) {
             this.tenant = Objects.requireNonNull(tenant);
+            return this;
+        }
+
+        /**
+         * The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104).
+         * Default none: fetches go to the leader.
+         */
+        public Builder zone(String zone) {
+            this.zone = zone;
             return this;
         }
 

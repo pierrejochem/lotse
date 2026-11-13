@@ -111,6 +111,7 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     log: LogConfig::default(),
                     client_listen: Some(clients[&id].clone()),
                     client_addrs: clients.clone(),
+                    zones: Default::default(),
                     streams: streams.clone(),
                     queues: Vec::new(),
                     exchanges: Vec::new(),

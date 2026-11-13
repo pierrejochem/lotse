@@ -34,6 +34,9 @@ export interface ListOffsetsRequest {
   readonly isolation: number;
   readonly resources: readonly m.ListOffsetsResource[];
 }
+/** Fetch's tag: a follower may answer (ADR 0104). */
+const TAG_ALLOW_FOLLOWER = 0;
+
 export interface FetchRequest {
   readonly type: "Fetch";
   readonly maxWaitMs: number;
@@ -41,6 +44,8 @@ export interface FetchRequest {
   readonly maxBytes: number;
   readonly isolation: number;
   readonly resources: readonly m.FetchResource[];
+  /** A follower may answer with the committed data it has instead of NOT_LEADER (ADR 0104). Tag 0. */
+  readonly allowFollower?: boolean;
 }
 export interface InitProducerRequest {
   readonly type: "InitProducer";
@@ -528,7 +533,11 @@ export function writeRequest(w: Writer, req: Request): void {
         });
         w1.noTags();
       });
-      w.noTags();
+      if (req.allowFollower) {
+        w.tags([{ tag: TAG_ALLOW_FOLLOWER, value: Uint8Array.of(1) }]);
+      } else {
+        w.noTags();
+      }
       return;
     case "InitProducer":
       w.optString(req.txnId).u32(req.txnTimeoutMs);
@@ -782,8 +791,16 @@ export function readRequest(apiKey: number, r: Reader): Request {
         r1.tags();
         return { resourceId, partitions };
       });
-      r.tags();
-      return { type: "Fetch", maxWaitMs, minBytes, maxBytes, isolation, resources };
+      let allowFollower = false;
+      for (const t of r.tags()) {
+        if (t.tag === TAG_ALLOW_FOLLOWER) {
+          const vr = new Reader(t.value);
+          allowFollower = vr.u8() !== 0;
+          vr.finish();
+        }
+      }
+      // Left out when not set, as a request made without it has it.
+      return { type: "Fetch", maxWaitMs, minBytes, maxBytes, isolation, resources, ...(allowFollower ? { allowFollower } : {}) };
     }
     case ApiKey.INIT_PRODUCER:
       return { type: "InitProducer", txnId: r.optString(), txnTimeoutMs: r.u32(), tenant: m.getTenant(r) };

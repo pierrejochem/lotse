@@ -47,7 +47,7 @@ pub use consumer::{Consumer, Message};
 pub use group::{GroupConfig, GroupConsumer, GroupRecord};
 pub use publish::{OutMessage, Published};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
@@ -186,6 +186,11 @@ pub struct ClientConfig {
     /// transactional id and consumer group ids live in (ADR 0062): the same
     /// id in another tenant is another id.
     pub tenant: String,
+    /// The zone this client runs in. With one, it fetches from a replica
+    /// of the partition in that zone, which serves the committed data it
+    /// has, and from the leader if there is none (ADR 0104). Other
+    /// requests go to the leader as always.
+    pub zone: Option<String>,
 }
 
 impl ClientConfig {
@@ -204,6 +209,7 @@ impl ClientConfig {
             metadata_max_age: Duration::from_secs(30),
             credentials: None,
             tenant: DEFAULT_TENANT.into(),
+            zone: None,
         }
     }
 }
@@ -314,6 +320,12 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     conns: Mutex<BTreeMap<String, Arc<Connection<R::Conn>>>>,
     brokers: Mutex<BTreeMap<u32, String>>,
     routes: Mutex<BTreeMap<(String, u32), Route>>,
+    /// Each node's zone and each partition's voters, for fetching in this
+    /// client's zone; and partitions whose replica in it failed, which are
+    /// read from the leader until metadata is asked for again.
+    zones: Mutex<BTreeMap<u32, String>>,
+    voters: Mutex<BTreeMap<(String, u32), Vec<u32>>>,
+    not_in_zone: Mutex<BTreeSet<(String, u32)>>,
     /// Resource names by id, for requests that address resources by id.
     names: Mutex<BTreeMap<u64, String>>,
     /// Exchanges by name, for routing published messages, and when they
@@ -391,6 +403,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             conns: Mutex::new(BTreeMap::new()),
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
+            zones: Mutex::new(BTreeMap::new()),
+            voters: Mutex::new(BTreeMap::new()),
+            not_in_zone: Mutex::new(BTreeSet::new()),
             names: Mutex::new(BTreeMap::new()),
             exchanges: Mutex::new(BTreeMap::new()),
             metadata_leader: Mutex::new(None),
@@ -447,23 +462,47 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     fn learn(&self, m: &MetadataResponse) {
         self.learn_exchanges(m);
         let mut brokers = self.brokers.lock().expect("brokers lock");
+        let mut zones = self.zones.lock().expect("zones lock");
         for b in &m.brokers {
             brokers.insert(b.node_id, format!("{}:{}", b.host, b.port));
+            zones.insert(b.node_id, b.rack.clone());
         }
+        drop((brokers, zones));
         let mut names = self.names.lock().expect("names lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             names.insert(r.resource_id, r.name.clone());
         }
         drop(names);
         let mut routes = self.routes.lock().expect("routes lock");
+        let mut voters = self.voters.lock().expect("voters lock");
+        let mut not_in_zone = self.not_in_zone.lock().expect("zone lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             for p in &r.partitions {
-                routes.insert(
-                    (r.name.clone(), p.partition),
-                    Route { resource_id: r.resource_id, leader: p.leader, term: p.leader_term },
-                );
+                let key = (r.name.clone(), p.partition);
+                routes.insert(key.clone(), Route { resource_id: r.resource_id, leader: p.leader, term: p.leader_term });
+                not_in_zone.remove(&key);
+                voters.insert(key, p.voters.clone());
             }
         }
+    }
+
+    /// A replica of the partition in this client's zone other than the
+    /// leader, and its address: where fetches go (ADR 0104). `None` without
+    /// a zone, when the leader is in it, or when there is none.
+    fn replica_in_zone(&self, stream: &str, partition: u32, leader: u32) -> Option<String> {
+        let zone = self.cfg.zone.as_deref()?;
+        let key = (stream.to_string(), partition);
+        if self.not_in_zone.lock().expect("zone lock").contains(&key) {
+            return None;
+        }
+        let zones = self.zones.lock().expect("zones lock");
+        if zones.get(&leader).is_some_and(|z| z == zone) {
+            return None;
+        }
+        let voters = self.voters.lock().expect("voters lock").get(&key).cloned()?;
+        let node = voters.into_iter().find(|v| zones.get(v).is_some_and(|z| z == zone))?;
+        drop(zones);
+        self.brokers.lock().expect("brokers lock").get(&node).cloned()
     }
 
     /// The leader's address, refreshing metadata if none is known.
@@ -1035,7 +1074,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         max_wait: Duration,
         isolation: u8,
     ) -> Result<Fetched, Attempt> {
-        let (route, addr) = self.route(stream, partition).await?;
+        let (route, leader_addr) = self.route(stream, partition).await?;
+        let replica = self.replica_in_zone(stream, partition, route.leader);
+        let allow_follower = replica.is_some();
+        let addr = replica.unwrap_or(leader_addr);
+        // A replica in the zone that fails is left for the leader until
+        // metadata is asked for again: an older node, one that left, or
+        // one whose log starts later.
+        let leave_replica = |why: String| {
+            self.not_in_zone.lock().expect("zone lock").insert((stream.to_string(), partition));
+            Err(Attempt::Retry(why))
+        };
         let req = Request::Fetch(FetchRequest {
             max_wait_ms: u32::try_from(max_wait.as_millis()).unwrap_or(u32::MAX),
             min_bytes: 1,
@@ -1050,10 +1099,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                     max_bytes: 1 << 20,
                 }],
             }],
+            allow_follower,
         });
         let resp = match self.call(&addr, &req).await {
             Ok(Response::Fetch(r)) => r,
             Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) if allow_follower => return leave_replica(format!("{addr}: {e}")),
             Err(e) => {
                 self.forget(stream, partition);
                 return Err(e.into());
@@ -1065,6 +1116,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             .next()
             .and_then(|r| r.partitions.into_iter().next())
             .ok_or_else(|| Attempt::Retry("empty fetch response".into()))?;
+        if allow_follower && p.error != ErrorCode::NONE {
+            return leave_replica(format!("{addr}: {}", p.error));
+        }
         match p.error {
             ErrorCode::NONE => Ok(Fetched {
                 records: p.records,

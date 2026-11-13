@@ -207,7 +207,9 @@ The timestamp of a record is the producer's. A stream's retention judges a batch
 
 ### Fetch
 
-`Fetch` asks for `min_bytes = 1`, `max_bytes` 4 MiB, 1 MiB per partition, `isolation = 1` (committed) and `leader_term` = the route's term; the broker holds the request up to `max_wait_ms` when there is nothing to return. Keep `max_wait` well below the request timeout. The records are whole batches; a response may contain only a control batch, so a reader moves on by the offset after the last batch, not by the number of messages it got.
+`Fetch` asks for `min_bytes = 1`, `max_bytes` 4 MiB, 1 MiB per partition, `isolation = 1` (committed) and `leader_term` = the route's term; the broker holds the request up to `max_wait_ms` when there is nothing to return. Keep `max_wait` well below the request timeout.
+
+**Fetching in a zone** (ADR 0104). `Metadata` names each broker's zone as `rack` (empty: none). A client configured with a zone sends a partition's `Fetch` to the first voter whose `rack` is that zone, unless the leader is in it, and sets the request's tag 0, `allow_follower` (one `u8`, 1). A follower then serves the committed data it has: it may lag the leader, it ignores `leader_term`, and past its log it answers with no records and no error. On any error answer from that replica, or a failed connection, the client reads the partition from the leader until it next learns metadata. Without the tag a follower answers `NOT_LEADER` as before. The records are whole batches; a response may contain only a control batch, so a reader moves on by the offset after the last batch, not by the number of messages it got.
 
 A read_committed reader drops what it must not show:
 

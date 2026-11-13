@@ -85,7 +85,8 @@ impl Clients {
         if taken {
             return outbox.push(id, &refuse(ErrorCode::INVALID_REQUEST, "another node has this address"));
         }
-        let change = Change::AddNode { id: req.node_id, peer: req.peer, client: req.client };
+        let zone = req.zone.unwrap_or_default();
+        let change = Change::AddNode { id: req.node_id, peer: req.peer, client: req.client, zone };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

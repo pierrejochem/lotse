@@ -285,6 +285,8 @@ pub(crate) struct ClusterView<'a> {
     /// The metadata group and what admin requests need.
     pub(crate) admin: admin::AdminView<'a>,
     pub(crate) client_addrs: &'a BTreeMap<NodeId, String>,
+    /// Nodes' zones, reported as `rack` in `Metadata` (ADR 0104).
+    pub(crate) zones: &'a BTreeMap<NodeId, String>,
     pub(crate) coordinator: Option<GroupId>,
     /// The node itself, for metrics.
     pub(crate) node: NodeView<'a>,
@@ -915,17 +917,25 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                     // Offsets below the commit index are committed (index = offset + 1).
                     let hw = raft.commit();
                     let start = replica.log().start_offset();
-                    if raft.role() != Role::Leader {
+                    // A follower asked for what it has serves the committed
+                    // data it has applied (ADR 0104); it may lag the leader.
+                    let leads = raft.role() == Role::Leader;
+                    let follower = !leads && req.allow_follower;
+                    if !leads && !follower {
                         out.error = ErrorCode::NOT_LEADER;
                         out.leader_hint = hint(raft);
-                    } else if fp.leader_term != 0 && fp.leader_term != raft.term() {
+                    } else if leads && fp.leader_term != 0 && fp.leader_term != raft.term() {
+                        // A follower serves only what is committed, which no
+                        // term changes: the term a client names does not matter.
                         out.error = ErrorCode::FENCED_LEADER_TERM;
                         out.leader_hint = hint(raft);
-                    } else if fp.fetch_offset < start || fp.fetch_offset > raft.last_index() {
+                    } else if fp.fetch_offset < start || (leads && fp.fetch_offset > raft.last_index()) {
                         // Not `> hw`: a new leader learns the commit index only once
                         // an entry of its own term commits, so for a moment its high
                         // watermark lags offsets a client already read. Those are in
                         // its log (they are committed); the client waits for them.
+                        // A follower may lag further still: past its log it has
+                        // nothing yet, and the client waits too.
                         out.error = ErrorCode::OFFSET_OUT_OF_RANGE;
                     } else {
                         // Below the last stable offset every transaction is decided.
@@ -1039,7 +1049,8 @@ fn metadata<R: Runtime, S: StateMachine>(
         .iter()
         .filter_map(|(id, addr)| {
             let (host, port) = addr.rsplit_once(':')?;
-            Some(Broker { node_id: *id as u32, host: host.into(), port: port.parse().ok()?, rack: String::new() })
+            let rack = view.zones.get(id).cloned().unwrap_or_default();
+            Some(Broker { node_id: *id as u32, host: host.into(), port: port.parse().ok()?, rack })
         })
         .collect();
     let tenant_of = |id: u64| view.access.resources.get(&id).map(|(_, t)| t.clone()).unwrap_or_default();

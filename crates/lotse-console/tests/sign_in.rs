@@ -255,6 +255,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         log: LogConfig::default(),
         client_listen: Some(client_addr.clone()),
         client_addrs: [(1, client_addr.clone())].into(),
+        zones: Default::default(),
         streams: vec![
             StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![3] },
             StreamConfig { name: "audit".into(), resource_id: 8, partitions: vec![4] },

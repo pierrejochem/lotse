@@ -61,6 +61,7 @@ fn config(id: NodeId) -> NodeConfig {
         log: LogConfig::default(),
         client_listen: Some(format!("n{id}:9000")),
         client_addrs: (1..=3).map(|i| (i, format!("n{i}:9000"))).collect(),
+        zones: Default::default(),
         streams: vec![StreamConfig { name: "s".into(), resource_id: STREAM, partitions: vec![STREAM_GROUP] }],
         queues: vec![QueueConfig {
             name: "q".into(),

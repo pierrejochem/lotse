@@ -70,7 +70,7 @@ fn a_drained_node_is_emptied_a_few_groups_at_a_time_then_forgotten() {
     let refs: Vec<&[NodeId]> = partitions.iter().map(Vec::as_slice).collect();
     let mut s = with_stream(&refs);
     let core = [1, 2];
-    s.nodes.insert(4, NodeMeta { peer: "n4:1".into(), client: "n4:2".into() });
+    s.nodes.insert(4, NodeMeta { peer: "n4:1".into(), client: "n4:2".into(), zone: String::new() });
     let mut at = 100;
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
     let active = [1, 3, 4];
@@ -343,7 +343,11 @@ fn a_node_is_drained_once_no_group_needs_it() {
     let mut at = 100;
     let managed = |s: &MetadataState| crate::client::managed_groups(s, &[], &[]);
     assert!(!drained(&s, &managed(&s), &[], 4), "never draining");
-    apply_all(&mut s, &mut at, &[Change::AddNode { id: 4, peer: "n4:1".into(), client: "n4:2".into() }]);
+    apply_all(
+        &mut s,
+        &mut at,
+        &[Change::AddNode { id: 4, peer: "n4:1".into(), client: "n4:2".into(), zone: String::new() }],
+    );
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
     assert!(!drained(&s, &managed(&s), &[], 2), "still a voter");
     apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
@@ -383,7 +387,7 @@ fn a_node_is_listed_by_its_own_state_once_it_was_a_first_voter_or_added() {
     let mut at = 1;
     assert!(listed(&s, &[1, 2, 3], 2), "a first voter");
     assert!(!listed(&s, &[1, 2, 3], 4), "a joining node its configuration names, before it is added");
-    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into() };
+    let add = Change::AddNode { id: 4, peer: "n4:7000".into(), client: "n4:9000".into(), zone: String::new() };
     apply_all(&mut s, &mut at, &[add]);
     assert!(listed(&s, &[1, 2, 3], 4), "added");
     apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }, Change::ForgetNode { id: 2 }]);

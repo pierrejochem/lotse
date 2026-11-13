@@ -289,6 +289,57 @@ describe("fetch and list offsets against scripted brokers", () => {
     assert.equal(b.requests("Fetch")[0]?.resources[0]?.partitions[0]?.leaderTerm, 6n);
   });
 
+  /** Node 1 leads in zone a, node 2 follows in zone b; node 2 answers with `followerCode`. */
+  function zones(followerCode: number): void {
+    const meta = {
+      type: "Metadata" as const,
+      brokers: [a, b].map((n, i) => ({ nodeId: n.id, host: "127.0.0.1", port: n.address.port, rack: ["a", "b"][i] ?? "" })),
+      resources: [fx.stream("s", fx.STREAM_ID, fx.partition(0, 1, 5, 1, 2))],
+    };
+    const handler = (node: FakeNode, request: Request) => {
+      if (request.type === "Metadata") {
+        return meta;
+      }
+      const code = node.id === 2 ? followerCode : ErrorCode.NONE;
+      const records = code === ErrorCode.NONE ? data(0, 0, false, `from ${node.id}`) : undefined;
+      return fx.fetched(fx.STREAM_ID, 0, { code, highWatermark: 1, lastStable: 1, ...(records ? { records } : {}) });
+    };
+    a.on(handler);
+    b.on(handler);
+  }
+
+  test("a client in a zone fetches from the replica there", async () => {
+    zones(ErrorCode.NONE);
+    client = new LotseClient(fx.config([a], { zone: "b" }));
+    assert.deepEqual(values(await client.fetch("s", 0, 0n, 1)), ["from 2"]);
+    assert.deepEqual(values(await client.fetch("s", 0, 0n, 1)), ["from 2"]);
+    assert.equal(a.count("Fetch"), 0, "the leader is in another zone");
+    assert.equal((b.requests("Fetch")[0] as Extract<Request, { type: "Fetch" }>).allowFollower, true);
+    await client.close();
+    // In the leader's zone, or in one without a replica, the leader serves, as without a zone.
+    for (const zone of ["a", "c", undefined]) {
+      client = new LotseClient(fx.config([a], zone === undefined ? {} : { zone }));
+      assert.deepEqual(values(await client.fetch("s", 0, 0n, 1)), ["from 1"], `zone ${zone}`);
+      await client.close();
+    }
+    assert.ok(a.requests("Fetch").every((r) => (r as Extract<Request, { type: "Fetch" }>).allowFollower !== true));
+    client = undefined;
+  });
+
+  test("a replica that fails is left for the leader", async () => {
+    // An older node answers NOT_LEADER; one whose log starts later, OFFSET_OUT_OF_RANGE.
+    for (const code of [ErrorCode.NOT_LEADER, ErrorCode.OFFSET_OUT_OF_RANGE]) {
+      zones(code);
+      const before = b.count("Fetch");
+      client = new LotseClient(fx.config([a], { zone: "b" }));
+      assert.deepEqual(values(await client.fetch("s", 0, 0n, 1)), ["from 1"]);
+      assert.deepEqual(values(await client.fetch("s", 0, 0n, 1)), ["from 1"]);
+      assert.equal(b.count("Fetch"), before + 1, `asked once, then left: ${code}`);
+      await client.close();
+    }
+    client = undefined;
+  });
+
   test("a fetch that never gets a leader gives up", async () => {
     a.on((node, request) =>
       request.type === "Metadata" ? fx.metadata([node], fx.stream("s", fx.STREAM_ID, fx.partition(0, 0, 0))) : null,
