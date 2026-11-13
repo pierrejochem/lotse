@@ -84,6 +84,7 @@ async fn the_console_shows_a_real_cluster() {
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),
             client_addrs: clients.clone(),
+            zones: Default::default(),
             streams: vec![StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![3] }],
             queues: vec![QueueConfig {
                 name: "jobs".into(),

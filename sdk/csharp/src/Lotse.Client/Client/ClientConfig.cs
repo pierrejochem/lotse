@@ -35,6 +35,7 @@ public sealed class ClientConfig
         TransactionalId = b.TransactionalIdValue;
         MetadataMaxAge = b.MetadataMaxAgeValue;
         Tenant = b.TenantValue;
+        Zone = b.ZoneValue;
         Credentials = b.CredentialsValue;
         Time = b.TimeValue;
         _tls = b.TlsValue;
@@ -84,6 +85,12 @@ public sealed class ClientConfig
     /// <summary>The tenant resources created by this client go to, and the one its transactional and group ids live in (ADR 0062).</summary>
     public string Tenant { get; }
 
+    /// <summary>
+    /// The zone this client runs in, or <c>null</c>. With one, it fetches from a replica of the partition in that zone,
+    /// which serves the committed data it has, and from the leader if there is none (ADR 0104).
+    /// </summary>
+    public string? Zone { get; }
+
     /// <summary>The SASL credentials, or <c>null</c>.</summary>
     public Credentials? Credentials { get; }
 
@@ -118,6 +125,7 @@ public sealed class ClientConfig
         internal string? TransactionalIdValue;
         internal TimeSpan MetadataMaxAgeValue = TimeSpan.FromSeconds(30);
         internal string TenantValue = DefaultTenant;
+        internal string? ZoneValue;
         internal Credentials? CredentialsValue;
         internal TlsConfig? TlsValue;
         internal bool PlaintextValue;
@@ -228,6 +236,13 @@ public sealed class ClientConfig
         public Builder WithTenant(string tenant)
         {
             TenantValue = tenant ?? throw new ArgumentNullException(nameof(tenant));
+            return this;
+        }
+
+        /// <summary>The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104). Default none.</summary>
+        public Builder WithZone(string? zone)
+        {
+            ZoneValue = zone;
             return this;
         }
 

@@ -43,6 +43,15 @@ final class Fx {
         return new Response.Metadata(brokers, List.of(resources));
     }
 
+    /** Like {@link #metadata}, each node in the zone {@code zones} names for its id (index 0 for node 1). */
+    static Response.Metadata metadataInZones(List<FakeNode> nodes, List<String> zones, ResourceMetadata... resources) {
+        List<Broker> brokers = new ArrayList<>();
+        for (FakeNode n : nodes) {
+            brokers.add(new Broker(n.id, "127.0.0.1", n.address().port(), zones.get((int) n.id - 1)));
+        }
+        return new Response.Metadata(brokers, List.of(resources));
+    }
+
     static PartitionMetadata partition(int number, long leader, long term, Long... voters) {
         return new PartitionMetadata(number, leader, term, List.of(voters));
     }

@@ -88,6 +88,7 @@ fn config(id: NodeId, log: LogConfig, pre_vote: bool) -> NodeConfig {
         log,
         client_listen: Some(addr(id, 9000)),
         client_addrs: known.iter().map(|n| (*n, addr(*n, 9000))).collect(),
+        zones: Default::default(),
         streams: Vec::new(),
         queues: Vec::new(),
         exchanges: Vec::new(),

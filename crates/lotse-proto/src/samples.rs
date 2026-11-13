@@ -199,7 +199,13 @@ pub fn requests() -> Vec<Request> {
                 ],
             }],
         }),
-        Request::AddNode(AddNodeRequest { node_id: 4, peer: "10.0.0.4:7000".into(), client: "10.0.0.4:9000".into() }),
+        // The SDKs do not add nodes in a zone; `lotse node add` does.
+        Request::AddNode(AddNodeRequest {
+            node_id: 4,
+            peer: "10.0.0.4:7000".into(),
+            client: "10.0.0.4:9000".into(),
+            zone: None,
+        }),
         Request::RemoveNode(RemoveNodeRequest { node_id: 2 }),
         Request::DescribeNodes(DescribeNodesRequest::default()),
         Request::SettleVoters(SettleVotersRequest { group: 1_099_511_627_776, voters: vec![1, 3, 4] }),
@@ -231,6 +237,18 @@ pub fn requests() -> Vec<Request> {
                 resource_id: 7,
                 partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
             }],
+            allow_follower: false,
+        }),
+        Request::Fetch(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            isolation: isolation::COMMITTED,
+            resources: vec![FetchResource {
+                resource_id: 7,
+                partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
+            }],
+            allow_follower: true,
         }),
         Request::SaslHandshake(SaslHandshakeRequest { mechanism: "SCRAM-SHA-512".into() }),
         Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: Bytes::from_static(b"n,,n=alice,r=x") }),

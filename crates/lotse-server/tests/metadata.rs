@@ -158,6 +158,7 @@ impl World {
                         log,
                         client_listen: Some(client_addrs[&id].clone()),
                         client_addrs: client_addrs.clone(),
+                        zones: Default::default(),
                         streams: vec![lotse_server::StreamConfig {
                             name: "base".into(),
                             resource_id: 7,
@@ -455,6 +456,7 @@ async fn fetch_error(rt: &SimRuntime, addr: &str, resource_id: u64) -> Option<Er
                 max_bytes: 1 << 10,
             }],
         }],
+        allow_follower: false,
     });
     conn.send(lotse_proto::encode_request(1, &req)).await.ok()?;
     let frame = conn.recv().await.ok()??;

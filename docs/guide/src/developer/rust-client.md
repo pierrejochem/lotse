@@ -25,6 +25,7 @@ bytes = "1"
 | `txn_timeout` | 60 s | How long a transaction may stay open before the coordinator aborts it. |
 | `credentials` | `None` | `Credentials::Scram { user, password }` or `Credentials::OAuthBearer(..)`. |
 | `tenant` | `default` | Where created resources, transactional ids and group ids live. |
+| `zone` | none | The zone the client runs in. Fetches go to a replica of the partition in that zone, which serves the committed data it has and may lag the leader a little; to the leader if none is there or that replica fails. Everything else goes to the leader. Nodes name their zone in the cluster file ([ADR 0104](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0104-followers-serve-fetches-in-their-zone.md)). |
 
 The runtime decides the transport. A `TokioRuntime` uses the network only after `with_tls` (a TLS 1.3 configuration) or `plaintext_on_loopback`; plain TCP is refused off loopback.
 

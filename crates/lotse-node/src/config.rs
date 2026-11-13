@@ -107,6 +107,10 @@ pub struct NodeEntry {
     /// Where it listens for clients, if not on `client`.
     #[serde(default)]
     pub client_bind: Option<String>,
+    /// Its zone (a data centre or availability zone): clients that name
+    /// the same zone fetch from its replicas (ADR 0104).
+    #[serde(default)]
+    pub zone: Option<String>,
 }
 
 /// TLS: the CA and each node's certificate and key. `{id}` in a path
@@ -363,6 +367,7 @@ impl ClusterFile {
             log: lotse_log::LogConfig { segment_bytes: self.cluster.segment_bytes, ..lotse_log::LogConfig::default() },
             client_listen: Some(me.client_bind.clone().unwrap_or_else(|| me.client.clone())),
             client_addrs: clients,
+            zones: self.nodes.iter().filter_map(|n| Some((n.id, n.zone.clone()?))).collect(),
             streams: Vec::new(),
             queues: Vec::new(),
             exchanges: Vec::new(),

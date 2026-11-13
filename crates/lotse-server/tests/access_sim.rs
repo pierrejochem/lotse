@@ -190,6 +190,7 @@ fn config(id: NodeId, n: u64) -> NodeConfig {
         log: LogConfig::default(),
         client_listen: Some(format!("n{id}:9000")),
         client_addrs: (1..=n).map(|i| (i, format!("n{i}:9000"))).collect(),
+        zones: Default::default(),
         streams: Vec::new(),
         queues: Vec::new(),
         exchanges: Vec::new(),

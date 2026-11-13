@@ -203,12 +203,22 @@ public sealed interface Request {
      * @param maxBytes byte limit for the whole response, a {@code u32}
      * @param isolation see {@link Isolation}
      * @param resources what to read
+     * @param allowFollower a follower may answer with the committed data it has instead of {@code NOT_LEADER}
+     *     (ADR 0104); tag 0
      */
-    record Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources)
-            implements Request {
+    record Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources,
+            boolean allowFollower) implements Request {
+        /** Fetch's tag: a follower may answer. */
+        static final long TAG_ALLOW_FOLLOWER = 0;
+
         /** Creates the request. */
         public Fetch {
             resources = List.copyOf(resources);
+        }
+
+        /** The request for the leader only. */
+        public Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources) {
+            this(maxWaitMs, minBytes, maxBytes, isolation, resources, false);
         }
 
         @Override
@@ -230,7 +240,11 @@ public sealed interface Request {
                 });
                 w1.noTags();
             });
-            w.noTags();
+            if (allowFollower) {
+                w.tags(List.of(new Tag(TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1}))));
+            } else {
+                w.noTags();
+            }
         }
 
         static Fetch read(Reader r) {
@@ -248,8 +262,15 @@ public sealed interface Request {
                 r1.tags();
                 return new FetchResource(id, partitions);
             });
-            r.tags();
-            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources);
+            boolean allowFollower = false;
+            for (Tag t : r.tags()) {
+                if (t.tag() == TAG_ALLOW_FOLLOWER) {
+                    Reader vr = new Reader(t.value().toByteArray());
+                    allowFollower = vr.u8() != 0;
+                    vr.finish();
+                }
+            }
+            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower);
         }
     }
 

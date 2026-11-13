@@ -71,6 +71,7 @@ async fn main() {
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),
             client_addrs: clients.clone(),
+            zones: Default::default(),
             streams: vec![StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![3, 4, 5] }],
             queues: vec![QueueConfig {
                 name: "jobs".into(),

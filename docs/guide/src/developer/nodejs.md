@@ -38,7 +38,7 @@ const client = new LotseClient({
 // ... client.close() when done
 ```
 
-Durations are milliseconds: `requestTimeoutMs` 10 000, `retryForMs` 30 000, `backoffMs` 50, `produceTimeoutMs` 5 000, `txnTimeoutMs` 60 000, `metadataMaxAgeMs` 30 000. Other options: `idempotent`, `producerName`, `transactionalId`, `tenant`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
+Durations are milliseconds: `requestTimeoutMs` 10 000, `retryForMs` 30 000, `backoffMs` 50, `produceTimeoutMs` 5 000, `txnTimeoutMs` 60 000, `metadataMaxAgeMs` 30 000. Other options: `idempotent`, `producerName`, `transactionalId`, `tenant`, `zone`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
 
 ## Streams
 
