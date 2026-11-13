@@ -186,6 +186,42 @@ fn a_replica_placed_here_again_stays_while_this_node_lags() {
 }
 
 #[test]
+fn a_replica_from_before_a_settled_move_off_starts_over_when_placed_again() {
+    // Node 2 holds the group, is down while it moves to node 4, and the
+    // group comes back to it before it starts again (ADR 0108).
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    let before = 50; // the membership node 2's replica last held
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    let off = s.target_at[&g];
+    assert_eq!(starts_over(&s, g, 2, before, None), None, "not settled: node 2 may hold copies commits rest on");
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
+    assert_eq!(s.moved_off[&g].get(&2), Some(&off), "the settled move off is recorded");
+    assert!(!s.moved_off[&g].contains_key(&4), "a voter is not");
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 2, 3] }]);
+    assert_eq!(starts_over(&s, g, 2, before, None), Some(off), "its log is from before it left");
+    assert_eq!(starts_over(&s, g, 2, off, None), Some(off), "the membership of the move off itself is no newer");
+    assert_eq!(starts_over(&s, g, 2, s.target_at[&g], None), None, "it took part again: commits may rest on it");
+    assert_eq!(starts_over(&s, g, 2, 0, Some(off)), None, "already removed for that move: it catches up");
+    assert_eq!(starts_over(&s, g, 2, 0, Some(off - 1)), Some(off), "removed for an older move only");
+    assert_eq!(starts_over(&s, g, 1, before, None), None, "node 1 never left");
+}
+
+#[test]
+fn only_a_report_of_the_current_decision_records_a_move_off() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 2, 3] }]);
+    // A late report of the first decision: node 2 never left in fact.
+    apply_all(&mut s, &mut at, &[Change::Settled { group: g, voters: vec![1, 3, 4] }]);
+    assert!(s.moved_off.get(&g).is_none_or(|m| !m.contains_key(&2)), "an older decision's report moves nothing off");
+    assert_eq!(starts_over(&s, g, 2, 0, None), None);
+}
+
+#[test]
 fn a_node_that_left_a_group_may_hold_it_again() {
     // Node 5 left the group and carries nothing: it keeps the group's term
     // and vote, so it may take the group again (ADR 0050).
@@ -427,4 +463,36 @@ fn a_move_evens_out_bytes_as_far_as_counts_allow() {
     });
     assert_eq!(first, Some(crate::metadata::group_id(10, 0)));
     assert_eq!(by_count.len(), next.len(), "sizes choose between moves, they add none");
+}
+
+#[test]
+fn a_membership_newer_than_this_nodes_view_waits() {
+    use bytes::Bytes;
+    use lotse_raft::{Entry, EntryKind, Message, SnapshotMeta};
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = crate::metadata::group_id(10, 0);
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::SetVoters { group: g, voters: vec![1, 3, 4] }]);
+    let seen = s.target_at[&g];
+    let tagged = |tag| Membership { tag, ..m(&[1, 2, 3], &[]) };
+    let append =
+        |entries: Vec<Entry>| Message::Append { term: 3, prev_index: 0, prev_term: 0, entries, commit: 0, seq: 1 };
+    let config = |tag| Entry { first: 7, last: 7, term: 3, kind: EntryKind::Config, data: tagged(tag).encode() };
+    let data = Entry { first: 6, last: 6, term: 3, kind: EntryKind::Normal, data: Bytes::from_static(b"x") };
+    assert!(!ahead_of_view(&s, g, &append(vec![data.clone()])), "data alone never waits");
+    assert!(!ahead_of_view(&s, g, &append(vec![data.clone(), config(seen)])), "the decision this node saw");
+    assert!(ahead_of_view(&s, g, &append(vec![data, config(seen + 1)])), "a newer one waits");
+    let snapshot = |tag| Message::Snapshot {
+        term: 3,
+        meta: SnapshotMeta { index: 9, term: 3, membership: tagged(tag) },
+        offset: 0,
+        data: Bytes::new(),
+        done: false,
+        seq: 1,
+    };
+    assert!(!ahead_of_view(&s, g, &snapshot(seen)));
+    assert!(ahead_of_view(&s, g, &snapshot(seen + 1)), "a snapshot carries its membership too");
+    assert!(!ahead_of_view(&s, g, &Message::TimeoutNow { term: 3 }));
+    let other = crate::metadata::group_id(77, 0);
+    assert!(ahead_of_view(&s, other, &append(vec![config(1)])), "a group this node has seen no decision of");
 }

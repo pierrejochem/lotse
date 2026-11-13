@@ -1038,8 +1038,16 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             }
         }
         let inbox: Vec<_> = shared.inbox.lock().expect("inbox lock").drain(..).collect();
+        let core = core_groups(cfg);
         for (from, messages) in inbox {
             for (g, msg) in messages {
+                // A runtime group's membership waits until this node's
+                // replicas were refreshed with the decision behind it
+                // (ADR 0108); the metadata and coordinator groups, which
+                // carry no streams or queues, never wait.
+                if !core.contains(&g) && crate::membership::ahead_of_view(&known.state, g, &msg) {
+                    continue;
+                }
                 if let Some(group) = groups.get_mut(&g) {
                     group.step(from, msg);
                 }
@@ -1565,6 +1573,18 @@ impl Known {
             if voters.contains(&cfg.id) {
                 // Back on this node: should it move off again, clean again.
                 known.forgotten.remove(&g);
+                // Placed here again with a replica from before a move off
+                // this node settled, which this node did not see (ADR 0108):
+                // that log starts over. A replica opened from an older view
+                // is checked here the next round; until then it takes no
+                // membership newer than this view (`ahead_of_view`).
+                if let Some(r) = groups.get(&g)
+                    && let Some(off) =
+                        crate::membership::starts_over(&state, g, cfg.id, r.raft_ref().membership().tag, r.moved_at())
+                {
+                    closed |= groups.remove(&g).is_some();
+                    forget_group_log(rt, &group_dir(g), off).await?;
+                }
             }
             if !known.forgotten.contains(&g) && !voters.contains(&cfg.id) && state.is_settled(g, voters) {
                 let tag = match groups.get(&g) {
