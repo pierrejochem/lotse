@@ -583,6 +583,10 @@ struct Progress {
     /// move on since: answers to chunks sent before that say the same and
     /// must not send the window again each time.
     snap_rewound: bool,
+    /// Where the follower's latest chunk answer said it stands. Below the
+    /// offset in `snap` it is a late answer, or the follower started over:
+    /// the in-flight timeout goes back there, nothing earlier does.
+    snap_said: u64,
     /// After a rejection, appends carry no entries until one matches: the
     /// leader learns where the logs agree before it sends entries, instead
     /// of sending from a guess that may be wrong again.
@@ -903,6 +907,12 @@ impl RaftGroup {
                     // snapshot from where the follower last stood.
                     if p.inflight_ticks >= election {
                         p.inflight = false;
+                        // A follower that started over says so in every
+                        // answer: from where it last said it stands.
+                        let said = p.snap_said;
+                        if let Some(s) = p.snap.as_mut() {
+                            s.1 = s.1.min(said);
+                        }
                         p.snap_sent = p.snap.as_ref().map_or(0, |s| s.1);
                         p.snap_rewound = true;
                     }
@@ -1060,6 +1070,7 @@ impl RaftGroup {
                     snap: None,
                     snap_sent: 0,
                     snap_rewound: false,
+                    snap_said: 0,
                     probing: false,
                 });
             }
@@ -1320,6 +1331,9 @@ impl RaftGroup {
             // know the snapshot's length: chunks past its end come back
             // empty and marked last, and a follower that has installed it
             // just accepts them.
+            if p.snap.is_none() {
+                p.snap_said = 0;
+            }
             let (meta, offset) = p.snap.get_or_insert((snapshot, 0)).clone();
             p.snap_sent = p.snap_sent.max(offset);
             let mut sends = Vec::new();
@@ -1413,21 +1427,28 @@ impl RaftGroup {
                 // the one in transfer, and the follower starts over.
                 // Each chunk that arrives in order moves the follower on. One
                 // that does not (a chunk was lost, or came twice) leaves it
-                // where it stood: then the leader sends again from there.
+                // where it stood: then the leader sends again from there,
+                // once. An answer below where the follower stood is late
+                // (sent before an answer that came first) and moves nothing:
+                // sending again for it, the answers to what was sent would
+                // send again in turn. A follower that really started over is
+                // served from there when the chunks in flight time out.
                 if p.snap.as_ref().is_some_and(|s| s.0.index == index) {
                     let stood = p.snap.as_ref().map_or(0, |s| s.1);
                     if next > stood {
+                        p.snap = p.snap.take().map(|s| (s.0, next));
                         p.snap_rewound = false;
-                    } else if !p.snap_rewound || next < stood {
+                    } else if next == stood && !p.snap_rewound {
                         p.snap_sent = next;
                         p.snap_rewound = true;
                     }
-                    p.snap = p.snap.take().map(|s| (s.0, next));
+                    p.snap_said = next;
                     p.inflight = false;
                 } else if index == self.log.snapshot_index() {
                     p.snap = Some((self.snapshot_meta(), next));
                     p.snap_sent = next;
                     p.snap_rewound = true;
+                    p.snap_said = next;
                     p.inflight = false;
                 }
             }
