@@ -875,7 +875,7 @@ fn a_newer_snapshot_replaces_a_partial_one_and_an_unknown_one_must_start_over() 
 fn a_leader_sends_a_snapshot_in_chunks_and_resumes_where_the_follower_stands() {
     let (mut c, sn) = snapshot_to_send();
     let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
-    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
     let chunks = data.len().div_ceil(40);
     assert!(chunks >= 4);
     // Lose the second and the fourth chunk once each.
@@ -885,6 +885,84 @@ fn a_leader_sends_a_snapshot_in_chunks_and_resumes_where_the_follower_stands() {
     assert_eq!(c.nodes[&f].snapshot_index(), meta.index, "caught up from chunks");
     assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
     assert!(c.lose_chunks.is_empty(), "the chunks were lost as planned");
+}
+
+#[test]
+fn a_leader_sends_a_window_of_chunks_and_goes_back_to_a_lost_one() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, meta, data) = (sn.leader, sn.follower, sn.meta.clone(), sn.data.clone());
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_window(3);
+    let chunks = data.len().div_ceil(40) as u64;
+    assert!(chunks >= 5);
+    c.lose_chunks.insert(40);
+    c.cut.clear();
+    c.ticks(3 * chunks as u32 + 60);
+    assert_eq!(c.nodes[&f].snapshot_index(), meta.index, "caught up from chunks");
+    assert_eq!(c.nodes[&f].applied_data(), c.nodes[&l].applied_data());
+    let sent: Vec<u64> = c.chunks_sent.iter().filter(|s| s.0 == meta.index).map(|s| s.1).collect();
+    // Three chunks go out before any answer is back.
+    assert_eq!(sent[..3], [0, 40, 80], "{sent:?}");
+    // The lost one goes again, once the follower says it still stands there.
+    assert_eq!(sent.iter().filter(|&&o| o == 40).count(), 2, "{sent:?}");
+    // Never more than three ahead: a chunk goes out only after the one
+    // three before it. (Past the end the driver says the end, so an offset
+    // that is no multiple of 40 stands for the next multiple.)
+    for (i, &o) in sent.iter().enumerate() {
+        let before = &sent[..i];
+        let nominal = o.div_ceil(40) * 40;
+        let resent = before.contains(&o);
+        assert!(resent || nominal <= 80 || before.contains(&(nominal - 120)), "{o} went out too early: {sent:?}");
+    }
+}
+
+/// Chunk answers arrive late, twice and out of order. Only an answer that
+/// moves the follower on slides the window, and only an answer that says
+/// the follower still stands where it stood sends chunks again, once. A
+/// smaller one is old news: it sends nothing, or answers to the chunks it
+/// sends would feed on themselves (a storm found by the Raft simulation,
+/// seed 459). A follower that really went back, because it started over,
+/// is served from where it said it stands once the chunks in flight time
+/// out.
+#[test]
+fn late_chunk_answers_send_nothing_and_a_follower_that_started_over_is_served_after_the_timeout() {
+    let (mut c, sn) = snapshot_to_send();
+    let (l, f, index, term) = (sn.leader, sn.follower, sn.meta.index, sn.term);
+    let raft = &mut c.nodes.get_mut(&l).unwrap().raft;
+    raft.set_snapshot_chunk_bytes(40);
+    raft.set_snapshot_window(3);
+    let chunks = |raft: &mut RaftGroup| -> Vec<u64> {
+        raft.ready()
+            .messages
+            .into_iter()
+            .filter(|s| s.to == f)
+            .filter_map(|s| match s.msg {
+                Message::Snapshot { offset, .. } => Some(offset),
+                _ => None,
+            })
+            .collect()
+    };
+    let answer = |raft: &mut RaftGroup, next: u64| {
+        let result = AppendResult::SnapshotChunk { index, next };
+        raft.step(f, Message::AppendReply { term, result, seq: 1_000_000 });
+        chunks(raft)
+    };
+    // The follower says where it stands: a window from there.
+    assert_eq!(answer(raft, 0), [0, 40, 80]);
+    assert_eq!(answer(raft, 80), [120, 160], "it moved on: the window slides");
+    assert_eq!(answer(raft, 40), [0u64; 0], "an older answer, late: nothing again");
+    assert_eq!(answer(raft, 0), [0u64; 0], "an even older one: nothing either");
+    assert_eq!(answer(raft, 80), [80, 120, 160], "it still stands at 80: the chunk there was lost");
+    assert_eq!(answer(raft, 80), [0u64; 0], "the same again: once is enough");
+    assert_eq!(answer(raft, 120), [200], "on again");
+    // It started over (its node restarted): every answer says 0 now.
+    assert_eq!(answer(raft, 0), [0u64; 0]);
+    let mut sent = Vec::new();
+    for _ in 0..40 {
+        raft.tick();
+        sent.extend(chunks(raft));
+    }
+    assert_eq!(sent[..3], [0, 40, 80], "after the timeout, from where it last said it stands: {sent:?}");
 }
 
 #[test]
@@ -925,7 +1003,10 @@ fn a_replaced_snapshot_is_sent_from_its_start_and_the_last_chunk_is_marked() {
 fn a_transfer_finishes_with_its_snapshot_although_the_leader_snapshots_again() {
     let (mut c, sn) = snapshot_to_send();
     let (l, f, first) = (sn.leader, sn.follower, sn.meta.index);
-    c.nodes.get_mut(&l).unwrap().max_snapshot_chunk = 40;
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_chunk_bytes(40);
+    // One chunk at a time, so the follower's answer to the first arrives
+    // before it is cut off and the leader knows where it stands.
+    c.nodes.get_mut(&l).unwrap().raft.set_snapshot_window(1);
     // Let a few chunks through, then the follower is cut off and the leader
     // snapshots again.
     c.cut_after_chunks = Some(2);

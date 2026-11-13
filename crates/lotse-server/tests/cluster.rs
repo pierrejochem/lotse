@@ -107,7 +107,18 @@ impl World {
             rts: ids.iter().map(|&id| (id, rt.with_own_disk())).collect(),
             cfgs: ids
                 .iter()
-                .map(|&id| (id, Config { seed: rt.next_u64(), pre_vote, ..Config::new(id, ids.clone()) }))
+                .map(|&id| {
+                    let window = 1 + rt.below(6) as u32;
+                    (
+                        id,
+                        Config {
+                            seed: rt.next_u64(),
+                            pre_vote,
+                            snapshot_window: window,
+                            ..Config::new(id, ids.clone())
+                        },
+                    )
+                })
                 .collect(),
             nodes: BTreeMap::new(),
             down_until: BTreeMap::new(),
@@ -136,7 +147,8 @@ impl World {
                 .await
                 .unwrap_or_else(|e| panic!("node {id} cannot recover from its disk: {e}"));
         node.max_fill_bytes = 1 + self.rng.below(400) as usize;
-        node.max_snapshot_chunk = 16 + self.rng.below(600) as usize; // snapshots in chunks, also across power loss
+        // Snapshots in chunks, several on their way, also across power loss.
+        node.raft().set_snapshot_chunk_bytes(16 + self.rng.below(600));
         node
     }
 
