@@ -72,6 +72,9 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
 
     private readonly record struct PartitionKey(string Stream, int Partition);
 
+    /// <summary>A partition of one incarnation of a stream: sequences belong to it (ADR 0107).</summary>
+    private readonly record struct IncarnationKey(ulong ResourceId, int Partition);
+
     /// <summary>The producer id this client writes with.</summary>
     private sealed class Session
     {
@@ -85,7 +88,8 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
 
         internal ushort Epoch { get; }
 
-        internal Dictionary<PartitionKey, int> Next { get; } = new();
+        /// <summary>By resource id: a stream deleted and created again under its name has sequences of its own.</summary>
+        internal Dictionary<IncarnationKey, int> Next { get; } = new();
     }
 
     /// <summary>What a produce is stamped with.</summary>
@@ -522,7 +526,12 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         await turn.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Stamp stamp = await NextSequenceAsync(key, cancellationToken).ConfigureAwait(false);
+            // The sequence belongs to the incarnation the stream has now; the produce stays with it (ADR 0107).
+            ulong resourceId = await RetryingAsync(
+                async () => (await RouteAsync(stream, partition, cancellationToken).ConfigureAwait(false)).Route.ResourceId,
+                cancellationToken).ConfigureAwait(false);
+            var incarnation = new IncarnationKey(resourceId, partition);
+            Stamp stamp = await NextSequenceAsync(incarnation, cancellationToken).ConfigureAwait(false);
             byte[] bytes = batch.ToByteArray();
             Batch.SetProducer(bytes, stamp.ProducerId, stamp.Epoch, stamp.Sequence);
             ByteString stamped = ByteString.View(bytes, 0, bytes.Length);
@@ -531,11 +540,25 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             // reusing the sequence would let the leader take the next batch for this one, answer with its offset and
             // write nothing.
             bool decided = false;
+            bool inDoubt = false;
             try
             {
                 // Every attempt sends the same bytes: the same producer id and the same sequence.
                 result = await RetryingAsync(
-                    () => ProduceOnceAsync(stream, partition, stamped, true, null, cancellationToken), cancellationToken)
+                    async () =>
+                    {
+                        try
+                        {
+                            return await ProduceOnceAsync(stream, partition, stamped, true, null, cancellationToken, resourceId)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Attempt a) when (a.Outcome == Attempt.Kind.RetryMaybeDone)
+                        {
+                            inDoubt = true;
+                            throw;
+                        }
+                    },
+                    cancellationToken)
                     .ConfigureAwait(false);
                 decided = true;
             }
@@ -549,8 +572,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 bool fencedByName = _cfg.ProducerName is not null
                     && e is BrokerErrorException f
                     && f.Code.Equals(ErrorCode.ProducerFenced);
+                // The stream went to another incarnation after an attempt that may have been written to this one: in
+                // doubt as well.
                 bool startOver = !fencedByName
                     && (e is OutcomeUnknownException
+                        || (e is UnknownStreamException && inDoubt)
                         || (e is BrokerErrorException b
                             && (b.Code.Equals(ErrorCode.OutOfOrderSequence) || b.Code.Equals(ErrorCode.ProducerFenced))));
                 if (startOver)
@@ -570,7 +596,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             {
                 if (_session is not null && _session.ProducerId == stamp.ProducerId)
                 {
-                    _session.Next[key] = unchecked(stamp.Sequence + (int)records);
+                    _session.Next[incarnation] = unchecked(stamp.Sequence + (int)records);
                 }
             }
             return result;
@@ -593,7 +619,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     }
 
     /// <summary>The producer id, epoch and next sequence for a partition, getting a producer id first if there is none.</summary>
-    private async Task<Stamp> NextSequenceAsync(PartitionKey key, CancellationToken ct)
+    private async Task<Stamp> NextSequenceAsync(IncarnationKey key, CancellationToken ct)
     {
         lock (_sessionLock)
         {
@@ -611,13 +637,22 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         }
     }
 
-    private static Stamp StampOf(Session s, PartitionKey key) => new(s.ProducerId, s.Epoch, s.Next.GetValueOrDefault(key, 0));
+    private static Stamp StampOf(Session s, IncarnationKey key) => new(s.ProducerId, s.Epoch, s.Next.GetValueOrDefault(key, 0));
 
+    /// <summary>
+    /// One produce attempt. Pinned to the incarnation <paramref name="pin"/>, a route to another one (the stream was
+    /// deleted and created again) ends the produce with <see cref="UnknownStreamException"/>, since its sequence
+    /// belongs to the one it was taken for (ADR 0107).
+    /// </summary>
     internal async Task<ProduceResult> ProduceOnceAsync(
-        string stream, int partition, ByteString batch, bool idempotent, string? txnId, CancellationToken ct)
+        string stream, int partition, ByteString batch, bool idempotent, string? txnId, CancellationToken ct, ulong? pin = null)
     {
         // An idempotent batch may be sent again whatever happened to it.
         Routed routed = await RouteAsync(stream, partition, ct).ConfigureAwait(false);
+        if (pin is ulong pinned && routed.Route.ResourceId != pinned)
+        {
+            throw Attempt.Fail(new UnknownStreamException(stream, partition));
+        }
         var req = new Request.Produce(
             txnId,
             (uint)Math.Min(_cfg.ProduceTimeout.TotalMilliseconds, U32Max),

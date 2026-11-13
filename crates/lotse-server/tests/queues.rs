@@ -533,6 +533,23 @@ async fn run(rt: SimRuntime) {
     for id in std::mem::take(&mut w.down_until).into_keys() {
         w.start(id).await;
     }
+    // The transactional producer may have left a transaction open. Its
+    // messages, and every message after them, wait for its end, which the
+    // coordinator decides at the timeout and, under faults, may finish
+    // later than any quiet spell the drain waits for (seed 931). A new
+    // instance, as a restarted application starts one, fences the old one
+    // and gets its producer only once that transaction is aborted and its
+    // markers are written.
+    let restarted = Client::new(
+        rt.node("t2"),
+        ClientConfig {
+            transactional_id: Some("tx".into()),
+            txn_timeout: Duration::from_millis(800),
+            retry_for: Duration::from_secs(20),
+            ..client_config()
+        },
+    );
+    drop(restarted.begin_transaction().await.expect("the healed cluster ends the open transaction"));
 
     // Drain: whatever is not settled comes out, nothing settled does.
     let out = std::mem::take(&mut *out.lock().unwrap());

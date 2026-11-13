@@ -16,6 +16,15 @@ struct Cluster {
     chunks_sent: Vec<(u64, u64)>,
     /// Cuts the receiver off once this many chunks have been sent.
     cut_after_chunks: Option<usize>,
+    /// Every append delivered (to, prev index, entries) and every rejection
+    /// (from), in order.
+    appends: Vec<Seen>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    Append { to: NodeId, prev_index: u64, entries: usize },
+    Rejected { from: NodeId },
 }
 
 impl Cluster {
@@ -36,6 +45,7 @@ impl Cluster {
             lose_chunks: BTreeSet::new(),
             chunks_sent: Vec::new(),
             cut_after_chunks: None,
+            appends: Vec::new(),
         }
     }
 
@@ -77,6 +87,15 @@ impl Cluster {
             };
             if self.cut.contains(&from) || self.cut.contains(&s.to) {
                 continue;
+            }
+            match &s.msg {
+                Message::Append { prev_index, entries, .. } => {
+                    self.appends.push(Seen::Append { to: s.to, prev_index: *prev_index, entries: entries.len() });
+                }
+                Message::AppendReply { result: AppendResult::Rejected { .. }, .. } => {
+                    self.appends.push(Seen::Rejected { from });
+                }
+                _ => {}
             }
             if let Message::Snapshot { meta, offset, .. } = &s.msg {
                 self.chunks_sent.push((meta.index, *offset));
@@ -173,6 +192,50 @@ fn a_new_leader_overwrites_uncommitted_entries_of_an_isolated_old_leader() {
     c.ticks(30);
     for n in c.nodes.values() {
         assert_eq!(n.applied_data(), vec![Bytes::from("kept")], "node {}", n.raft.id());
+    }
+}
+
+#[test]
+fn after_a_conflict_the_leader_probes_before_it_sends_entries() {
+    let mut c = Cluster::new(5);
+    let old = c.elect();
+    c.ticks(2);
+    // The old leader, cut off, appends many entries of its term nobody
+    // else has.
+    c.cut.insert(old);
+    for i in 0..40 {
+        c.nodes.get_mut(&old).unwrap().propose(4, format!("lost-{i}")).unwrap();
+    }
+    c.nodes.get_mut(&old).unwrap().process();
+    let new = c.elect();
+    for i in 0..40 {
+        c.nodes.get_mut(&new).unwrap().propose(2, format!("kept-{i}")).unwrap();
+    }
+    c.ticks(2);
+    // A third node leads next, so its first guess for the old leader is
+    // its own last index.
+    c.cut.insert(new);
+    let third = c.elect();
+    assert!(third != old && third != new);
+    c.cut.remove(&new);
+    c.ticks(5);
+    c.appends.clear();
+    c.cut.clear();
+    c.ticks(30);
+    for n in c.nodes.values() {
+        assert_eq!(n.applied_data().len(), 40, "node {}", n.raft.id());
+    }
+    // Every append that follows a rejection carries no entries: the leader
+    // learns where the logs agree first, then sends from there.
+    let seen = &c.appends;
+    let rejections = seen.iter().filter(|e| **e == (Seen::Rejected { from: old })).count();
+    assert!(rejections > 0, "the old leader's log conflicted");
+    for (i, e) in seen.iter().enumerate() {
+        if *e != (Seen::Rejected { from: old }) {
+            continue;
+        }
+        let next = seen[i + 1..].iter().find(|e| matches!(e, Seen::Append { to, .. } if *to == old));
+        assert!(matches!(next, Some(Seen::Append { entries: 0, .. })), "after a rejection: {next:?}");
     }
 }
 

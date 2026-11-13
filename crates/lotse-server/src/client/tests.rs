@@ -588,6 +588,120 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
     });
 }
 
+/// A consumer that ended sends its requeue late, on a connection where a
+/// newer subscription has received the same message again since: the Nack
+/// names its subscription and takes back only what that one holds
+/// (ADR 0106). Without a name it takes from every subscription of the
+/// connection, as before.
+#[test]
+fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig {
+            name: "jobs".into(),
+            resource_id: 7,
+            group: G,
+            ack_timeout: QueueConfig::DEFAULT_ACK_TIMEOUT,
+            limits: Default::default(),
+            dead_letter: None,
+            single_active: false,
+            priority_levels: 0,
+        }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        // One connection for the consumers, another for the watcher.
+        let (outbox, watcher) = (Arc::new(Outbox::default()), Arc::new(Outbox::default()));
+        let mut clients = Clients::default();
+        let send = async |clients: &mut Clients, groups: &mut Groups, on: &Arc<Outbox>, request: Request| {
+            let key = request.api_key();
+            let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: on.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(&view, groups).await.unwrap();
+            }
+            drain(on, key)
+        };
+        let subscribe = || {
+            Request::Subscribe(lotse_proto::SubscribeRequest {
+                queue_id: 7,
+                consumer_tag: "w".into(),
+                credit_msgs: 1,
+                credit_bytes: 1 << 20,
+                exclusive: false,
+                notify_active: false,
+            })
+        };
+        let id_of = |r: &[Response]| match r {
+            [Response::Subscribe(s)] if s.error == ErrorCode::NONE => s.subscription_id,
+            other => panic!("expected a subscription, got {other:?}"),
+        };
+        let nack = |subscription_id| {
+            Request::Nack(lotse_proto::NackRequest {
+                queue_id: 7,
+                ranges: vec![(1, 2)],
+                requeue: true,
+                delay_ms: 0,
+                subscription_id,
+            })
+        };
+        let delivered = |p: &[lotse_proto::DeliverPush]| {
+            p.iter().flat_map(|p| p.deliveries.iter().map(|d| d.offset)).collect::<Vec<_>>()
+        };
+        send(&mut clients, &mut groups, &outbox, produce_request("a")).await; // offset 1
+
+        // The first subscription gets it, ends, and gives it back.
+        let (r, pushes) = send(&mut clients, &mut groups, &outbox, subscribe()).await;
+        let old = id_of(&r);
+        assert_eq!(delivered(&pushes), [1]);
+        let unsub = Request::Unsubscribe(lotse_proto::UnsubscribeRequest { subscription_id: old });
+        send(&mut clients, &mut groups, &outbox, unsub).await;
+        send(&mut clients, &mut groups, &outbox, nack(Some(old))).await;
+        // A newer subscription on the same connection gets it again.
+        let (r, pushes) = send(&mut clients, &mut groups, &outbox, subscribe()).await;
+        let new = id_of(&r);
+        assert_eq!(delivered(&pushes), [1], "delivered again, to the newer subscription");
+
+        // The old consumer's requeue arrives once more, late: nothing moves.
+        send(&mut clients, &mut groups, &outbox, nack(Some(old))).await;
+        let (_, pushes) = send(&mut clients, &mut groups, &watcher, subscribe()).await;
+        assert!(delivered(&pushes).is_empty(), "the newer subscription keeps it: {pushes:?}");
+        let (_, pushes) = send(&mut clients, &mut groups, &outbox, nack(Some(new))).await;
+        assert!(delivered(&pushes).is_empty());
+        assert_eq!(delivered(&drain(&watcher, ApiKey::SUBSCRIBE).1), [1], "its own subscription gives it back");
+
+        // Without a name, as older clients send it, it is taken from any.
+        let (_, pushes) = send(&mut clients, &mut groups, &watcher, nack(None)).await;
+        assert!(delivered(&pushes).is_empty(), "the watcher's credit is used");
+        let (r, pushes) = send(&mut clients, &mut groups, &outbox, subscribe()).await;
+        id_of(&r);
+        assert_eq!(delivered(&pushes), [1], "the unnamed requeue took it from the watcher's connection");
+    });
+}
+
 /// A new leader may hold an ack that its predecessor committed without
 /// knowing it is committed: it must not deliver until it has applied an
 /// entry of its own term, or the acknowledged message goes out again.
@@ -917,6 +1031,61 @@ fn offsets_for_a_released_partition_are_refused() {
 /// A queue's limits through the admin requests: a dead-letter queue must be
 /// another queue, a queue others dead-letter into cannot be deleted, and the
 /// settings are described and changed like the ack timeout.
+#[test]
+fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
+    // ADR 0105: a node that asks with the metadata index it has applied gets
+    // an answer at least that new, or NOT_LEADER (a leader behind it, or one
+    // deposed without knowing it). Without the index anything goes.
+    Sim::new(9).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open(rt.clone(), "m", cfg, Nothing, LogConfig::default()).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let applied = groups[&G].applied();
+        assert!(applied > 0);
+        let (addrs, voters) = (BTreeMap::new(), BTreeMap::new());
+        let view = ClusterView {
+            streams: &[],
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            admin: AdminView {
+                metadata: Some(G),
+                nodes: &[1],
+                configured_groups: 1,
+                voters: &voters,
+                ..AdminView::default()
+            },
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+        };
+        let mut clients = Clients::default();
+        for (applied_at_least, expected) in
+            [(None, ErrorCode::NONE), (Some(applied), ErrorCode::NONE), (Some(applied + 1), ErrorCode::NOT_LEADER)]
+        {
+            let request = Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least });
+            let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+            let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+            match &drain(&outbox, key).0[..] {
+                [Response::DescribeNodes(d)] => assert_eq!(d.error, expected, "{applied_at_least:?}"),
+                other => panic!("expected one answer, got {other:?}"),
+            }
+        }
+    });
+}
+
 #[test]
 fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() {
     Sim::new(9).run(|rt| async move {

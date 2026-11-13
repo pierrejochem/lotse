@@ -529,6 +529,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       ranges: offsetRanges(held.map((d) => d.offset)),
       requeue: true,
       delayMs,
+      subscriptionId: on.id, // ADR 0106
     };
     let resp: Response;
     try {
@@ -611,6 +612,8 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
           ranges: offsetRanges(unread),
           requeue: true,
           delayMs: 0,
+          // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+          subscriptionId: ending.id,
         });
       }
     }

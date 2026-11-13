@@ -473,14 +473,18 @@ impl Clients {
             return self.write_queue(Some((outbox, correlation_id)), g, replica, QueueBatch::new(batch), view.now);
         }
         // Only this connection's messages in flight go back; nothing else
-        // needs doing for the rest (not delivered here, or settled).
+        // needs doing for the rest (not delivered here, or settled). A Nack
+        // that names its subscription takes back only what that one holds:
+        // sent late, by a consumer that ended, it must not take what a newer
+        // subscription on the connection received since (ADR 0106).
         let conn = conn_id(&outbox);
+        let named = req.subscription_id;
         let taken = match self.queues.get_mut(&g).filter(|s| s.term == replica.raft_ref().term()) {
             Some(s) => {
                 let d = &mut s.dispatcher;
                 let mine: Vec<u64> = d
                     .subscriptions()
-                    .filter(|(_, c)| *c == conn)
+                    .filter(|(id, c)| *c == conn && named.is_none_or(|n| n == *id))
                     .flat_map(|(id, _)| d.in_flight_of(id))
                     .filter(|o| req.ranges.iter().any(|&(f, t)| (f..t).contains(o)))
                     .collect();

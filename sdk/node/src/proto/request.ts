@@ -96,6 +96,11 @@ export interface NackRequest {
   readonly ranges: readonly m.Range[];
   readonly requeue: boolean;
   readonly delayMs: number;
+  /**
+   * The subscription the messages came on, tag 0 (ADR 0106): a requeue then takes back only what that subscription
+   * holds, not what a newer one on the connection received since. Absent: every subscription of the connection.
+   */
+  readonly subscriptionId?: number;
 }
 export interface UnsubscribeRequest {
   readonly type: "Unsubscribe";
@@ -565,7 +570,13 @@ export function writeRequest(w: Writer, req: Request): void {
     case "Nack":
       w.u64(req.queueId);
       m.putRanges(w, req.ranges);
-      w.bool(req.requeue).u32(req.delayMs).noTags();
+      w.bool(req.requeue).u32(req.delayMs);
+      m.putTagList(
+        w,
+        req.subscriptionId === undefined
+          ? []
+          : [{ tag: m.TAG_NACK_SUBSCRIPTION, value: new Writer().u32(req.subscriptionId).toBytes() }],
+      );
       return;
     case "Unsubscribe":
       w.u32(req.subscriptionId).noTags();
@@ -837,15 +848,20 @@ export function readRequest(apiKey: number, r: Reader): Request {
       return { type: "Ack", queueId, txnId, ranges, tenant, producerId, producerEpoch };
     }
     case ApiKey.NACK: {
-      const x: NackRequest = {
-        type: "Nack",
-        queueId: r.u64(),
-        ranges: m.getRanges(r),
-        requeue: r.bool(),
-        delayMs: r.u32(),
-      };
-      r.tags();
-      return x;
+      const queueId = r.u64();
+      const ranges = m.getRanges(r);
+      const requeue = r.bool();
+      const delayMs = r.u32();
+      let subscriptionId: number | undefined;
+      for (const t of r.tags()) {
+        if (t.tag === m.TAG_NACK_SUBSCRIPTION) {
+          const vr = new Reader(t.value);
+          subscriptionId = vr.u32();
+          vr.finish();
+        }
+      }
+      const x: NackRequest = { type: "Nack", queueId, ranges, requeue, delayMs };
+      return subscriptionId === undefined ? x : { ...x, subscriptionId };
     }
     case ApiKey.UNSUBSCRIBE: {
       const x: UnsubscribeRequest = { type: "Unsubscribe", subscriptionId: r.u32() };

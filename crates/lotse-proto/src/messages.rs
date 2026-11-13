@@ -1460,9 +1460,17 @@ pub struct NackRequest {
     pub ranges: Vec<(u64, u64)>,
     /// Deliver again (`true`) or discard.
     pub requeue: bool,
-    /// Wait before delivering again (not yet supported: must be 0).
+    /// Wait before delivering again (ADR 0077).
     pub delay_ms: u32,
+    /// The subscription the messages came on (ADR 0106): a requeue then
+    /// takes back only what that subscription holds, not what a newer
+    /// subscription on the same connection received since. Tag 0; absent,
+    /// every subscription of the connection counts, as before.
+    pub subscription_id: Option<u32>,
 }
+
+/// Tag of [`NackRequest::subscription_id`].
+const TAG_NACK_SUBSCRIPTION: u64 = 0;
 
 impl NackRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
@@ -1470,11 +1478,31 @@ impl NackRequest {
         put_ranges(w, &self.ranges);
         w.u8(u8::from(self.requeue));
         w.u32(self.delay_ms);
-        w.no_tags();
+        match self.subscription_id {
+            Some(id) => {
+                let mut v = Writer::new();
+                v.u32(id);
+                w.tags(&[(TAG_NACK_SUBSCRIPTION, v.finish())]);
+            }
+            None => w.no_tags(),
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let req = NackRequest { queue_id: r.u64()?, ranges: get_ranges(r)?, requeue: r.u8()? != 0, delay_ms: r.u32()? };
-        r.tags()?;
+        let mut req = NackRequest {
+            queue_id: r.u64()?,
+            ranges: get_ranges(r)?,
+            requeue: r.u8()? != 0,
+            delay_ms: r.u32()?,
+            subscription_id: None,
+        };
+        for (tag, value) in r.tags()? {
+            if tag == TAG_NACK_SUBSCRIPTION {
+                let mut v = Reader::new(value);
+                req.subscription_id = Some(v.u32()?);
+                v.finish()?;
+            }
+            // Unknown tags come from newer versions: skipped.
+        }
         Ok(req)
     }
 }
@@ -3236,15 +3264,39 @@ impl RemoveNodeRequest {
 
 /// Lists the cluster's nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DescribeNodesRequest;
+pub struct DescribeNodesRequest {
+    /// Internal, for nodes (ADR 0105): the metadata index the asking node
+    /// has applied. The metadata leader answers only once it has applied as
+    /// much, so a node its own state lists, and that the answer leaves out,
+    /// knows it was forgotten. Tag 0; clients leave it out.
+    pub applied_at_least: Option<u64>,
+}
+
+/// Tag of [`DescribeNodesRequest::applied_at_least`].
+const TAG_APPLIED_AT_LEAST: u64 = 0;
 
 impl DescribeNodesRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
-        w.no_tags();
+        match self.applied_at_least {
+            Some(index) => {
+                let mut v = Writer::new();
+                v.u64(index);
+                w.tags(&[(TAG_APPLIED_AT_LEAST, v.finish())]);
+            }
+            None => w.no_tags(),
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        r.tags()?;
-        Ok(DescribeNodesRequest)
+        let mut applied_at_least = None;
+        for (tag, value) in r.tags()? {
+            if tag == TAG_APPLIED_AT_LEAST {
+                let mut v = Reader::new(value);
+                applied_at_least = Some(v.u64()?);
+                v.finish()?;
+            }
+            // Unknown tags come from newer versions: skipped.
+        }
+        Ok(DescribeNodesRequest { applied_at_least })
     }
 }
 

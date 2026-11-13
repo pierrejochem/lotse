@@ -527,12 +527,20 @@ public sealed interface Request {
      * @param queueId the queue, a {@code u64}
      * @param ranges offset ranges {@code [from, to)}
      * @param requeue deliver again ({@code true}) or discard
-     * @param delayMs wait before delivering again (not yet supported: must be 0), a {@code u32}
+     * @param delayMs wait before delivering again (ADR 0077), a {@code u32}
+     * @param subscriptionId the subscription the messages came on, or {@code -1} for none; a tag (ADR 0106): a requeue
+     *     then takes back only what that subscription holds, not what a newer one on the connection received since
      */
-    record Nack(long queueId, List<Range> ranges, boolean requeue, long delayMs) implements Request {
+    record Nack(long queueId, List<Range> ranges, boolean requeue, long delayMs, long subscriptionId)
+            implements Request {
         /** Creates the request. */
         public Nack {
             ranges = List.copyOf(ranges);
+        }
+
+        /** Without naming a subscription: every subscription of the connection counts. */
+        public Nack(long queueId, List<Range> ranges, boolean requeue, long delayMs) {
+            this(queueId, ranges, requeue, delayMs, -1);
         }
 
         @Override
@@ -544,13 +552,30 @@ public sealed interface Request {
         public void write(Writer w) {
             w.u64(queueId);
             Messages.putRanges(w, ranges);
-            w.bool(requeue).u32(delayMs).noTags();
+            w.bool(requeue).u32(delayMs);
+            if (subscriptionId >= 0) {
+                Writer v = new Writer();
+                v.u32(subscriptionId);
+                w.tags(List.of(new Tag(Messages.TAG_NACK_SUBSCRIPTION, ByteString.copyOf(v.toByteArray()))));
+            } else {
+                w.noTags();
+            }
         }
 
         static Nack read(Reader r) {
-            Nack x = new Nack(r.u64(), Messages.getRanges(r), r.bool(), r.u32());
-            r.tags();
-            return x;
+            long queueId = r.u64();
+            List<Range> ranges = Messages.getRanges(r);
+            boolean requeue = r.bool();
+            long delayMs = r.u32();
+            long subscription = -1;
+            for (Tag t : r.tags()) {
+                if (t.tag() == Messages.TAG_NACK_SUBSCRIPTION) {
+                    Reader vr = new Reader(t.value().toByteArray());
+                    subscription = vr.u32();
+                    vr.finish();
+                }
+            }
+            return new Nack(queueId, ranges, requeue, delayMs, subscription);
         }
     }
 

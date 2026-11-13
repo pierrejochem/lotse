@@ -371,8 +371,10 @@ impl Drop for Undecided<'_> {
 struct Session {
     producer_id: u64,
     epoch: u16,
-    /// Next sequence per partition.
-    next: BTreeMap<(String, u32), i32>,
+    /// Next sequence per partition, by resource id: a stream deleted and
+    /// created again under its name is another partition, with sequences of
+    /// its own (ADR 0107).
+    next: BTreeMap<(u64, u32), i32>,
 }
 
 impl<R: Net + Clock + Spawn + Rng> Client<R> {
@@ -594,9 +596,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             .map_err(|e| ClientError::Broker { code: ErrorCode::CORRUPT_BATCH, message: Some(e.to_string()) })?
             .0
             .record_count();
-        let key = (stream.to_string(), partition);
-        let lock = self.partition_locks.lock().expect("locks lock").entry(key.clone()).or_default().clone();
+        let lock_key = (stream.to_string(), partition);
+        let lock = self.partition_locks.lock().expect("locks lock").entry(lock_key).or_default().clone();
         let _turn = lock.lock().await;
+        // The sequence belongs to the incarnation the stream has now; the
+        // produce stays with it (ADR 0107).
+        let resource_id = self.retrying(|| async { Ok(self.route(stream, partition).await?.0.resource_id) }).await?;
+        let key = (resource_id, partition);
         let (producer_id, epoch, seq) = self.next_sequence(&key).await?;
         let mut stamped = bytes::BytesMut::from(&batch[..]);
         lotse_record::set_producer(&mut stamped, producer_id, epoch, seq)
@@ -607,7 +613,16 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         // `Unknown` does: the guard ends the session, or the next batch
         // would take the same sequence and be taken for this one.
         let mut undecided = Undecided { session: &self.session, producer_id, armed: true };
-        let res = self.retrying(|| self.produce_once(stream, partition, stamped.clone(), true, None)).await;
+        let in_doubt = std::sync::atomic::AtomicBool::new(false);
+        let res = self
+            .retrying(|| async {
+                let r = self.produce_once_to(stream, partition, stamped.clone(), true, None, Some(resource_id)).await;
+                if matches!(r, Err(Attempt::RetryMaybeDone(_))) {
+                    in_doubt.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                r
+            })
+            .await;
         undecided.armed = false;
         let mut session = self.session.lock().expect("session lock");
         match &res {
@@ -622,6 +637,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             // its fenced id rather than start over, which would fence that
             // one in turn (ADR 0071).
             Err(ClientError::Broker { code: ErrorCode::PRODUCER_FENCED, .. }) if self.cfg.producer_name.is_some() => {}
+            // The stream went to another incarnation after an attempt that
+            // may have been written to this one: in doubt as well.
+            Err(ClientError::UnknownStream(..)) if in_doubt.load(std::sync::atomic::Ordering::Relaxed) => {
+                if session.as_ref().is_some_and(|s| s.producer_id == producer_id) {
+                    *session = None;
+                }
+            }
             Err(ClientError::Unknown(_))
             | Err(ClientError::Broker {
                 code: ErrorCode::OUT_OF_ORDER_SEQUENCE | ErrorCode::PRODUCER_FENCED, ..
@@ -638,7 +660,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 
     /// The producer id, epoch and next sequence for a partition, getting a
     /// producer id first if there is none.
-    async fn next_sequence(&self, key: &(String, u32)) -> Result<(u64, u16, i32), ClientError> {
+    async fn next_sequence(&self, key: &(u64, u32)) -> Result<(u64, u16, i32), ClientError> {
         if let Some(s) = self.session.lock().expect("session lock").as_ref() {
             return Ok((s.producer_id, s.epoch, s.next.get(key).copied().unwrap_or(0)));
         }
@@ -753,11 +775,30 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         idempotent: bool,
         txn_id: Option<String>,
     ) -> Result<u64, Attempt> {
+        self.produce_once_to(stream, partition, batch, idempotent, txn_id, None).await
+    }
+
+    /// [`Client::produce_once`] to the incarnation `pin`, if given: a route
+    /// to another one (the stream was deleted and created again) ends the
+    /// produce with [`ClientError::UnknownStream`], since its sequence
+    /// belongs to the one it was taken for (ADR 0107).
+    async fn produce_once_to(
+        &self,
+        stream: &str,
+        partition: u32,
+        batch: Bytes,
+        idempotent: bool,
+        txn_id: Option<String>,
+        pin: Option<u64>,
+    ) -> Result<u64, Attempt> {
         // An idempotent batch may be sent again whatever happened to it.
         let unknown = |why: String| {
             if idempotent { Attempt::RetryMaybeDone(why) } else { Attempt::Fail(ClientError::Unknown(why)) }
         };
         let (route, addr) = self.route(stream, partition).await?;
+        if pin.is_some_and(|p| p != route.resource_id) {
+            return Err(Attempt::Fail(ClientError::UnknownStream(stream.into(), partition)));
+        }
         let req = Request::Produce(ProduceRequest {
             txn_id,
             tenant: self.cfg.tenant.clone(),

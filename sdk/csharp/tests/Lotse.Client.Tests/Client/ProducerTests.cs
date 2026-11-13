@@ -56,6 +56,83 @@ public sealed class ProducerTests : IDisposable
         return _client;
     }
 
+    /// <summary>
+    /// Stream <c>s</c> has the resource id in <c>current[0]</c>. A produce to another id is refused with NOT_LEADER
+    /// (nothing written), as a node that applied the delete would; with <c>swallowThen[0]</c> set, the next produce's
+    /// answer is lost and the stream moves to that id meanwhile (ADR 0107).
+    /// </summary>
+    private void ServeIncarnations(long[] current, long[] swallowThen)
+    {
+        _node.On((n, request) =>
+        {
+            switch (request)
+            {
+                case Request.Metadata:
+                    return Fx.Metadata(new[] { n }, Fx.Stream("s", (ulong)Interlocked.Read(ref current[0]), Fx.Partition(0, 1, 1, 1)));
+                case Request.FindCoordinator:
+                    return Fx.Coordinator(n);
+                case Request.InitProducer:
+                    return Fx.Producer((ulong)Interlocked.Increment(ref _nextProducerId) - 1, 3);
+                case Request.Produce p:
+                    ulong id = p.Resources[0].ResourceId;
+                    long then = Interlocked.Exchange(ref swallowThen[0], 0);
+                    if (then != 0)
+                    {
+                        Interlocked.Exchange(ref current[0], then);
+                        throw new FakeNode.Drop();
+                    }
+                    return id == (ulong)Interlocked.Read(ref current[0])
+                        ? Fx.Produced(id, 0, (ulong)Interlocked.Increment(ref _offsets) - 1)
+                        : Fx.Produced(id, 0, ErrorCode.NotLeader, 0);
+                default:
+                    throw new InvalidOperationException("unexpected " + request);
+            }
+        });
+    }
+
+    private List<string> IncarnationsSent() =>
+        _node.Requests<Request.Produce>()
+            .Select(p => $"{p.Resources[0].ResourceId}/{Fx.BatchOf(p).ProducerId}/{Fx.BatchOf(p).BaseSequence}")
+            .ToList();
+
+    [Fact]
+    public async Task EachIncarnationOfAStreamCountsItsOwnSequences()
+    {
+        long[] current = { 7 };
+        ServeIncarnations(current, new long[] { 0 });
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        // Deleted and created again: the cached route still names 7, which is refused; the produce does not follow the
+        // name to 9.
+        Interlocked.Exchange(ref current[0], 9);
+        await Assert.ThrowsAsync<UnknownStreamException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        // A node behind still serves 7: back there, its sequences go on.
+        Interlocked.Exchange(ref current[0], 7);
+        await Assert.ThrowsAsync<UnknownStreamException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        // A refused batch keeps its sequence; 9 starts at 0; 7 goes on at 2.
+        Assert.Equal(new[] { "7/100/0", "7/100/1", "7/100/2", "9/100/0", "9/100/1", "7/100/2" }, IncarnationsSent());
+    }
+
+    [Fact]
+    public async Task AProduceInDoubtWhenItsStreamMovesStartsANewProducer()
+    {
+        long[] current = { 7 };
+        long[] swallowThen = { 0 };
+        ServeIncarnations(current, swallowThen);
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        // The next produce's answer is lost while the stream is created again: it may be in 7.
+        Interlocked.Exchange(ref swallowThen[0], 9);
+        await Assert.ThrowsAsync<UnknownStreamException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        List<string> sent = IncarnationsSent();
+        Assert.Equal("7/100/1", sent[1]);
+        Assert.Equal("9/101/0", sent[^1]); // a new producer id
+    }
+
     [Fact]
     public async Task AnIdempotentProducerAsksForItsIdOnceAndCountsRecordsPerPartition()
     {
