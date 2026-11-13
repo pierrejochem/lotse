@@ -317,9 +317,6 @@ pub struct Replica<D: Disk, S> {
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
-    /// Largest chunk of a snapshot sent in one message. A snapshot is cut into
-    /// chunks of at most this size so that it never has to fit one frame.
-    pub max_snapshot_chunk: usize,
     /// The tag of the move that removed this replica's log, if one did.
     moved_at: Option<u64>,
 }
@@ -447,7 +444,6 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             compactor: compaction::Compactor::default(),
             state,
             max_fill_bytes: 1 << 20,
-            max_snapshot_chunk: 1 << 20,
             moved_at,
         })
     }
@@ -949,7 +945,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             let Some((m, f)) = &self.snapshot else { return Ok(()) };
             let Some((source, offset)) = s.msg.snapshot_chunk_source(m, f, &self.older) else { return Ok(()) };
             let source = source.clone();
-            let (start, data) = source.read(&self.disk, &self.dir, offset, self.max_snapshot_chunk).await?;
+            let (start, data) = source.read(&self.disk, &self.dir, offset, self.raft.snapshot_chunk_bytes()).await?;
             let done = start + data.len() as u64 == source.len;
             s.msg.set_snapshot_chunk(start, data, done);
             return Ok(());

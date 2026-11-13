@@ -57,7 +57,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted |
 | 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted, in part superseded by [0105](0105-a-forgotten-node-stops-without-seeing-its-drain.md) |
 | 0052 | [Rebalancing weighs moves by size](0052-rebalancing-weighs-moves-by-size.md) | Accepted |
-| 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted; in part superseded by 0099 |
+| 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted; in part superseded by 0099 and 0103 |
 | 0054 | [A moved replica does not elect itself](0054-a-moved-replica-does-not-elect-itself.md) | Accepted |
 | 0055 | [Dead-letter queues and message TTL](0055-dead-letter-queues-and-message-ttl.md) | Accepted |
 | 0056 | [Client SDKs for the JVM](0056-client-sdks-for-the-jvm.md) | Accepted |
@@ -106,6 +106,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0100 | [Tombstones go once every node removed the files](0100-tombstones-go-once-every-node-removed-the-files.md) | Accepted |
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 | 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
+| 0103 | [Snapshot chunks travel in a window](0103-snapshot-chunks-travel-in-a-window.md) | Accepted |
 | 0105 | [A forgotten node stops without seeing its drain](0105-a-forgotten-node-stops-without-seeing-its-drain.md) | Accepted |
 | 0106 | [A requeue names its subscription](0106-a-requeue-names-its-subscription.md) | Accepted |
 | 0107 | [Sequences belong to a stream's incarnation](0107-sequences-belong-to-a-stream-s-incarnation.md) | Accepted |
