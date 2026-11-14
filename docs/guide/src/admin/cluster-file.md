@@ -102,6 +102,17 @@ How compacted streams are compacted; see [Retention and compaction](retention-an
 | --- | --- | --- | --- |
 | `map_bytes` | integer, bytes | 67108864 (64 MiB) | Memory the key map of the node's one compaction sweep may take, 48 bytes per key. |
 
+## `[producers]`
+
+How each partition keeps idempotent producers ([ADR 0110](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md)). Use the same values on every node.
+
+| Key | Type, unit | Default | Meaning |
+| --- | --- | --- | --- |
+| `max` | integer | 10000 | Producers a partition admits. While it knows this many, a new producer is refused with `PRODUCER_LIMIT` and its client retries. A known producer is never refused or forgotten to make room. |
+| `expiration_ms` | integer, ms | 86400000 (a day) | How long a producer may write nothing to a partition before its leader forgets it. A retry after that is taken as a new batch. |
+
+Both must be at least 1.
+
 ## `[auth]`
 
 | Key | Type, unit | Default | Meaning |

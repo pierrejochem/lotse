@@ -74,6 +74,7 @@ fn config(id: NodeId) -> NodeConfig {
         metadata: Some(1),
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+        producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth: AuthConfig {

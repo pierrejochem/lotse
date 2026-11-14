@@ -152,6 +152,7 @@ impl World {
                         metadata: Some(4),
                         coordinator: Some(3),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+                        producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
                         retention,
                         join: false,
                         auth: lotse_server::AuthConfig::none(),

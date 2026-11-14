@@ -338,10 +338,14 @@ impl ErrorCode {
     pub const MESSAGE_NOT_HELD: ErrorCode = ErrorCode(31);
     /// A mandatory published message routes to no queue (ADR 0079).
     pub const UNROUTABLE: ErrorCode = ErrorCode(32);
+    /// A new producer, and the partition holds as many producers as it
+    /// admits: retry once an idle one is forgotten (ADR 0110). Nothing was
+    /// written.
+    pub const PRODUCER_LIMIT: ErrorCode = ErrorCode(33);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 33] = [
+        const NAMES: [&str; 34] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -375,6 +379,7 @@ impl ErrorCode {
             "FENCED_INSTANCE_ID",
             "MESSAGE_NOT_HELD",
             "UNROUTABLE",
+            "PRODUCER_LIMIT",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -391,6 +396,7 @@ impl ErrorCode {
                 | ErrorCode::CONCURRENT_TRANSACTIONS
                 | ErrorCode::UNSTABLE_OFFSET_COMMIT
                 | ErrorCode::CONCURRENT_GROUP_CHANGE
+                | ErrorCode::PRODUCER_LIMIT
         )
     }
 }

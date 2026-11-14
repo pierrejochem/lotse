@@ -139,7 +139,7 @@ test("a frame with a byte too many is refused as malformed", () => {
 
 test("error codes have the broker's names and retry classes", () => {
   const vectors = lines("error-codes.txt");
-  assert.equal(vectors.length, 34, "codes 0 to 32 and an unknown one");
+  assert.equal(vectors.length, 35, "codes 0 to 33 and an unknown one");
   for (const v of vectors) {
     const code = Number(field(v, 0));
     assert.equal(errorName(code), field(v, 1), field(v, 0));
