@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lotse social preview</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;800&display=swap">
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:var(--surface); color:var(--ink); font-family:var(--font-sans); overflow:hidden; }
+  .cover { position:relative; width:1280px; height:640px; overflow:hidden; }
+  .art { position:absolute; top:0; left:600px; width:768px; height:461px; overflow:hidden; }
+  .art svg { display:block; width:768px; height:461px; }
+  .elbe { fill:var(--elbe); }
+  .signal { fill:var(--signal); }
+  .fog { fill:var(--fog); }
+  .brass { fill:var(--brass); }
+  .lg { rx:var(--radius-lg); }
+  .seg { rx:var(--radius-sm); }
+  .seg.cut { fill:var(--surface); }
+  .seg.on-fog { fill:var(--elbe); }
+  .wire { fill:none; stroke:var(--surface); stroke-width:8; stroke-linecap:round; }
+  .stream { fill:var(--surface); rx:var(--radius-md); }
+  .words { position:absolute; left:64px; bottom:64px; max-width:520px; }
+  .name { margin:0; font-size:208px; line-height:.92; font-weight:800; letter-spacing:-.03em; color:var(--ink); }
+  .tag { margin:var(--space-4) 0 0 10px; font-size:24px; line-height:32px; color:var(--ink-muted); }
+</style>
+</head>
+<body>
+<div class="cover">
+<div class="art" aria-hidden="true">
+<svg viewBox="0 0 480 288" width="480" height="288">
+<!--
+  blocks      elbe 176×256 and signal 176×256 flush side by side, the pilot-flag split, bled off the top (≈40% of the box) · fog 112×144 bleeding off the right edge · brass 24×8 once, the committed offset
+  arrangement one flag slab split down the middle with a fog satellite, bottoms on one line space-12 above the edge
+  pattern     the Fairway mark's own motion, from the README "three queue lanes converge into one stream": three lanes of space-2-tall segments (radius-sm) at a space-8 pitch on the elbe half, curving into one space-4-tall stream (radius-md) across the signal half, all cut from the ground; the stream continues as elbe segments on the fog and ends in brass
+  scales      sides in space-2 multiples; lane pitch space-8; segment pitch space-8; corners radius-lg on blocks, radius-sm on segments, radius-md on the stream
+-->
+<rect class="elbe lg" x="24" y="-16" width="352" height="256" rx="14"/>
+<rect class="signal lg" x="200" y="-16" width="176" height="256" rx="14"/>
+<rect class="signal" x="200" y="-16" width="24" height="256"/>
+<rect class="fog lg" x="392" y="96" width="112" height="144" rx="14"/>
+<rect class="seg cut" x="48" y="96" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="80" y="96" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="112" y="96" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="48" y="128" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="80" y="128" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="112" y="128" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="48" y="160" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="80" y="160" width="24" height="8" rx="4"/>
+<rect class="seg cut" x="112" y="160" width="24" height="8" rx="4"/>
+<path class="wire" d="M140 100C176 100 172 132 208 132M140 164C176 164 172 132 208 132M140 132H208"/>
+<rect class="stream" x="200" y="124" width="152" height="16" rx="8"/>
+<rect class="seg on-fog" x="400" y="128" width="24" height="8" rx="4"/>
+<rect class="brass seg" x="432" y="128" width="24" height="8" rx="4"/>
+</svg>
+</div>
+<div class="words">
+<h1 class="name">Lotse</h1>
+<p class="tag">Queues and streams on one replicated log.</p>
+</div>
+</div>
+</body>
+</html>
