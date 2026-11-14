@@ -2545,6 +2545,67 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
     });
 }
 
+/// ADR 0109 with ADR 0076: the first subscriber of a single active consumer
+/// queue, at a leader that has applied an entry of its term, is active in
+/// its answer, though no round has adopted the checkouts yet.
+#[test]
+fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let mut queue = QueueConfig::new("jobs", 7, G);
+        queue.single_active = true;
+        let queues = [queue];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            zones: &NO_ZONES,
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 1_000,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let mut standby = Vec::new();
+        for _ in 0..2 {
+            let request = Request::Subscribe(lotse_proto::SubscribeRequest {
+                queue_id: 7,
+                consumer_tag: "w".into(),
+                credit_msgs: 10,
+                credit_bytes: 1 << 20,
+                exclusive: false,
+                notify_active: false,
+                resume: None,
+            });
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+            let answer = outbox.queue.lock().unwrap().drain(..).last().unwrap();
+            match lotse_proto::decode_response(answer, ApiKey::SUBSCRIBE).unwrap().1 {
+                Response::Subscribe(r) => standby.push(r.standby),
+                other => panic!("expected a subscription, got {other:?}"),
+            }
+        }
+        assert_eq!(standby, vec![false, true], "the first is active, the second waits");
+    });
+}
+
 #[test]
 fn a_message_is_pushed_only_once_its_checkout_is_applied() {
     Sim::new(4).run(|rt| async move {

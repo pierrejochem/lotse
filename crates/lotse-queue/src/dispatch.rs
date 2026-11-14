@@ -196,8 +196,12 @@ impl Dispatcher {
     /// Subscription `id` takes back what waits for its consumer: those
     /// messages are in flight with it from now on, keeping their age, and
     /// its connection may ack them in a transaction. With a single active
-    /// consumer, one that holds messages becomes active if no one is: it was
-    /// the active one, and the queue's order holds. Returns how many it took.
+    /// consumer, one that holds messages becomes active if no one is and
+    /// nothing else is out: it was the active one. Messages that wait for
+    /// another consumer keep it a standby, since a connection that went
+    /// without writing to the log leaves its checkouts behind, and those
+    /// come back older than what an active one would get next. Returns how
+    /// many it took.
     pub fn resume(&mut self, id: SubscriptionId) -> usize {
         let Some(consumer) = self.subs.get(&id).map(|s| s.consumer) else { return 0 };
         let mine: Vec<(u64, Instant)> =
@@ -206,7 +210,11 @@ impl Dispatcher {
             self.waiting.remove(&o);
             self.in_flight.insert(o, InFlight { sub: id, at });
         }
-        if !mine.is_empty() && self.single_active && self.active.is_none() {
+        let alone = self.waiting.is_empty()
+            && self.in_flight.values().all(|f| f.sub == id)
+            && self.out.is_empty()
+            && self.held.is_empty();
+        if !mine.is_empty() && self.single_active && self.active.is_none() && alone {
             self.active = Some(id);
             self.activated.push(id);
         }

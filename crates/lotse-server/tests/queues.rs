@@ -902,7 +902,10 @@ async fn run_limits(rt: SimRuntime) {
         Client::new(rt.node("drainer"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
     let mut drained: BTreeMap<At, String> = BTreeMap::new();
     for queue in LIMITED {
-        let mut consumer = drainer.subscribe(queue, 50).await.expect("the healed cluster takes a subscription");
+        // Credit the drainer reads well within the ack timeout: a message
+        // left in its buffer past it times out, and one at its last
+        // delivery is then dead-lettered while the drainer still takes it.
+        let mut consumer = drainer.subscribe(queue, 10).await.expect("the healed cluster takes a subscription");
         let mut quiet_since = rt.now();
         while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
             let Some(m) = consumer.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };

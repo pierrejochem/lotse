@@ -871,6 +871,32 @@ fn a_resumed_single_active_consumer_stays_active() {
     assert!(d.is_standby(1));
 }
 
+/// A connection that went leaves its checkouts in the log: a resumed
+/// consumer whose messages are not the only ones out stays a standby, or
+/// it would get newer messages before the older one comes back.
+#[test]
+fn a_resumed_consumer_is_not_active_while_another_consumers_message_waits() {
+    let mut q = queue(5);
+    q.apply(&checkout(5, 8, 0, &[(2, 1)])).unwrap();
+    q.apply(&checkout(6, 7, 0, &[(0, 1), (1, 1)])).unwrap();
+    let t0 = Instant::from_nanos(1);
+    let mut d = Dispatcher::new(&q);
+    d.set_single_active(true);
+    d.adopt(&q, t0, 0);
+    d.subscribe(1, 10, 7, 10, u32::MAX);
+    assert_eq!(d.resume(1), 2);
+    assert_eq!(d.active(), None, "consumer 8's message 2 is still out");
+    assert!(d.is_standby(1));
+    assert_eq!(d.hand_over(&q), None);
+    // The window ends: message 2 goes back, but consumer 7 still holds 0 and 1.
+    let gone = d.unclaimed(t0 + Duration::from_secs(30), Duration::from_secs(30), Duration::from_secs(600));
+    assert_eq!(gone, vec![2]);
+    d.release([2]);
+    assert_eq!(d.hand_over(&q), None, "messages 0 and 1 are out");
+    d.release([0, 1]);
+    assert_eq!(d.hand_over(&q), Some(1), "nothing out: the oldest subscription takes over");
+}
+
 #[test]
 fn a_late_release_leaves_what_another_subscription_got_since() {
     let q = queue(1);

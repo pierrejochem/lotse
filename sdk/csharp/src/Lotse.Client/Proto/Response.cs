@@ -198,6 +198,7 @@ public abstract record Response
     /// <param name="SubscriptionId">The subscription, per node and connection.</param>
     /// <param name="LeaderHint">The queue's leader, after <c>NOT_LEADER</c>.</param>
     /// <param name="Standby">The subscription waits as a standby of a single active consumer (ADR 0076).</param>
+    /// <param name="ConsumerId">The consumer's id, to name when it subscribes again (ADR 0109).</param>
     public sealed record Subscribe(
         ErrorCode Error, uint SubscriptionId, LeaderHint? LeaderHint, bool Standby = false, ulong ConsumerId = 0) : Response
     {
