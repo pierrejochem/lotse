@@ -137,6 +137,21 @@ pub(super) struct Serving {
 }
 
 impl Serving {
+    /// Adopts the log's checkouts once (ADR 0109); the caller has applied
+    /// an entry of this term, so every checkout committed before is in the
+    /// ack index. Subscriptions there already take theirs back.
+    fn adopt(&mut self, queue: &QueueLog, view: &ClusterView<'_>) {
+        if self.adopted {
+            return;
+        }
+        self.dispatcher.adopt(queue, view.now, view.unix_ms as i64);
+        let subs: Vec<SubscriptionId> = self.dispatcher.subscriptions().map(|(id, _)| id).collect();
+        for id in subs {
+            self.dispatcher.resume(id);
+        }
+        self.adopted = true;
+    }
+
     /// Follows the queue's single active consumer setting, hands over if
     /// that is due, and tells whoever became active and asked.
     fn hand_over(&mut self, single_active: bool, queue: &QueueLog) {
@@ -366,6 +381,12 @@ impl Clients {
         };
         let s = self.serving(g, replica);
         s.dispatcher.subscribe(id, conn, consumer, req.credit_msgs, req.credit_bytes);
+        // A leader that has applied an entry of its term adopts now rather
+        // than at the end of the round, so the first subscriber of a single
+        // active consumer queue is not told it waits when no one is ahead.
+        if replica.raft_ref().log().term_at(replica.applied()) == Some(replica.raft_ref().term()) {
+            s.adopt(replica.queue().expect("a queue group"), view);
+        }
         if s.adopted {
             s.dispatcher.resume(id);
         }
@@ -736,14 +757,7 @@ impl Clients {
             // Everything committed before this term is applied now, every
             // checkout included: what earlier leaders handed out waits for
             // its consumers, and those subscribed already take theirs back.
-            if !s.adopted {
-                s.dispatcher.adopt(q, view.now, view.unix_ms as i64);
-                let subs: Vec<SubscriptionId> = s.dispatcher.subscriptions().map(|(id, _)| id).collect();
-                for id in subs {
-                    s.dispatcher.resume(id);
-                }
-                s.adopted = true;
-            }
+            s.adopt(q, view);
 
             // Connections that closed: their messages go to others.
             let closed: Vec<ConnId> =
