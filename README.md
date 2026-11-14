@@ -2,6 +2,13 @@
 
 <p><img src="docs/brand/logos/lotse-wordmark.svg" alt="Lotse" height="56"></p>
 
+[![CI](https://github.com/pierrejochem/lotse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pierrejochem/lotse/actions/workflows/ci.yml)
+[![Docs](https://github.com/pierrejochem/lotse/actions/workflows/docs.yml/badge.svg?branch=main)](https://pierrejochem.github.io/lotse/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust: 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
+[![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](AGENTS.md)
+[![Latest release](https://img.shields.io/github/v/release/pierrejochem/lotse?include_prereleases)](https://github.com/pierrejochem/lotse/releases)
+
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 
 - **Queues and streams on one log:** RabbitMQ-style queues (acks, redelivery, dead-letter queues, delayed delivery, priorities, exchanges and bindings) and Kafka-style streams (partitions, consumer groups, retention, log compaction) share one storage engine.
