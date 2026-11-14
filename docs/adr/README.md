@@ -112,7 +112,8 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0106 | [A requeue names its subscription](0106-a-requeue-names-its-subscription.md) | Accepted |
 | 0107 | [Sequences belong to a stream's incarnation](0107-sequences-belong-to-a-stream-s-incarnation.md) | Accepted |
 | 0108 | [A replica placed again starts from an empty log](0108-a-replica-placed-again-starts-from-an-empty-log.md) | Accepted |
-| 0109 | [Deliveries are written to the log](0109-deliveries-are-written-to-the-log.md) | Accepted |
+| 0109 | [Deliveries are written to the log](0109-deliveries-are-written-to-the-log.md) | Accepted, refined by [0111](0111-checkouts-commit-with-new-data.md) |
 | 0110 | [Idle producers expire, and a full partition refuses new ones](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) | Accepted |
+| 0111 | [Checkouts commit with new data](0111-checkouts-commit-with-new-data.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
