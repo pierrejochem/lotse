@@ -522,3 +522,264 @@ async fn run(rt: SimRuntime) {
 fn compaction_keeps_each_keys_newest_record_on_every_replica() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
 }
+
+/// A node's configuration for [`returned`]: nodes 1 to 3 are the cluster,
+/// node 4 joins it.
+fn returned_config(id: NodeId, log: LogConfig) -> NodeConfig {
+    let known: Vec<NodeId> = if id <= 3 { vec![1, 2, 3] } else { vec![1, 2, 3, id] };
+    NodeConfig {
+        id,
+        listen: format!("n{id}:7000"),
+        peers: known.iter().map(|n| (*n, format!("n{n}:7000"))).collect(),
+        groups: vec![1, 2],
+        tick: TICK,
+        pre_vote: true,
+        log,
+        client_listen: Some(format!("n{id}:9000")),
+        client_addrs: known.iter().map(|n| (*n, format!("n{n}:9000"))).collect(),
+        zones: Default::default(),
+        streams: Vec::new(),
+        queues: Vec::new(),
+        exchanges: Vec::new(),
+        group_session_timeout: Duration::from_millis(600),
+        group_heartbeat_interval: TICK * 5,
+        metadata: Some(1),
+        coordinator: Some(2),
+        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+        retention: RetentionConfig::keep(),
+        join: id > 3,
+        auth: lotse_server::AuthConfig::none(),
+    }
+}
+
+/// The nodes that report a replica of the stream's partition 0, and which
+/// of them leads; `None` while the cluster does not answer.
+async fn replicas(admin: &Client<SimRuntime>, stream_id: u64) -> Option<(BTreeMap<NodeId, u64>, Option<NodeId>)> {
+    let mut ends = BTreeMap::new();
+    let mut leader = None;
+    for (node, m) in admin.node_metrics().await.ok()? {
+        let Ok(m) = m else { continue };
+        for pm in m.partitions.iter().filter(|pm| pm.resource_id == stream_id && pm.partition == 0) {
+            ends.insert(NodeId::from(node), pm.log_end);
+            if pm.leader {
+                leader = Some(NodeId::from(node));
+            }
+        }
+    }
+    Some((ends, leader))
+}
+
+/// A replica that left a compacted stream's group and is placed on its node
+/// again must not bring back a value whose tombstone the leader dropped
+/// while it was gone (ADR 0067 counts only current members).
+///
+/// Node 3 holds `k = old` and goes down. Node 4 joins, and spreading moves
+/// the stream from node 3 (the fullest, highest id) to node 4; that move
+/// settles without node 3. `k` gets a tombstone, which the leader drops
+/// once it is old enough and every member holds it. Node 4 is drained,
+/// and the stream goes back to node 3, the emptiest node, which then
+/// starts. Read from node 3 as leader, `k` must stay gone.
+///
+/// How node 3 misses the move off in [`returned`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Away {
+    /// It is down, and starts once the stream is back.
+    Down,
+    /// It keeps running but hears no one until the stream is back: its
+    /// replica is open all along, and its view of the metadata group jumps
+    /// from before the move off to after the return.
+    CutOff,
+    /// It is down, and starts hearing the stream's leader but not the
+    /// metadata group's for a while: the stream would bring its old log up
+    /// to the membership that placed it there again before the node learns
+    /// that the group had left it.
+    MetadataBehind,
+}
+
+/// The node that leads group `g` (resource 0: the metadata group is 1).
+async fn leader_of(admin: &Client<SimRuntime>, g: u64) -> Option<NodeId> {
+    let ms = admin.node_metrics().await.ok()?;
+    ms.into_iter().find_map(|(node, m)| {
+        m.ok()?.partitions.iter().any(|pm| pm.group == g && pm.leader).then_some(NodeId::from(node))
+    })
+}
+
+async fn returned(rt: SimRuntime, away: Away) {
+    let log = LogConfig { segment_bytes: 400, index_interval_bytes: 64 };
+    let hosts: BTreeMap<NodeId, SimRuntime> = (1..=4).map(|id| (id, rt.node(&format!("n{id}")))).collect();
+    let mut w = World {
+        cfgs: (1..=4).map(|id| (id, returned_config(id, log))).collect(),
+        hosts,
+        running: BTreeMap::new(),
+        down_until: BTreeMap::new(),
+        rt: rt.clone(),
+        map_bytes: lotse_server::DEFAULT_COMPACTION_MAP_BYTES,
+    };
+    for id in 1..=3 {
+        w.start(id).await;
+    }
+    let admin = Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(3) });
+    let configs = [("cleanup.policy", "compact"), ("delete.retention.ms", "100")];
+    let stream_id = loop {
+        match admin.create_stream_with(STREAM, 1, 3, &configs).await {
+            Ok(id) | Err(ClientError::ResourceExists { resource_id: id, .. }) => break id,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("the stream is not created: {e}"),
+        }
+    };
+    let produce = async |key: &str, value: Option<&str>| loop {
+        match admin.produce(STREAM, 0, keyed(key, value, now_ms(&rt))).await {
+            Ok(o) => break o,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("produce: {e}"),
+        }
+    };
+    let fill = async |from: u32| {
+        let mut last = 0;
+        for i in from..from + 30 {
+            last = produce("filler", Some(&format!("filler-{i}-{}", "x".repeat(60)))).await;
+        }
+        last
+    };
+    let old = produce("k", Some("old")).await;
+    fill(0).await;
+    // Node 3 holds the old value, sealed, before it goes down.
+    let deadline = rt.now() + Duration::from_secs(30);
+    while !replicas(&admin, stream_id).await.is_some_and(|(ends, _)| ends.get(&3).is_some_and(|e| *e > old + 30)) {
+        assert!(rt.now() < deadline, "node 3 never holds the old value");
+        rt.sleep(TICK * 10).await;
+    }
+    let others = ["n1", "n2", "n4", "admin"];
+    if away == Away::CutOff {
+        for o in others {
+            rt.net().block("n3", o);
+        }
+    } else {
+        w.crash(3, false).await;
+    }
+
+    // Node 4 joins; the stream moves from node 3 to node 4.
+    loop {
+        match admin.add_node(4, "n4:7000", "n4:9000").await {
+            Ok(()) => break,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("node 4 is not added: {e}"),
+        }
+    }
+    w.start(4).await;
+    let deadline = rt.now() + Duration::from_secs(60);
+    while !replicas(&admin, stream_id).await.is_some_and(|(ends, _)| ends.keys().copied().eq([1, 2, 4])) {
+        assert!(rt.now() < deadline, "the stream does not move to node 4");
+        rt.sleep(TICK * 20).await;
+    }
+
+    // The tombstone, sealed, then dropped by the leader.
+    produce("k", None).await;
+    let mut round = 30;
+    let end = loop {
+        let end = fill(round).await + 1;
+        round += 30;
+        let (records, _) = read_all(&admin, 0, end).await;
+        if !records.iter().any(|(_, k, _)| k == "k") {
+            break end;
+        }
+        assert!(round < 30 * 40, "the leader never drops the tombstone");
+        rt.sleep(Duration::from_secs(2)).await;
+    };
+
+    // Node 3 knows nodes 1 and 2 only until it learns of node 4: for
+    // the stream to reach it first, one of them leads it, not the one that
+    // leads the metadata group.
+    if away == Away::MetadataBehind {
+        let deadline = rt.now() + Duration::from_secs(60);
+        loop {
+            if let Some(meta) = leader_of(&admin, 1).await.filter(|m| [1, 2].contains(m)) {
+                let other = 3 - meta;
+                if admin.move_leader(STREAM, 0, Some(other)).await.is_ok()
+                    && replicas(&admin, stream_id).await.is_some_and(|(_, l)| l == Some(other))
+                {
+                    break;
+                }
+            }
+            assert!(rt.now() < deadline, "the stream cannot be led apart from the metadata group");
+            rt.sleep(TICK * 20).await;
+        }
+    }
+
+    // Node 4 drains; the stream goes back to node 3, which starts.
+    loop {
+        match admin.remove_node(4).await {
+            Ok(()) => break,
+            Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => continue,
+            Err(e) => panic!("node 4 is not removed: {e}"),
+        }
+    }
+    rt.sleep(Duration::from_secs(2)).await;
+    match away {
+        Away::CutOff => rt.net().heal(),
+        Away::Down => w.start(3).await,
+        Away::MetadataBehind => {
+            // Cut off from the metadata leader only, while the stream's
+            // leader (pinned above) is another node it knows.
+            let deadline = rt.now() + Duration::from_secs(60);
+            let meta = loop {
+                let meta = leader_of(&admin, 1).await;
+                let stream = replicas(&admin, stream_id).await.and_then(|(_, l)| l);
+                if let (Some(meta), Some(stream)) = (meta, stream)
+                    && meta != stream
+                    && [1, 2].contains(&stream)
+                {
+                    break meta;
+                }
+                assert!(rt.now() < deadline, "the stream is not led apart from the metadata group: {meta:?}");
+                rt.sleep(TICK * 20).await;
+            };
+            rt.net().block("n3", &format!("n{meta}"));
+            w.start(3).await;
+            rt.sleep(Duration::from_secs(5)).await;
+            rt.net().heal();
+        }
+    }
+    let deadline = rt.now() + Duration::from_secs(120);
+    loop {
+        let placed = replicas(&admin, stream_id).await.is_some_and(|(ends, _)| ends.keys().copied().eq([1, 2, 3]));
+        if placed {
+            match admin.move_leader(STREAM, 0, Some(3)).await {
+                Ok(()) => {
+                    if replicas(&admin, stream_id).await.is_some_and(|(_, leader)| leader == Some(3)) {
+                        break;
+                    }
+                }
+                Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
+                Err(e) => panic!("leadership does not move to node 3: {e}"),
+            }
+        }
+        assert!(rt.now() < deadline, "the stream does not come back to node 3");
+        rt.sleep(TICK * 20).await;
+    }
+    let (records, _) = read_all(&admin, 0, end).await;
+    // A tombstone may still be there (only a leader drops one, and the
+    // stream may have had another since), but no value of `k`.
+    let back: Vec<_> = records.iter().filter(|(_, k, v)| k == "k" && v.is_some()).collect();
+    assert!(back.is_empty(), "node 3 brought back what the tombstone deleted: {back:?}");
+    drop(admin);
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn a_replica_placed_again_does_not_bring_back_a_deleted_key() {
+    lotse_sim::check_few_seeds(3, |seed| Sim::new(seed).run(|rt| returned(rt, Away::Down)));
+}
+
+#[test]
+fn a_replica_cut_off_and_placed_again_does_not_bring_back_a_deleted_key() {
+    lotse_sim::check_few_seeds(3, |seed| Sim::new(seed).run(|rt| returned(rt, Away::CutOff)));
+}
+
+#[test]
+fn a_replica_placed_again_before_its_node_hears_the_metadata_group_does_not_bring_back_a_deleted_key() {
+    lotse_sim::check_few_seeds(3, |seed| Sim::new(seed).run(|rt| returned(rt, Away::MetadataBehind)));
+}
