@@ -21,6 +21,7 @@ fn config(peers: &[NodeId], id: NodeId, join: bool) -> NodeConfig {
         metadata: Some(1),
         coordinator: Some(2),
         max_producers: crate::DEFAULT_MAX_PRODUCERS,
+        producer_expiration: crate::DEFAULT_PRODUCER_EXPIRATION,
         auth: AuthConfig::none(),
         retention: RetentionConfig::keep(),
         join,

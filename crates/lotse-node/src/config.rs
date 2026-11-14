@@ -55,6 +55,9 @@ pub struct ClusterFile {
     /// How compacted streams are compacted.
     #[serde(default)]
     pub compaction: Compaction,
+    /// How partitions keep idempotent producers.
+    #[serde(default)]
+    pub producers: Producers,
     /// How clients authenticate.
     #[serde(default)]
     pub auth: Auth,
@@ -158,6 +161,20 @@ pub struct Compaction {
     /// (default 64 MiB, about 1.4 million keys).
     #[serde(default)]
     pub map_bytes: Option<u64>,
+}
+
+/// How partitions keep idempotent producers (ADR 0110).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Producers {
+    /// Producers each partition admits (default 10,000); while it holds this
+    /// many, a new one is refused until one is forgotten.
+    #[serde(default)]
+    pub max: Option<usize>,
+    /// How long a producer may write nothing to a partition before it is
+    /// forgotten (default 86,400,000 ms, a day).
+    #[serde(default)]
+    pub expiration_ms: Option<u64>,
 }
 
 /// How clients authenticate.
@@ -268,6 +285,12 @@ impl ClusterFile {
         }
         if self.cluster.segment_bytes < 4096 {
             return invalid("cluster.segment_bytes must be at least 4096".into());
+        }
+        if self.producers.max == Some(0) {
+            return invalid("producers.max must be at least 1".into());
+        }
+        if self.producers.expiration_ms == Some(0) {
+            return invalid("producers.expiration_ms must be at least 1".into());
         }
         if self.tls.plaintext_on_loopback {
             if self.tls.ca.is_some() || self.tls.cert.is_some() || self.tls.key.is_some() || self.tls.crl.is_some() {
@@ -381,7 +404,11 @@ impl ClusterFile {
                 .map_or(lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL, Duration::from_millis),
             metadata: Some(METADATA_GROUP),
             coordinator: Some(COORDINATOR_GROUP),
-            max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+            max_producers: self.producers.max.unwrap_or(lotse_server::DEFAULT_MAX_PRODUCERS),
+            producer_expiration: self
+                .producers
+                .expiration_ms
+                .map_or(lotse_server::DEFAULT_PRODUCER_EXPIRATION, Duration::from_millis),
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

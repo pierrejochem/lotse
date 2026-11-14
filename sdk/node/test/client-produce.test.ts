@@ -265,6 +265,17 @@ describe("produce against a scripted broker", () => {
     assert.equal(batchOf(node.requests("Produce")[1] as never).baseSequence, 0, "the sequence of a batch that was not written is free");
   });
 
+  test("a partition full of producers is asked again with the same bytes until it takes this one", async () => {
+    // ADR 0110: nothing was written, and the partition takes the producer once it forgot an idle one.
+    serve((n) => (n <= 2 ? fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.PRODUCER_LIMIT) : ok()));
+    const lotse = client(true);
+    await lotse.produce("s", 0, messages(2));
+    const sent = node.requests("Produce");
+    assert.equal(sent.length, 3);
+    assert.deepEqual(fx.bytesOf(sent[0] as never), fx.bytesOf(sent[2] as never), "the same bytes again");
+    assert.equal(node.count("InitProducer"), 1, "the producer id stayed");
+  });
+
   test("produce to the same partition is serialised and to others is not", async () => {
     let release!: () => void;
     const released = new Promise<void>((r) => {

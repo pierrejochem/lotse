@@ -704,6 +704,10 @@ export class LotseClient {
       this.redirect(stream, partition, first.leaderHint);
       throw Attempt.retry(describeError(code));
     }
+    if (code === ErrorCode.PRODUCER_LIMIT) {
+      // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
+      throw Attempt.retry(first.errorMsg ?? describeError(code));
+    }
     if (code === ErrorCode.REQUEST_TIMED_OUT) {
       this.forget(stream, partition);
       throw unknown(idempotent, first.errorMsg ?? describeError(code));

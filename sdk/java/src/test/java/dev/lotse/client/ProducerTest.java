@@ -134,6 +134,19 @@ class ProducerTest {
         assertEquals(1, node.count(Request.InitProducer.class), "the producer id stayed");
     }
 
+    @Test
+    void aPartitionFullOfProducersIsAskedAgainWithTheSameBytesUntilItTakesThisOne() {
+        // ADR 0110: nothing was written, and the partition takes the producer once it forgot an idle one.
+        serve(n -> n <= 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.PRODUCER_LIMIT, 0, null) : ok());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(2));
+
+        List<Request.Produce> sent = node.requests(Request.Produce.class);
+        assertEquals(3, sent.size());
+        assertEquals(Fx.bytesOf(sent.get(0)), Fx.bytesOf(sent.get(2)), "the same bytes again");
+        assertEquals(1, node.count(Request.InitProducer.class), "the producer id stayed");
+    }
+
     /**
      * Stream {@code s} has the resource id in {@code current}. A produce to another id is refused with NOT_LEADER
      * (nothing written), as a node that applied the delete would; with {@code swallowThen} set, the next produce's

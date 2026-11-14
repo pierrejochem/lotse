@@ -168,6 +168,50 @@ async fn commit(r: &mut Replica<SimRuntime, Recorder>, b: Bytes) -> Proposed {
     p
 }
 
+/// An idempotent batch of one record from producer `id`.
+fn from_producer(id: u64, seq: i32, value: &str) -> Bytes {
+    let mut raw = BytesMut::from(&batch(1, value)[..]);
+    lotse_record::set_producer(&mut raw, id, 0, seq).unwrap();
+    raw.freeze()
+}
+
+#[test]
+fn an_idle_producer_is_forgotten_through_the_log_and_a_live_one_never_makes_room() {
+    Sim::new(6).run(|rt| async move {
+        let options = ReplicaOptions { max_producers: 1, ..ReplicaOptions::default() };
+        let open = || async {
+            let cfg = Config::new(1, vec![1]);
+            let log = LogConfig { segment_bytes: 400, index_interval_bytes: 100 };
+            Replica::open_with(rt.clone(), "g", cfg, Recorder::default(), log, options).await.unwrap()
+        };
+        let mut r = open().await;
+        elect(&mut r).await;
+        let a = commit(&mut r, from_producer(7, 0, "a")).await;
+        assert!(matches!(r.propose(from_producer(8, 0, "x")), Err(ProposeError::ProducerLimit(1))), "full");
+        let day = std::time::Duration::from_secs(24 * 3600);
+        let t0 = lotse_rt::Instant::ZERO;
+        assert!(r.expire_producers(t0, day).is_none(), "first seen now");
+        assert!(r.expire_producers(t0 + day / 2, day).is_none());
+        assert_eq!(r.propose(from_producer(7, 0, "a")).unwrap().first, a.first, "still known: a retry is the original");
+        assert!(r.expire_producers(t0 + day, day).is_some(), "a day without a write");
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        let b = commit(&mut r, from_producer(8, 0, "b")).await;
+        assert!(!b.duplicate, "room for a new producer");
+        // Producer 7 is unknown now: not a duplicate, and refused while 8 fills the place.
+        assert!(matches!(r.propose(from_producer(7, 0, "a")), Err(ProposeError::ProducerLimit(1))), "forgotten");
+
+        // Every replica forgets it the same way: from the log, after a restart too.
+        drop(r);
+        rt.crash();
+        let mut r = open().await;
+        elect(&mut r).await;
+        assert!(matches!(r.propose(from_producer(7, 0, "a")), Err(ProposeError::ProducerLimit(1))));
+        assert_eq!(r.propose(from_producer(8, 0, "b")).unwrap().first, b.first, "8 is still known");
+        assert_eq!(applied(&r), ["a", "b"], "the expiry is not data");
+    });
+}
+
 #[test]
 fn producer_state_survives_a_restart_and_a_snapshot() {
     Sim::new(5).run(|rt| async move {
