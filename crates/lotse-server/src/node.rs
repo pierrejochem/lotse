@@ -1062,14 +1062,28 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 }
             }
         }
+        // Appends are filled only after the round's own writes are
+        // persisted too: a queue leader checks out messages it has just
+        // appended, and the append that carries them carries the checkout
+        // as well, so both commit together (ADR 0111).
+        let mut sends: BTreeMap<GroupId, Vec<lotse_raft::Send>> = BTreeMap::new();
+        for (&g, group) in groups.iter_mut() {
+            let out = group.process_unfilled().await?;
+            sends.entry(g).or_default().extend(out.messages);
+        }
+        let marker_jobs = clients.after_round(&view, groups).await?;
         let mut outbound: BTreeMap<NodeId, Vec<(GroupId, Message)>> = BTreeMap::new();
         for (&g, group) in groups.iter_mut() {
-            let out = group.process().await?;
-            for s in out.messages {
+            let mut messages = sends.remove(&g).unwrap_or_default();
+            if group.raft_ref().has_ready() {
+                messages.extend(group.process_unfilled().await?.messages);
+            }
+            group.fill_messages(&mut messages).await?;
+            for s in messages {
                 outbound.entry(s.to).or_default().push((g, s.msg));
             }
         }
-        for job in clients.after_round(&view, groups).await? {
+        for job in marker_jobs {
             let task = write_markers(rt.clone(), marker_client.clone(), job, shared.clone(), cfg.tick * 5);
             jobs.spawn(rt, task);
         }
