@@ -61,5 +61,6 @@ No custom icon set yet. Use a plain 1.5px-stroke outline set at 16 and 20px, col
 - [`tokens.css`](tokens.css): the same tokens as CSS custom properties, generated from `tokens.json` with `python3 docs/brand/tokens.py`.
 - [`logos/`](logos/): the five lockups described above.
 - [`cover.html`](cover.html) and [`cover.png`](cover.png): the cover with the Fairway motif.
+- [`social.html`](social.html) and [`social.png`](social.png): the 1280×640 GitHub social preview, the same motif; upload it under Settings, Social preview.
 
 Fonts: [Schibsted Grotesk](https://fonts.google.com/specimen/Schibsted+Grotesk) and [IBM Plex Mono](https://fonts.google.com/specimen/IBM+Plex+Mono), both under the SIL Open Font License; load them from Google Fonts or self-host the files from there. The logos have their lettering outlined and need neither.
