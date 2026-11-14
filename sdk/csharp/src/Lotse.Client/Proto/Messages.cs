@@ -47,6 +47,12 @@ public static class Messages
     /// <summary>Tag of a subscription that waits as a standby, next to the leader hint (ADR 0076).</summary>
     internal const long TagStandby = 1;
 
+    /// <summary>Tag of the consumer a subscription resumes (ADR 0109).</summary>
+    internal const long TagResume = 2;
+
+    /// <summary>Tag of the consumer id the leader gave a subscription (ADR 0109).</summary>
+    internal const long TagConsumer = 2;
+
     /// <summary>Tag of a transactional ack's producer id and epoch (ADR 0075).</summary>
     internal const long TagProducer = 2;
 

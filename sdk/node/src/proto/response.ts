@@ -53,6 +53,8 @@ export interface SubscribeResponse {
   readonly leaderHint: m.LeaderHint | null;
   /** Tag 1: accepted, but gets nothing until its turn (ADR 0076). */
   readonly standby: boolean;
+  /** Tag 2: the consumer this subscription is (ADR 0109), to resume with; absent or 0 from an older node. */
+  readonly consumerId?: bigint;
 }
 export interface PublishResponse {
   readonly type: "Publish";
@@ -326,6 +328,9 @@ export function writeResponse(w: Writer, res: Response): void {
       }
       if (res.standby) {
         tags.push({ tag: m.TAG_STANDBY, value: new Uint8Array([1]) });
+      }
+      if (res.consumerId !== undefined && res.consumerId !== 0n) {
+        tags.push({ tag: m.TAG_CONSUMER, value: new Writer().u64(res.consumerId).toBytes() });
       }
       m.putTagList(w, tags);
       return;
@@ -623,18 +628,21 @@ export function readResponse(apiKey: number, r: Reader): Response {
       const subscriptionId = r.u32();
       let leaderHint: m.LeaderHint | null = null;
       let standby = false;
+      let consumerId = 0n;
       for (const t of r.tags()) {
         const vr = new Reader(t.value);
         if (t.tag === m.TAG_LEADER_HINT) {
           leaderHint = { leader: vr.u32(), term: vr.u64() };
         } else if (t.tag === m.TAG_STANDBY) {
           standby = vr.u8() !== 0;
+        } else if (t.tag === m.TAG_CONSUMER) {
+          consumerId = vr.u64();
         } else {
           continue; // from a newer version: skipped
         }
         vr.finish();
       }
-      return { type: "Subscribe", error, subscriptionId, leaderHint, standby };
+      return { type: "Subscribe", error, subscriptionId, leaderHint, standby, consumerId };
     }
     case ApiKey.ACK:
     case ApiKey.NACK:

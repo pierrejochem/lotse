@@ -17,7 +17,7 @@ Points to note:
 - `poll(wait)` returns the next delivery, or `null` after `wait`. `next()` waits without limit.
 - `ack(delivery)` settles a message. `nack(delivery, true)` gives it back to be delivered again; `nack(delivery, false)` discards it. `nackAfter(delivery, delay)` gives it back after a delay, for a retry with backoff.
 - `delivery.deliveryCount()` says how many times the broker has sent the message.
-- A message you neither ack nor nack goes out again when the **ack timeout** passes (`ack.timeout.ms`), when your connection closes, or after a leader change. Process messages so that doing one twice is harmless, or use a [transaction](transactions.md).
+- A message you neither ack nor nack goes out again when the **ack timeout** passes (`ack.timeout.ms`) or when you close the consumer. After a leader change or a broken connection the consumer subscribes again and keeps its messages, also within a transaction; if it does not come back within the **resume window** (`resume.window.ms`, 30 s by default), they go to others ([ADR 0109](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0109-deliveries-are-written-to-the-log.md)). Process messages so that doing one twice is harmless, or use a [transaction](transactions.md).
 
 ## Settings
 
@@ -26,13 +26,14 @@ Set at creation with `QueueOptions`, or later with `alterConfigs(name, set, rese
 | Key | Meaning | Values | `QueueOptions` |
 | --- | --- | --- | --- |
 | `ack.timeout.ms` | Time a delivered message may stay unacknowledged | Milliseconds above 0 | `ackTimeout` |
+| `resume.window.ms` | After a leader change, how long a consumer's messages wait for it to subscribe again | Milliseconds above 0; default 30,000 | `alterConfigs` |
 | `max.deliveries` | A message goes out at most this often; the next time it is retired | 1 to 65,535 | `maxDeliveries` |
 | `message.ttl.ms` | A message not delivered within this time after the broker stored it is retired | Milliseconds above 0 | `messageTtl` |
 | `dead.letter.queue` | Where retired messages go | Name of a queue in the same tenant | `deadLetterQueue` |
 | `single.active.consumer` | Only one subscription gets messages | `true` or `false` | `alterConfigs` |
 | `priority.levels` | Number of priority levels | 1 to 10; 1 means none | `alterConfigs` |
 
-The last two are set with `alterConfigs` in the Java SDK:
+`resume.window.ms` and the last two are set with `alterConfigs` in the Java SDK:
 
 ```java
 // Not from the compiled examples.
@@ -58,7 +59,7 @@ The move happens once, also across failovers. The copy keeps key, value and head
 | `x-lotse-dead-letter-deliveries` | Deliveries before it was retired |
 | `x-lotse-dead-letter-floor` | The source queue's retention floor when it moved |
 
-A queue cannot be its own dead-letter queue, a chain of dead-letter queues that leads back is refused, and a queue that is someone's dead-letter queue cannot be deleted. Delivery counts are a lower bound: after a failover a message may have been delivered more often than the count says. See [ADR 0055](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0055-dead-letter-queues-and-message-ttl.md).
+A queue cannot be its own dead-letter queue, a chain of dead-letter queues that leads back is refused, and a queue that is someone's dead-letter queue cannot be deleted. Delivery counts are kept in the queue's log, so they go on across failovers ([ADR 0109](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0109-deliveries-are-written-to-the-log.md)). See [ADR 0055](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0055-dead-letter-queues-and-message-ttl.md).
 
 ## Purge and requeue
 

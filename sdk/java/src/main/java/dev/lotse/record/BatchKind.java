@@ -13,7 +13,9 @@ public enum BatchKind {
     /** Messages moved here from another queue's dead-lettering (ADR 0055); deliverable like data. */
     DEAD_LETTER(4),
     /** Messages leaving a queue because of its limits: the claim that settles them, and the note that they were forwarded (ADR 0055). */
-    RETIRE(5);
+    RETIRE(5),
+    /** Messages a queue's leader hands to a consumer, written before it pushes them (ADR 0109). */
+    CHECKOUT(6);
 
     private final int code;
 

@@ -78,6 +78,11 @@ export interface SubscribeRequest {
   readonly exclusive: boolean;
   /** Tag 1: ask for a push when a standby subscription becomes the active one (ADR 0076). */
   readonly notifyActive?: boolean;
+  /**
+   * Tag 2: the consumer this subscription continues (ADR 0109), the id an earlier subscription's answer gave. The
+   * messages a leader handed to it and no one has settled are this subscription's again.
+   */
+  readonly resume?: bigint;
 }
 export interface CreditRequest {
   readonly type: "Credit";
@@ -554,7 +559,16 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "Subscribe":
       w.u64(req.queueId).string(req.consumerTag).u32(req.creditMsgs).u32(req.creditBytes).bool(req.exclusive);
-      m.putTagList(w, req.notifyActive === true ? [{ tag: m.TAG_NOTIFY_ACTIVE, value: new Uint8Array([1]) }] : []);
+      {
+        const tags: Tag[] = [];
+        if (req.notifyActive === true) {
+          tags.push({ tag: m.TAG_NOTIFY_ACTIVE, value: new Uint8Array([1]) });
+        }
+        if (req.resume !== undefined && req.resume !== 0n) {
+          tags.push({ tag: m.TAG_RESUME, value: new Writer().u64(req.resume).toBytes() });
+        }
+        m.putTagList(w, tags);
+      }
       return;
     case "Credit":
       w.u32(req.subscriptionId).u32(req.addMsgs).u32(req.addBytes).noTags();
@@ -829,14 +843,20 @@ export function readRequest(apiKey: number, r: Reader): Request {
       const creditBytes = r.u32();
       const exclusive = r.bool();
       let notifyActive = false;
+      let resume: bigint | undefined;
       for (const t of r.tags()) {
+        const vr = new Reader(t.value);
         if (t.tag === m.TAG_NOTIFY_ACTIVE) {
-          const vr = new Reader(t.value);
           notifyActive = vr.u8() !== 0;
-          vr.finish();
+        } else if (t.tag === m.TAG_RESUME) {
+          resume = vr.u64();
+        } else {
+          continue; // from a newer version: skipped
         }
+        vr.finish();
       }
-      return { type: "Subscribe", queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive };
+      const out: SubscribeRequest = { type: "Subscribe", queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive };
+      return resume === undefined ? out : { ...out, resume };
     }
     case ApiKey.CREDIT: {
       const x: CreditRequest = { type: "Credit", subscriptionId: r.u32(), addMsgs: r.u32(), addBytes: r.u32() };

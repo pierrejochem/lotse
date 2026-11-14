@@ -92,7 +92,7 @@ await foreach (Delivery delivery in consumer.DeliveriesAsync(cancellationToken))
 }
 ```
 
-- Credit defaults to 64 messages. The consumer resubscribes by itself after a leader change; messages it held may arrive twice, with a higher `DeliveryCount`.
+- Credit defaults to 64 messages. The consumer resubscribes by itself after a leader change, as the same consumer, and keeps the messages it received (ADR 0109); after an ack timeout they may arrive twice, with a higher `DeliveryCount`.
 - `IsStandby` is true while a subscription waits behind another on a single active consumer queue.
 - `Delivery.DeadLetter` says where a retired message came from and why.
 - `DisposeAsync` sends `Unsubscribe` and then hands back what the consumer holds and has not handed out. The Java consumer leaves those messages with the broker until the ack timeout.

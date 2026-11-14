@@ -221,11 +221,16 @@ public sealed interface Response {
      * @param standby the queue has a single active consumer and this subscription waits for its turn (ADR 0076); a
      *     tag in the hint's block
      */
-    record Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint, boolean standby)
+    record Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint, boolean standby, long consumerId)
             implements Response {
         /** Not a standby. */
         public Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint) {
-            this(error, subscriptionId, leaderHint, false);
+            this(error, subscriptionId, leaderHint, false, 0);
+        }
+
+        /** Without a consumer id, as a node from before ADR 0109 answers. */
+        public Subscribe(ErrorCode error, long subscriptionId, LeaderHint leaderHint, boolean standby) {
+            this(error, subscriptionId, leaderHint, standby, 0);
         }
 
         @Override
@@ -240,6 +245,11 @@ public sealed interface Response {
             if (standby) {
                 tags.add(new Tag(Messages.TAG_STANDBY, ByteString.copyOf(new byte[] {1})));
             }
+            if (consumerId != 0) {
+                Writer v = new Writer();
+                v.u64(consumerId);
+                tags.add(new Tag(Messages.TAG_CONSUMER, ByteString.copyOf(v.toByteArray())));
+            }
             if (tags.isEmpty()) {
                 w.noTags();
             } else {
@@ -252,18 +262,21 @@ public sealed interface Response {
             long id = r.u32();
             LeaderHint hint = null;
             boolean standby = false;
+            long consumerId = 0;
             for (Tag t : r.tags()) {
                 Reader vr = new Reader(t.value().toByteArray());
                 if (t.tag() == Messages.TAG_LEADER_HINT) {
                     hint = new LeaderHint(vr.u32(), vr.u64());
                 } else if (t.tag() == Messages.TAG_STANDBY) {
                     standby = vr.u8() != 0;
+                } else if (t.tag() == Messages.TAG_CONSUMER) {
+                    consumerId = vr.u64();
                 } else {
                     continue; // from a newer version: skipped
                 }
                 vr.finish();
             }
-            return new Subscribe(error, id, hint, standby);
+            return new Subscribe(error, id, hint, standby, consumerId);
         }
     }
 

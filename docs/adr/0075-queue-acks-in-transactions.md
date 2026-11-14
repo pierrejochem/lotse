@@ -41,6 +41,6 @@ A plain ack still settles it, because an ack names an offset (ADR 0031).
 - Consume-transform-produce from a queue is exactly once. The output and the ack commit or abort together, and while the transaction is open no one else receives the message.
 - A message stays with its transaction until the transaction ends. The coordinator's transaction timeout bounds this.
 - A failover keeps what the log holds. A new leader learns what is held from the ack index, and delivers again what an abort releases.
-- An ack that went to the old leader but is not in the new leader's log is lost. So is the subscription: the client sees `MESSAGE_NOT_HELD`, and the message is delivered again.
+- An ack that went to the old leader but is not in the new leader's log is lost. So is the subscription: the client sees `MESSAGE_NOT_HELD`, and the message is delivered again. Since ADR 0109 the subscription is not: deliveries are in the log, the consumer resumes with its id at the new leader, and the client sends the ack again there.
 - Holding works per message. A transactional ack of a large range costs as much as acking each message in it, and the leader refuses ranges of more than 10,000 messages.
 - The Java SDK codes the new tags. Its queue consumer does not send transactional acks yet, because the SDK has no transactions so far.

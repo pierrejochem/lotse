@@ -38,10 +38,9 @@ impl Limits {
 }
 
 /// The unsettled messages that have been delivered as often as `limits`
-/// allow and are not with a consumer or a transaction: persisted counts (nack, ack timeout)
-/// plus, when the leader has a dispatcher, deliveries it only counts in
-/// memory (disconnects). Not those in `skip`. At most `max`, lowest first,
-/// each with its delivery count.
+/// allow (every delivery's count is in the log, ADR 0109) and are not with
+/// a consumer ([`Dispatcher::with_consumer`]) or a transaction. Not those in
+/// `skip`. At most `max`, lowest first, each with its delivery count.
 pub fn exhausted(
     queue: &QueueLog,
     dispatcher: Option<&Dispatcher>,
@@ -52,18 +51,10 @@ pub fn exhausted(
     if limits.max_deliveries == 0 {
         return Vec::new();
     }
-    let mut offsets: BTreeSet<u64> = queue.delivered_at_least(1).map(|(o, _)| o).collect();
-    if let Some(d) = dispatcher {
-        offsets.extend(d.extra_offsets());
-    }
-    offsets
-        .into_iter()
-        .filter(|o| !skip.contains(o) && !queue.is_settled(*o) && queue.held_by(*o).is_none())
-        .filter(|o| !dispatcher.is_some_and(|d| d.is_busy(*o)))
-        .map(|o| {
-            let n = u32::from(queue.delivery_count(o)) + dispatcher.map_or(0, |d| u32::from(d.extra_of(o)));
-            (o, n.min(u32::from(u16::MAX)) as u16)
-        })
+    queue
+        .delivered_at_least(1)
+        .filter(|(o, _)| !skip.contains(o) && !queue.is_settled(*o) && queue.held_by(*o).is_none())
+        .filter(|(o, _)| !Dispatcher::with_consumer(queue, dispatcher, *o))
         .filter(|(_, n)| limits.exhausted(u32::from(*n)))
         .take(max)
         .collect()

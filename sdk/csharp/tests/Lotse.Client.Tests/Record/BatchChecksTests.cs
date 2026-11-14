@@ -107,10 +107,10 @@ public class BatchChecksTests
     [Fact]
     public void AttributesAreValidated()
     {
-        foreach (ushort bits in new ushort[] { 3, 6 << 5, 7 << 5, 1 << 9, 1 << 15 })
+        foreach (ushort bits in new ushort[] { 3, 7 << 5, 1 << 9, 1 << 15 })
         {
             byte[] b = Sample();
-            Batch.PutU16(b, 25, bits); // compression 3, kind 6, kind 7, reserved bits
+            Batch.PutU16(b, 25, bits); // compression 3, kind 7, reserved bits
             Assert.Equal(RecordFormatErrorKind.Malformed, ParseFails(Sum(b)));
         }
     }

@@ -27,6 +27,13 @@
 //! A requeueing nack with a delay (ADR 0077) writes a TIMER batch: the
 //! message's delivery count and the time it may go out again, which every
 //! replica keeps until the message is settled, so a new leader waits too.
+//!
+//! The leader writes a CHECKOUT batch before it hands messages to a
+//! consumer (ADR 0109): every replica then knows which consumer holds which
+//! message since when, and the delivery count. A checkout ends when the
+//! message is settled, when a transaction holds it, or when a QUEUE_STATE or
+//! TIMER batch writes its count again (a requeue, an ack timeout, a
+//! consumer that left or did not come back): it is out with no one then.
 
 use std::collections::BTreeMap;
 
@@ -53,6 +60,17 @@ pub struct QueueLog {
     /// Unsettled messages a requeueing nack delayed (ADR 0077): not
     /// delivered before this, ms since the epoch by the leader's clock.
     due: BTreeMap<u64, i64>,
+    /// Unsettled messages out with a consumer (ADR 0109).
+    out: BTreeMap<u64, Checkout>,
+}
+
+/// A message out with a consumer, as a CHECKOUT batch wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkout {
+    /// The consumer's id, which the leader drew when it subscribed.
+    pub consumer: u64,
+    /// When it was handed out, ms since the epoch by the leader's clock.
+    pub at_ms: i64,
 }
 
 /// A claimed message that is to be forwarded.
@@ -130,7 +148,21 @@ impl QueueLog {
             BatchKind::QueueState => {
                 self.settled.insert(first, next);
                 for (offset, count) in lotse_record::queue_state_counts(batch)? {
+                    // Written when a message goes back: out with no one.
+                    self.out.remove(&offset);
                     if !self.settled.contains(offset) {
+                        let c = self.counts.entry(offset).or_insert(0);
+                        *c = (*c).max(count);
+                    }
+                }
+            }
+            BatchKind::Checkout => {
+                self.settled.insert(first, next);
+                let (consumer, deliveries) = lotse_record::checkout(batch)?;
+                let at_ms = batch.base_timestamp();
+                for (offset, count) in deliveries {
+                    if !self.settled.contains(offset) && self.held_by(offset).is_none() {
+                        self.out.insert(offset, Checkout { consumer, at_ms });
                         let c = self.counts.entry(offset).or_insert(0);
                         *c = (*c).max(count);
                     }
@@ -139,6 +171,7 @@ impl QueueLog {
             BatchKind::Timer => {
                 self.settled.insert(first, next);
                 for t in lotse_record::timers(batch)? {
+                    self.out.remove(&t.offset);
                     if !self.settled.contains(t.offset) {
                         let c = self.counts.entry(t.offset).or_insert(0);
                         *c = (*c).max(t.delivery_count);
@@ -204,6 +237,8 @@ impl QueueLog {
                     let (e, offsets) = self.held.entry(producer).or_insert_with(|| (epoch, RangeSet::new()));
                     *e = (*e).max(epoch);
                     offsets.insert(o, o + 1);
+                    // The transaction has it now, not the consumer.
+                    self.out.remove(&o);
                 }
                 o = self.settled.next_gap(o + 1);
             }
@@ -233,6 +268,20 @@ impl QueueLog {
         for o in gone {
             self.due.remove(&o);
         }
+        let gone: Vec<u64> = self.out.range(from..to).map(|(o, _)| *o).collect();
+        for o in gone {
+            self.out.remove(&o);
+        }
+    }
+
+    /// The consumer `offset` is out with, if it is (ADR 0109).
+    pub fn checked_out(&self, offset: u64) -> Option<Checkout> {
+        self.out.get(&offset).copied()
+    }
+
+    /// Every message out with a consumer, by offset.
+    pub fn checkouts(&self) -> impl Iterator<Item = (u64, Checkout)> + '_ {
+        self.out.iter().map(|(o, c)| (*o, *c))
     }
 
     /// When a requeueing nack lets `offset` go out again, if it delayed
@@ -329,8 +378,8 @@ impl QueueLog {
         }
         // Trailing sections, written up to the last that holds something,
         // so a state without them reads as before: held messages (ADR
-        // 0075), then due times (ADR 0077).
-        if !self.held.is_empty() || !self.due.is_empty() {
+        // 0075), due times (ADR 0077), then checkouts (ADR 0109).
+        if !self.held.is_empty() || !self.due.is_empty() || !self.out.is_empty() {
             b.put_u32_le(self.held.len() as u32);
             for (p, (epoch, offsets)) in &self.held {
                 b.put_u64_le(*p);
@@ -338,11 +387,19 @@ impl QueueLog {
                 offsets.encode(&mut b);
             }
         }
-        if !self.due.is_empty() {
+        if !self.due.is_empty() || !self.out.is_empty() {
             b.put_u32_le(self.due.len() as u32);
             for (o, at) in &self.due {
                 b.put_u64_le(*o);
                 b.put_i64_le(*at);
+            }
+        }
+        if !self.out.is_empty() {
+            b.put_u32_le(self.out.len() as u32);
+            for (o, c) in &self.out {
+                b.put_u64_le(*o);
+                b.put_u64_le(c.consumer);
+                b.put_i64_le(c.at_ms);
             }
         }
         b.freeze()
@@ -424,9 +481,22 @@ impl QueueLog {
                 due.insert(b.get_u64_le(), b.get_i64_le());
             }
         }
+        let mut out = BTreeMap::new();
+        if b.has_remaining() {
+            if b.remaining() < 4 {
+                return Err(short());
+            }
+            for _ in 0..b.get_u32_le() {
+                if b.remaining() < 24 {
+                    return Err(short());
+                }
+                let offset = b.get_u64_le();
+                out.insert(offset, Checkout { consumer: b.get_u64_le(), at_ms: b.get_i64_le() });
+            }
+        }
         if b.has_remaining() {
             return Err("queue state has trailing bytes".into());
         }
-        Ok(QueueLog { settled, counts, pending, owed, sources, held, due })
+        Ok(QueueLog { settled, counts, pending, owed, sources, held, due, out })
     }
 }

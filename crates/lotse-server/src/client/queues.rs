@@ -5,8 +5,16 @@
 //! ([`lotse_queue::QueueLog`]) as it applies the log. The leader adds a
 //! [`Dispatcher`] for its term, made when the first consumer subscribes and
 //! dropped when the term ends, which ends every subscription with a
-//! `NOT_LEADER` push; consumers subscribe again at the new leader, which
-//! delivers every unsettled message again.
+//! `NOT_LEADER` push; consumers subscribe again at the new leader.
+//!
+//! Before it pushes messages to a subscription, the leader writes a
+//! CHECKOUT batch with the subscription's consumer id (ADR 0109), and
+//! pushes once that is applied. A new leader adopts the checkouts once it
+//! has applied an entry of its term: those messages wait for their
+//! consumer, which subscribes again naming its id and takes them back, so
+//! its transactional acks go through at the new leader. What no consumer
+//! takes back within the queue's resume window goes out again, its count
+//! written first; everything else unsettled is delivered again.
 //!
 //! The leader delivers only once it has applied an entry of its own term:
 //! everything committed before, every ack included, is applied then, so an
@@ -63,6 +71,9 @@ pub struct QueueConfig {
     /// How long a consumer may hold a message unacknowledged before its
     /// subscription ends and the message goes to someone else.
     pub ack_timeout: Duration,
+    /// How long a new leader keeps the messages an earlier one handed to a
+    /// consumer for it, from when it starts serving (ADR 0109).
+    pub resume_window: Duration,
     /// What the queue does with a message it will not deliver (again).
     pub limits: lotse_queue::Limits,
     /// The queue that receives such messages (a resource id), if any; they
@@ -80,6 +91,9 @@ impl QueueConfig {
     /// RabbitMQ's default consumer timeout.
     pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+    /// The resume window a queue has unless it says otherwise (ADR 0109).
+    pub const DEFAULT_RESUME_WINDOW: Duration = Duration::from_secs(30);
+
     /// A queue with the default ack timeout and no limits.
     pub fn new(name: impl Into<String>, resource_id: u64, group: GroupId) -> Self {
         QueueConfig {
@@ -87,6 +101,7 @@ impl QueueConfig {
             resource_id,
             group,
             ack_timeout: Self::DEFAULT_ACK_TIMEOUT,
+            resume_window: Self::DEFAULT_RESUME_WINDOW,
             limits: lotse_queue::Limits::default(),
             dead_letter: None,
             single_active: false,
@@ -117,6 +132,8 @@ pub(super) struct Serving {
     /// far the log has been read for them.
     levels: u8,
     scanned: u64,
+    /// The checkouts of earlier terms are adopted (ADR 0109).
+    adopted: bool,
 }
 
 impl Serving {
@@ -124,7 +141,11 @@ impl Serving {
     /// that is due, and tells whoever became active and asked.
     fn hand_over(&mut self, single_active: bool, queue: &QueueLog) {
         self.dispatcher.set_single_active(single_active);
-        self.dispatcher.hand_over(queue);
+        // Not before the checkouts of earlier terms are adopted: until then
+        // this leader does not know what is out with consumers (ADR 0109).
+        if self.adopted {
+            self.dispatcher.hand_over(queue);
+        }
         let owners: BTreeMap<SubscriptionId, ConnId> = self.dispatcher.subscriptions().collect();
         for id in self.dispatcher.take_activated() {
             if self.notify.contains(&id)
@@ -155,6 +176,21 @@ pub(super) struct QueueWrite {
     action: Option<Action>,
     /// For a transactional ack: whose, and what.
     txn: Option<TxnAck>,
+    /// For a checkout: the pushes that wait for it.
+    pushes: Option<Pushes>,
+}
+
+/// Deliveries to one subscription that wait for their CHECKOUT batch to be
+/// applied (ADR 0109).
+pub(super) struct Pushes {
+    sub: SubscriptionId,
+    outbox: Arc<Outbox>,
+    /// Encoded `DeliverPush` frames, in order.
+    frames: Vec<bytes::Bytes>,
+    /// The messages they carry, given back if the batch is not written.
+    offsets: Vec<u64>,
+    /// Bytes of log they carry, for metrics.
+    bytes: u64,
 }
 
 /// A transactional ack in flight (ADR 0075).
@@ -203,11 +239,21 @@ pub(super) struct QueueBatch {
     pub(super) action: Option<Action>,
     /// For a transactional ack.
     pub(super) txn: Option<TxnAck>,
+    /// For a checkout.
+    pub(super) pushes: Option<Pushes>,
 }
 
 impl QueueBatch {
     pub(super) fn new(batch: bytes::Bytes) -> Self {
-        QueueBatch { batch, release: Vec::new(), acked: 0, marks: retire::Marks::default(), action: None, txn: None }
+        QueueBatch {
+            batch,
+            release: Vec::new(),
+            acked: 0,
+            marks: retire::Marks::default(),
+            action: None,
+            txn: None,
+            pushes: None,
+        }
     }
 }
 
@@ -268,6 +314,7 @@ impl Clients {
             notify: std::collections::BTreeSet::new(),
             levels: 0,
             scanned: 0,
+            adopted: false,
         })
     }
 
@@ -291,7 +338,7 @@ impl Clients {
         groups: &Groups<R, S>,
     ) {
         let reply = |error, subscription_id, leader_hint| {
-            let resp = SubscribeResponse { error, subscription_id, leader_hint, standby: false };
+            let resp = SubscribeResponse { error, subscription_id, leader_hint, standby: false, consumer_id: 0 };
             outbox.push(correlation_id, &Response::Subscribe(resp))
         };
         let group = Self::queue_group(view, req.queue_id);
@@ -312,8 +359,16 @@ impl Clients {
         self.sub_groups.insert(id, g);
         let conn = conn_id(&outbox);
         let single_active = view.queues.iter().any(|q| q.group == g && q.single_active);
+        // A consumer that comes back names itself (ADR 0109).
+        let consumer = match req.resume.filter(|c| *c != 0) {
+            Some(c) => c,
+            None => self.consumer_id(),
+        };
         let s = self.serving(g, replica);
-        s.dispatcher.subscribe(id, conn, req.credit_msgs, req.credit_bytes);
+        s.dispatcher.subscribe(id, conn, consumer, req.credit_msgs, req.credit_bytes);
+        if s.adopted {
+            s.dispatcher.resume(id);
+        }
         s.conns.insert(conn, outbox.clone());
         // The answer says whether it waits; a push follows when it is its
         // turn, if it asked.
@@ -323,7 +378,13 @@ impl Clients {
             s.notify.insert(id);
         }
         let standby = s.dispatcher.is_standby(id);
-        let resp = SubscribeResponse { error: ErrorCode::NONE, subscription_id: id, leader_hint: None, standby };
+        let resp = SubscribeResponse {
+            error: ErrorCode::NONE,
+            subscription_id: id,
+            leader_hint: None,
+            standby,
+            consumer_id: consumer,
+        };
         outbox.push(correlation_id, &Response::Subscribe(resp));
     }
 
@@ -521,7 +582,7 @@ impl Clients {
         reply: Option<(Arc<Outbox>, u32)>,
         group: GroupId,
         replica: &mut Replica<R, S>,
-        QueueBatch { batch, release, acked, marks, action, txn }: QueueBatch,
+        QueueBatch { batch, release, acked, marks, action, txn, pushes }: QueueBatch,
         now: Instant,
     ) {
         let proposed = if txn.is_some() { replica.propose_txn_ack(batch) } else { replica.propose_internal(batch) };
@@ -539,6 +600,7 @@ impl Clients {
                     marks,
                     action,
                     txn,
+                    pushes,
                 });
             }
             Ok(_) => unreachable!("a queue batch is never a duplicate"),
@@ -549,10 +611,13 @@ impl Clients {
                     ProposeError::ProducerFenced { .. } => (ErrorCode::PRODUCER_FENCED, None),
                     _ => (ErrorCode::NOT_LEADER, hint(replica.raft_ref())),
                 };
-                if let Some(t) = txn
-                    && let Some(s) = self.queues.get_mut(&group).filter(|s| s.term == replica.raft_ref().term())
-                {
-                    s.dispatcher.release(t.taken);
+                if let Some(s) = self.queues.get_mut(&group).filter(|s| s.term == replica.raft_ref().term()) {
+                    if let Some(t) = txn {
+                        s.dispatcher.release(t.taken);
+                    }
+                    if let Some(p) = pushes {
+                        s.dispatcher.release_from(p.sub, p.offsets);
+                    }
                 }
                 if let Some((outbox, id)) = reply {
                     reply_to(&outbox, id, error, h, action);
@@ -602,6 +667,20 @@ impl Clients {
                     // Released only into the term that took them back.
                     if let Some(s) = self.queues.get_mut(&w.group).filter(|s| s.term == w.term) {
                         s.dispatcher.release(w.release);
+                        // Checked out: pushed now to a subscription that still
+                        // takes deliveries. Not written, or for one that has
+                        // ended or unsubscribed meanwhile (which cannot give
+                        // back what it never saw): out again.
+                        if let Some(p) = w.pushes.take() {
+                            if error == ErrorCode::NONE && s.dispatcher.is_open(p.sub) {
+                                for frame in p.frames {
+                                    p.outbox.push_frame(frame);
+                                }
+                                self.stats.group(w.group).fetch_bytes += p.bytes;
+                            } else {
+                                s.dispatcher.release_from(p.sub, p.offsets);
+                            }
+                        }
                     }
                     if let Some(r) = self.retiring.get_mut(&w.group).filter(|r| r.term() == w.term) {
                         r.decided(&w.marks);
@@ -654,6 +733,17 @@ impl Clients {
             let s = self.queues.get_mut(&g).expect("serving");
             let q = replica.queue().expect("a queue group");
             s.dispatcher.sweep(q);
+            // Everything committed before this term is applied now, every
+            // checkout included: what earlier leaders handed out waits for
+            // its consumers, and those subscribed already take theirs back.
+            if !s.adopted {
+                s.dispatcher.adopt(q, view.now, view.unix_ms as i64);
+                let subs: Vec<SubscriptionId> = s.dispatcher.subscriptions().map(|(id, _)| id).collect();
+                for id in subs {
+                    s.dispatcher.resume(id);
+                }
+                s.adopted = true;
+            }
 
             // Connections that closed: their messages go to others.
             let closed: Vec<ConnId> =
@@ -677,6 +767,9 @@ impl Clients {
                 }
                 held.extend(offsets);
             }
+            // Messages that waited for a consumer that did not come back go
+            // out again the same way.
+            held.extend(s.dispatcher.unclaimed(view.now, qc.resume_window, qc.ack_timeout));
             if !held.is_empty() {
                 let counts: Vec<(u64, u16)> = held.iter().map(|&o| (o, s.dispatcher.count_to_persist(q, o))).collect();
                 let batch = lotse_record::queue_state_batch(&counts).expect("counts fit a batch");
@@ -696,15 +789,31 @@ impl Clients {
             let none = std::collections::BTreeSet::new();
             let skip = self.retiring.get(&g).map_or(&none, retire::Retiring::claiming);
             let due = Due { now: view.now, unix_ms: view.unix_ms, limits: qc.limits };
-            let (delivered, bytes, late) = deliver(s, replica, limit, due, skip).await?;
+            let (rounds, late) = deliver(s, replica, limit, due, skip).await?;
             if late && let Some(r) = self.retiring.get_mut(&g) {
                 r.scan_now();
             }
-            let stats = self.stats.group(g);
-            stats.delivered += delivered;
-            stats.fetch_bytes += bytes;
+            // Each subscription's messages are checked out in one batch
+            // before they are pushed (ADR 0109).
+            let mut checkouts = Vec::new();
+            for (id, round) in rounds {
+                self.stats.group(g).delivered += round.deliveries.len() as u64;
+                let consumer = s.dispatcher.consumer_of(id).expect("assigned to a subscription");
+                let outbox = s.dispatcher.subscriptions().find(|(x, _)| *x == id).and_then(|(_, c)| s.conns.get(&c));
+                let Some(outbox) = outbox.cloned() else { continue };
+                let mut batch = BytesMut::from(
+                    &lotse_record::checkout_batch(consumer, &round.deliveries).expect("deliveries fit a batch")[..],
+                );
+                lotse_record::set_base_timestamp(&mut batch, view.unix_ms as i64).expect("a whole batch");
+                let offsets = round.deliveries.iter().map(|(o, _)| *o).collect();
+                let pushes = Pushes { sub: id, outbox, frames: round.frames, offsets, bytes: round.bytes };
+                checkouts.push(QueueBatch { pushes: Some(pushes), ..QueueBatch::new(batch.freeze()) });
+            }
             let live: Vec<ConnId> = s.dispatcher.subscriptions().map(|(_, c)| c).collect();
             s.conns.retain(|c, _| live.contains(c));
+            for c in checkouts {
+                self.write_queue(None, g, replica, c, view.now);
+            }
         }
         Ok(())
     }
@@ -785,6 +894,15 @@ fn waiting(q: &QueueLog, batch: &Batch, here: &[u64], now_ms: i64) -> Result<Vec
     Ok(out)
 }
 
+/// What one round hands to one subscription: checked out together, then
+/// pushed (ADR 0109).
+#[derive(Default)]
+struct Round {
+    deliveries: Vec<(u64, u16)>,
+    frames: Vec<bytes::Bytes>,
+    bytes: u64,
+}
+
 /// When deliveries happen, and what the queue allows.
 #[derive(Clone, Copy)]
 struct Due {
@@ -804,35 +922,30 @@ async fn deliver<R: Runtime, S: StateMachine>(
     limit: u64,
     due: Due,
     skip: &std::collections::BTreeSet<u64>,
-) -> Result<(u64, u64, bool), Error> {
+) -> Result<(BTreeMap<SubscriptionId, Round>, bool), Error> {
     let Due { now, unix_ms, limits } = due;
     s.dispatcher.wake(unix_ms as i64);
     let mut skip = skip.clone();
     let mut late = false;
     let q: &QueueLog = replica.queue().expect("a queue group");
     let mut budget = DELIVER_PER_ROUND;
-    let mut total = 0;
-    let mut bytes = 0u64;
+    let mut rounds: BTreeMap<SubscriptionId, Round> = BTreeMap::new();
     while budget > 0 {
         let max = (s.dispatcher.open_credit() as usize).min(budget);
         let offsets = s.dispatcher.candidates(q, limit, max, &skip);
         if offsets.is_empty() {
-            return Ok((total, bytes, late));
+            return Ok((rounds, late));
         }
         // Delivered as often as allowed already (a release this round may
         // have counted one more): the next round's claim retires them.
-        let over: Vec<u64> = offsets
-            .iter()
-            .copied()
-            .filter(|o| limits.exhausted(u32::from(q.delivery_count(*o)) + u32::from(s.dispatcher.extra_of(*o))))
-            .collect();
+        let over: Vec<u64> =
+            offsets.iter().copied().filter(|o| limits.exhausted(u32::from(q.delivery_count(*o)))).collect();
         if !over.is_empty() {
             skip.extend(over);
             late = true;
             budget = budget.saturating_sub(1);
             continue;
         }
-        let owners: BTreeMap<SubscriptionId, ConnId> = s.dispatcher.subscriptions().collect();
         let (mut delivered, mut skipped) = (0, false);
         let mut rest = &offsets[..];
         while let Some(&first) = rest.first() {
@@ -876,17 +989,16 @@ async fn deliver<R: Runtime, S: StateMachine>(
                         .collect(),
                     leader_hint: None,
                 };
-                if let Some(outbox) = owners.get(&id).and_then(|c| s.conns.get(c)) {
-                    outbox.push_frame(lotse_proto::encode_push(&push));
-                    bytes += raw.len() as u64;
-                }
+                let round = rounds.entry(id).or_default();
+                round.deliveries.extend(deliveries.iter().map(|d| (d.offset, d.delivery_count)));
+                round.frames.push(lotse_proto::encode_push(&push));
+                round.bytes += raw.len() as u64;
             }
         }
         if delivered == 0 && !skipped {
-            return Ok((total, bytes, late)); // credit in messages, but none in bytes
+            return Ok((rounds, late)); // credit in messages, but none in bytes
         }
-        total += delivered as u64;
         budget = budget.saturating_sub(delivered.max(1));
     }
-    Ok((total, bytes, late))
+    Ok((rounds, late))
 }

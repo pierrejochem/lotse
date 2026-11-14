@@ -321,8 +321,15 @@ public abstract record Request
     /// <param name="CreditBytes">How many bytes may be pushed before more credit.</param>
     /// <param name="Exclusive">Refused by the broker; do not set.</param>
     /// <param name="NotifyActive">Ask for a push when this subscription becomes the single active consumer (ADR 0076).</param>
+    /// <param name="Resume">The consumer this subscription continues, the id an earlier answer gave; 0 for a new one (ADR 0109).</param>
     public sealed record Subscribe(
-        ulong QueueId, string ConsumerTag, uint CreditMsgs, uint CreditBytes, bool Exclusive, bool NotifyActive = false)
+        ulong QueueId,
+        string ConsumerTag,
+        uint CreditMsgs,
+        uint CreditBytes,
+        bool Exclusive,
+        bool NotifyActive = false,
+        ulong Resume = 0)
         : Request
     {
         /// <inheritdoc/>
@@ -332,13 +339,24 @@ public abstract record Request
         public override void Write(Writer w)
         {
             w.U64(QueueId).String(ConsumerTag).U32(CreditMsgs).U32(CreditBytes).Bool(Exclusive);
+            var tags = new List<Tag>();
             if (NotifyActive)
             {
-                w.Tags(new[] { new Tag(TagNotifyActive, ByteString.CopyOf(new byte[] { 1 })) });
+                tags.Add(new Tag(TagNotifyActive, ByteString.CopyOf(new byte[] { 1 })));
+            }
+            if (Resume != 0)
+            {
+                var v = new Writer();
+                v.U64(Resume);
+                tags.Add(new Tag(TagResume, ByteString.CopyOf(v.ToByteArray())));
+            }
+            if (tags.Count == 0)
+            {
+                w.NoTags();
             }
             else
             {
-                w.NoTags();
+                w.Tags(tags);
             }
         }
 
@@ -350,16 +368,25 @@ public abstract record Request
             uint bytes = r.U32();
             bool exclusive = r.Bool();
             bool notify = false;
+            ulong resume = 0;
             foreach (Tag t in r.Tags())
             {
+                var vr = new Reader(t.Value.ToByteArray());
                 if (t.Number == TagNotifyActive)
                 {
-                    var vr = new Reader(t.Value.ToByteArray());
                     notify = vr.U8() != 0;
-                    vr.Finish();
                 }
+                else if (t.Number == TagResume)
+                {
+                    resume = vr.U64();
+                }
+                else
+                {
+                    continue; // from a newer version: skipped
+                }
+                vr.Finish();
             }
-            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify);
+            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume);
         }
     }
 

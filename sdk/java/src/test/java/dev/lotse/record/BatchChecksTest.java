@@ -102,9 +102,6 @@ class BatchChecksTest {
         Batch.putU16(b, 25, 3); // compression 3
         assertEquals(Kind.MALFORMED, parseFails(sum(b)));
         b = sample();
-        Batch.putU16(b, 25, 6 << 5); // kind 6
-        assertEquals(Kind.MALFORMED, parseFails(sum(b)));
-        b = sample();
         Batch.putU16(b, 25, 7 << 5); // kind 7
         assertEquals(Kind.MALFORMED, parseFails(sum(b)));
         b = sample();

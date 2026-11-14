@@ -47,7 +47,7 @@ The example below creates a stream, writes ten messages and reads them back. It 
 
 ## Queues
 
-`createQueue(name, QueueOptions)` and `subscribe(queue, SubscribeOptions)` return a `QueueConsumer`. `poll(Duration)` returns a `Delivery` or `null`; settle with `ack`, `nack(delivery, requeue)` or `nackAfter(delivery, delay)`. `isStandby()` is true while a subscription waits behind another on a single active consumer queue. The consumer resubscribes by itself after a leader change.
+`createQueue(name, QueueOptions)` and `subscribe(queue, SubscribeOptions)` return a `QueueConsumer`. `poll(Duration)` returns a `Delivery` or `null`; settle with `ack`, `nack(delivery, requeue)` or `nackAfter(delivery, delay)`. `isStandby()` is true while a subscription waits behind another on a single active consumer queue. The consumer resubscribes by itself after a leader change, as the same consumer, and keeps the messages it received, also those acked in a transaction (ADR 0109).
 
 `QueueOptions.builder()` sets `maxDeliveries`, `deadLetterQueue`, `ackTimeout` and the other queue settings. A retired message arrives in the dead-letter queue with `Delivery.deadLetter()` describing where it came from and why.
 
