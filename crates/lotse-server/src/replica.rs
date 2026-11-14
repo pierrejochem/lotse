@@ -487,6 +487,11 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         &self.raft
     }
 
+    /// The tag of the move that removed this replica's log, if one did.
+    pub(crate) fn moved_at(&self) -> Option<u64> {
+        self.moved_at
+    }
+
     /// The state machine.
     pub fn state_machine(&self) -> &S {
         &self.sm

@@ -459,6 +459,11 @@ pub(crate) struct MetadataState {
     /// Nodes that were voters of a group and were moved off it: while such
     /// a move is under way, a drained node is not forgotten.
     pub(crate) left: BTreeMap<GroupId, BTreeSet<NodeId>>,
+    /// For each group, the nodes that were no voters when a decision was
+    /// reported in place, with that decision's tag (ADR 0108). A replica on
+    /// such a node whose membership is no newer holds a log from before it
+    /// left: placed there again, it starts over instead of going on from it.
+    pub(crate) moved_off: BTreeMap<GroupId, BTreeMap<NodeId, u64>>,
     /// A group's voters before its first change at runtime: what a new
     /// replica of it starts from, as every replica of the group did. A
     /// replica placed later starts outside the group and learns who the
@@ -763,6 +768,26 @@ impl MetadataState {
             }
             Change::Settled { group, mut voters } => {
                 voters.sort_unstable();
+                // Only a report of what the metadata group wants now settles
+                // a move; one of an older decision changes nothing here.
+                if self.voters_of(group).is_some_and(|v| {
+                    let mut want = v.to_vec();
+                    want.sort_unstable();
+                    want == voters
+                }) && let Some(&at) = self.target_at.get(&group)
+                {
+                    let gone: Vec<NodeId> = self
+                        .left
+                        .get(&group)
+                        .map(|l| l.iter().copied().filter(|n| !voters.contains(n)).collect())
+                        .unwrap_or_default();
+                    if !gone.is_empty() {
+                        let off = self.moved_off.entry(group).or_default();
+                        for n in gone {
+                            off.insert(n, at);
+                        }
+                    }
+                }
                 self.settled.insert(group, voters);
             }
             Change::PinLeader { group, node } => match node {
@@ -963,7 +988,7 @@ impl MetadataState {
         // (ADR 0078), revoked certificates (ADR 0090), the certificate
         // inventory (ADR 0091), certificate requests (ADR 0092), the index
         // that made each tombstone (ADR 0100), the zones of nodes added at
-        // runtime (ADR 0104). A later section needs the ones before it,
+        // runtime (ADR 0104), the nodes moved off each group (ADR 0108). A later section needs the ones before it,
         // empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -974,7 +999,9 @@ impl MetadataState {
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
         let zoned: Vec<(&NodeId, &NodeMeta)> = self.nodes.iter().filter(|(_, n)| !n.zone.is_empty()).collect();
-        let sections = if !zoned.is_empty() {
+        let sections = if !self.moved_off.is_empty() {
+            12
+        } else if !zoned.is_empty() {
             11
         } else if !self.deleted.is_empty() {
             10
@@ -1073,6 +1100,17 @@ impl MetadataState {
             for (id, n) in zoned {
                 b.put_u64_le(*id);
                 put_str(&mut b, &n.zone);
+            }
+        }
+        if sections >= 12 {
+            b.put_u32_le(self.moved_off.len() as u32);
+            for (g, off) in &self.moved_off {
+                b.put_u64_le(*g);
+                b.put_u32_le(off.len() as u32);
+                for (n, at) in off {
+                    b.put_u64_le(*n);
+                    b.put_u64_le(*at);
+                }
             }
         }
         b.freeze()
@@ -1254,6 +1292,18 @@ impl MetadataState {
                 need(b, 8)?;
                 let id = b.get_u64_le();
                 s.nodes.get_mut(&id).ok_or("the zone of an unknown node")?.zone = get_str(b)?;
+            }
+        }
+        if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let g = b.get_u64_le();
+                let off = s.moved_off.entry(g).or_default();
+                for _ in 0..count(b)? {
+                    need(b, 16)?;
+                    let n = b.get_u64_le();
+                    off.insert(n, b.get_u64_le());
+                }
             }
         }
         if b.has_remaining() {

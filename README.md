@@ -184,7 +184,6 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 - **Leadership moves after a failover.** A new group starts on its preferred node, so creating a queue or stream no longer leads to a move (ADR 0095); but after a failover, or an election that a node short of CPU loses, clients meet `NOT_LEADER`, and a transactional ack goes only on the connection the message came on (ADR 0075), so the transaction is aborted and the message comes again. `DescribeMetrics` names a leader only while a quorum answers it, so for a moment after an election no node may.
 - **Queue state that only the leader holds is lost in a failover.** Delivery counts are written only on requeue and ack timeout, so after a failover they may start over, and `max.deliveries` counts again. A failover may expire a message a consumer still holds (ADR 0055). A new leader orders priority levels by offset until it has read the backlog, 1 MiB a round (ADR 0078).
-- **A compaction tombstone dropped while a replica that left the group still holds an older value** is not covered by a test (ADR 0067).
 - **A producer evicted from a full partition loses its deduplication**, and a plain idempotent producer's id survives a client restart only with a producer name, which fences the earlier instance but does not deduplicate a batch the application sends again (ADR 0071).
 
 ### Not built yet

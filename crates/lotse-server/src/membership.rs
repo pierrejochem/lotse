@@ -122,6 +122,49 @@ pub(crate) fn replica_may_go(
     !voters.contains(&me) && state.is_settled(g, voters) && replica_tag <= state.target_at.get(&g).copied().unwrap_or(0)
 }
 
+/// Whether a replica of `g` on this node (`me`), one of the voters the
+/// metadata group wants, holds a log from before a settled move took the
+/// group off this node, and must start over (ADR 0108). That replica was no
+/// member when the move settled, so no commit rests on its log since; a
+/// node that was down or cut off then never removed it, and going on from
+/// it would bring back records the group has since compacted away. Its
+/// membership (`replica_tag`) is newer than the move once it took part
+/// again, and its log was already removed for that move if `moved_at`
+/// says so: either way it stays.
+pub(crate) fn starts_over(
+    state: &MetadataState,
+    g: GroupId,
+    me: NodeId,
+    replica_tag: u64,
+    moved_at: Option<u64>,
+) -> Option<u64> {
+    let off = *state.moved_off.get(&g)?.get(&me)?;
+    (replica_tag <= off && moved_at.is_none_or(|at| at < off)).then_some(off)
+}
+
+/// Whether a Raft message for runtime group `g` carries a membership newer
+/// than the decision this node last refreshed its replicas with (`state`),
+/// and must wait (ADR 0108). [`starts_over`] judges a replica by the
+/// membership it holds: one that took the membership placing it here
+/// again before its node saw the settled move off would look current and
+/// go on from a log the group has since compacted. Held back, the message
+/// comes again once the node has caught up with the metadata group, as
+/// Raft resends what is not acknowledged.
+pub(crate) fn ahead_of_view(state: &MetadataState, g: GroupId, msg: &lotse_raft::Message) -> bool {
+    let seen = state.target_at.get(&g).copied().unwrap_or(0);
+    let carried = match msg {
+        lotse_raft::Message::Append { entries, .. } => entries
+            .iter()
+            .filter(|e| e.kind == lotse_raft::EntryKind::Config)
+            .filter_map(|e| Membership::decode(&e.data))
+            .map(|m| m.tag)
+            .max(),
+        lotse_raft::Message::Snapshot { meta, .. } => Some(meta.membership.tag),
+        _ => None,
+    };
+    carried.is_some_and(|tag| tag > seen)
+}
+
 /// Whether nodes holding `hi` and `lo` replicas are uneven enough to move
 /// one: by more than one replica and more than a tenth of `hi`.
 pub(crate) fn uneven(hi: usize, lo: usize) -> bool {

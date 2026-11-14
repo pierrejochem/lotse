@@ -759,3 +759,27 @@ fn a_tombstone_goes_once_every_node_removed_its_files_and_the_id_stays_deleted()
     // The index of a tombstone survives a snapshot.
     assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
 }
+
+#[test]
+fn moves_off_round_trip() {
+    let mut s = MetadataState::default();
+    let create = Change::CreateStream {
+        name: "o".into(),
+        tenant: "t".into(),
+        partitions: vec![vec![1, 2, 3]],
+        settings: StreamSettings::default(),
+    };
+    s.apply(10, &payload(&create)).unwrap();
+    let g = group_id(10, 0);
+    s.apply(11, &payload(&Change::SetVoters { group: g, voters: vec![1, 3, 4] })).unwrap();
+    s.apply(12, &payload(&Change::Settled { group: g, voters: vec![1, 3, 4] })).unwrap();
+    assert_eq!(s.moved_off[&g].get(&2), Some(&11));
+    let bytes = s.encode();
+    assert_eq!(MetadataState::decode(&bytes).unwrap(), s);
+    for cut in 0..bytes.len() {
+        assert!(
+            MetadataState::decode(&bytes[..cut]).is_ok_and(|d| d != s) || MetadataState::decode(&bytes[..cut]).is_err(),
+            "cut at {cut}"
+        );
+    }
+}
