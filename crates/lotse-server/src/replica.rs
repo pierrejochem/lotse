@@ -49,7 +49,7 @@ use lotse_rt::{Disk, OpenMode, SegmentFile};
 
 use crate::coordinator::CoordinatorState;
 use crate::metadata::MetadataState;
-use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, ProducerState};
+use crate::producers::{Check, DEFAULT_MAX_PRODUCERS, IdleClock, ProducerState};
 use crate::txns::{MarkerCheck, TxnState};
 
 pub(crate) const HARD_STATE: &str = "raft.state";
@@ -118,6 +118,10 @@ pub enum ProposeError {
     /// this partition, or a transactional batch without a producer id.
     #[error("invalid transaction state: {0}")]
     InvalidTxnState(&'static str),
+    /// A new producer, and the partition holds as many as it admits; one is
+    /// forgotten once it has been idle long enough (ADR 0110).
+    #[error("the partition holds {0} producers, as many as it admits: try again later")]
+    ProducerLimit(usize),
 }
 
 /// What became of a marker the coordinator asked for.
@@ -135,8 +139,8 @@ pub(crate) enum MarkerOutcome {
 /// use the same options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplicaOptions {
-    /// Producers kept for idempotence; beyond it, the producer with the
-    /// oldest write is evicted.
+    /// Producers admitted for idempotence; while the replica holds this
+    /// many, a new one is refused (ADR 0110).
     pub max_producers: usize,
     /// The group is a queue: keep its ack index.
     pub queue: bool,
@@ -319,6 +323,8 @@ pub struct Replica<D: Disk, S> {
     pub max_fill_bytes: usize,
     /// The tag of the move that removed this replica's log, if one did.
     moved_at: Option<u64>,
+    /// As leader: how long each producer has been idle (ADR 0110).
+    idle: IdleClock,
 }
 
 impl<D: Disk, S> fmt::Debug for Replica<D, S> {
@@ -346,8 +352,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     }
 
     /// [`Replica::open`] with [`ReplicaOptions`]. Every replica of a group
-    /// must use the same options: they decide, for example, which producers
-    /// are evicted.
+    /// must use the same options: they decide, for example, what a queue
+    /// keeps.
     pub async fn open_with(
         disk: D,
         dir: impl Into<PathBuf>,
@@ -445,6 +451,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             state,
             max_fill_bytes: 1 << 20,
             moved_at,
+            idle: IdleClock::default(),
         })
     }
 
@@ -553,6 +560,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             Check::Duplicate { first, last, term } => return Ok(Proposed { first, last, term, duplicate: true }),
             Check::OutOfOrder { expected } => return Err(ProposeError::OutOfOrderSequence { expected }),
             Check::Fenced { current } => return Err(ProposeError::ProducerFenced { current }),
+            Check::Full => return Err(ProposeError::ProducerLimit(self.state.producers.max())),
         }
         let (first, last) =
             self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
@@ -638,6 +646,25 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         let term = self.raft.term();
         self.state.appended(first, last, term, &parsed);
         Ok(Proposed { first, last, term: Some(term), duplicate: false })
+    }
+
+    /// As leader, writes the producers idle for `after` by its clock to be
+    /// forgotten (ADR 0110); `None` when there are none, or this replica
+    /// does not lead. A producer with a transaction open here stays.
+    pub(crate) fn expire_producers(&mut self, now: lotse_rt::Instant, after: std::time::Duration) -> Option<Proposed> {
+        if self.raft.role() != lotse_raft::Role::Leader {
+            return None;
+        }
+        self.idle.for_term(self.raft.term());
+        let txns = &self.state.txns;
+        let idle = self.state.producers.idle(&mut self.idle, now, after, |id| txns.has_open(id));
+        if idle.is_empty() {
+            return None;
+        }
+        let payload = crate::producers::encode_expired(&idle);
+        let batch = lotse_record::internal_control_batch(lotse_record::InternalControl::ExpireProducers, &payload)
+            .expect("one record");
+        self.propose_internal(batch).ok()
     }
 
     /// The partition's transaction state, as applied.

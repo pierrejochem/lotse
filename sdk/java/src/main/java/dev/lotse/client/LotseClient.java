@@ -670,6 +670,10 @@ public final class LotseClient implements AutoCloseable {
             redirect(stream, partition, p.leaderHint());
             throw Attempt.retry(code.toString());
         }
+        if (code.equals(ErrorCode.PRODUCER_LIMIT)) {
+            // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
+            throw Attempt.retry(p.errorMsg() != null ? p.errorMsg() : code.toString());
+        }
         if (code.equals(ErrorCode.REQUEST_TIMED_OUT)) {
             forget(stream, partition);
             throw unknown(idempotent, p.errorMsg() != null ? p.errorMsg() : code.toString());

@@ -33,6 +33,7 @@ export const ErrorCode = {
   FENCED_INSTANCE_ID: 30,
   MESSAGE_NOT_HELD: 31,
   UNROUTABLE: 32,
+  PRODUCER_LIMIT: 33,
 } as const;
 
 /** An error code as it travels: a `u16`. Known codes are the values of `ErrorCode`. */
@@ -56,6 +57,7 @@ export function isRetriable(code: ErrorCodeValue): boolean {
     case ErrorCode.CONCURRENT_TRANSACTIONS:
     case ErrorCode.UNSTABLE_OFFSET_COMMIT:
     case ErrorCode.CONCURRENT_GROUP_CHANGE:
+    case ErrorCode.PRODUCER_LIMIT:
       return true;
     default:
       return false;

@@ -876,6 +876,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 self.redirect(stream, partition, p.leader_hint);
                 Err(Attempt::Retry(format!("{}", p.error)))
             }
+            // Not written either: the partition takes a new producer once it
+            // has forgotten an idle one (ADR 0110).
+            ErrorCode::PRODUCER_LIMIT => {
+                Err(Attempt::Retry(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
+            }
             ErrorCode::REQUEST_TIMED_OUT => {
                 self.forget(stream, partition);
                 Err(unknown(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))

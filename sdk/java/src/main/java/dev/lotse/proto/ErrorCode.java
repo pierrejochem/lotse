@@ -75,6 +75,8 @@ public record ErrorCode(int code) {
     public static final ErrorCode MESSAGE_NOT_HELD = new ErrorCode(31);
     /** A mandatory published message routes to no queue (ADR 0079). */
     public static final ErrorCode UNROUTABLE = new ErrorCode(32);
+    /** A new producer, and the partition holds as many as it admits: retry once an idle one is forgotten (ADR 0110). */
+    public static final ErrorCode PRODUCER_LIMIT = new ErrorCode(33);
 
     private static final List<String> NAMES = List.of(
             "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -84,7 +86,7 @@ public record ErrorCode(int code) {
             "COORDINATOR_NOT_AVAILABLE", "CONCURRENT_TRANSACTIONS", "COORDINATOR_FENCED", "INVALID_REQUEST",
             "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
             "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
-            "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE");
+            "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE", "PRODUCER_LIMIT");
 
     /** Creates a code. */
     public ErrorCode {
@@ -109,7 +111,7 @@ public record ErrorCode(int code) {
      */
     public boolean retriable() {
         return switch (code) {
-            case 1, 2, 5, 6, 18, 19, 24, 25 -> true;
+            case 1, 2, 5, 6, 18, 19, 24, 25, 33 -> true;
             default -> false;
         };
     }

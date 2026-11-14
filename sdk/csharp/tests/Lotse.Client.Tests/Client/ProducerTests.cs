@@ -188,6 +188,20 @@ public sealed class ProducerTests : IDisposable
     }
 
     [Fact]
+    public async Task APartitionFullOfProducersIsAskedAgainWithTheSameBytesUntilItTakesThisOne()
+    {
+        // ADR 0110: nothing was written, and the partition takes the producer once it forgot an idle one.
+        Serve(n => n <= 2 ? Fx.Produced(StreamId, 0, ErrorCode.ProducerLimit, 0) : Ok());
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(2));
+
+        List<Request.Produce> sent = _node.Requests<Request.Produce>();
+        Assert.Equal(3, sent.Count);
+        Assert.Equal(Fx.BytesOf(sent[0]), Fx.BytesOf(sent[2])); // the same bytes again
+        Assert.Equal(1, _node.Count<Request.InitProducer>()); // the producer id stayed
+    }
+
+    [Fact]
     public async Task AnOutcomeStillUnknownWhenTimeRunsOutIsReportedAndTheNextProduceGetsANewProducerId()
     {
         int phase = 0;

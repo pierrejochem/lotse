@@ -707,6 +707,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             Redirect(stream, partition, p.LeaderHint);
             throw Attempt.Retry(code.ToString());
         }
+        if (code.Equals(ErrorCode.ProducerLimit))
+        {
+            // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
+            throw Attempt.Retry(p.ErrorMsg ?? code.ToString());
+        }
         if (code.Equals(ErrorCode.RequestTimedOut))
         {
             Forget(stream, partition);

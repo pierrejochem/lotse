@@ -869,6 +869,10 @@ fn propose_one<R: Runtime, S: StateMachine>(
             out.error = ErrorCode::INVALID_TXN_STATE;
             out.error_msg = Some(e.to_string());
         }
+        Err(e @ ProposeError::ProducerLimit(_)) => {
+            out.error = ErrorCode::PRODUCER_LIMIT;
+            out.error_msg = Some(e.to_string());
+        }
         Err(e) => {
             out.error = ErrorCode::CORRUPT_BATCH;
             out.error_msg = Some(e.to_string());

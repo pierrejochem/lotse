@@ -42,7 +42,7 @@ public static class ControlBatches
             throw RecordFormatException.MalformedBatch("control record has the wrong size");
         }
         int code = key.At(2) | key.At(3) << 8;
-        if (code > (int)ControlKind.Forget)
+        if (code > (int)ControlKind.ExpireProducers)
         {
             throw RecordFormatException.MalformedBatch("unknown control type");
         }

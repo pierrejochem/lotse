@@ -19,6 +19,11 @@
 //! - no batch is there twice (the idempotent producer retries unknown
 //!   outcomes, the other never does);
 //! - after healing, a new batch commits in each partition.
+//!
+//! In half the runs a partition admits only a few producers and forgets one
+//! after 3 s without a write (ADR 0110), while short-lived producers come
+//! and go: they wait for a place or give up, and the live producers keep
+//! theirs, so their retries are still recognised.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +37,7 @@ use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{Clock, Rng, Spawn};
 use lotse_server::{Node, NodeConfig, NodeHandle, StateMachine, StreamConfig};
-use lotse_sim::{Sim, SimRuntime, check_seeds};
+use lotse_sim::{Sim, SimRuntime, check_few_seeds, check_seeds};
 
 /// The test reads partitions through `Fetch`; the state machine keeps nothing.
 #[derive(Debug, Default)]
@@ -120,8 +125,20 @@ struct World {
     down_until: BTreeMap<NodeId, lotse_rt::Instant>,
 }
 
+/// How the partitions keep producers: how many, and for how long idle.
+#[derive(Clone, Copy)]
+struct Producers {
+    max: usize,
+    expiration: Duration,
+}
+
+impl Producers {
+    const DEFAULT: Producers =
+        Producers { max: lotse_server::DEFAULT_MAX_PRODUCERS, expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION };
+}
+
 impl World {
-    async fn new(rt: SimRuntime) -> World {
+    async fn new(rt: SimRuntime, producers: Producers) -> World {
         let n = if rt.chance(1, 2) { 3 } else { 5 };
         let ids: Vec<NodeId> = (1..=n).collect();
         let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
@@ -160,7 +177,8 @@ impl World {
                         group_heartbeat_interval: lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL,
                         metadata: None,
                         coordinator: Some(3),
-                        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+                        max_producers: producers.max,
+                        producer_expiration: producers.expiration,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
@@ -326,8 +344,39 @@ async fn consumer(rt: SimRuntime, partition: u32, out: Arc<Mutex<Outcomes>>, sto
     }
 }
 
+/// Short-lived idempotent producers: each a new client with a new producer
+/// id that writes one batch and goes. Where few producers are admitted
+/// they wait for a place, or give up: definitely not written.
+async fn churn(rt: SimRuntime, out: Arc<Mutex<Outcomes>>, stop: Arc<AtomicBool>) {
+    let mut seq = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        let client = Client::new(rt.clone(), client_config());
+        let partition = rt.below(u64::from(PARTITIONS)) as u32;
+        let value = format!("s-{seq}");
+        seq += 1;
+        let res = client.produce(STREAM, partition, batch(&value, 1)).await;
+        {
+            let mut o = out.lock().unwrap();
+            match res {
+                Ok(offset) => {
+                    let before = o.acked.entry(partition).or_default().insert(offset, value.clone());
+                    assert!(before.is_none(), "offset {offset} acknowledged twice in partition {partition}");
+                }
+                Err(ClientError::GaveUp(..)) => o.not_written.push(value),
+                Err(ClientError::Unknown(_)) => o.unknown += 1,
+                Err(e) => panic!("unexpected produce error: {e}"),
+            }
+        }
+        rt.sleep(TICK * (5 + rt.below(20) as u32)).await;
+    }
+}
+
 async fn run(rt: SimRuntime) {
-    let mut w = World::new(rt.clone()).await;
+    // Longer idle than any retry of the live producers takes (`retry_for`
+    // plus a request), so they are never forgotten while they retry.
+    let few = rt.chance(1, 2);
+    let producers = if few { Producers { max: 4, expiration: Duration::from_secs(3) } } else { Producers::DEFAULT };
+    let mut w = World::new(rt.clone(), producers).await;
     let out = Arc::new(Mutex::new(Outcomes::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
@@ -337,9 +386,12 @@ async fn run(rt: SimRuntime) {
         tasks.push(rt.spawn(consumer(host, c - 1, out.clone(), stop.clone())));
     }
     tasks.push(rt.spawn(transactional(rt.node("t1"), out.clone(), stop.clone())));
+    if few {
+        tasks.push(rt.spawn(churn(rt.node("s1"), out.clone(), stop.clone())));
+    }
     let n = w.cfgs.len() as u64;
     let mut hosts: Vec<String> = (1..=n).map(|i| format!("n{i}")).collect();
-    hosts.extend(["c1".to_string(), "c2".to_string(), "t1".to_string()]);
+    hosts.extend(["c1".to_string(), "c2".to_string(), "t1".to_string(), "s1".to_string()]);
     let end = rt.now() + Duration::from_secs(6);
     let mut partition_until = None;
     while rt.now() < end {
@@ -450,4 +502,31 @@ async fn run(rt: SimRuntime) {
 #[test]
 fn clients_see_only_committed_data_and_lose_no_acknowledged_batch() {
     check_seeds(10, |seed| Sim::new(seed).run(run));
+}
+
+/// A partition that admits two producers holds a third back until one of
+/// the first two has been idle for the expiration, then takes it: the
+/// leader forgets through the log, and the client waits on
+/// `PRODUCER_LIMIT` (ADR 0110).
+async fn wait_for_a_place(rt: SimRuntime) {
+    let expiration = Duration::from_secs(1);
+    let mut w = World::new(rt.clone(), Producers { max: 2, expiration }).await;
+    for name in ["a", "b"] {
+        let client = Client::new(rt.node(name), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+        client.produce(STREAM, 0, batch(name, 1)).await.unwrap_or_else(|e| panic!("{name} found no place: {e}"));
+    }
+    let started = rt.now();
+    let c = Client::new(rt.node("c"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+    c.produce(STREAM, 0, batch("c", 1)).await.expect("a place once an idle producer is forgotten");
+    let waited = rt.now() - started;
+    assert!(waited >= expiration / 2, "the third producer got in after {waited:?}, before anyone was idle long");
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn a_new_producer_waits_for_an_idle_one_to_be_forgotten() {
+    check_few_seeds(3, |seed| Sim::new(seed).run(wait_for_a_place));
 }

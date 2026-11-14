@@ -32,4 +32,7 @@ public enum ControlKind
 
     /// <summary>The coordinator forgets a tenant incarnation's ids.</summary>
     Forget = 9,
+
+    /// <summary>Producers a partition's leader found idle long enough to forget (ADR 0110).</summary>
+    ExpireProducers = 10,
 }
