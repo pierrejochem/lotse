@@ -5,7 +5,7 @@ export const Compression = { NONE: 0, ZSTD: 1, LZ4: 2 } as const;
 export type Compression = (typeof Compression)[keyof typeof Compression];
 
 /** What a batch holds. Everything but DATA belongs to the queue log. */
-export const BatchKind = { DATA: 0, ACK: 1, QUEUE_STATE: 2, TIMER: 3, DEAD_LETTER: 4, RETIRE: 5 } as const;
+export const BatchKind = { DATA: 0, ACK: 1, QUEUE_STATE: 2, TIMER: 3, DEAD_LETTER: 4, RETIRE: 5, CHECKOUT: 6 } as const;
 export type BatchKind = (typeof BatchKind)[keyof typeof BatchKind];
 
 /** The packed attributes of a batch (bit 8, compacted, is read from the batch itself). */
@@ -34,7 +34,7 @@ export function attributesFromBits(bits: number): Attributes {
     throw RecordFormatError.malformed("unknown compression");
   }
   const kind = (bits >> 5) & 0b111;
-  if (kind > BatchKind.RETIRE) {
+  if (kind > BatchKind.CHECKOUT) {
     throw RecordFormatError.malformed("unknown batch kind");
   }
   if (bits >> 9 !== 0) {

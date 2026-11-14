@@ -88,7 +88,7 @@ jobs.close().await;
 
 - `ack` settles a message for good. `nack(&message, requeue)` delivers it again with `requeue`, and discards it like an acknowledged one without; `nack_after(&message, delay)` returns it after a delay ([ADR 0077](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0077-delayed-delivery.md)).
 - `is_standby()` is true while a subscription waits behind another on a queue with `single.active.consumer`.
-- After a leader change or a broken connection the consumer subscribes again by itself. Messages not acknowledged by then are delivered again, possibly to another consumer.
+- After a leader change or a broken connection the consumer subscribes again by itself, naming the consumer id the leader gave it, and keeps the messages it received; `ack_in` sends a transactional ack again on the new subscription (ADR 0109). If it does not come back within the queue's resume window, its messages are delivered again, possibly to another consumer.
 - `Message::delivery_count` is how often the message has been delivered, this time included.
 
 ## Publishing through an exchange

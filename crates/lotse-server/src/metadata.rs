@@ -344,6 +344,8 @@ pub(crate) struct QueueLimits {
     pub(crate) single_active: bool,
     /// `priority.levels` (ADR 0078): 2 to 10; 0 for one level, none.
     pub(crate) priority_levels: u8,
+    /// `resume.window.ms` (ADR 0109); 0 for the default.
+    pub(crate) resume_window_ms: u64,
 }
 
 /// What an `AlterQueue` does: each field is left (`None`) or set, 0
@@ -357,6 +359,8 @@ pub(crate) struct QueueChange {
     pub(crate) single_active: Option<bool>,
     /// 0 for one level.
     pub(crate) priority_levels: Option<u8>,
+    /// 0 for the default.
+    pub(crate) resume_window_ms: Option<u64>,
 }
 
 impl QueueChange {
@@ -380,6 +384,7 @@ impl QueueChange {
         l.dead_letter = self.dead_letter.unwrap_or(l.dead_letter);
         l.single_active = self.single_active.unwrap_or(l.single_active);
         l.priority_levels = self.priority_levels.unwrap_or(l.priority_levels);
+        l.resume_window_ms = self.resume_window_ms.unwrap_or(l.resume_window_ms);
         l
     }
 }
@@ -988,8 +993,9 @@ impl MetadataState {
         // (ADR 0078), revoked certificates (ADR 0090), the certificate
         // inventory (ADR 0091), certificate requests (ADR 0092), the index
         // that made each tombstone (ADR 0100), the zones of nodes added at
-        // runtime (ADR 0104), the nodes moved off each group (ADR 0108). A later section needs the ones before it,
-        // empty or not.
+        // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
+        // queues' resume windows (ADR 0109). A later section needs the ones
+        // before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -999,7 +1005,15 @@ impl MetadataState {
             .map(|q| (q.resource_id, q.limits.priority_levels))
             .collect();
         let zoned: Vec<(&NodeId, &NodeMeta)> = self.nodes.iter().filter(|(_, n)| !n.zone.is_empty()).collect();
-        let sections = if !self.moved_off.is_empty() {
+        let windows: Vec<(u64, u64)> = self
+            .queues
+            .values()
+            .filter(|q| q.limits.resume_window_ms != 0)
+            .map(|q| (q.resource_id, q.limits.resume_window_ms))
+            .collect();
+        let sections = if !windows.is_empty() {
+            13
+        } else if !self.moved_off.is_empty() {
             12
         } else if !zoned.is_empty() {
             11
@@ -1111,6 +1125,13 @@ impl MetadataState {
                     b.put_u64_le(*n);
                     b.put_u64_le(*at);
                 }
+            }
+        }
+        if sections >= 13 {
+            b.put_u32_le(windows.len() as u32);
+            for (id, ms) in &windows {
+                b.put_u64_le(*id);
+                b.put_u64_le(*ms);
             }
         }
         b.freeze()
@@ -1307,6 +1328,14 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 16)?;
+                let id = b.get_u64_le();
+                let ms = b.get_u64_le();
+                s.queues.get_mut(&id).ok_or("resume window of an unknown queue")?.limits.resume_window_ms = ms;
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1351,7 +1380,7 @@ fn change_bytes(change: &Change) -> Bytes {
             put_limits(&mut b, limits);
             // A trailing flag byte only when a flag is set, then what the
             // flags say comes: older records read as before.
-            put_flags(&mut b, limits.single_active, limits.priority_levels);
+            put_flags(&mut b, limits);
         }
         Change::DeclareExchange { name, tenant, kind } => {
             b.put_u8(2);
@@ -1376,7 +1405,8 @@ fn change_bytes(change: &Change) -> Bytes {
                 | u8::from(change.message_ttl_ms.is_some()) << 2
                 | u8::from(change.dead_letter.is_some()) << 3
                 | u8::from(change.single_active.is_some()) << 4
-                | u8::from(change.priority_levels.is_some()) << 5;
+                | u8::from(change.priority_levels.is_some()) << 5
+                | u8::from(change.resume_window_ms.is_some()) << 6;
             b.put_u8(mask);
             b.put_u64_le(change.ack_timeout_ms.unwrap_or(0));
             b.put_u32_le(change.max_deliveries.unwrap_or(0));
@@ -1387,6 +1417,9 @@ fn change_bytes(change: &Change) -> Bytes {
             }
             if let Some(n) = change.priority_levels {
                 b.put_u8(n);
+            }
+            if let Some(ms) = change.resume_window_ms {
+                b.put_u64_le(ms);
             }
         }
         Change::AlterStream { resource_id, change } => {
@@ -1547,7 +1580,8 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let ack_timeout_ms = b.get_u64_le();
             let mut limits = get_limits(b)?;
             if b.has_remaining() {
-                (limits.single_active, limits.priority_levels) = get_flags(b)?;
+                let flags = get_flags(b)?;
+                (limits.single_active, limits.priority_levels, limits.resume_window_ms) = flags;
             }
             Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits }
         }
@@ -1581,6 +1615,12 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
                 priority_levels: if mask & 32 != 0 {
                     need(b, 1)?;
                     Some(b.get_u8())
+                } else {
+                    None
+                },
+                resume_window_ms: if mask & 64 != 0 {
+                    need(b, 8)?;
+                    Some(b.get_u64_le())
                 } else {
                     None
                 },
@@ -1735,27 +1775,33 @@ fn get_limits(b: &mut &[u8]) -> Result<QueueLimits, String> {
         dead_letter: b.get_u64_le(),
         single_active: false,
         priority_levels: 0,
+        resume_window_ms: 0,
     })
 }
 
 /// A queue's flags, written only when one is set: bit 0 single active
-/// consumer; bit 1 priority levels, whose count follows.
-fn put_flags(b: &mut BytesMut, single_active: bool, levels: u8) {
-    let flags = u8::from(single_active) | u8::from(levels != 0) << 1;
+/// consumer; bit 1 priority levels, whose count follows; bit 2 a resume
+/// window, whose ms follow (ADR 0109).
+fn put_flags(b: &mut BytesMut, l: &QueueLimits) {
+    let (levels, window) = (l.priority_levels, l.resume_window_ms);
+    let flags = u8::from(l.single_active) | u8::from(levels != 0) << 1 | u8::from(window != 0) << 2;
     if flags != 0 {
         b.put_u8(flags);
     }
     if levels != 0 {
         b.put_u8(levels);
     }
+    if window != 0 {
+        b.put_u64_le(window);
+    }
 }
 
 /// The flags [`put_flags`] writes; in an `AlterQueue` record only bit 0
 /// is ever set.
-fn get_flags(b: &mut &[u8]) -> Result<(bool, u8), String> {
+fn get_flags(b: &mut &[u8]) -> Result<(bool, u8, u64), String> {
     need(b, 1)?;
     let flags = b.get_u8();
-    if flags > 3 {
+    if flags > 7 {
         return Err("unknown queue flags".into());
     }
     let levels = if flags & 2 != 0 {
@@ -1764,7 +1810,13 @@ fn get_flags(b: &mut &[u8]) -> Result<(bool, u8), String> {
     } else {
         0
     };
-    Ok((flags & 1 != 0, levels))
+    let window = if flags & 4 != 0 {
+        need(b, 8)?;
+        b.get_u64_le()
+    } else {
+        0
+    };
+    Ok((flags & 1 != 0, levels, window))
 }
 
 fn need(b: &&[u8], n: usize) -> Result<(), String> {

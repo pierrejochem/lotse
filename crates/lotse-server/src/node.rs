@@ -871,6 +871,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let Around { links, shared, jobs, auth } = around;
     let mut next_tick = rt.now() + cfg.tick;
     let mut clients = Clients::default();
+    clients.random = Some(Box::new({
+        let rt = rt.clone();
+        move || rt.next_u64()
+    }));
     // The coordinator writes markers through the native protocol, like a client.
     let marker_client = Arc::new(lotse_client::Client::new(
         rt.clone(),
@@ -1541,6 +1545,10 @@ impl Known {
                 dead_letter: Some(q.limits.dead_letter).filter(|d| *d != 0),
                 single_active: q.limits.single_active,
                 priority_levels: q.limits.priority_levels,
+                resume_window: match q.limits.resume_window_ms {
+                    0 => QueueConfig::DEFAULT_RESUME_WINDOW,
+                    ms => Duration::from_millis(ms),
+                },
             });
         }
         for x in state.exchanges.values() {

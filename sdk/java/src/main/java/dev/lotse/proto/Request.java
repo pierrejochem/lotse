@@ -401,11 +401,23 @@ public sealed interface Request {
      * @param notifyActive asks for a push when the subscription becomes the queue's single active consumer; a tag
      */
     record Subscribe(
-            long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive, boolean notifyActive)
+            long queueId,
+            String consumerTag,
+            long creditMsgs,
+            long creditBytes,
+            boolean exclusive,
+            boolean notifyActive,
+            long resume)
             implements Request {
         /** Without asking to hear about becoming active. */
         public Subscribe(long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive) {
-            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, false);
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, false, 0);
+        }
+
+        /** A new consumer: resuming none. */
+        public Subscribe(
+                long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive, boolean notifyActive) {
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive, 0);
         }
 
         @Override
@@ -416,10 +428,19 @@ public sealed interface Request {
         @Override
         public void write(Writer w) {
             w.u64(queueId).string(consumerTag).u32(creditMsgs).u32(creditBytes).bool(exclusive);
+            List<Tag> tags = new java.util.ArrayList<>();
             if (notifyActive) {
-                w.tags(List.of(new Tag(Messages.TAG_NOTIFY_ACTIVE, ByteString.copyOf(new byte[] {1}))));
-            } else {
+                tags.add(new Tag(Messages.TAG_NOTIFY_ACTIVE, ByteString.copyOf(new byte[] {1})));
+            }
+            if (resume != 0) {
+                Writer v = new Writer();
+                v.u64(resume);
+                tags.add(new Tag(Messages.TAG_RESUME, ByteString.copyOf(v.toByteArray())));
+            }
+            if (tags.isEmpty()) {
                 w.noTags();
+            } else {
+                w.tags(tags);
             }
         }
 
@@ -430,14 +451,19 @@ public sealed interface Request {
             long bytes = r.u32();
             boolean exclusive = r.bool();
             boolean notify = false;
+            long resume = 0;
             for (Tag t : r.tags()) {
+                Reader vr = new Reader(t.value().toByteArray());
                 if (t.tag() == Messages.TAG_NOTIFY_ACTIVE) {
-                    Reader vr = new Reader(t.value().toByteArray());
                     notify = vr.u8() != 0;
-                    vr.finish();
+                } else if (t.tag() == Messages.TAG_RESUME) {
+                    resume = vr.u64();
+                } else {
+                    continue; // from a newer version: skipped
                 }
+                vr.finish();
             }
-            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify);
+            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume);
         }
     }
 

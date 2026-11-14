@@ -25,9 +25,9 @@
 //!   selects, a mandatory one that matches nothing is refused, and a queue
 //!   a partial publish reports as not written does not hold it.
 //!
-//! Delivery counts are not checked further here: they are written only on
-//! a requeue or an ack timeout, so after a failover a count may start over
-//! (the dispatcher's unit tests check counts).
+//! Delivery counts are not checked further under random faults; the
+//! deterministic failover scenario checks that they go on across a
+//! failover (ADR 0109), and the dispatcher's unit tests check them too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -902,7 +902,10 @@ async fn run_limits(rt: SimRuntime) {
         Client::new(rt.node("drainer"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
     let mut drained: BTreeMap<At, String> = BTreeMap::new();
     for queue in LIMITED {
-        let mut consumer = drainer.subscribe(queue, 50).await.expect("the healed cluster takes a subscription");
+        // Credit the drainer reads well within the ack timeout: a message
+        // left in its buffer past it times out, and one at its last
+        // delivery is then dead-lettered while the drainer still takes it.
+        let mut consumer = drainer.subscribe(queue, 10).await.expect("the healed cluster takes a subscription");
         let mut quiet_since = rt.now();
         while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
             let Some(m) = consumer.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
@@ -1104,6 +1107,109 @@ fn queue_acks_commit_and_abort_with_their_transaction() {
             assert!(fresh.next(ACK_TIMEOUT * 3).await.unwrap().is_none(), "the committed ack settled it");
             drop((fresh, audit));
             for (node, handle) in w.running.into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+/// The node that leads queue `name`, as the metadata says.
+async fn queue_leader(rt: &SimRuntime, c: &Client<SimRuntime>, name: &str) -> NodeId {
+    loop {
+        if let Ok(meta) = c.metadata(&[name]).await
+            && let Some(p) = meta.resources.iter().find(|r| r.name == name).and_then(|r| r.partitions.first())
+            && p.leader != 0
+        {
+            return NodeId::from(p.leader);
+        }
+        rt.sleep(TICK * 10).await;
+    }
+}
+
+/// ADR 0109: what a leader handed to a consumer is in the log, so after a
+/// failover the consumer keeps it and acks it in a transaction at the new
+/// leader, and a delivery count holds across leaders. A consumer that does
+/// not come back loses its message after the queue's resume window, to
+/// another consumer, with its count.
+#[test]
+fn a_transactional_ack_survives_a_failover() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            // An ack timeout longer than the failovers below: only the
+            // resume window gives a message back here.
+            let mut scenario = Scenario::classic();
+            for q in &mut scenario.queues {
+                q.ack_timeout = Duration::from_secs(120);
+            }
+            let mut w = World::new(rt.clone(), scenario).await;
+            let patient = || ClientConfig { retry_for: Duration::from_secs(20), ..client_config() };
+            let quiet = Client::new(rt.node("p"), patient());
+            quiet.produce("jobs", 0, message("first")).await.expect("written");
+            let tf = Client::new(
+                rt.node("t"),
+                ClientConfig { transactional_id: Some("tf".into()), txn_timeout: Duration::from_secs(30), ..patient() },
+            );
+            let mut jobs = tf.subscribe("jobs", 1).await.expect("subscribed");
+            let m = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            assert_eq!(m.delivery_count, 1);
+
+            // The leader goes after the delivery, before the ack.
+            let mut txn = tf.begin_transaction().await.expect("begun");
+            txn.produce("audit", 0, message("made of first")).await.expect("written");
+            let leader = queue_leader(&rt, &quiet, "jobs").await;
+            w.crash(leader, false).await;
+            jobs.ack_in(&mut txn, &m).await.expect("held at the new leader");
+            txn.commit().await.expect("committed");
+            w.start(leader).await;
+
+            let mut audit = quiet.subscribe("audit", 10).await.expect("subscribed");
+            let out = audit.next(Duration::from_secs(5)).await.unwrap().expect("the committed output");
+            assert_eq!(value_of(&out), "made of first");
+            assert!(audit.next(Duration::from_secs(1)).await.unwrap().is_none(), "written once");
+            drop(audit);
+
+            // A consumer cut off for good: its message waits for it at the
+            // new leader, then goes to another one with its count.
+            drop(jobs);
+            let gone = Client::new(rt.node("g"), patient());
+            let mut lost = gone.subscribe("jobs", 1).await.expect("subscribed");
+            quiet.produce("jobs", 0, message("second")).await.expect("written");
+            let second = lost.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            assert_eq!((value_of(&second), second.delivery_count), ("second".to_string(), 1));
+            for n in 1..=3 {
+                rt.net().block("g", &format!("n{n}"));
+            }
+            let leader = queue_leader(&rt, &quiet, "jobs").await;
+            w.crash(leader, false).await;
+            let other = Client::new(rt.node("o"), patient());
+            let mut theirs = other.subscribe("jobs", 1).await.expect("subscribed");
+            let t0 = rt.now();
+            let again = theirs.next(Duration::from_secs(60)).await.unwrap().expect("given back after the window");
+            assert_eq!((value_of(&again), again.offset()), ("second".to_string(), second.offset()));
+            let waited = rt.now() - t0;
+            assert!(waited >= QueueConfig::DEFAULT_RESUME_WINDOW / 2, "kept for its consumer a while: {waited:?}");
+            assert_eq!(again.delivery_count, 2, "the first delivery counts across leaders");
+            theirs.ack(&again).await.expect("acked");
+            drop(lost);
+            drop(gone);
+            w.start(leader).await;
+
+            // A requeue and a failover: the count still holds.
+            quiet.produce("jobs", 0, message("third")).await.expect("written");
+            let m = theirs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            theirs.nack(&m, true).await.expect("given back");
+            let m = theirs.next(Duration::from_secs(5)).await.unwrap().expect("delivered again");
+            assert_eq!(m.delivery_count, 2);
+            let leader = queue_leader(&rt, &quiet, "jobs").await;
+            w.crash(leader, false).await;
+            theirs.nack(&m, true).await.expect("given back at the new leader");
+            let m = theirs.next(Duration::from_secs(10)).await.unwrap().expect("delivered a third time");
+            assert_eq!(m.delivery_count, 3);
+            theirs.ack(&m).await.expect("acked");
+            drop(theirs);
+            w.start(leader).await;
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
                 handle.stop();
                 let _ = node.join().await;
             }

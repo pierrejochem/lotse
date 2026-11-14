@@ -59,7 +59,7 @@ try (Transaction txn = client.beginTransaction()) {
 
 Rules to know ([ADR 0075](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0075-queue-acks-in-transactions.md)):
 
-- Ack on the connection the message came on. A message that is not in flight with your subscription gets `MESSAGE_NOT_HELD`; abort.
+- Ack on the connection the message came on; the client does this for you. After a leader change it subscribes again as the same consumer and sends the ack there, so the transaction goes on. A message that is not in flight with your subscription gets `MESSAGE_NOT_HELD`; abort.
 - Of two transactions that ack the same message, the first in the log holds it; the other gets `MESSAGE_NOT_HELD`.
 - A held message is not ready: purge leaves it, and expiry and the delivery limit do not touch it.
 

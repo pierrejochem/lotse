@@ -783,3 +783,34 @@ fn moves_off_round_trip() {
         );
     }
 }
+
+#[test]
+fn resume_windows_are_set_and_changed_and_survive_a_snapshot() {
+    let mut s = MetadataState::default();
+    let all = QueueLimits { single_active: true, priority_levels: 4, resume_window_ms: 5_000, ..Default::default() };
+    let window = QueueLimits { resume_window_ms: 60_000, ..Default::default() };
+    for (i, l) in [all, window].into_iter().enumerate() {
+        let c = queue(&format!("q{i}"), "t", l);
+        assert_eq!(decode_change(&change_bytes(&c)).unwrap(), c);
+    }
+    let before = s.encode();
+    s.apply(1, &payload(&queue("q0", "t", all))).unwrap();
+    s.apply(2, &payload(&queue("q1", "t", window))).unwrap();
+    let (q0, q1) = (resource_id(1), resource_id(2));
+    assert_eq!((s.queues[&q0].limits, s.queues[&q1].limits), (all, window));
+    assert_eq!(MetadataState::decode(&before).unwrap(), MetadataState::default(), "without windows as before");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    let alter = |id, ms| Change::AlterQueue {
+        resource_id: id,
+        change: QueueChange { resume_window_ms: Some(ms), ..Default::default() },
+    };
+    assert_eq!(decode_change(&change_bytes(&alter(q1, 9))).unwrap(), alter(q1, 9));
+    s.apply(3, &payload(&alter(q1, 9))).unwrap();
+    s.apply(4, &payload(&alter(q0, 0))).unwrap();
+    assert_eq!(s.queues[&q1].limits.resume_window_ms, 9);
+    assert_eq!(s.queues[&q0].limits, QueueLimits { resume_window_ms: 0, ..all }, "0: back to the default");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    let mut cut = change_bytes(&queue("x", "t", window)).to_vec();
+    cut.pop();
+    assert!(decode_change(&cut).is_err(), "a window promised but cut short");
+}

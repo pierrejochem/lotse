@@ -22,12 +22,14 @@ namespace Lotse.Client;
 /// <see cref="SubscribeOptions.Credit"/> messages wait unprocessed on this side.
 /// </para>
 /// <para>
-/// When the subscription ends (the leader changed, the connection broke, or the consumer held a message longer than
-/// the queue's ack timeout) the leader gives its unacknowledged messages to other consumers, and the consumer
-/// subscribes again on its next read once it has handed out the messages it already holds. Those may meanwhile have
-/// gone to someone else, so a message can arrive more than once (<see cref="Delivery.DeliveryCount"/> then exceeds
-/// 1); it is not lost. Acknowledging a message that went to someone else still settles it: an ack names an offset,
-/// not a delivery.
+/// When the subscription ends the consumer subscribes again on its next read. The leader gave it a consumer id with its
+/// first subscription (ADR 0109), which it names when it subscribes again: after a failover or a broken connection the
+/// messages it holds are still its own at the new subscription, so it keeps the ones it has received, and acknowledges
+/// them, within a transaction too, through the new one. Only after the ack timeout, or when the consumer did not come
+/// back within the queue's resume window, did the leader give them to others; after the ack timeout the ones received
+/// are dropped. A message can so arrive more than once (<see cref="Delivery.DeliveryCount"/> then exceeds 1); it is
+/// not lost. Acknowledging a message that went to someone else still settles it: an ack names an offset, not a
+/// delivery.
 /// </para>
 /// <para>
 /// The reading methods are for one reader at a time. Acking, nacking and closing may be done from any task, also while
@@ -94,6 +96,21 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     private ulong _usedBytes; // guarded by _mu
     private bool _closed; // guarded by _mu
 
+    /// <summary>The id the leader gave this consumer, which it resumes with (ADR 0109); 0 until one is given.</summary>
+    private ulong _consumerId; // guarded by _mu
+
+    /// <summary>Requeues that missed a subscription because the leader moved or the connection broke.</summary>
+    private readonly List<(ulong Offset, uint DelayMs)> _unsent = new(); // guarded by _mu
+
+    /// <summary>The leader moved or the connection broke: a transactional ack is worth sending on a new subscription.</summary>
+    private sealed class ResendException : Exception
+    {
+        internal ResendException(string why)
+            : base(why)
+        {
+        }
+    }
+
     internal QueueConsumer(LotseClient client, string queue, int credit)
     {
         _client = client;
@@ -116,8 +133,10 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 return;
             }
         }
-        (Sub made, ulong resourceId) = await _client.RetryingAsync(() => SubscribeOnceAsync(ct), ct).ConfigureAwait(false);
+        (Sub made, ulong resourceId, ulong consumerId) =
+            await _client.RetryingAsync(() => SubscribeOnceAsync(ct), ct).ConfigureAwait(false);
         bool abandon;
+        var missed = new List<(ulong Offset, uint DelayMs)>();
         lock (_mu)
         {
             abandon = _closed;
@@ -125,9 +144,21 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             {
                 _sub = made;
                 _resourceId = resourceId;
+                if (consumerId != 0)
+                {
+                    _consumerId = consumerId;
+                }
                 _usedMsgs = 0;
                 _usedBytes = 0;
+                missed.AddRange(_unsent);
+                _unsent.Clear();
             }
+        }
+        // Requeues that missed the old subscription go on the new one, which took their messages back (ADR 0109).
+        foreach ((ulong offset, uint delayMs) in missed)
+        {
+            await SendQuietlyAsync(made.Conn, new Request.Nack(resourceId, OffsetRanges.Of(new[] { offset }), true, delayMs, made.Id))
+                .ConfigureAwait(false);
         }
         if (abandon)
         {
@@ -138,7 +169,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
     }
 
-    private async Task<(Sub, ulong)> SubscribeOnceAsync(CancellationToken ct)
+    private async Task<(Sub, ulong, ulong)> SubscribeOnceAsync(CancellationToken ct)
     {
         LotseClient.Routed routed = await _client.RouteAsync(_queue, 0, ct).ConfigureAwait(false);
         Connection conn;
@@ -150,8 +181,14 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         {
             throw e.ToAttempt();
         }
-        // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076).
-        var request = new Request.Subscribe(routed.Route.ResourceId, string.Empty, (uint)_credit, U32Max, false, true);
+        ulong resume;
+        lock (_mu)
+        {
+            resume = _consumerId;
+        }
+        // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076), and resumes
+        // as the consumer it was (ADR 0109).
+        var request = new Request.Subscribe(routed.Route.ResourceId, string.Empty, (uint)_credit, U32Max, false, true, resume);
         Response response;
         try
         {
@@ -186,7 +223,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             {
                 throw Attempt.Retry("the connection broke");
             }
-            return (made, routed.Route.ResourceId);
+            return (made, routed.Route.ResourceId, s.ConsumerId);
         }
         if (code.Retriable)
         {
@@ -322,7 +359,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
         if (ev is ConnectionException)
         {
-            Ended(from);
+            Ended(from, resumable: true);
             return;
         }
         var push = (Frames.DeliverPush)ev;
@@ -336,7 +373,8 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             {
                 _client.Forget(_queue, 0);
             }
-            Ended(from);
+            // A failover leaves this consumer its messages; the ack timeout, or a queue that is gone, does not.
+            Ended(from, resumable: push.Error.Equals(ErrorCode.NotLeader));
             return;
         }
         // Its turn as the single active consumer, or messages, which come to the active consumer only.
@@ -345,6 +383,38 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         {
             return;
         }
+        List<Delivery> received = DeliveriesOf(from, push);
+        Request? giveBack = null;
+        lock (_mu)
+        {
+            if (!ReferenceEquals(_sub, from))
+            {
+                // Closed while this push was being read: close could not know about it, so give its messages back here.
+                if (_closed && push.Deliveries.Count > 0)
+                {
+                    // Named (ADR 0106): a newer subscription on the connection keeps what it received since.
+                    giveBack = new Request.Nack(
+                        _resourceId, OffsetRanges.Of(push.Deliveries.Select(d => d.Offset).ToList()), true, 0, from.Id);
+                }
+            }
+            else
+            {
+                foreach (Delivery d in received)
+                {
+                    _buffered.Enqueue(d);
+                }
+                _usedBytes = Math.Min(U32Max, _usedBytes + (ulong)push.Batch.Size);
+            }
+        }
+        if (giveBack is not null)
+        {
+            _ = SendQuietlyAsync(from.Conn, giveBack);
+        }
+    }
+
+    /// <summary>The messages of a delivery push that are <paramref name="from"/>'s.</summary>
+    private static List<Delivery> DeliveriesOf(Sub from, Frames.DeliverPush push)
+    {
         List<BatchRecord> records;
         try
         {
@@ -365,42 +435,23 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         {
             mine[d.Offset] = d.DeliveryCount;
         }
-        Request? giveBack = null;
-        lock (_mu)
+        var output = new List<Delivery>();
+        foreach (BatchRecord r in records)
         {
-            if (!ReferenceEquals(_sub, from))
+            if (mine.TryGetValue(r.Offset, out int count))
             {
-                // Closed while this push was being read: close could not know about it, so give its messages back here.
-                if (_closed && push.Deliveries.Count > 0)
-                {
-                    // Named (ADR 0106): a newer subscription on the connection keeps what it received since.
-                    giveBack = new Request.Nack(
-                        _resourceId, OffsetRanges.Of(push.Deliveries.Select(d => d.Offset).ToList()), true, 0, from.Id);
-                }
-            }
-            else
-            {
-                foreach (BatchRecord r in records)
-                {
-                    if (mine.TryGetValue(r.Offset, out int count))
-                    {
-                        _buffered.Enqueue(new Delivery(r, count, from));
-                    }
-                }
-                _usedBytes = Math.Min(U32Max, _usedBytes + (ulong)push.Batch.Size);
+                output.Add(new Delivery(r, count, from));
             }
         }
-        if (giveBack is not null)
-        {
-            _ = SendQuietlyAsync(from.Conn, giveBack);
-        }
+        return output;
     }
 
     /// <summary>
-    /// The subscription is over. Called only when nothing is buffered (the buffer is read before the events), so the
-    /// clearing is for a consumer closed meanwhile.
+    /// The subscription is over. If the leader gave this consumer an id and it ended for a failover or a broken
+    /// connection (<paramref name="resumable"/>), its messages are still its own when it subscribes again (ADR 0109):
+    /// those received stay, with those pushed and not read yet. Otherwise they went to others and are dropped.
     /// </summary>
-    private void Ended(Sub which)
+    private void Ended(Sub which, bool resumable)
     {
         lock (_mu)
         {
@@ -409,10 +460,34 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 return;
             }
             _sub = null;
-            _buffered.Clear();
+            if (!resumable || _consumerId == 0)
+            {
+                _buffered.Clear();
+            }
+            else
+            {
+                while (which.Events.TryRead(out object? ev))
+                {
+                    if (ev is Frames.DeliverPush { Error.IsOk: true } p && !p.IsActivation)
+                    {
+                        foreach (Delivery d in DeliveriesOf(which, p))
+                        {
+                            _buffered.Enqueue(d);
+                        }
+                    }
+                }
+            }
         }
         which.Conn.Unregister(which.Id);
     }
+
+    /// <summary>
+    /// The subscription to send a nack or a transactional ack of <paramref name="d"/> on: its own, or, once the leader
+    /// gave this consumer an id, the current one, which took back what earlier ones held (ADR 0109); called with the
+    /// lock held.
+    /// </summary>
+    private Sub? SubFor(Delivery d) =>
+        _sub is not null && (ReferenceEquals(d.Subscription, _sub) || _consumerId != 0) ? _sub : null;
 
     /// <summary>The request that adds credit once half of it is used up, or <c>null</c>; called with the lock held.</summary>
     private Request? Refill()
@@ -455,9 +530,10 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// <summary>
     /// Acknowledges a message within a transaction (ADR 0075): the queue joins the transaction, the leader takes the
     /// message out of flight, and the transaction holds it. The commit settles it; an abort gives it back. This goes over
-    /// the subscription's own connection, since only the connection that holds a message can ack it so, so only a
-    /// message of the current subscription can be acknowledged this way. Any error leaves the transaction to be aborted.
-    /// <c>MESSAGE_NOT_HELD</c> means the message has gone back, or another transaction holds it.
+    /// the subscription's own connection, since only the connection that holds a message can ack it so. If the leader
+    /// changed or the connection broke, the consumer subscribes again, naming its id, and sends it on the new
+    /// subscription, which holds the message still (ADR 0109). Any error leaves the transaction to be aborted.
+    /// <c>MESSAGE_NOT_HELD</c> means the message has gone to someone else, or another transaction holds it.
     /// </summary>
     /// <exception cref="BrokerErrorException">With <c>MESSAGE_NOT_HELD</c> or another refusal.</exception>
     public async Task AckInAsync(Transaction txn, Delivery delivery, CancellationToken cancellationToken = default)
@@ -467,7 +543,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         await txn.AddAsync(_queue, 0, cancellationToken).ConfigureAwait(false);
         try
         {
-            await AckInOnceAsync(txn, delivery, cancellationToken).ConfigureAwait(false);
+            await AckInResumingAsync(txn, delivery, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception e) when (e is ClientException or OperationCanceledException or ObjectDisposedException)
         {
@@ -476,54 +552,89 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
     }
 
-    private async Task AckInOnceAsync(Transaction txn, Delivery delivery, CancellationToken ct)
+    private async Task AckInResumingAsync(Transaction txn, Delivery delivery, CancellationToken ct)
     {
-        Sub? on;
-        ulong queueId;
-        lock (_mu)
+        var clock = Stopwatch.StartNew();
+        while (true)
         {
-            on = _sub;
-            queueId = _resourceId;
+            bool resubscribe;
+            lock (_mu)
+            {
+                resubscribe = _sub is null && _consumerId != 0;
+            }
+            if (resubscribe)
+            {
+                await EnsureSubscribedAsync(ct).ConfigureAwait(false);
+            }
+            Sub? on;
+            ulong queueId;
+            bool resumable;
+            lock (_mu)
+            {
+                // Without an id the message is held only on its subscription's connection, gone if this is another.
+                on = SubFor(delivery);
+                queueId = _resourceId;
+                resumable = _consumerId != 0;
+            }
+            if (on is null)
+            {
+                throw new BrokerErrorException(ErrorCode.MessageNotHeld, "the subscription ended; the message went back");
+            }
+            try
+            {
+                await AckInOnceAsync(on, queueId, txn, delivery, ct).ConfigureAwait(false);
+                return;
+            }
+            catch (ResendException e)
+            {
+                if (!resumable || clock.Elapsed >= _client.Config.RetryFor)
+                {
+                    throw new BrokerErrorException(ErrorCode.MessageNotHeld, e.Message);
+                }
+                // Subscribe again, as this consumer, and send it there (the connection is shared: only the
+                // subscription goes).
+                _client.Forget(_queue, 0);
+                Ended(on, resumable: true);
+            }
         }
-        // The messages are the subscription's connection's: on another one they are not held.
-        if (on is null)
-        {
-            throw new BrokerErrorException(ErrorCode.MessageNotHeld, "the subscription ended; the message went back");
-        }
+    }
+
+    private async Task AckInOnceAsync(Sub on, ulong queueId, Transaction txn, Delivery delivery, CancellationToken ct)
+    {
         var req = new Request.Ack(
             queueId, txn.TxnId, OffsetRanges.Of(new[] { delivery.Offset }), _client.Config.Tenant, txn.ProducerId, txn.Epoch);
-        await _client.RetryingAsync(
-            async () =>
+        int lost = 0;
+        while (true)
+        {
+            Response resp;
+            try
             {
-                Response resp;
-                try
+                resp = await _client.CallOnAsync(on.Conn, req, ct).ConfigureAwait(false);
+            }
+            catch (CallFailure e)
+            {
+                // Sent again on the same connection first: the leader takes a retry for what the transaction holds.
+                if (e.Outcome == CallFailure.Kind.Lost && lost < 2)
                 {
-                    resp = await _client.CallOnAsync(on.Conn, req, ct).ConfigureAwait(false);
+                    lost++;
+                    continue;
                 }
-                catch (CallFailure e)
+                throw new ResendException(e.Describe());
+            }
+            if (resp is Response.Outcome o)
+            {
+                if (o.Error.IsOk)
                 {
-                    switch (e.Outcome)
-                    {
-                        // Sent again on the same connection: the leader takes a retry for what the transaction holds.
-                        case CallFailure.Kind.Lost:
-                            throw Attempt.RetryMaybeDone(e.Message);
-                        case CallFailure.Kind.NotSent:
-                            throw Attempt.Fail(new BrokerErrorException(ErrorCode.MessageNotHeld, "the connection broke; the message went back"));
-                        default:
-                            throw e.ToAttempt();
-                    }
+                    return;
                 }
-                if (resp is Response.Outcome o)
+                if (o.Error.Retriable)
                 {
-                    if (o.Error.IsOk)
-                    {
-                        return 0;
-                    }
-                    throw Attempt.Fail(new BrokerErrorException(o.Error, null));
+                    throw new ResendException(o.Error.ToString());
                 }
-                throw Attempt.RetryMaybeDone("unexpected response " + resp);
-            },
-            ct).ConfigureAwait(false);
+                throw new BrokerErrorException(o.Error, null);
+            }
+            throw new ResendException("unexpected response " + resp);
+        }
     }
 
     /// <summary>
@@ -565,7 +676,8 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// Gives a message back to be delivered again, to any consumer, once <paramref name="delay"/> has passed (ADR 0077):
     /// a retry with backoff. Rounded down to whole milliseconds, at most about 49 days; a delay of 0 is
     /// <see cref="NackAsync(Delivery, bool, CancellationToken)"/> with requeue. If the subscription has ended, the
-    /// message went back with it, without a delay.
+    /// message went back with it, without a delay; or it waits at the new leader for this consumer, which gives it back
+    /// once it has subscribed again (ADR 0109).
     /// </summary>
     public Task NackAfterAsync(Delivery delivery, TimeSpan delay, CancellationToken cancellationToken = default)
     {
@@ -576,45 +688,67 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
 
     private async Task RequeueAsync(IReadOnlyCollection<Delivery> deliveries, uint delayMs, CancellationToken ct)
     {
-        // Only the subscription's connection can give a message back; if it is gone, so is the message (it went back
-        // with the subscription). A message of an earlier subscription is gone with it.
+        // Only the subscription's connection can give a message back. Without an id a message of an earlier
+        // subscription went back with it; with one, the current subscription took it back (ADR 0109).
         Sub? on;
         ulong queueId;
+        bool resumable;
+        var held = new List<Delivery>();
         lock (_mu)
         {
             on = _sub;
             queueId = _resourceId;
-        }
-        if (on is null)
-        {
-            return;
-        }
-        var held = new List<Delivery>();
-        foreach (Delivery d in deliveries)
-        {
-            if (ReferenceEquals(d.Subscription, on))
+            resumable = _consumerId != 0;
+            foreach (Delivery d in deliveries)
             {
-                held.Add(d);
+                if (SubFor(d) is not null)
+                {
+                    held.Add(d);
+                }
+            }
+            if (on is null && resumable)
+            {
+                // Between subscriptions: the next one gives them back.
+                foreach (Delivery d in deliveries)
+                {
+                    _unsent.Add((d.Offset, delayMs));
+                }
+                return;
             }
         }
-        if (held.Count == 0)
+        if (on is null || held.Count == 0)
         {
             return;
         }
         var request = new Request.Nack(queueId, OffsetRanges.Of(Offsets(held)), true, delayMs, on.Id);
-        Response response;
+        Response? response;
         try
         {
             response = await _client.CallOnAsync(on.Conn, request, ct).ConfigureAwait(false);
         }
         catch (CallFailure)
         {
-            // Not done (no leader, broken connection): the subscription ends with it and the message goes back anyway.
+            response = null;
+        }
+        if (response is Response.Outcome { Error.IsOk: true })
+        {
             return;
         }
-        if (response is Response.Outcome o && !o.Error.IsOk && !o.Error.Retriable)
+        if (response is Response.Outcome o && !o.Error.Retriable)
         {
             throw new BrokerErrorException(o.Error, null);
+        }
+        // Not done (no leader, broken connection): the subscription ends with it. Without an id the message goes back
+        // with it; with one it stays this consumer's, and the next subscription gives it back.
+        if (resumable)
+        {
+            lock (_mu)
+            {
+                foreach (Delivery d in held)
+                {
+                    _unsent.Add((d.Offset, delayMs));
+                }
+            }
         }
     }
 
@@ -675,68 +809,94 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// Ends the subscription. Messages handed out stay with this consumer until acknowledged (or until this client's
     /// connection closes); the ones not handed out yet go back to the queue. A task waiting for a message gets an
     /// <see cref="ObjectDisposedException"/>. This does not wait for the broker; <see cref="DisposeAsync"/> waits until
-    /// the requests are written.
+    /// the subscription has ended and what goes back is sent.
     /// </summary>
     public void Dispose()
     {
-        (Sub? ending, List<Request> requests) = BeginClose();
+        (Sub? ending, List<ulong> back, ulong queueId) = BeginClose();
         if (ending is not null)
         {
-            _ = SendAllQuietlyAsync(ending.Conn, requests);
+            _ = FinishCloseAsync(ending, back, queueId);
         }
     }
 
-    /// <summary>Like <see cref="Dispose"/>, and completes once the requests that end the subscription are written.</summary>
+    /// <summary>Like <see cref="Dispose"/>, and completes once the subscription has ended and what goes back is sent.</summary>
     public async ValueTask DisposeAsync()
     {
-        (Sub? ending, List<Request> requests) = BeginClose();
+        (Sub? ending, List<ulong> back, ulong queueId) = BeginClose();
         if (ending is not null)
         {
-            await SendAllQuietlyAsync(ending.Conn, requests).ConfigureAwait(false);
+            await FinishCloseAsync(ending, back, queueId).ConfigureAwait(false);
         }
     }
 
-    private (Sub?, List<Request>) BeginClose()
+    private (Sub?, List<ulong>, ulong) BeginClose()
     {
         Sub? ending;
-        var requests = new List<Request>();
+        List<ulong> back;
+        ulong queueId;
         lock (_mu)
         {
             if (_closed)
             {
-                return (null, requests);
+                return (null, new List<ulong>(), 0);
             }
             _closed = true;
             ending = _sub;
             _sub = null;
-            if (ending is not null)
-            {
-                requests.Add(new Request.Unsubscribe(ending.Id));
-                // What was handed out stays with the consumer. What it holds, and what was pushed and not read yet (the
-                // events are read only once the buffer is empty), goes back; the broker keeps the messages of a
-                // subscription that is ending until they are settled, so they would otherwise wait for the ack timeout.
-                List<ulong> back = Offsets(_buffered);
-                while (ending.Events.TryRead(out object? ev))
-                {
-                    if (ev is Frames.DeliverPush { Error.IsOk: true } p)
-                    {
-                        back.AddRange(p.Deliveries.Select(d => d.Offset));
-                    }
-                }
-                if (back.Count > 0)
-                {
-                    // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
-                    requests.Add(new Request.Nack(_resourceId, OffsetRanges.Of(back), true, 0, ending.Id));
-                }
-            }
+            queueId = _resourceId;
+            // What was handed out stays with the consumer; what it holds goes back.
+            back = Offsets(_buffered);
             _buffered.Clear();
         }
-        if (ending is not null)
+        return (ending, back, queueId);
+    }
+
+    /// <summary>
+    /// Unsubscribes, waits for the answer, then gives back what was received and not handed out. Pushes and answers
+    /// come in order on the connection, so every push the leader sent before it took the unsubscribe has arrived by
+    /// then (the leader writes a checkout before it pushes, ADR 0109, so one may still be on its way); the broker
+    /// keeps the messages of a subscription that is ending until they are settled, so they would otherwise wait for the
+    /// ack timeout.
+    /// </summary>
+    private async Task FinishCloseAsync(Sub ending, List<ulong> back, ulong queueId)
+    {
+        var unread = new List<object>();
+        while (ending.Events.TryRead(out object? ev))
         {
-            ending.Conn.Unregister(ending.Id);
-            ending.Add(ClosedEvent);
+            unread.Add(ev);
         }
-        return (ending, requests);
+        // A task waiting for a message wakes and sees the consumer closed.
+        ending.Add(ClosedEvent);
+        using (var timeout = new CancellationTokenSource(_client.RequestTimeout))
+        {
+            try
+            {
+                await _client.CallOnAsync(ending.Conn, new Request.Unsubscribe(ending.Id), timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is CallFailure or OperationCanceledException)
+            {
+                // the subscription ends with the connection
+            }
+        }
+        ending.Conn.Unregister(ending.Id);
+        while (ending.Events.TryRead(out object? ev))
+        {
+            unread.Add(ev);
+        }
+        foreach (object ev in unread)
+        {
+            if (ev is Frames.DeliverPush { Error.IsOk: true } p)
+            {
+                back.AddRange(p.Deliveries.Select(d => d.Offset));
+            }
+        }
+        if (back.Count > 0)
+        {
+            // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+            await SendQuietlyAsync(ending.Conn, new Request.Nack(queueId, OffsetRanges.Of(back), true, 0, ending.Id))
+                .ConfigureAwait(false);
+        }
     }
 
     private void CheckOpen()
@@ -744,14 +904,6 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         if (_closed)
         {
             throw new ObjectDisposedException(nameof(QueueConsumer), "the consumer is closed");
-        }
-    }
-
-    private async Task SendAllQuietlyAsync(Connection conn, List<Request> requests)
-    {
-        foreach (Request r in requests)
-        {
-            await SendQuietlyAsync(conn, r).ConfigureAwait(false);
         }
     }
 

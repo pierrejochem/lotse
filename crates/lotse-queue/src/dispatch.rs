@@ -7,15 +7,24 @@
 //! Released messages are delivered again before new ones, lowest offset
 //! first, so a message keeps its place.
 //!
-//! A nack with requeue and an ack timeout persist the delivery count before
-//! the message goes out again: [`Dispatcher::take`] and
+//! Every delivery's count is in the log before the message goes out: the
+//! caller writes a CHECKOUT batch for what [`Dispatcher::assign`] hands out
+//! and pushes once it is committed (ADR 0109), so a count is always the
+//! persisted one plus this delivery. A nack with requeue and an ack timeout
+//! write that the message is back (a QUEUE_STATE batch with its count)
+//! before it goes out again: [`Dispatcher::take`] and
 //! [`Dispatcher::timed_out`] hold the messages back, and the caller releases
-//! them once the count is committed. After a disconnect the count is only
-//! kept in memory.
+//! them once that is committed. After a disconnect a message goes out again
+//! at once; its next checkout replaces the old one.
 //!
-//! None of this is replicated: after a failover the new leader starts with
-//! an empty dispatcher and delivers every unsettled message again. That is
-//! correct because only committed acks settle a message. A subscription
+//! Who holds what is also in the log (ADR 0109): the leader writes a
+//! CHECKOUT batch naming the consumer before it hands messages out. A new
+//! leader [adopts](Dispatcher::adopt) those as **waiting** for their
+//! consumer: not delivered to anyone else, until the consumer subscribes
+//! again with its id and [resumes](Dispatcher::resume) them, or the resume
+//! window ends, or their ack timeout does, when they are held back as below
+//! and go out again. Everything else starts afresh with a new leader; that
+//! is correct because only committed acks settle a message. A subscription
 //! whose oldest message in flight is older than the ack timeout is ended and
 //! its messages are held back as above (RabbitMQ's consumer timeout).
 //!
@@ -61,6 +70,8 @@ pub type ConnId = u64;
 #[derive(Debug, Clone)]
 struct Subscription {
     conn: ConnId,
+    /// The consumer's id, which outlives the subscription (ADR 0109).
+    consumer: u64,
     credit_msgs: u32,
     credit_bytes: u32,
     /// Unsubscribed: no new deliveries; gone once nothing is in flight.
@@ -76,6 +87,15 @@ struct InFlight {
     at: Instant,
 }
 
+/// A message an earlier leader handed to a consumer that has not
+/// subscribed again yet.
+#[derive(Debug, Clone, Copy)]
+struct Waiting {
+    consumer: u64,
+    /// When it was handed out, on this leader's clock.
+    at: Instant,
+}
+
 /// See the module docs.
 #[derive(Debug, Clone)]
 pub struct Dispatcher {
@@ -83,8 +103,6 @@ pub struct Dispatcher {
     in_flight: BTreeMap<u64, InFlight>,
     /// Released, to be delivered again before anything new.
     redeliver: BTreeSet<u64>,
-    /// Deliveries since the persisted count (redeliveries after disconnect).
-    extra: BTreeMap<u64, u16>,
     /// Offsets below this were handed out at least once by this leader.
     cursor: u64,
     /// Where the next round of assignment starts, for fairness.
@@ -103,6 +121,10 @@ pub struct Dispatcher {
     next_order: u64,
     /// Messages that wait, and until when (ms since the epoch).
     deferred: BTreeMap<u64, i64>,
+    /// Messages an earlier leader handed out, waiting for their consumer.
+    waiting: BTreeMap<u64, Waiting>,
+    /// When this dispatcher adopted them: the resume window starts then.
+    adopted: Option<Instant>,
     /// Unsettled messages above level 0, and their levels.
     levels: BTreeMap<u64, u8>,
     /// The same, highest level first: `(u8::MAX - level, offset)`.
@@ -134,7 +156,6 @@ impl Dispatcher {
             subs: BTreeMap::new(),
             in_flight: BTreeMap::new(),
             redeliver: BTreeSet::new(),
-            extra: BTreeMap::new(),
             cursor: queue.floor(),
             rotate: 0,
             held: BTreeMap::new(),
@@ -144,16 +165,91 @@ impl Dispatcher {
             activated: Vec::new(),
             next_order: 0,
             deferred: BTreeMap::new(),
+            waiting: BTreeMap::new(),
+            adopted: None,
             levels: BTreeMap::new(),
             ranked: BTreeSet::new(),
         }
     }
 
-    /// Adds subscription `id` with an initial credit window.
-    pub fn subscribe(&mut self, id: SubscriptionId, conn: ConnId, credit_msgs: u32, credit_bytes: u32) {
+    /// Takes over what the log says is out with consumers (ADR 0109): those
+    /// messages wait for their consumer to subscribe again. `now_ms` is the
+    /// time on the clock the checkouts were written with (ms since the
+    /// epoch), so that each keeps its age for the ack timeout.
+    pub fn adopt(&mut self, queue: &QueueLog, now: Instant, now_ms: i64) {
+        for (offset, c) in queue.checkouts() {
+            let age = Duration::from_millis(u64::try_from(now_ms.saturating_sub(c.at_ms)).unwrap_or(0));
+            let at = Instant::from_nanos(now.as_nanos().saturating_sub(age.as_nanos() as u64));
+            self.waiting.insert(offset, Waiting { consumer: c.consumer, at });
+        }
+        self.adopted = Some(now);
+    }
+
+    /// Adds subscription `id` of consumer `consumer` with an initial credit
+    /// window.
+    pub fn subscribe(&mut self, id: SubscriptionId, conn: ConnId, consumer: u64, credit_msgs: u32, credit_bytes: u32) {
         let order = self.next_order;
         self.next_order += 1;
-        self.subs.insert(id, Subscription { conn, credit_msgs, credit_bytes, closing: false, order });
+        self.subs.insert(id, Subscription { conn, consumer, credit_msgs, credit_bytes, closing: false, order });
+    }
+
+    /// Subscription `id` takes back what waits for its consumer: those
+    /// messages are in flight with it from now on, keeping their age, and
+    /// its connection may ack them in a transaction. With a single active
+    /// consumer, one that holds messages becomes active if no one is and
+    /// nothing else is out: it was the active one. Messages that wait for
+    /// another consumer keep it a standby, since a connection that went
+    /// without writing to the log leaves its checkouts behind, and those
+    /// come back older than what an active one would get next. Returns how
+    /// many it took.
+    pub fn resume(&mut self, id: SubscriptionId) -> usize {
+        let Some(consumer) = self.subs.get(&id).map(|s| s.consumer) else { return 0 };
+        let mine: Vec<(u64, Instant)> =
+            self.waiting.iter().filter(|(_, w)| w.consumer == consumer).map(|(o, w)| (*o, w.at)).collect();
+        for &(o, at) in &mine {
+            self.waiting.remove(&o);
+            self.in_flight.insert(o, InFlight { sub: id, at });
+        }
+        let alone = self.waiting.is_empty()
+            && self.in_flight.values().all(|f| f.sub == id)
+            && self.out.is_empty()
+            && self.held.is_empty();
+        if !mine.is_empty() && self.single_active && self.active.is_none() && alone {
+            self.active = Some(id);
+            self.activated.push(id);
+        }
+        mine.len()
+    }
+
+    /// Whether subscription `id` is there and takes deliveries: not ended
+    /// and not unsubscribed.
+    pub fn is_open(&self, id: SubscriptionId) -> bool {
+        self.subs.get(&id).is_some_and(|s| !s.closing)
+    }
+
+    /// The consumer of subscription `id`.
+    pub fn consumer_of(&self, id: SubscriptionId) -> Option<u64> {
+        self.subs.get(&id).map(|s| s.consumer)
+    }
+
+    /// Messages that waited for their consumer in vain: the resume window
+    /// since [`Dispatcher::adopt`] is over, or their ack timeout is. They
+    /// are held back like timed-out ones until the caller has persisted
+    /// their counts and releases them.
+    pub fn unclaimed(&mut self, now: Instant, window: Duration, timeout: Duration) -> Vec<u64> {
+        let over = self.adopted.is_some_and(|a| now - a >= window);
+        let gone: Vec<u64> =
+            self.waiting.iter().filter(|(_, w)| over || now - w.at >= timeout).map(|(o, _)| *o).collect();
+        for o in &gone {
+            self.waiting.remove(o);
+            self.out.insert(*o);
+        }
+        gone
+    }
+
+    /// Whether `offset` waits for the consumer an earlier leader handed it to.
+    pub fn is_waiting(&self, offset: u64) -> bool {
+        self.waiting.contains_key(&offset)
     }
 
     /// Turns single active consumer on or off (ADR 0076). Turned on, no one
@@ -193,7 +289,11 @@ impl Dispatcher {
             self.active = None;
         }
         // The queue's count covers transactions an earlier leader saw.
-        let nothing_out = self.in_flight.is_empty() && self.out.is_empty() && self.held.is_empty() && queue.held() == 0;
+        let nothing_out = self.in_flight.is_empty()
+            && self.waiting.is_empty()
+            && self.out.is_empty()
+            && self.held.is_empty()
+            && queue.held() == 0;
         if self.active.is_none() && nothing_out {
             self.active = self.subs.iter().filter(|(_, s)| !s.closing).min_by_key(|(_, s)| s.order).map(|(id, _)| *id);
             self.activated.extend(self.active);
@@ -239,7 +339,6 @@ impl Dispatcher {
         for o in &mine {
             self.in_flight.remove(o);
             self.redeliver.insert(*o);
-            *self.extra.entry(*o).or_insert(0) += 1;
         }
         mine
     }
@@ -261,11 +360,24 @@ impl Dispatcher {
         taken
     }
 
+    /// Releases those of `offsets` that are still in flight with `id`, for
+    /// delivery again: what was handed to it but never reached it (its
+    /// checkout was not written, or it ended or unsubscribed first, ADR
+    /// 0109). One that went back and out to another since stays there.
+    pub fn release_from(&mut self, id: SubscriptionId, offsets: impl IntoIterator<Item = u64>) {
+        for o in offsets {
+            if self.in_flight.get(&o).is_some_and(|f| f.sub == id) {
+                self.in_flight.remove(&o);
+                self.redeliver.insert(o);
+            }
+        }
+        self.drop_finished();
+    }
+
     /// Releases messages for delivery again, once the caller has persisted
-    /// their counts (so no extra count is kept here).
+    /// their counts.
     pub fn release(&mut self, offsets: impl IntoIterator<Item = u64>) {
         for o in offsets {
-            self.extra.remove(&o);
             self.held.remove(&o);
             self.out.remove(&o);
             if self.in_flight.remove(&o).is_some() || o < self.cursor {
@@ -307,8 +419,9 @@ impl Dispatcher {
     /// connection or leader), and subscriptions that are done.
     pub fn sweep(&mut self, queue: &QueueLog) {
         self.in_flight.retain(|o, _| !queue.is_settled(*o));
+        // Settled, or a transaction holds it now: no one waits for it.
+        self.waiting.retain(|o, _| !queue.is_settled(*o) && queue.held_by(*o).is_none());
         self.redeliver.retain(|o| !queue.is_settled(*o));
-        self.extra.retain(|o, _| !queue.is_settled(*o));
         self.deferred.retain(|o, _| !queue.is_settled(*o));
         let settled: Vec<(u64, u8)> =
             self.levels.iter().filter(|(o, _)| queue.is_settled(**o)).map(|(o, l)| (*o, *l)).collect();
@@ -338,7 +451,6 @@ impl Dispatcher {
         });
         for o in back {
             self.redeliver.insert(o);
-            *self.extra.entry(o).or_insert(0) += 1;
         }
         self.drop_finished();
     }
@@ -420,6 +532,7 @@ impl Dispatcher {
                 && !self.held.contains_key(o)
                 && !self.deferred.contains_key(o)
                 && !self.out.contains(o)
+                && !self.waiting.contains_key(o)
                 && !queue.is_settled(*o)
         };
         let first: Vec<u64> = self.ranked.iter().map(|(_, o)| *o).filter(|o| ready(o)).take(max).collect();
@@ -440,6 +553,8 @@ impl Dispatcher {
                 self.held.insert(o, Hold { producer, applied: true });
             }
             let free = !self.in_flight.contains_key(&o)
+                && !self.waiting.contains_key(&o)
+                && !self.out.contains(&o)
                 && !self.redeliver.contains(&o)
                 && !self.held.contains_key(&o)
                 && !self.deferred.contains_key(&o)
@@ -488,13 +603,15 @@ impl Dispatcher {
             let mut deliveries = Vec::with_capacity(n);
             for &o in mine {
                 self.in_flight.insert(o, InFlight { sub: id, at: now });
-                self.redeliver.remove(&o);
-                // Level-0 messages a higher one overtook are still to come.
-                if !self.levels.contains_key(&o) {
+                // Only a message found new moves the cursor: what goes out
+                // again may lie beyond it (one an earlier leader handed out,
+                // ADR 0109), and the messages before it are still to come.
+                // So are level-0 messages a higher one overtook.
+                let again = self.redeliver.remove(&o);
+                if !again && !self.levels.contains_key(&o) {
                     self.cursor = self.cursor.max(o + 1);
                 }
-                let count =
-                    queue.delivery_count(o).saturating_add(self.extra.get(&o).copied().unwrap_or(0)).saturating_add(1);
+                let count = queue.delivery_count(o).saturating_add(1);
                 deliveries.push(Delivery { offset: o, delivery_count: count });
             }
             out.push((id, deliveries));
@@ -530,20 +647,10 @@ impl Dispatcher {
             .collect()
     }
 
-    /// The count to persist for a message held back: its deliveries so far.
+    /// The count to persist for a message held back: its deliveries so
+    /// far, each of which its checkout wrote (ADR 0109).
     pub fn count_to_persist(&self, queue: &QueueLog, offset: u64) -> u16 {
-        queue.delivery_count(offset).saturating_add(self.extra.get(&offset).copied().unwrap_or(0)).saturating_add(1)
-    }
-
-    /// Deliveries of `offset` since its persisted count: redeliveries after
-    /// a disconnect, kept in memory only.
-    pub fn extra_of(&self, offset: u64) -> u16 {
-        self.extra.get(&offset).copied().unwrap_or(0)
-    }
-
-    /// Offsets with deliveries not yet persisted.
-    pub fn extra_offsets(&self) -> impl Iterator<Item = u64> + '_ {
-        self.extra.keys().copied()
+        queue.delivery_count(offset)
     }
 
     /// The messages in flight with `id`.
@@ -556,9 +663,21 @@ impl Dispatcher {
         self.held.contains_key(&offset)
     }
 
-    /// Whether `offset` is with a consumer: in flight or held.
+    /// Whether `offset` is with a consumer as far as `dispatcher` knows, or,
+    /// before it has adopted the log's checkouts (or without a dispatcher),
+    /// as far as the log says (ADR 0109): not to be retired or expired.
+    pub fn with_consumer(queue: &QueueLog, dispatcher: Option<&Dispatcher>, offset: u64) -> bool {
+        match dispatcher {
+            Some(d) if d.adopted.is_some() => d.is_busy(offset),
+            Some(d) => d.is_busy(offset) || queue.checked_out(offset).is_some(),
+            None => queue.checked_out(offset).is_some(),
+        }
+    }
+
+    /// Whether `offset` is with a consumer: in flight, held, or waiting for
+    /// the consumer an earlier leader handed it to.
     pub fn is_busy(&self, offset: u64) -> bool {
-        self.is_in_flight(offset) || self.is_held(offset)
+        self.is_in_flight(offset) || self.is_held(offset) || self.is_waiting(offset)
     }
 
     /// Whether `offset` is in flight with any subscription.

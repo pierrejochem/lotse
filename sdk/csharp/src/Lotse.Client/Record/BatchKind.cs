@@ -20,4 +20,7 @@ public enum BatchKind
 
     /// <summary>A message retired from a queue.</summary>
     Retire = 5,
+
+    /// <summary>Messages a queue's leader hands to a consumer, written before it pushes them (ADR 0109).</summary>
+    Checkout = 6,
 }

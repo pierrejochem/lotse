@@ -20,6 +20,8 @@ import { offsetRanges } from "./offset-ranges.js";
 /** What a consumer needs from the client that made it. */
 export interface QueueHost {
   readonly tenant: string;
+  /** How long the client retries a call (`ClientOptions.retryForMs`). */
+  readonly retryForMs: number;
   retrying<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   route(queue: string, partition: number, signal?: AbortSignal): Promise<{ route: { resourceId: bigint }; address: Address }>;
   connect(address: Address): Promise<Connection>;
@@ -81,7 +83,11 @@ class Sub {
 interface Subscribed {
   readonly sub: Sub;
   readonly resourceId: bigint;
+  readonly consumerId: bigint;
 }
+
+/** The leader moved or the connection broke: a transactional ack is worth sending on a new subscription. */
+class Resend extends Error {}
 
 function sendQuietly(conn: Connection, request: Request): void {
   try {
@@ -102,10 +108,12 @@ function sendQuietly(conn: Connection, request: Request): void {
  * the consumer hands the messages out one at a time and adds credit once half of it is used up, so at most `credit`
  * messages wait unprocessed on this side.
  *
- * When the subscription ends (the leader changed, the connection broke, or the consumer held a message longer than the
- * queue's ack timeout) the leader gives its unacknowledged messages to other consumers, and the consumer subscribes
- * again on its next read once it has handed out the messages it already holds. Those may meanwhile have gone to someone
- * else, so a message can arrive more than once (`Delivery.deliveryCount` then exceeds 1); it is not lost.
+ * When the subscription ends the consumer subscribes again on its next read. The leader gave it a consumer id with its
+ * first subscription (ADR 0109), which it names when it subscribes again: after a failover or a broken connection the
+ * messages it holds are still its own at the new subscription, so it keeps the ones it has received, and acknowledges
+ * them, within a transaction too, through the new one. Only after the ack timeout, or when the consumer did not come
+ * back within the queue's resume window, did the leader give them to others; after the ack timeout the ones received
+ * are dropped. A message can so arrive more than once (`Delivery.deliveryCount` then exceeds 1); it is not lost.
  * Acknowledging a message that went to someone else still settles it: an ack names an offset, not a delivery.
  *
  * Reads (`next`, `poll`, the iterator) take turns when called together, in the order they were called. `ack`, `nack` and
@@ -119,6 +127,10 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   private usedBytes = 0;
   private isClosed = false;
   private readonly reading = new Mutex();
+  /** The id the leader gave this consumer, which it resumes with (ADR 0109); 0 until one is given. */
+  private consumerId = 0n;
+  /** Requeues that missed a subscription because the leader moved or the connection broke. */
+  private readonly unsent: { offset: bigint; delayMs: number }[] = [];
 
   constructor(
     private readonly host: QueueHost,
@@ -147,8 +159,22 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     }
     this.sub = made.sub;
     this.resourceId = made.resourceId;
+    if (made.consumerId !== 0n) {
+      this.consumerId = made.consumerId;
+    }
     this.usedMsgs = 0;
     this.usedBytes = 0;
+    // Requeues that missed the old subscription go on the new one, which took their messages back (ADR 0109).
+    for (const u of this.unsent.splice(0)) {
+      sendQuietly(made.sub.conn, {
+        type: "Nack",
+        queueId: made.resourceId,
+        ranges: offsetRanges([u.offset]),
+        requeue: true,
+        delayMs: u.delayMs,
+        subscriptionId: made.sub.id,
+      });
+    }
   }
 
   private async subscribeOnce(signal?: AbortSignal): Promise<Subscribed> {
@@ -162,7 +188,8 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       }
       throw e;
     }
-    // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076).
+    // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076), and resumes as
+    // the consumer it was (ADR 0109).
     const req: Request = {
       type: "Subscribe",
       queueId: routed.route.resourceId,
@@ -171,6 +198,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       creditBytes: U32_MAX,
       exclusive: false,
       notifyActive: true,
+      ...(this.consumerId !== 0n ? { resume: this.consumerId } : {}),
     };
     let resp: Response;
     try {
@@ -200,7 +228,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
         }
         throw e;
       }
-      return { sub: made, resourceId: routed.route.resourceId };
+      return { sub: made, resourceId: routed.route.resourceId, consumerId: resp.consumerId ?? 0n };
     }
     if (isRetriable(resp.error)) {
       this.host.redirect(this.queue, 0, resp.leaderHint);
@@ -295,7 +323,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       return;
     }
     if (event instanceof ConnectionError) {
-      this.ended(from);
+      this.ended(from, true);
       return;
     }
     const push = event;
@@ -305,7 +333,8 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       } else if (push.error === ErrorCode.UNKNOWN_RESOURCE) {
         this.host.forget(this.queue, 0);
       }
-      this.ended(from);
+      // A failover leaves this consumer its messages; the ack timeout, or a queue that is gone, does not.
+      this.ended(from, push.error === ErrorCode.NOT_LEADER);
       return;
     }
     // Its turn as the single active consumer, or messages, which come to the active consumer only.
@@ -313,47 +342,42 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     if (isActivation(push)) {
       return;
     }
-    let records;
-    try {
-      records = Batch.parse(push.batch).batch.records();
-    } catch (e) {
-      if (e instanceof RecordFormatError) {
-        // A codec missing here is no damage: say which one to add (ADR 0085).
-        if (e.kind === "UNSUPPORTED_COMPRESSION") {
-          throw e;
-        }
-        throw new BrokerResponseError(ErrorCode.CORRUPT_BATCH, e.message);
-      }
-      throw e;
-    }
-    // The batch is as stored: it can hold messages that are not for this subscription.
-    const mine = new Map<bigint, number>();
-    for (const d of push.deliveries) {
-      mine.set(d.offset, d.deliveryCount);
-    }
+    const received = deliveriesOf(from, push);
     if (this.sub !== from) {
       return; // the subscription ended meanwhile (closed)
     }
-    for (const r of records) {
-      const count = mine.get(r.offset);
-      if (count !== undefined) {
-        this.buffered.push(new Delivery(r, count, from));
-      }
-    }
+    this.buffered.push(...received);
     this.usedBytes = Math.min(U32_MAX, this.usedBytes + push.batch.length);
   }
 
   /**
-   * The subscription is over. Called only when nothing is buffered (the buffer is read before the events), so the
-   * clearing is for a consumer closed meanwhile.
+   * The subscription is over. If the leader gave this consumer an id and it ended for a failover or a broken connection
+   * (`resumable`), its messages are still its own when it subscribes again (ADR 0109): those received stay, with those
+   * pushed and not read yet. Otherwise they went to others and are dropped.
    */
-  private ended(which: Sub): void {
+  private ended(which: Sub, resumable: boolean): void {
     if (this.sub !== which) {
       return;
     }
     this.sub = null;
-    this.buffered.length = 0;
+    if (!resumable || this.consumerId === 0n) {
+      this.buffered.length = 0;
+    } else {
+      for (const e of which.events.splice(0)) {
+        if (typeof e === "object" && !(e instanceof ConnectionError) && e.error === ErrorCode.NONE && !isActivation(e)) {
+          this.buffered.push(...deliveriesOf(which, e));
+        }
+      }
+    }
     which.conn.unregister(which.id);
+  }
+
+  /**
+   * The subscription to send a nack or a transactional ack of `d` on: its own, or, once the leader gave this consumer
+   * an id, the current one, which took back what earlier ones held (ADR 0109).
+   */
+  private subFor(d: Delivery): Sub | null {
+    return this.sub !== null && (d.subscription === this.sub || this.consumerId !== 0n) ? this.sub : null;
   }
 
   /** The request that adds credit once half of it is used up, or `null`. */
@@ -424,15 +448,17 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   /**
    * Acknowledges a message within a transaction (ADR 0075): the queue joins the transaction, the leader takes the message
    * out of flight and the transaction holds it, so that the commit settles it and an abort gives it back; no one else
-   * receives it meanwhile. Only a message this subscription holds can be acknowledged so, and the request goes on the
-   * subscription's own connection. Any error leaves the transaction to be aborted. `MESSAGE_NOT_HELD` (a
-   * `BrokerResponseError`) means the message has gone back, or another transaction holds it.
+   * receives it meanwhile. Only a message this consumer holds can be acknowledged so, and the request goes on the
+   * subscription's own connection. If the leader changed or the connection broke, the consumer subscribes again, naming
+   * its id, and sends it on the new subscription, which holds the message still (ADR 0109). Any error leaves the
+   * transaction to be aborted. `MESSAGE_NOT_HELD` (a `BrokerResponseError`) means the message has gone to someone else,
+   * or another transaction holds it.
    */
   async ackIn(txn: Transaction, delivery: Delivery, options: ConsumerCallOptions = {}): Promise<void> {
     await txn.inTurn(async () => {
       await txn.add(this.queue, 0, options.signal);
       try {
-        await this.ackInOnce(txn, delivery, options.signal);
+        await this.ackInResuming(txn, delivery, options.signal);
       } catch (e) {
         txn.mustAbort((e as Error).message);
         throw e;
@@ -440,12 +466,35 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     });
   }
 
-  private async ackInOnce(txn: Transaction, delivery: Delivery, signal?: AbortSignal): Promise<void> {
-    // The messages are the subscription's connection's: on another one they are not held.
-    const on = this.sub;
-    if (on === null) {
-      throw new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+  private async ackInResuming(txn: Transaction, delivery: Delivery, signal?: AbortSignal): Promise<void> {
+    const deadline = performance.now() + this.host.retryForMs;
+    for (;;) {
+      if (this.sub === null && this.consumerId !== 0n) {
+        await this.ensureSubscribed(signal);
+      }
+      // Without an id the message is held only on its subscription's connection, gone if this is another.
+      const on = this.subFor(delivery);
+      if (on === null) {
+        throw new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+      }
+      try {
+        await this.ackInOnce(on, txn, delivery);
+        return;
+      } catch (e) {
+        if (!(e instanceof Resend)) {
+          throw e;
+        }
+        if (this.consumerId === 0n || performance.now() >= deadline || signal?.aborted === true) {
+          throw new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, e.message);
+        }
+        // Subscribe again, as this consumer, and send it there (the connection is shared: only the subscription goes).
+        this.host.forget(this.queue, 0);
+        this.ended(on, true);
+      }
     }
+  }
+
+  private async ackInOnce(on: Sub, txn: Transaction, delivery: Delivery): Promise<void> {
     const req: Request = {
       type: "Ack",
       queueId: this.resourceId,
@@ -455,23 +504,18 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       producerId: txn.producerId,
       producerEpoch: txn.epoch,
     };
-    await this.host.retrying(async () => {
+    for (let lost = 0; ; ) {
       let resp: Response;
       try {
         resp = await this.host.callOn(on.conn, req);
       } catch (e) {
         if (e instanceof CallFailure) {
-          switch (e.kind) {
-            // Sent again on the same connection: the leader takes a retry for what the transaction holds.
-            case "LOST":
-              throw Attempt.retryMaybeDone(e.message);
-            case "NOT_SENT":
-              throw Attempt.fail(
-                new BrokerResponseError(ErrorCode.MESSAGE_NOT_HELD, "the connection broke; the message went back"),
-              );
-            default:
-              throw e.toAttempt();
+          // Sent again on the same connection first: the leader takes a retry for what the transaction holds.
+          if (e.kind === "LOST" && lost < 2) {
+            lost++;
+            continue;
           }
+          throw new Resend(e.describe());
         }
         throw e;
       }
@@ -479,10 +523,13 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
         if (resp.error === ErrorCode.NONE) {
           return;
         }
-        throw Attempt.fail(new BrokerResponseError(resp.error, null));
+        if (isRetriable(resp.error)) {
+          throw new Resend(describeError(resp.error));
+        }
+        throw new BrokerResponseError(resp.error, null);
       }
-      throw Attempt.retryMaybeDone(`unexpected response ${resp.type}`);
-    }, signal);
+      throw new Resend(`unexpected response ${resp.type}`);
+    }
   }
 
   /**
@@ -505,7 +552,8 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   /**
    * Gives a message back to be delivered again, to any consumer, once `delayMs` has passed (ADR 0077): a retry with
    * backoff. Rounded down to whole milliseconds, at most `u32::MAX` (about 49 days); a delay of 0 is `nack` with
-   * requeue. If the subscription has ended, the message went back with it, without a delay.
+   * requeue. If the subscription has ended, the message went back with it, without a delay; or it waits at the new
+   * leader for this consumer, which gives it back once it has subscribed again (ADR 0109).
    */
   async nackAfter(delivery: Delivery, delayMs: number): Promise<void> {
     const ms = Math.min(Math.max(Math.trunc(Number.isNaN(delayMs) ? 0 : delayMs), 0), U32_MAX);
@@ -513,13 +561,17 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   }
 
   private async requeue(deliveries: readonly Delivery[], delayMs: number): Promise<void> {
-    // Only the subscription's connection can give a message back; if it is gone, so is the message (it went back with
-    // the subscription). A message of an earlier subscription is gone with it.
+    // Only the subscription's connection can give a message back. Without an id a message of an earlier subscription
+    // went back with it; with one, the current subscription took it back (ADR 0109).
     const on = this.sub;
     if (on === null) {
+      if (this.consumerId !== 0n) {
+        // Between subscriptions: the next one gives them back.
+        this.unsent.push(...deliveries.map((d) => ({ offset: d.offset, delayMs })));
+      }
       return;
     }
-    const held = deliveries.filter((d) => d.subscription === on);
+    const held = deliveries.filter((d) => this.subFor(d) !== null);
     if (held.length === 0) {
       return;
     }
@@ -531,18 +583,25 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       delayMs,
       subscriptionId: on.id, // ADR 0106
     };
-    let resp: Response;
+    let resp: Response | null;
     try {
       resp = await this.host.callOn(on.conn, req);
     } catch (e) {
-      if (e instanceof CallFailure) {
-        // Not done (no leader, broken connection): the subscription ends with it and the message goes back anyway.
-        return;
+      if (!(e instanceof CallFailure)) {
+        throw e;
       }
-      throw e;
+      resp = null;
     }
-    if (resp.type === "Outcome" && resp.error !== ErrorCode.NONE && !isRetriable(resp.error)) {
+    if (resp !== null && resp.type === "Outcome" && resp.error === ErrorCode.NONE) {
+      return;
+    }
+    if (resp !== null && resp.type === "Outcome" && !isRetriable(resp.error)) {
       throw new BrokerResponseError(resp.error, null);
+    }
+    // Not done (no leader, broken connection): the subscription ends with it. Without an id the message goes back with
+    // it; with one it stays this consumer's, and the next subscription gives it back.
+    if (this.consumerId !== 0n) {
+      this.unsent.push(...held.map((d) => ({ offset: d.offset, delayMs })));
     }
   }
 
@@ -595,35 +654,45 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     this.isClosed = true;
     const ending = this.sub;
     this.sub = null;
-    const requests: Request[] = [];
-    if (ending !== null) {
-      requests.push({ type: "Unsubscribe", subscriptionId: ending.id });
-      // Received means buffered here or pushed and not read yet: the broker holds both for this subscription.
-      const unread = this.buffered.map((d) => d.offset);
-      for (const e of ending.events) {
-        if (typeof e === "object" && !(e instanceof ConnectionError) && e.error === ErrorCode.NONE) {
-          unread.push(...e.deliveries.map((d) => d.offset));
-        }
-      }
-      if (unread.length > 0) {
-        requests.push({
-          type: "Nack",
-          queueId: this.resourceId,
-          ranges: offsetRanges(unread),
-          requeue: true,
-          delayMs: 0,
-          // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
-          subscriptionId: ending.id,
-        });
-      }
-    }
+    const unread = this.buffered.map((d) => d.offset);
     this.buffered.length = 0;
     if (ending !== null) {
-      ending.conn.unregister(ending.id);
-      ending.add(CLOSED);
-      for (const r of requests) {
-        sendQuietly(ending.conn, r);
+      void this.finish(ending, unread, this.resourceId);
+    }
+  }
+
+  /**
+   * Unsubscribes, waits for the answer, then gives back what was received and not handed out. Pushes and answers come
+   * in order on the connection, so every push the leader sent before it took the unsubscribe has arrived by then (the
+   * leader writes a checkout before it pushes, ADR 0109, so one may still be on its way); the broker holds their
+   * messages for this subscription.
+   */
+  private async finish(ending: Sub, unread: bigint[], queueId: bigint): Promise<void> {
+    // Readers waiting on the subscription wake and see the consumer closed.
+    const waiting = ending.events.filter((e) => e !== CLOSED);
+    ending.events.length = 0;
+    ending.add(CLOSED);
+    try {
+      await this.host.callOn(ending.conn, { type: "Unsubscribe", subscriptionId: ending.id });
+    } catch {
+      // the subscription ends with the connection
+    }
+    ending.conn.unregister(ending.id);
+    for (const e of [...waiting, ...ending.events]) {
+      if (typeof e === "object" && !(e instanceof ConnectionError) && e.error === ErrorCode.NONE) {
+        unread.push(...e.deliveries.map((d) => d.offset));
       }
+    }
+    if (unread.length > 0) {
+      sendQuietly(ending.conn, {
+        type: "Nack",
+        queueId,
+        ranges: offsetRanges(unread),
+        requeue: true,
+        delayMs: 0,
+        // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+        subscriptionId: ending.id,
+      });
     }
   }
 
@@ -637,6 +706,36 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   subscribedAddress(): Address | undefined {
     return this.sub?.conn.address;
   }
+}
+
+/** The messages of a delivery push that are `from`'s. */
+function deliveriesOf(from: Sub, push: DeliverPush): Delivery[] {
+  let records;
+  try {
+    records = Batch.parse(push.batch).batch.records();
+  } catch (e) {
+    if (e instanceof RecordFormatError) {
+      // A codec missing here is no damage: say which one to add (ADR 0085).
+      if (e.kind === "UNSUPPORTED_COMPRESSION") {
+        throw e;
+      }
+      throw new BrokerResponseError(ErrorCode.CORRUPT_BATCH, e.message);
+    }
+    throw e;
+  }
+  // The batch is as stored: it can hold messages that are not for this subscription.
+  const mine = new Map<bigint, number>();
+  for (const d of push.deliveries) {
+    mine.set(d.offset, d.deliveryCount);
+  }
+  const out: Delivery[] = [];
+  for (const r of records) {
+    const count = mine.get(r.offset);
+    if (count !== undefined) {
+      out.push(new Delivery(r, count, from));
+    }
+  }
+  return out;
 }
 
 function asList(d: Delivery | readonly Delivery[]): readonly Delivery[] {

@@ -198,7 +198,9 @@ public abstract record Response
     /// <param name="SubscriptionId">The subscription, per node and connection.</param>
     /// <param name="LeaderHint">The queue's leader, after <c>NOT_LEADER</c>.</param>
     /// <param name="Standby">The subscription waits as a standby of a single active consumer (ADR 0076).</param>
-    public sealed record Subscribe(ErrorCode Error, uint SubscriptionId, LeaderHint? LeaderHint, bool Standby = false) : Response
+    /// <param name="ConsumerId">The consumer's id, to name when it subscribes again (ADR 0109).</param>
+    public sealed record Subscribe(
+        ErrorCode Error, uint SubscriptionId, LeaderHint? LeaderHint, bool Standby = false, ulong ConsumerId = 0) : Response
     {
         /// <inheritdoc/>
         public override void Write(Writer w)
@@ -214,6 +216,12 @@ public abstract record Response
             if (Standby)
             {
                 tags.Add(new Tag(TagStandby, ByteString.CopyOf(new byte[] { 1 })));
+            }
+            if (ConsumerId != 0)
+            {
+                var v = new Writer();
+                v.U64(ConsumerId);
+                tags.Add(new Tag(TagConsumer, ByteString.CopyOf(v.ToByteArray())));
             }
             if (tags.Count == 0)
             {
@@ -231,6 +239,7 @@ public abstract record Response
             uint id = r.U32();
             LeaderHint? hint = null;
             bool standby = false;
+            ulong consumerId = 0;
             foreach (Tag t in r.Tags())
             {
                 var vr = new Reader(t.Value.ToByteArray());
@@ -242,13 +251,17 @@ public abstract record Response
                 {
                     standby = vr.U8() != 0;
                 }
+                else if (t.Number == TagConsumer)
+                {
+                    consumerId = vr.U64();
+                }
                 else
                 {
                     continue; // from a newer version: skipped
                 }
                 vr.Finish();
             }
-            return new Subscribe(error, id, hint, standby);
+            return new Subscribe(error, id, hint, standby, consumerId);
         }
     }
 
