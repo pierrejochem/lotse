@@ -184,6 +184,12 @@ public final class Messages {
     /** Tag of a subscription that waits as a standby, next to the leader hint (ADR 0076). */
     static final long TAG_STANDBY = 1;
 
+    /** Tag of the consumer a subscription resumes (ADR 0109). */
+    static final long TAG_RESUME = 2;
+
+    /** Tag of the consumer id the leader gave a subscription (ADR 0109). */
+    static final long TAG_CONSUMER = 2;
+
     /** Tag of a transactional ack's producer id and epoch (ADR 0075). */
     static final long TAG_PRODUCER = 2;
 

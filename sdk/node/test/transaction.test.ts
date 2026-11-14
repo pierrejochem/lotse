@@ -46,6 +46,10 @@ describe("transactions against a scripted broker", () => {
   let produce: Map<bigint, (r: Extract<Request, { type: "Produce" }>) => Response | typeof SILENT>;
   let endTxn: (r: Extract<Request, { type: "EndTxn" }>) => Response;
   let ackError: ErrorCodeValue;
+  /** The consumer id the node gives (ADR 0109); 0 as a node from before it. */
+  let consumerId: bigint;
+  /** Acks to refuse as NOT_LEADER before taking them. */
+  let acksNotLed: number;
   /** The connection the last subscription was made on. */
   let subPeer: Peer | undefined;
 
@@ -57,6 +61,8 @@ describe("transactions against a scripted broker", () => {
     produce = new Map();
     endTxn = (r) => ({ type: "EndTxn", error: ErrorCode.NONE, producerId: r.producerId, producerEpoch: r.producerEpoch + 1 });
     ackError = ErrorCode.NONE;
+    consumerId = 0n;
+    acksNotLed = 0;
     subPeer = undefined;
     node.on((n, request, peer) => {
       const answer = answerOf(n, request, peer);
@@ -133,8 +139,12 @@ describe("transactions against a scripted broker", () => {
         };
       case "Subscribe":
         subPeer = peer;
-        return { type: "Subscribe", error: ErrorCode.NONE, subscriptionId: 500, leaderHint: null, standby: false };
+        return { type: "Subscribe", error: ErrorCode.NONE, subscriptionId: 500, leaderHint: null, standby: false, consumerId };
       case "Ack":
+        if (acksNotLed > 0) {
+          acksNotLed--;
+          return { type: "Outcome", error: ErrorCode.NOT_LEADER, leaderHint: null };
+        }
         return { type: "Outcome", error: ackError, leaderHint: null };
       case "Unsubscribe":
       case "Nack":
@@ -545,6 +555,24 @@ describe("transactions against a scripted broker", () => {
     assert.equal(node.requests("Ack").length, 1, "and on no other");
     const add = node.requests("AddPartitionsToTxn")[0];
     assert.equal(add?.resources[0]?.resourceId, QUEUE_A, "the queue joins the transaction first");
+    c.close();
+  });
+
+  test("ADR 0109: an ack refused as NOT_LEADER goes on a subscription that resumes", async () => {
+    consumerId = 77n;
+    acksNotLed = 1;
+    const lotse = open();
+    const c = await lotse.subscribe("qa");
+    const txn = await lotse.beginTransaction();
+    (subPeer as Peer).push(deliver(3));
+    const d = await c.poll(3_000);
+    assert.ok(d !== null);
+    await c.ackIn(txn, d);
+    await txn.commit();
+    const subs = node.requests("Subscribe");
+    assert.equal(subs.length, 2, "subscribed again");
+    assert.equal(subs[1]?.resume, 77n, "as the consumer it was");
+    assert.equal(node.requests("Ack").length, 2, "sent again on the new subscription");
     c.close();
   });
 

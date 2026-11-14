@@ -103,7 +103,6 @@ test("attributes are validated", () => {
     return sum(b);
   };
   assert.equal(parseFails(withBits(3)), "MALFORMED", "compression 3");
-  assert.equal(parseFails(withBits(6 << 5)), "MALFORMED", "kind 6");
   assert.equal(parseFails(withBits(7 << 5)), "MALFORMED", "kind 7");
   assert.equal(parseFails(withBits(1 << 9)), "MALFORMED", "a reserved bit (bit 8 marks a compacted batch)");
   assert.equal(parseFails(withBits(1 << 15)), "MALFORMED", "the top bit");
@@ -111,7 +110,7 @@ test("attributes are validated", () => {
 
 test("every known attribute combination round-trips", () => {
   for (const compression of [Compression.NONE, Compression.ZSTD, Compression.LZ4]) {
-    for (const kind of [0, 1, 2, 3, 4, 5] as const) {
+    for (const kind of [0, 1, 2, 3, 4, 5, 6] as const) {
       for (let flags = 0; flags < 4; flags++) {
         const a: Attributes = { compression, transactional: (flags & 1) !== 0, control: (flags & 2) !== 0, kind };
         assert.deepEqual(attributesFromBits(attributesToBits(a)), a);

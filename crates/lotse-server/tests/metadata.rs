@@ -739,7 +739,8 @@ async fn run(rt: SimRuntime) {
             continue;
         }
         // The ack timeout, then the limits (ADR 0055), single active consumer
-        // (ADR 0076) and priority levels (ADR 0078), which this run never sets.
+        // (ADR 0076), priority levels (ADR 0078) and the resume window (ADR
+        // 0109), which this run never sets.
         let [c, limits @ ..] = &configs[..] else { panic!("{name} has settings {configs:?}") };
         let keys: Vec<(&str, &str, u8)> = limits.iter().map(|e| (e.key.as_str(), e.value.as_str(), e.source)).collect();
         let off = lotse_proto::config_source::DEFAULT;
@@ -750,7 +751,8 @@ async fn run(rt: SimRuntime) {
                 ("message.ttl.ms", "0", off),
                 ("dead.letter.queue", "", off),
                 ("single.active.consumer", "false", off),
-                ("priority.levels", "1", off)
+                ("priority.levels", "1", off),
+                ("resume.window.ms", "30000", off)
             ],
             "{name}: no limits were set"
         );

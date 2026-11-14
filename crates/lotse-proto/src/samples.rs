@@ -65,6 +65,7 @@ pub fn requests() -> Vec<Request> {
             credit_bytes: 1 << 20,
             exclusive: false,
             notify_active: false,
+            resume: None,
         }),
         Request::Subscribe(SubscribeRequest {
             queue_id: 9,
@@ -73,6 +74,7 @@ pub fn requests() -> Vec<Request> {
             credit_bytes: 1 << 20,
             exclusive: false,
             notify_active: true,
+            resume: None,
         }),
         Request::Credit(CreditRequest { subscription_id: 3, add_msgs: 10, add_bytes: 4096 }),
         Request::Ack(AckRequest::plain(9, vec![(0, 3), (5, 6)])),
@@ -433,6 +435,15 @@ pub fn requests() -> Vec<Request> {
             not_before_ms: 1_700_000_000_000,
             not_after_ms: 1_800_000_000_000,
         }),
+        Request::Subscribe(SubscribeRequest {
+            queue_id: 9,
+            consumer_tag: "worker-1".into(),
+            credit_msgs: 100,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+            notify_active: false,
+            resume: Some(0x8000_0000_0000_0001),
+        }),
     ]
 }
 
@@ -656,6 +667,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 subscription_id: 3,
                 leader_hint: None,
                 standby: false,
+                consumer_id: 0,
             }),
         ),
         (
@@ -665,6 +677,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 subscription_id: 4,
                 leader_hint: None,
                 standby: true,
+                consumer_id: 0,
             }),
         ),
         (ApiKey::ACK, Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None })),
@@ -941,6 +954,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 subscription_id: 0,
                 leader_hint: Some(LeaderHint { leader: 2, term: 8 }),
                 standby: false,
+                consumer_id: 0,
             }),
         ),
         (
@@ -1053,6 +1067,16 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 up_to: 0,
                 more: false,
                 leader_hint: Some(LeaderHint { leader: 2, term: 4 }),
+            }),
+        ),
+        (
+            ApiKey::SUBSCRIBE,
+            Response::Subscribe(SubscribeResponse {
+                error: ErrorCode::NONE,
+                subscription_id: 5,
+                leader_hint: None,
+                standby: false,
+                consumer_id: 0x8000_0000_0000_0001,
             }),
         ),
     ]

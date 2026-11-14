@@ -72,6 +72,7 @@ fn config(id: NodeId) -> NodeConfig {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            resume_window: lotse_server::QueueConfig::DEFAULT_RESUME_WINDOW,
         }],
         exchanges: Vec::new(),
         group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,

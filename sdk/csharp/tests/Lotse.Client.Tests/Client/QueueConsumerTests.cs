@@ -702,6 +702,52 @@ public sealed class QueueConsumerTests : IDisposable
         Assert.Equal(0, _a.Count<Request.Unsubscribe>()); // the push ended it: nothing to unsubscribe
     }
 
+    /// <summary>ADR 0109: the consumer names the id its first answer gave when it subscribes again, and keeps its messages.</summary>
+    [Fact]
+    public async Task AConsumerResumesWithItsIdAndKeepsWhatItReceivedAcrossAFailover()
+    {
+        var seen = new Seen();
+        Script(_a, (n, conn, r) =>
+        {
+            if (r is Request.Subscribe)
+            {
+                seen.Conn = conn;
+                seen.Id = NewSub();
+                conn.Push(PushAll(seen.Id, 10, 2));
+                return new Response.Subscribe(ErrorCode.None, seen.Id, null, false, 77);
+            }
+            return Plain(n, conn, r);
+        });
+        uint subB = 0;
+        Script(_b, (n, conn, r) =>
+        {
+            if (r is Request.Subscribe)
+            {
+                subB = NewSub();
+                return new Response.Subscribe(ErrorCode.None, subB, null, false, 77);
+            }
+            return Plain(n, conn, r);
+        });
+        Connect(_a);
+        await using QueueConsumer c = await Client.SubscribeAsync("jobs", SubscribeOptions.WithCredit(2));
+        Delivery first = await Take(c);
+        Assert.Equal(10UL, first.Offset);
+        seen.Conn!.Push(Failure(seen.Id, ErrorCode.NotLeader, new LeaderHint(2, 2)));
+        Delivery second = await Take(c);
+        Assert.Equal(11UL, second.Offset); // kept: the new subscription holds it still
+        Assert.Null(await c.PollAsync(Short)); // subscribed again, nothing new
+        List<Request.Subscribe> again = _b.Requests<Request.Subscribe>();
+        Assert.Single(again);
+        Assert.Equal(77UL, again[0].Resume); // resumes as the consumer it was
+        Assert.Equal(0UL, _a.Requests<Request.Subscribe>()[0].Resume); // a new consumer first
+        // A requeue of a message from before goes on the new subscription, which took it back.
+        await c.NackAsync(first, true);
+        List<Request.Nack> nacks = _b.Requests<Request.Nack>();
+        Assert.Single(nacks);
+        Assert.Equal(subB, nacks[0].SubscriptionId);
+        Assert.Equal(Ranges((10, 11)), nacks[0].Ranges);
+    }
+
     [Fact]
     public async Task APushWithUnknownResourceForgetsTheRoute()
     {

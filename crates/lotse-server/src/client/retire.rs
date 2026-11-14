@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{DeadLetterRequest, ErrorCode};
-use lotse_queue::Owed;
+use lotse_queue::{Dispatcher, Owed};
 use lotse_record::dead_letter::Reason;
 use lotse_record::{Batch, DeadLetterInfo};
 use lotse_rt::{Instant, Runtime};
@@ -194,7 +194,7 @@ impl Clients {
             let mut wake = now + (limits.message_ttl_ms / 4).clamp(10, 500) as i64;
             let mut budget = SCAN_BATCHES;
             while o < end && budget > 0 && claims.len() < MAX_CLAIM {
-                if st.claiming.contains(&o) || dispatcher.is_some_and(|d| d.is_busy(o)) || q.held_by(o).is_some() {
+                if st.claiming.contains(&o) || Dispatcher::with_consumer(q, dispatcher, o) || q.held_by(o).is_some() {
                     o = q.next_unsettled(o + 1);
                     continue;
                 }
@@ -208,10 +208,11 @@ impl Clients {
                     break;
                 }
                 for x in o..batch.next_offset() {
-                    let busy =
-                        st.claiming.contains(&x) || dispatcher.is_some_and(|d| d.is_busy(x)) || q.held_by(x).is_some();
+                    let busy = st.claiming.contains(&x)
+                        || Dispatcher::with_consumer(q, dispatcher, x)
+                        || q.held_by(x).is_some();
                     if !q.is_settled(x) && !busy {
-                        let prior = u32::from(q.delivery_count(x)) + dispatcher.map_or(0, |d| u32::from(d.extra_of(x)));
+                        let prior = u32::from(q.delivery_count(x));
                         claims.entry(x).or_insert((Reason::Expired, prior.min(u32::from(u16::MAX)) as u16));
                     }
                 }

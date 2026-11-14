@@ -1,0 +1,34 @@
+# 109. Deliveries are written to the log
+
+- Status: Accepted
+- Date: 2026-11-14
+
+## Context
+
+A transactional ack goes on the connection the message came on, and the leader takes only what that connection has in flight (ADR 0075). Which messages are in flight with whom was the leader's alone (ADR 0031). After a failover the new leader knew nothing of them: it handed them to the next consumer, the old consumer's ack got `NOT_LEADER` or `MESSAGE_NOT_HELD`, and its transaction had to abort. With leadership moving now and then (a failover, an election lost to a node short of CPU, spreading after a node joins) a consume-transform-produce loop aborted for no fault of its own, and the message came again.
+
+Two smaller losses had the same cause. Delivery counts were written only on requeue and ack timeout, so a failover could start them over and `max.deliveries` counted again. And a failover could expire or dead-letter a message a consumer still held (ADR 0055), since the new leader did not know it was held.
+
+## Decision
+
+- **A delivery is written before it is pushed.** Each round the leader writes, per subscription that gets messages, a `CHECKOUT` batch (batch kind 6): an 8-byte big-endian consumer id, then a varint count and varint pairs of offset and delivery count. Its base timestamp is the leader's clock. The push goes out only once the batch is applied, and only if the subscription still takes deliveries; otherwise the messages are released, by that subscription only, so a late release cannot take what another one got since.
+- **Every replica applies checkouts into the ack index.** It records for each offset the consumer and the time, and raises the delivery count. A checkout ends when the message is settled, held by a transaction, or goes back: requeued (`QUEUE_STATE` or `TIMER`). Checkouts are in the snapshot, as an optional last section, so an older snapshot reads as before. Since each checkout carries its count, every delivery's count is in the log; the in-memory extra counts are gone.
+- **A consumer has an id.** The leader gives one in its first `Subscribe` answer (tag 2, `consumer_id u64`), a random number from the runtime's `Rng`. A consumer subscribing again names it (`Subscribe` tag 2, `resume u64`). A new leader adopts the log's checkouts once it has applied an entry of its own term: they wait for their consumer, keeping their age. A subscription that resumes with the id takes them over as in flight; with a single active consumer it becomes the active one if none is. The leader hands over a single active consumer only after it has adopted.
+- **A resume window.** Messages whose consumer does not come back within the queue's `resume.window.ms` (default 30 s, settable at runtime) after the leader adopted, or whose ack timeout passes while they wait, go back as timed-out ones do: their counts are written, then they are released. Waiting messages are not delivered, retired or expired.
+- **The cursor moves only for new messages.** A message delivered again, an adopted one among them, may lie beyond the cursor; moving the cursor past it would skip the messages before it.
+- **Clients resume.** The Rust client, the Java, Kotlin, C# and Node.js SDKs keep the id and name it when they subscribe again. After `NOT_LEADER` or a broken connection they keep the messages they received and the pushes not read yet; after `ACK_TIMED_OUT` or another error they drop them, as before. A transactional ack that meets a retriable error, a broken connection or a lost answer (after two tries on the same connection) subscribes again and is sent on the new subscription, within `retry_for`. A requeue or transactional ack of a message from an earlier subscription goes on the current one. A requeue that missed its subscription is sent once the consumer has subscribed again. Closing waits for the `Unsubscribe` answer before it gives back what was pushed and not read, since a push may still be on its way behind its checkout.
+
+## Consequences
+
+- A transactional ack survives a failover: the message stays with its consumer, the ack goes on the new subscription, and the transaction commits.
+- Delivery counts survive failovers, so `max.deliveries` holds across them. A failover no longer expires or dead-letters a message a consumer holds.
+- Every delivery is one more Raft write, batched per subscription and round, and a push waits for its commit: a delivery costs one commit of latency more.
+- A message whose consumer is gone waits up to the resume window after a failover before it goes to another.
+- An older client without an id gets the old behaviour: the id is given, but a client that does not name it starts as a new consumer, and its messages go back after the window.
+- Tests: `tests/queues.rs` has a failover scenario in three parts (a transactional ack after the leader crashed commits and the output holds the message once; a consumer that does not come back gets its message back after the window with count 2; a requeue, a failover and another requeue give count 3). Unit tests cover the batch, the ack index and its snapshot, adoption, the window, a resumed single active consumer, the late release, the cursor rule and the push after the applied checkout; the SDK tests and a scripted broker in `lotse-client/tests/queue_resume.rs` cover resuming, the kept buffer and the transactional ack. Each rule was broken on purpose and a test failed:
+  - the server ignoring `resume`, the client not sending it, and a requeue dropped instead of sent after resubscribing: the failover scenario;
+  - waiting messages handed to others, a resume window that never ends, a release from any subscription, the cursor moving for redelivered messages, and `with_consumer` ignoring the log before adoption: unit tests of the dispatcher;
+  - a push before its checkout is applied, and a push to a subscription that ended meanwhile: unit tests of the server;
+  - a single active consumer handed over before adoption: the single active consumer simulation;
+  - the client dropping its buffer when it resumes: the scripted broker.
+- Three of these first survived (the push to an ended subscription, `with_consumer`, the dropped buffer); the tests for them were added then.

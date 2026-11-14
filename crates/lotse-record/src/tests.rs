@@ -478,3 +478,16 @@ fn the_priority_header_reads_levels_from_0_to_255() {
         assert_eq!(priority::of(&record(bad)), 0, "{bad:?} is level 0");
     }
 }
+
+#[test]
+fn checkout_batches_round_trip() {
+    let deliveries = vec![(7, 1), (9, 3), (1 << 40, u16::MAX)];
+    let bytes = checkout_batch(u64::MAX - 5, &deliveries).unwrap();
+    let (batch, _) = Batch::parse(&bytes).unwrap();
+    assert_eq!(batch.attributes().kind, BatchKind::Checkout);
+    assert_eq!(checkout(&batch).unwrap(), (u64::MAX - 5, deliveries));
+    let (empty, _) = Batch::parse(&checkout_batch(1, &[]).unwrap()).unwrap();
+    assert_eq!(checkout(&empty).unwrap(), (1, vec![]));
+    let (other, _) = Batch::parse(&queue_state_batch(&[(1, 1)]).unwrap()).unwrap();
+    assert!(checkout(&other).is_err(), "only a checkout batch reads as one");
+}

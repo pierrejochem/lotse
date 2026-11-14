@@ -20,7 +20,7 @@ mod ranges;
 
 pub use dispatch::{ConnId, Delivery, Dispatcher, SubscriptionId};
 pub use limits::{Limits, exhausted};
-pub use log::{Owed, QueueLog};
+pub use log::{Checkout, Owed, QueueLog};
 pub use ranges::RangeSet;
 
 #[cfg(test)]

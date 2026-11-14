@@ -46,6 +46,9 @@ class TransactionTest {
             r -> new Response.EndTxn(ErrorCode.NONE, r.producerId(), r.producerEpoch() + 1);
     private volatile ErrorCode offsetsError = ErrorCode.NONE;
     private volatile ErrorCode ackError = ErrorCode.NONE;
+    private final java.util.concurrent.atomic.AtomicLong subscriptions = new java.util.concurrent.atomic.AtomicLong(499);
+    /** Acks to refuse as {@code NOT_LEADER} before taking them. */
+    private final java.util.concurrent.atomic.AtomicInteger acksNotLed = new java.util.concurrent.atomic.AtomicInteger();
 
     @BeforeEach
     void start() throws IOException {
@@ -121,9 +124,12 @@ class TransactionTest {
             return new Response.CommitOffsets(results);
         }
         if (request instanceof Request.Subscribe) {
-            return new Response.Subscribe(ErrorCode.NONE, 500, null);
+            return new Response.Subscribe(ErrorCode.NONE, subscriptions.incrementAndGet(), null, false, 77);
         }
         if (request instanceof Request.Ack) {
+            if (acksNotLed.getAndUpdate(k -> Math.max(k - 1, 0)) > 0) {
+                return new Response.Outcome(ErrorCode.NOT_LEADER, null);
+            }
             return new Response.Outcome(ackError, null);
         }
         if (request instanceof Request.Unsubscribe || request instanceof Request.Nack) {
@@ -389,6 +395,25 @@ class TransactionTest {
         }
         Request.AddPartitionsToTxn add = node.requests(Request.AddPartitionsToTxn.class).get(0);
         assertEquals(QUEUE_A, add.resources().get(0).resourceId(), "the queue joins the transaction first");
+    }
+
+    /** ADR 0109: the leader moved; the consumer resumes as itself and sends the ack on the new subscription. */
+    @Test
+    void anAckRefusedAsNotLeaderGoesOnASubscriptionThatResumes() throws Exception {
+        acksNotLed.set(1);
+        LotseClient lotse = client();
+        try (QueueConsumer c = lotse.subscribe("qa"); Transaction txn = lotse.beginTransaction()) {
+            FakeNode.Conn on = node.conns().get(node.conns().size() - 1);
+            on.push(new Frames.DeliverPush(
+                    500, ErrorCode.NONE, FetchTest.data(3, 0, false, "m"), List.of(new DeliveredOffset(3, 1)), null));
+            Delivery d = c.poll(Duration.ofSeconds(3));
+            c.ackIn(txn, d);
+            txn.commit();
+            List<Request.Subscribe> subs = node.requests(Request.Subscribe.class);
+            assertEquals(2, subs.size(), "subscribed again");
+            assertEquals(77, subs.get(1).resume(), "as the consumer it was");
+            assertEquals(2, node.requests(Request.Ack.class).size(), "sent again on the new subscription");
+        }
     }
 
     @Test

@@ -701,6 +701,49 @@ class QueueConsumerTest {
         }
     }
 
+    /** ADR 0109: the consumer names the id its first answer gave when it subscribes again, and keeps its messages. */
+    @Test
+    void aConsumerResumesWithItsIdAndKeepsWhatItReceivedAcrossAFailover() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        AtomicLong sub = new AtomicLong();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                where.set(conn);
+                sub.set(nextSub.incrementAndGet());
+                conn.push(pushAll(sub.get(), 10, 2));
+                return new Response.Subscribe(ErrorCode.NONE, sub.get(), null, false, 77);
+            }
+            return plain(n, conn, r);
+        });
+        AtomicLong subB = new AtomicLong();
+        script(b, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                subB.set(nextSub.incrementAndGet());
+                return new Response.Subscribe(ErrorCode.NONE, subB.get(), null, false, 77);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        try (QueueConsumer c = client.subscribe("jobs", SubscribeOptions.withCredit(2))) {
+            Delivery first = take(c);
+            assertEquals(10, first.offset());
+            where.get().push(failure(sub.get(), ErrorCode.NOT_LEADER, new LeaderHint(2, 2)));
+            Delivery second = take(c);
+            assertEquals(11, second.offset(), "kept: the new subscription holds it still");
+            assertNull(c.poll(SHORT), "subscribed again, nothing new");
+            List<Request.Subscribe> again = b.requests(Request.Subscribe.class);
+            assertEquals(1, again.size());
+            assertEquals(77, again.get(0).resume(), "resumes as the consumer it was");
+            assertEquals(0, a.requests(Request.Subscribe.class).get(0).resume(), "a new consumer first");
+            // A requeue of a message from before goes on the new subscription, which took it back.
+            c.nack(first, true);
+            List<Request.Nack> nacks = b.requests(Request.Nack.class);
+            assertEquals(1, nacks.size());
+            assertEquals(subB.get(), nacks.get(0).subscriptionId());
+            assertEquals(List.of(new Range(10, 11)), nacks.get(0).ranges());
+        }
+    }
+
     @Test
     void aPushWithUnknownResourceForgetsTheRoute() throws Exception {
         AtomicReference<Conn> where = new AtomicReference<>();

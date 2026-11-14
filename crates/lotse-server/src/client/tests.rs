@@ -656,6 +656,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -712,6 +713,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             credit_bytes: 1 << 20,
             exclusive: false,
             notify_active: false,
+            resume: None,
         });
         let (r, pushes) = send(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         assert!(matches!(&r[..], [Response::Subscribe(s)] if s.error == ErrorCode::NONE), "{r:?}");
@@ -746,6 +748,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -772,7 +775,8 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
             let req = ClientRequest { outbox: on.clone(), header, request, principal: Principal::Anonymous };
             clients.handle(req, &view, groups).await.unwrap();
-            for _ in 0..3 {
+            // A delivery takes one more commit: its checkout (ADR 0109).
+            for _ in 0..5 {
                 groups.get_mut(&G).unwrap().process().await.unwrap();
                 clients.after_round(&view, groups).await.unwrap();
             }
@@ -786,6 +790,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
                 credit_bytes: 1 << 20,
                 exclusive: false,
                 notify_active: false,
+                resume: None,
             })
         };
         let id_of = |r: &[Response]| match r {
@@ -856,6 +861,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
         let view = ClusterView {
@@ -917,6 +923,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             credit_bytes: 1 << 20,
             exclusive: false,
             notify_active: false,
+            resume: None,
         });
         let req = ClientRequest {
             outbox: outbox.clone(),
@@ -1310,6 +1317,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                         dead_letter: None,
                         single_active: false,
                         priority_levels: 0,
+                        resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
                     }
                 })
                 .collect()
@@ -1492,6 +1500,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let exchanges = [Exchange {
             name: "x".into(),
@@ -2259,6 +2268,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             credit_bytes: 1 << 20,
             exclusive: false,
             notify_active: false,
+            resume: None,
         });
         handle(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         rounds(&mut clients, &mut groups).await;
@@ -2435,5 +2445,176 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
         let routed: Vec<(u64, &str, ErrorCode, u64)> =
             e[0].routed.iter().map(|q| (q.queue_id, q.name.as_str(), q.error, q.base_offset)).collect();
         assert_eq!(routed, [(7, "a", ErrorCode::NONE, 41), (8, "b", ErrorCode::REQUEST_TIMED_OUT, 0)]);
+    });
+}
+
+/// The leader pushes a message to a subscription only once the CHECKOUT
+/// batch that hands it to the consumer is applied (ADR 0109): a new leader
+/// then knows every message a consumer holds, and the consumer's
+/// transactional ack goes through there.
+/// ADR 0109: a subscription that unsubscribes while its checkout commits is
+/// not pushed to, and the message goes to the next subscription.
+#[test]
+fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig::new("jobs", 7, G)];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            zones: &NO_ZONES,
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 1_000,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let handle = async |clients: &mut Clients, groups: &mut Groups, request: Request| {
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+        };
+        let subscribe = || {
+            Request::Subscribe(lotse_proto::SubscribeRequest {
+                queue_id: 7,
+                consumer_tag: "w".into(),
+                credit_msgs: 10,
+                credit_bytes: 1 << 20,
+                exclusive: false,
+                notify_active: false,
+                resume: None,
+            })
+        };
+        // Pushes in the outbox, by subscription.
+        let pushed = || {
+            let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+            frames
+                .into_iter()
+                .filter(|f| lotse_proto::is_push(f))
+                .map(|f| lotse_proto::decode_push(f).unwrap())
+                .flat_map(|p| p.deliveries.iter().map(|d| (p.subscription_id, d.offset)).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        handle(&mut clients, &mut groups, produce_request("a")).await;
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+        }
+        handle(&mut clients, &mut groups, subscribe()).await;
+        let answers: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+        let first = match lotse_proto::decode_response(answers.last().unwrap().clone(), ApiKey::SUBSCRIBE).unwrap().1 {
+            Response::Subscribe(r) => r.subscription_id,
+            other => panic!("expected a subscription, got {other:?}"),
+        };
+        // The round writes the checkout; the subscription ends before it is applied.
+        clients.after_round(&view, &mut groups).await.unwrap();
+        assert!(pushed().is_empty(), "nothing pushed before the checkout is applied");
+        handle(
+            &mut clients,
+            &mut groups,
+            Request::Unsubscribe(lotse_proto::UnsubscribeRequest { subscription_id: first }),
+        )
+        .await;
+        let mut seen = Vec::new();
+        for i in 0..10 {
+            if i == 5 {
+                handle(&mut clients, &mut groups, subscribe()).await;
+            }
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view, &mut groups).await.unwrap();
+            seen.extend(pushed());
+        }
+        assert_eq!(seen.len(), 1, "delivered once: {seen:?}");
+        assert!(seen[0].0 != first && seen[0].1 == 1, "only the next subscription gets it: {seen:?}");
+    });
+}
+
+#[test]
+fn a_message_is_pushed_only_once_its_checkout_is_applied() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig::new("jobs", 7, G)];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            zones: &NO_ZONES,
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 1_000,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let handle = async |clients: &mut Clients, groups: &mut Groups, request: Request| {
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+        };
+        handle(&mut clients, &mut groups, produce_request("a")).await;
+        handle(
+            &mut clients,
+            &mut groups,
+            Request::Subscribe(lotse_proto::SubscribeRequest {
+                queue_id: 7,
+                consumer_tag: "w".into(),
+                credit_msgs: 10,
+                credit_bytes: 1 << 20,
+                exclusive: false,
+                notify_active: false,
+                resume: None,
+            }),
+        )
+        .await;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            clients.after_round(&view, &mut groups).await.unwrap();
+            let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+            let pushes: Vec<lotse_proto::DeliverPush> = frames
+                .into_iter()
+                .filter(|f| lotse_proto::is_push(f))
+                .map(|f| lotse_proto::decode_push(f).unwrap())
+                .collect();
+            let q = groups[&G].queue().unwrap();
+            for d in pushes.iter().flat_map(|p| p.deliveries.iter()) {
+                let c = q.checked_out(d.offset);
+                assert!(c.is_some(), "offset {} pushed before its checkout was applied", d.offset);
+                assert_eq!((c.unwrap().at_ms, q.delivery_count(d.offset)), (1_000, d.delivery_count));
+                seen.push(d.offset);
+            }
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+        }
+        assert_eq!(seen, vec![1], "delivered once");
     });
 }

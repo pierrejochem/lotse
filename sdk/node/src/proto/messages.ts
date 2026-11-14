@@ -40,6 +40,10 @@ export const TAG_INSTANCE = 2;
 export const TAG_PATTERN = 3;
 export const TAG_NOTIFY_ACTIVE = 1;
 export const TAG_STANDBY = 1;
+/** The consumer a subscription resumes (ADR 0109). */
+export const TAG_RESUME = 2;
+/** The consumer id the leader gave a subscription (ADR 0109). */
+export const TAG_CONSUMER = 2;
 export const TAG_PRODUCER = 2;
 /** The subscription a requeueing `Nack` came on (ADR 0106). */
 export const TAG_NACK_SUBSCRIPTION = 0;

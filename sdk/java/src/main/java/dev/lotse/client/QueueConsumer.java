@@ -32,12 +32,14 @@ import java.util.concurrent.TimeUnit;
  * consumer's credit; the consumer hands the messages out one at a time and adds credit once half of it is used up,
  * so at most {@code credit} messages wait unprocessed on this side.
  *
- * <p>When the subscription ends (the leader changed, the connection broke, or the consumer held a message longer
- * than the queue's ack timeout) the leader gives its unacknowledged messages to other consumers, and the consumer
- * subscribes again on its next call once it has handed out the messages it already holds. Those may meanwhile have
- * gone to someone else, so a message can arrive more than once ({@link Delivery#deliveryCount()} then exceeds 1);
- * it is not lost. Acknowledging a message that went to someone else still settles it: an ack names an offset, not a
- * delivery.
+ * <p>When the subscription ends the consumer subscribes again on its next call. The leader gave it a consumer id
+ * with its first subscription (ADR 0109), which it names when it subscribes again: after a failover or a broken
+ * connection the messages it holds are still its own at the new subscription, so it keeps the ones it has received,
+ * and acknowledges them, within a transaction too, through the new one. Only after the ack timeout, or when the
+ * consumer did not come back within the queue's resume window, did the leader give them to others; after the ack
+ * timeout the ones received are dropped. A message can so arrive more than once ({@link Delivery#deliveryCount()}
+ * then exceeds 1); it is not lost. Acknowledging a message that went to someone else still settles it: an ack names
+ * an offset, not a delivery.
  *
  * <p>{@link #next} and {@link #poll} are for one thread at a time. {@link #ack}, {@link #nack} and {@link #close}
  * may be called from any thread, also while another thread waits in {@code next}.
@@ -83,6 +85,10 @@ public final class QueueConsumer implements AutoCloseable {
     private long usedMsgs; // guarded by mu
     private long usedBytes; // guarded by mu
     private boolean closed; // guarded by mu
+    /** The id the leader gave this consumer, which it resumes with (ADR 0109); 0 until one is given. */
+    private long consumerId; // guarded by mu
+    /** Requeues that missed a subscription because the leader moved or the connection broke: offset, delay ms. */
+    private final List<long[]> unsent = new ArrayList<>(); // guarded by mu
 
     QueueConsumer(LotseClient client, String queue, int credit) {
         this.client = client;
@@ -106,14 +112,24 @@ public final class QueueConsumer implements AutoCloseable {
         }
         Subscribed made = client.retrying(this::subscribeOnce);
         boolean abandon;
+        List<long[]> missed = List.of();
         synchronized (mu) {
             abandon = closed;
             if (!abandon) {
                 sub = made.sub;
                 resourceId = made.resourceId;
+                if (made.consumerId != 0) {
+                    consumerId = made.consumerId;
+                }
                 usedMsgs = 0;
                 usedBytes = 0;
+                missed = new ArrayList<>(unsent);
+                unsent.clear();
             }
+        }
+        // Requeues that missed the old subscription go on the new one, which took their messages back (ADR 0109).
+        for (long[] m : missed) {
+            sendQuietly(made.sub.conn, new Request.Nack(made.resourceId, OffsetRanges.of(new long[] {m[0]}), true, m[1], made.sub.id));
         }
         if (abandon) {
             // Closed while subscribing: the broker has the subscription, so end it.
@@ -123,7 +139,7 @@ public final class QueueConsumer implements AutoCloseable {
         }
     }
 
-    private record Subscribed(Sub sub, long resourceId) {}
+    private record Subscribed(Sub sub, long resourceId, long consumerId) {}
 
     private Subscribed subscribeOnce() {
         LotseClient.Routed routed = client.route(queue, 0);
@@ -133,8 +149,13 @@ public final class QueueConsumer implements AutoCloseable {
         } catch (CallFailure e) {
             throw e.toAttempt();
         }
-        // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076).
-        Request req = new Request.Subscribe(routed.route().resourceId(), "", credit, U32_MAX, false, true);
+        long resume;
+        synchronized (mu) {
+            resume = consumerId;
+        }
+        // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076), and
+        // resumes as the consumer it was (ADR 0109).
+        Request req = new Request.Subscribe(routed.route().resourceId(), "", credit, U32_MAX, false, true, resume);
         Response resp;
         try {
             resp = client.callOn(conn, req);
@@ -155,7 +176,7 @@ public final class QueueConsumer implements AutoCloseable {
             } catch (ConnectionException e) {
                 throw Attempt.retry("the connection broke");
             }
-            return new Subscribed(made, routed.route().resourceId());
+            return new Subscribed(made, routed.route().resourceId(), s.consumerId());
         }
         if (code.retriable()) {
             client.redirect(queue, 0, s.leaderHint());
@@ -248,7 +269,7 @@ public final class QueueConsumer implements AutoCloseable {
             return;
         }
         if (event instanceof ConnectionException) {
-            ended(from);
+            ended(from, true);
             return;
         }
         Frames.DeliverPush push = (Frames.DeliverPush) event;
@@ -258,7 +279,8 @@ public final class QueueConsumer implements AutoCloseable {
             } else if (push.error().equals(ErrorCode.UNKNOWN_RESOURCE)) {
                 client.forget(queue, 0);
             }
-            ended(from);
+            // A failover leaves this consumer its messages; the ack timeout, or a queue that is gone, does not.
+            ended(from, push.error().equals(ErrorCode.NOT_LEADER));
             return;
         }
         // Its turn as the single active consumer, or messages, which come to the active consumer only.
@@ -266,6 +288,29 @@ public final class QueueConsumer implements AutoCloseable {
         if (push.isActivation()) {
             return;
         }
+        List<Delivery> received = deliveries(from, push);
+        boolean closedMeanwhile = false;
+        synchronized (mu) {
+            if (sub != from) {
+                // The subscription ended meanwhile. Closed: this push was taken off the events before close could
+                // give it back with the rest, and the broker still holds it for the subscription.
+                closedMeanwhile = closed;
+            } else {
+                buffered.addAll(received);
+                usedBytes = Math.min(U32_MAX, usedBytes + push.batch().size());
+            }
+        }
+        if (closedMeanwhile) {
+            List<Long> offsets = new ArrayList<>();
+            for (DeliveredOffset d : push.deliveries()) {
+                offsets.add(d.offset());
+            }
+            giveBack(from, offsets);
+        }
+    }
+
+    /** The messages of a delivery push that are {@code from}'s. */
+    private static List<Delivery> deliveries(Sub from, Frames.DeliverPush push) {
         List<BatchRecord> records;
         try {
             records = Batch.parse(push.batch()).batch().records();
@@ -281,29 +326,14 @@ public final class QueueConsumer implements AutoCloseable {
         for (DeliveredOffset d : push.deliveries()) {
             mine.put(d.offset(), d.deliveryCount());
         }
-        boolean closedMeanwhile = false;
-        synchronized (mu) {
-            if (sub != from) {
-                // The subscription ended meanwhile. Closed: this push was taken off the events before close could
-                // give it back with the rest, and the broker still holds it for the subscription.
-                closedMeanwhile = closed;
-            } else {
-                for (BatchRecord r : records) {
-                Integer count = mine.get(r.offset());
-                    if (count != null) {
-                        buffered.addLast(new Delivery(r, count, from));
-                    }
-                }
-                usedBytes = Math.min(U32_MAX, usedBytes + push.batch().size());
+        List<Delivery> out = new ArrayList<>();
+        for (BatchRecord r : records) {
+            Integer count = mine.get(r.offset());
+            if (count != null) {
+                out.add(new Delivery(r, count, from));
             }
         }
-        if (closedMeanwhile) {
-            List<Long> offsets = new ArrayList<>();
-            for (DeliveredOffset d : push.deliveries()) {
-                offsets.add(d.offset());
-            }
-            giveBack(from, offsets);
-        }
+        return out;
     }
 
     /** Requeues messages the broker holds for a subscription this consumer no longer reads, over its connection. */
@@ -319,18 +349,37 @@ public final class QueueConsumer implements AutoCloseable {
     }
 
     /**
-     * The subscription is over. Called only when nothing is buffered (the buffer is read before the events), so the
-     * clearing is for a consumer closed meanwhile.
+     * The subscription is over. If the leader gave this consumer an id and it ended for a failover or a broken
+     * connection ({@code resumable}), its messages are still its own when it subscribes again (ADR 0109): those
+     * received stay, with those pushed and not read yet. Otherwise they went to others and are dropped.
      */
-    private void ended(Sub which) {
+    private void ended(Sub which, boolean resumable) {
         synchronized (mu) {
             if (sub != which) {
                 return;
             }
             sub = null;
-            buffered.clear();
+            if (!resumable || consumerId == 0) {
+                buffered.clear();
+            } else {
+                List<Object> unread = new ArrayList<>();
+                which.events.drainTo(unread);
+                for (Object e : unread) {
+                    if (e instanceof Frames.DeliverPush push && push.error().isOk() && !push.isActivation()) {
+                        buffered.addAll(deliveries(which, push));
+                    }
+                }
+            }
         }
         which.conn.unregister(which.id);
+    }
+
+    /**
+     * The subscription to send a nack or a transactional ack of {@code d} on: its own, or, once the leader gave this
+     * consumer an id, the current one, which took back what earlier ones held (ADR 0109); called with {@code mu} held.
+     */
+    private Sub subFor(Delivery d) {
+        return sub != null && (d.subscription == sub || consumerId != 0) ? sub : null;
     }
 
     /** The request that adds credit once half of it is used up, or {@code null}; called with {@code mu} held. */
@@ -376,31 +425,68 @@ public final class QueueConsumer implements AutoCloseable {
      * Acknowledges a message within a transaction (ADR 0075): the transaction holds it until it ends, the commit
      * settles it, and an abort gives it back to be delivered again; until then no one else receives it. Adds the
      * queue to the transaction first. The ack goes on the subscription's own connection, since only a message that
-     * connection holds can be acknowledged so; any error leaves the transaction to be aborted. {@code MESSAGE_NOT_HELD}
-     * means the message has gone back, or another transaction holds it.
+     * connection holds can be acknowledged so; any error leaves the transaction to be aborted. If the leader changed
+     * or the connection broke, the consumer subscribes again, naming its id, and sends it on the new subscription,
+     * which holds the message still (ADR 0109). {@code MESSAGE_NOT_HELD} means the message has gone to someone else,
+     * or another transaction holds it.
      */
     public void ackIn(Transaction txn, Delivery delivery) {
         txn.add(queue, 0);
         try {
-            ackInOnce(txn, delivery);
+            ackInResuming(txn, delivery);
         } catch (ClientException e) {
             txn.mustAbort(e.getMessage());
             throw e;
         }
     }
 
-    private void ackInOnce(Transaction txn, Delivery delivery) {
-        Sub on;
-        long queueId;
-        synchronized (mu) {
-            on = sub;
-            queueId = resourceId;
+    /** Thrown by {@link #ackInOnce} when the leader moved or the connection broke: worth sending on a new subscription. */
+    private static final class Resend extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        Resend(String why) {
+            super(why, null, false, false);
         }
-        // The messages are the subscription's connection's: on another one they are not held.
-        if (on == null) {
-            throw new ClientException.Broker(
-                    ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+    }
+
+    private void ackInResuming(Transaction txn, Delivery delivery) {
+        long deadline = System.nanoTime() + client.config().retryFor().toNanos();
+        while (true) {
+            boolean resubscribe;
+            synchronized (mu) {
+                resubscribe = sub == null && consumerId != 0;
+            }
+            if (resubscribe) {
+                ensureSubscribed();
+            }
+            Sub on;
+            long queueId;
+            boolean resumable;
+            synchronized (mu) {
+                // Without an id the message is held only on its subscription's connection, gone if this is another.
+                on = subFor(delivery);
+                queueId = resourceId;
+                resumable = consumerId != 0;
+            }
+            if (on == null) {
+                throw new ClientException.Broker(ErrorCode.MESSAGE_NOT_HELD, "the subscription ended; the message went back");
+            }
+            try {
+                ackInOnce(on, queueId, txn, delivery);
+                return;
+            } catch (Resend e) {
+                if (!resumable || System.nanoTime() >= deadline) {
+                    throw new ClientException.Broker(ErrorCode.MESSAGE_NOT_HELD, e.getMessage());
+                }
+                // Subscribe again, as this consumer, and send it there (the connection is shared: only the
+                // subscription goes).
+                client.forget(queue, 0);
+                ended(on, true);
+            }
         }
+    }
+
+    private void ackInOnce(Sub on, long queueId, Transaction txn, Delivery delivery) {
         Request req = new Request.Ack(
                 queueId,
                 txn.txnId(),
@@ -408,27 +494,30 @@ public final class QueueConsumer implements AutoCloseable {
                 client.config().tenant(),
                 txn.producerId(),
                 txn.epoch());
-        client.retrying(() -> {
+        int lost = 0;
+        while (true) {
             Response resp;
             try {
                 resp = client.callOn(on.conn, req);
             } catch (CallFailure e) {
-                switch (e.kind) {
-                    // Sent again on the same connection: the leader takes a retry for what the transaction holds.
-                    case LOST -> throw Attempt.retryMaybeDone(e.getMessage());
-                    case NOT_SENT -> throw Attempt.fail(new ClientException.Broker(
-                            ErrorCode.MESSAGE_NOT_HELD, "the connection broke; the message went back"));
-                    default -> throw e.toAttempt();
+                // Sent again on the same connection first: the leader takes a retry for what the transaction holds.
+                if (e.kind == CallFailure.Kind.LOST && lost < 2) {
+                    lost++;
+                    continue;
                 }
+                throw new Resend(e.describe());
             }
             if (resp instanceof Response.Outcome o) {
                 if (o.error().isOk()) {
-                    return null;
+                    return;
                 }
-                throw Attempt.fail(new ClientException.Broker(o.error(), null));
+                if (o.error().retriable()) {
+                    throw new Resend(o.error().toString());
+                }
+                throw new ClientException.Broker(o.error(), null);
             }
-            throw Attempt.retryMaybeDone("unexpected response " + resp);
-        });
+            throw new Resend("unexpected response " + resp);
+        }
     }
 
     /**
@@ -455,7 +544,8 @@ public final class QueueConsumer implements AutoCloseable {
     /**
      * Gives a message back to be delivered again, to any consumer, once {@code delay} has passed (ADR 0077): a retry
      * with backoff. Rounded down to whole milliseconds, at most about 49 days; a delay of 0 is {@link #nack(Delivery,
-     * boolean)} with requeue. If the subscription has ended, the message went back with it, without a delay.
+     * boolean)} with requeue. If the subscription has ended, the message went back with it, without a delay; or it
+     * waits at the new leader for this consumer, which gives it back once it has subscribed again (ADR 0109).
      */
     public void nackAfter(Delivery delivery, Duration delay) {
         long ms = Math.min(Math.max(delay.toMillis(), 0), U32_MAX);
@@ -463,24 +553,30 @@ public final class QueueConsumer implements AutoCloseable {
     }
 
     private void requeue(Collection<Delivery> deliveries, long delayMs) {
-        // Only the subscription's connection can give a message back; if it is gone, so is the message (it went
-        // back with the subscription). A message of an earlier subscription is gone with it.
+        // Only the subscription's connection can give a message back. Without an id a message of an earlier
+        // subscription went back with it; with one, the current subscription took it back (ADR 0109).
         Sub on;
         long queueId;
+        List<Delivery> held = new ArrayList<>();
+        boolean resumable;
         synchronized (mu) {
             on = sub;
             queueId = resourceId;
-            if (on == null) {
+            resumable = consumerId != 0;
+            for (Delivery d : deliveries) {
+                if (subFor(d) != null) {
+                    held.add(d);
+                }
+            }
+            if (on == null && resumable) {
+                // Between subscriptions: the next one gives them back.
+                for (Delivery d : deliveries) {
+                    unsent.add(new long[] {d.offset(), delayMs});
+                }
                 return;
             }
         }
-        List<Delivery> held = new ArrayList<>();
-        for (Delivery d : deliveries) {
-            if (d.subscription == on) {
-                held.add(d);
-            }
-        }
-        if (held.isEmpty()) {
+        if (on == null || held.isEmpty()) {
             return;
         }
         Request req = new Request.Nack(queueId, OffsetRanges.of(offsets(held)), true, delayMs, on.id);
@@ -488,11 +584,22 @@ public final class QueueConsumer implements AutoCloseable {
         try {
             resp = client.callOn(on.conn, req);
         } catch (CallFailure e) {
-            // Not done (no leader, broken connection): the subscription ends with it and the message goes back anyway.
+            resp = null;
+        }
+        if (resp instanceof Response.Outcome o && o.error().isOk()) {
             return;
         }
-        if (resp instanceof Response.Outcome o && !o.error().isOk() && !o.error().retriable()) {
+        if (resp instanceof Response.Outcome o && !o.error().retriable()) {
             throw new ClientException.Broker(o.error(), null);
+        }
+        // Not done (no leader, broken connection): the subscription ends with it. Without an id the message goes
+        // back with it; with one it stays this consumer's, and the next subscription gives it back.
+        if (resumable) {
+            synchronized (mu) {
+                for (Delivery d : held) {
+                    unsent.add(new long[] {d.offset(), delayMs});
+                }
+            }
         }
     }
 
@@ -545,7 +652,8 @@ public final class QueueConsumer implements AutoCloseable {
     @Override
     public void close() {
         Sub ending;
-        List<Request> requests = new ArrayList<>();
+        long queueId;
+        List<Long> back = new ArrayList<>();
         synchronized (mu) {
             if (closed) {
                 return;
@@ -553,33 +661,37 @@ public final class QueueConsumer implements AutoCloseable {
             closed = true;
             ending = sub;
             sub = null;
-            if (ending != null) {
-                requests.add(new Request.Unsubscribe(ending.id));
-                // Received means buffered here or pushed and not read yet: the broker holds both for this subscription.
-                List<Long> back = new ArrayList<>();
-                for (long o : offsets(buffered)) {
-                    back.add(o);
-                }
-                for (Object e : ending.events) {
-                    if (e instanceof Frames.DeliverPush push && push.error().isOk()) {
-                        for (DeliveredOffset d : push.deliveries()) {
-                            back.add(d.offset());
-                        }
-                    }
-                }
-                if (!back.isEmpty()) {
-                    // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
-                    requests.add(new Request.Nack(resourceId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0, ending.id));
-                }
+            queueId = resourceId;
+            for (long o : offsets(buffered)) {
+                back.add(o);
             }
             buffered.clear();
         }
-        if (ending != null) {
-            ending.conn.unregister(ending.id);
-            ending.events.add(CLOSED);
-            for (Request r : requests) {
-                sendQuietly(ending.conn, r);
+        if (ending == null) {
+            return;
+        }
+        // Unsubscribed, and the answer waited for: pushes and answers come in order on the connection, so every push
+        // the leader sent before it took the unsubscribe has arrived by then (the leader writes a checkout before it
+        // pushes, ADR 0109, so one may still be on its way). The broker holds their messages for this subscription.
+        try {
+            client.callOn(ending.conn, new Request.Unsubscribe(ending.id));
+        } catch (CallFailure e) {
+            // the subscription ends with the connection
+        }
+        ending.conn.unregister(ending.id);
+        List<Object> unread = new ArrayList<>();
+        ending.events.drainTo(unread);
+        for (Object e : unread) {
+            if (e instanceof Frames.DeliverPush push && push.error().isOk()) {
+                for (DeliveredOffset d : push.deliveries()) {
+                    back.add(d.offset());
+                }
             }
+        }
+        ending.events.add(CLOSED);
+        if (!back.isEmpty()) {
+            // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
+            sendQuietly(ending.conn, new Request.Nack(queueId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0, ending.id));
         }
     }
 

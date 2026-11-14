@@ -392,9 +392,30 @@ pub(crate) struct Clients {
     admin_writes: Vec<admin::AdminWrite>,
     /// Counted for `DescribeMetrics`.
     stats: stats::Stats,
+    /// The runtime's random source, for consumer ids (ADR 0109); set by
+    /// the node.
+    pub(crate) random: Option<Box<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Clients {
+    /// A new consumer id: random, so a client cannot guess another's and
+    /// resume in its place (ADR 0109); never 0, which means none.
+    fn consumer_id(&mut self) -> u64 {
+        loop {
+            let id = match &self.random {
+                Some(f) => f(),
+                // Unit tests without a runtime: distinct is enough there.
+                None => {
+                    self.next_subscription = self.next_subscription.wrapping_add(1);
+                    u64::from(self.next_subscription) | 1 << 63
+                }
+            };
+            if id != 0 {
+                return id;
+            }
+        }
+    }
+
     /// Serves a request, or keeps it until it can be answered.
     pub(crate) async fn handle<R: Runtime, S: StateMachine>(
         &mut self,

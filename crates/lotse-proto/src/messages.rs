@@ -25,6 +25,10 @@ const TAG_PRODUCER: u64 = 2;
 const TAG_NOTIFY_ACTIVE: u64 = 1;
 /// A subscription waits as a standby (ADR 0076), next to the leader hint.
 const TAG_STANDBY: u64 = 1;
+/// The consumer a subscription resumes (ADR 0109).
+const TAG_RESUME: u64 = 2;
+/// The consumer id the leader gave a subscription (ADR 0109).
+const TAG_CONSUMER: u64 = 2;
 /// The metadata index through which a node has removed the files of every
 /// deleted resource (ADR 0100), in its `DescribeMetrics` answer.
 const TAG_REMOVED_THROUGH: u64 = 1;
@@ -1213,6 +1217,12 @@ pub struct SubscribeRequest {
     /// Asks for a push when the subscription becomes the queue's single
     /// active consumer (ADR 0076); sent as a tag.
     pub notify_active: bool,
+    /// The consumer this subscription continues (ADR 0109): the id an
+    /// earlier subscription's answer gave. The messages a leader handed to
+    /// that consumer and that no one has settled are this subscription's
+    /// again, and its connection may ack them in a transaction. Sent as a
+    /// tag.
+    pub resume: Option<u64>,
 }
 
 impl SubscribeRequest {
@@ -1222,10 +1232,19 @@ impl SubscribeRequest {
         w.u32(self.credit_msgs);
         w.u32(self.credit_bytes);
         w.u8(u8::from(self.exclusive));
+        let mut tags = Vec::new();
         if self.notify_active {
-            w.tags(&[(TAG_NOTIFY_ACTIVE, Bytes::from_static(&[1]))]);
-        } else {
+            tags.push((TAG_NOTIFY_ACTIVE, Bytes::from_static(&[1])));
+        }
+        if let Some(c) = self.resume {
+            let mut v = Writer::new();
+            v.u64(c);
+            tags.push((TAG_RESUME, v.finish()));
+        }
+        if tags.is_empty() {
             w.no_tags();
+        } else {
+            w.tags(&tags);
         }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
@@ -1236,14 +1255,17 @@ impl SubscribeRequest {
             credit_bytes: r.u32()?,
             exclusive: r.u8()? != 0,
             notify_active: false,
+            resume: None,
         };
         for (tag, value) in r.tags()? {
-            if tag == TAG_NOTIFY_ACTIVE {
-                let mut v = Reader::new(value);
-                req.notify_active = v.u8()? != 0;
-                v.finish()?;
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_NOTIFY_ACTIVE => req.notify_active = v.u8()? != 0,
+                TAG_RESUME => req.resume = Some(v.u64()?),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
             }
-            // Unknown tags come from newer versions: skipped.
+            v.finish()?;
         }
         Ok(req)
     }
@@ -1262,6 +1284,11 @@ pub struct SubscribeResponse {
     /// for its turn (ADR 0076); a tag in the hint's block, sent only when
     /// set.
     pub standby: bool,
+    /// The consumer this subscription is (ADR 0109): a new one's id, drawn
+    /// by the leader, or the one it resumed. A client keeps it and resumes
+    /// with it after a failover or a broken connection. 0 from a node that
+    /// does not know consumer ids; a tag, sent when not 0.
+    pub consumer_id: u64,
 }
 
 impl SubscribeResponse {
@@ -1278,6 +1305,11 @@ impl SubscribeResponse {
         if self.standby {
             tags.push((TAG_STANDBY, Bytes::from_static(&[1])));
         }
+        if self.consumer_id != 0 {
+            let mut v = Writer::new();
+            v.u64(self.consumer_id);
+            tags.push((TAG_CONSUMER, v.finish()));
+        }
         if tags.is_empty() {
             w.no_tags();
         } else {
@@ -1286,12 +1318,13 @@ impl SubscribeResponse {
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let (error, subscription_id) = (ErrorCode(r.u16()?), r.u32()?);
-        let mut resp = SubscribeResponse { error, subscription_id, leader_hint: None, standby: false };
+        let mut resp = SubscribeResponse { error, subscription_id, leader_hint: None, standby: false, consumer_id: 0 };
         for (tag, value) in r.tags()? {
             let mut v = Reader::new(value);
             match tag {
                 TAG_LEADER_HINT => resp.leader_hint = Some(LeaderHint { leader: v.u32()?, term: v.u64()? }),
                 TAG_STANDBY => resp.standby = v.u8()? != 0,
+                TAG_CONSUMER => resp.consumer_id = v.u64()?,
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }

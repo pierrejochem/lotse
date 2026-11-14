@@ -79,7 +79,7 @@ for await (const d of consumer) {
 consumer.close();
 ```
 
-- Credit defaults to 64 messages. The consumer subscribes again by itself after a leader change; messages it held may arrive twice, with a higher `deliveryCount`.
+- Credit defaults to 64 messages. The consumer subscribes again by itself after a leader change, as the same consumer, and keeps the messages it received (ADR 0109); after an ack timeout they may arrive twice, with a higher `deliveryCount`.
 - Leaving a `for await` loop does not close the consumer.
 - `consumer.isStandby` is true while a subscription waits behind another on a single active consumer queue.
 - `delivery.deadLetter()` says where a retired message came from and why.

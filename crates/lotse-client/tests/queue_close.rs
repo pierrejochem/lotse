@@ -58,6 +58,7 @@ async fn broker(rt: SimRuntime, heard: Arc<Mutex<Vec<Request>>>) {
                             subscription_id: 3,
                             leader_hint: None,
                             standby: false,
+                            consumer_id: 0,
                         });
                         conn.send(encode_response(h.correlation_id, &answer)).await.unwrap();
                         for offset in [5, 6] {
