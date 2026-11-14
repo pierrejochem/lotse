@@ -376,6 +376,9 @@ pub(crate) struct Clients {
     next_subscription: u32,
     /// Acks and delivery counts in flight.
     queue_writes: Vec<queues::QueueWrite>,
+    /// Requeues that came before their leader adopted the checkouts of
+    /// earlier terms: they wait for it (ADR 0111).
+    early_nacks: Vec<(Arc<Outbox>, u32, lotse_proto::NackRequest)>,
     /// What queue leaders retire and forward, per group (ADR 0055).
     retiring: BTreeMap<GroupId, retire::Retiring>,
     /// Dead letters for the node to forward through the protocol.
@@ -677,6 +680,7 @@ impl Clients {
         self.settle_admin(view, groups);
         self.settle_queue_writes(view.now, groups);
         self.serve_queues(view, groups).await?;
+        self.replay_nacks(view, groups);
 
         // Commits bring new data, applying moves the last stable offset.
         let commits: u64 = groups.values().map(|g| g.raft_ref().commit() + g.applied()).sum();

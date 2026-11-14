@@ -2679,3 +2679,199 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
         assert_eq!(seen, vec![1], "delivered once");
     });
 }
+
+/// The offsets the CHECKOUT batches in `r`'s log name, in log order.
+async fn checkouts_in_log(r: &Replica<SimRuntime, Nothing>) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut at = r.log().start_offset();
+    while at < r.log().next_offset() {
+        for batch in crate::replica::batches(r.log().read(at, 1 << 20).await.unwrap()).unwrap() {
+            if batch.attributes().kind == lotse_record::BatchKind::Checkout {
+                out.extend(lotse_record::checkout(&batch).unwrap().1.into_iter().map(|(o, _)| o));
+            }
+            at = batch.next_offset();
+        }
+    }
+    out
+}
+
+/// A queue leader checks out plain data it has appended before it commits,
+/// passing over its own checkouts in between, so the checkout lands behind
+/// the data and both commit together (ADR 0111). It stops at transactional
+/// data and at dead letters, which may turn out not deliverable when
+/// applied, and checks out nothing behind them until they are. Pushes still
+/// wait for the checkout.
+#[test]
+fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_delivered() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let mut rs = Vec::new();
+        for id in 1..=2u64 {
+            let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2]) };
+            let host = rt.node(&format!("n{id}"));
+            rs.push(Replica::open_with(host, "q", cfg, Nothing, LogConfig::default(), options).await.unwrap());
+        }
+        let mut follower = rs.pop().unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, rs.pop().unwrap())]);
+        let mut mail = Vec::new();
+        // Delivers what both send, `n` times, starting with `mail`, what the
+        // leader has persisted and not sent.
+        async fn pump(
+            groups: &mut Groups,
+            follower: &mut Replica<SimRuntime, Nothing>,
+            mail: &mut Vec<lotse_raft::Send>,
+            n: usize,
+        ) {
+            groups[&G].fill_messages(mail).await.unwrap();
+            for s in mail.drain(..) {
+                follower.raft().step(1, s.msg);
+            }
+            for _ in 0..n {
+                let leader = groups.get_mut(&G).unwrap();
+                leader.raft().tick();
+                for s in leader.process().await.unwrap().messages {
+                    follower.raft().step(1, s.msg);
+                }
+                for s in follower.process().await.unwrap().messages {
+                    groups.get_mut(&G).unwrap().raft().step(2, s.msg);
+                }
+            }
+        }
+        for _ in 0..100 {
+            let r = &groups[&G];
+            let raft = r.raft_ref();
+            if raft.role() == Role::Leader
+                && raft.leads_with_quorum()
+                && raft.log().term_at(r.applied()) == Some(raft.term())
+            {
+                break;
+            }
+            pump(&mut groups, &mut follower, &mut mail, 1).await;
+        }
+        assert_eq!(groups[&G].raft_ref().role(), Role::Leader);
+        let queues = [QueueConfig::new("jobs", 7, G)];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            zones: &NO_ZONES,
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 1_000,
+            access: &OPEN,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let handle = async |clients: &mut Clients, groups: &mut Groups, request: Request| {
+            let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 5, flags: 0 };
+            let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
+            clients.handle(req, &view, groups).await.unwrap();
+        };
+        let pushed = |outbox: &Outbox| -> Vec<u64> {
+            let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+            frames
+                .into_iter()
+                .filter(|f| lotse_proto::is_push(f))
+                .flat_map(|f| lotse_proto::decode_push(f).unwrap().deliveries)
+                .map(|d| d.offset)
+                .collect()
+        };
+        handle(
+            &mut clients,
+            &mut groups,
+            Request::Subscribe(lotse_proto::SubscribeRequest {
+                queue_id: 7,
+                consumer_tag: "w".into(),
+                credit_msgs: 10,
+                credit_bytes: 1 << 20,
+                exclusive: false,
+                notify_active: false,
+                resume: None,
+            }),
+        )
+        .await;
+        clients.after_round(&view, &mut groups).await.unwrap();
+        pushed(&outbox);
+
+        // Persisted, not sent: the leader checks the message out at once,
+        // and checks out the next one past that checkout.
+        let a = groups[&G].log().next_offset();
+        handle(&mut clients, &mut groups, produce_request("a")).await;
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        clients.after_round(&view, &mut groups).await.unwrap();
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        let d = groups[&G].log().next_offset();
+        handle(&mut clients, &mut groups, produce_request("d")).await;
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        clients.after_round(&view, &mut groups).await.unwrap();
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        assert!(groups[&G].raft_ref().commit() <= a, "nothing new is committed yet");
+        assert_eq!(checkouts_in_log(&groups[&G]).await, vec![a, d], "checked out before the commit");
+        assert!(pushed(&outbox).is_empty(), "pushed only once the checkout is applied");
+        pump(&mut groups, &mut follower, &mut mail, 5).await;
+        clients.after_round(&view, &mut groups).await.unwrap();
+        assert_eq!(pushed(&outbox), vec![a, d]);
+
+        // Transactional data, and plain data behind it: neither goes out
+        // before it is applied (and the transaction's then waits for its
+        // marker).
+        let t = groups[&G].log().next_offset();
+        groups.get_mut(&G).unwrap().propose(transactional_batch(9, 0, 0)).unwrap();
+        handle(&mut clients, &mut groups, produce_request("b")).await;
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        clients.after_round(&view, &mut groups).await.unwrap();
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        let checked = checkouts_in_log(&groups[&G]).await;
+        assert!(!checked.iter().any(|o| *o >= t), "nothing checked out behind a transaction: {checked:?}");
+
+        // Dead letters, and plain data behind them, likewise.
+        let mut lone = BatchBuilder::new(BatchOptions::default());
+        lone.push(0, None, Some(b"dead".as_slice()), &[]);
+        let lone = lone.finish().unwrap();
+        let record = Batch::parse(&lone).unwrap().0.records().unwrap().remove(0);
+        let info = lotse_record::DeadLetterInfo {
+            queue: "elsewhere",
+            queue_id: 8,
+            offset: 3,
+            floor: 0,
+            reason: lotse_record::dead_letter::Reason::Expired,
+            deliveries: 1,
+        };
+        let item = lotse_record::dead_letter_item(&record, info).unwrap();
+        let dead = lotse_record::dead_letter_batch(&[Batch::parse(&item).unwrap().0], 1_000).unwrap();
+        pump(&mut groups, &mut follower, &mut mail, 5).await;
+        clients.after_round(&view, &mut groups).await.unwrap();
+        pushed(&outbox);
+        // Give the transaction's data its end, so nothing is held back below.
+        // (A marker comes at a raised epoch.)
+        groups.get_mut(&G).unwrap().propose_marker(9, 1, false, 0).unwrap();
+        pump(&mut groups, &mut follower, &mut mail, 5).await;
+        clients.after_round(&view, &mut groups).await.unwrap();
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        pump(&mut groups, &mut follower, &mut mail, 5).await;
+        clients.after_round(&view, &mut groups).await.unwrap();
+        pushed(&outbox);
+        let x = groups[&G].log().next_offset();
+        groups.get_mut(&G).unwrap().propose_internal(dead).unwrap();
+        handle(&mut clients, &mut groups, produce_request("c")).await;
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        clients.after_round(&view, &mut groups).await.unwrap();
+        mail.extend(groups.get_mut(&G).unwrap().process_unfilled().await.unwrap().messages);
+        let checked = checkouts_in_log(&groups[&G]).await;
+        assert!(!checked.iter().any(|o| *o >= x), "nothing checked out behind dead letters: {checked:?}");
+        pump(&mut groups, &mut follower, &mut mail, 5).await;
+        for _ in 0..3 {
+            clients.after_round(&view, &mut groups).await.unwrap();
+            pump(&mut groups, &mut follower, &mut mail, 3).await;
+        }
+        let late = pushed(&outbox);
+        assert!(late.contains(&x) && late.contains(&(x + 1)), "delivered once applied: {late:?}");
+    });
+}
