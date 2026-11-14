@@ -30,6 +30,13 @@ public sealed class TransactionTests : IDisposable
         r => new Response.EndTxn(ErrorCode.None, r.ProducerId, (ushort)(r.ProducerEpoch + 1));
     private ErrorCode _offsetsError = ErrorCode.None;
     private ErrorCode _ackError = ErrorCode.None;
+    private long _subscriptions = 499;
+
+    /// <summary>The consumer id subscriptions are answered with (ADR 0109); 0 gives none.</summary>
+    private ulong _consumerId;
+
+    /// <summary>Acks to refuse as <c>NOT_LEADER</c> before taking them.</summary>
+    private int _acksNotLed;
     private volatile Func<Request.AddPartitionsToTxn, ErrorCode> _addError = _ => ErrorCode.None;
 
     public TransactionTests() => _node.OnConn((n, conn, request) => Answer(n, request));
@@ -86,8 +93,12 @@ public sealed class TransactionTests : IDisposable
                     o.Resources.Select(r => new Messages.TxnResourceResult(
                         r.ResourceId, r.Partitions.Select(p => new Messages.TxnPartitionResult(p.Partition, _offsetsError)).ToList())).ToList());
             case Request.Subscribe:
-                return new Response.Subscribe(ErrorCode.None, 500, null);
+                return new Response.Subscribe(ErrorCode.None, (uint)Interlocked.Increment(ref _subscriptions), null, false, _consumerId);
             case Request.Ack:
+                if (Interlocked.Decrement(ref _acksNotLed) >= 0)
+                {
+                    return new Response.Outcome(ErrorCode.NotLeader, null);
+                }
                 return new Response.Outcome(_ackError, null);
             case Request.Unsubscribe or Request.Nack:
                 return new Response.Outcome(ErrorCode.None, null);
@@ -497,6 +508,26 @@ public sealed class TransactionTests : IDisposable
         Request.AddPartitionsToTxn add = _node.Requests<Request.AddPartitionsToTxn>().First();
         Assert.Equal(QueueA, add.Resources[0].ResourceId); // the queue joins the transaction first
         Assert.True(Assert.Single(_node.Requests<Request.EndTxn>()).Commit);
+    }
+
+    /// <summary>ADR 0109: the leader moved; the consumer resumes as itself and sends the ack on the new subscription.</summary>
+    [Fact]
+    public async Task AnAckRefusedAsNotLeaderGoesOnASubscriptionThatResumes()
+    {
+        _consumerId = 77;
+        _acksNotLed = 1;
+        LotseClient lotse = Client();
+        await using QueueConsumer c = await lotse.SubscribeAsync("qa");
+        await using Transaction txn = await lotse.BeginTransactionAsync();
+        FakeNode.Conn on = _node.Conns()[^1];
+        on.Push(new Frames.DeliverPush(500, ErrorCode.None, FetchTests.Data(3, 0, false, "m"), new[] { new Messages.DeliveredOffset(3, 1) }, null));
+        Delivery d = (await c.PollAsync(TimeSpan.FromSeconds(3)))!;
+        await c.AckInAsync(txn, d);
+        await txn.CommitAsync();
+        List<Request.Subscribe> subs = _node.Requests<Request.Subscribe>();
+        Assert.Equal(2, subs.Count); // subscribed again
+        Assert.Equal(77UL, subs[1].Resume); // as the consumer it was
+        Assert.Equal(2, _node.Requests<Request.Ack>().Count); // sent again on the new subscription
     }
 
     [Fact]

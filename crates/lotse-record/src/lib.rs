@@ -151,6 +151,10 @@ pub enum BatchKind {
     /// settles them and obliges the leader to forward them, and the note
     /// that they have been forwarded (ADR 0055).
     Retire,
+    /// Messages a queue's leader hands to a consumer, written before it
+    /// pushes them (ADR 0109): the consumer's id and each message's
+    /// delivery count, at the batch's timestamp.
+    Checkout,
 }
 
 /// The `attributes` field, decoded.
@@ -185,6 +189,7 @@ impl Attributes {
             BatchKind::Timer => 3,
             BatchKind::DeadLetter => 4,
             BatchKind::Retire => 5,
+            BatchKind::Checkout => 6,
         };
         c | (u16::from(self.transactional) << 3) | (u16::from(self.control) << 4) | (k << 5)
     }
@@ -204,6 +209,7 @@ impl Attributes {
             3 => BatchKind::Timer,
             4 => BatchKind::DeadLetter,
             5 => BatchKind::Retire,
+            6 => BatchKind::Checkout,
             _ => return Err(Error::Malformed("unknown batch kind")),
         };
         // Bit 8 marks a compacted batch (ADR 0067); [`Batch::is_compacted`]
@@ -975,6 +981,42 @@ pub fn queue_state_counts(batch: &Batch) -> Result<Vec<(u64, u16)>, Error> {
         return Err(Error::Malformed("trailing bytes in queue state batch"));
     }
     Ok(out)
+}
+
+/// Builds a CHECKOUT batch (ADR 0109): the messages `(offset, delivery
+/// count)` a queue's leader hands to `consumer`.
+pub fn checkout_batch(consumer: u64, deliveries: &[(u64, u16)]) -> Result<Bytes, Error> {
+    let mut value = Vec::new();
+    value.extend_from_slice(&consumer.to_be_bytes());
+    varint::put_i64(&mut value, deliveries.len() as i64);
+    for (offset, count) in deliveries {
+        varint::put_i64(&mut value, *offset as i64);
+        varint::put_i64(&mut value, i64::from(*count));
+    }
+    queue_batch(BatchKind::Checkout, &value)
+}
+
+/// The consumer and the deliveries of a CHECKOUT batch.
+pub fn checkout(batch: &Batch) -> Result<(u64, Vec<(u64, u16)>), Error> {
+    let value = queue_value(batch, BatchKind::Checkout)?;
+    let (id, mut rest) = value.split_at_checked(8).ok_or(Error::Malformed("checkout without a consumer"))?;
+    let consumer = u64::from_be_bytes(id.try_into().expect("8 bytes"));
+    let mut next = || -> Result<i64, Error> {
+        let (v, n) = varint::get_i64(rest)?;
+        rest = &rest[n..];
+        Ok(v)
+    };
+    let count = next()?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let offset = u64::try_from(next()?).map_err(|_| Error::Malformed("negative offset"))?;
+        let n = u16::try_from(next()?).map_err(|_| Error::Malformed("delivery count out of range"))?;
+        out.push((offset, n));
+    }
+    if !rest.is_empty() {
+        return Err(Error::Malformed("trailing bytes in checkout batch"));
+    }
+    Ok((consumer, out))
 }
 
 /// A message a requeueing nack delays (ADR 0077): its delivery count so

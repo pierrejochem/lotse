@@ -25,7 +25,7 @@ public sealed record Attributes(Compression Compression, bool Transactional, boo
             throw RecordFormatException.MalformedBatch("unknown compression");
         }
         int kind = (bits >> 5) & 0b111;
-        if (kind > (int)BatchKind.Retire)
+        if (kind > (int)BatchKind.Checkout)
         {
             throw RecordFormatException.MalformedBatch("unknown batch kind");
         }

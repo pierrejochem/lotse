@@ -669,6 +669,45 @@ describe("a queue consumer against scripted brokers", () => {
       c.close();
     });
 
+    test("ADR 0109: a consumer resumes with its id and keeps what it received across a failover", async () => {
+      serve(a, (r, peer) => {
+        if (r.type === "Subscribe") {
+          const id = ++nextSub;
+          subs.push({ node: 1, peer, id });
+          peer.push(pushAll(id, 10, 2));
+          return { ...subscribed(id), consumerId: 77n };
+        }
+        return undefined;
+      });
+      serve(b, (r, peer) => {
+        if (r.type === "Subscribe") {
+          const id = ++nextSub;
+          subs.push({ node: 2, peer, id });
+          return { ...subscribed(id), consumerId: 77n };
+        }
+        return undefined;
+      });
+      const c = await connect(a).subscribe("jobs", { credit: 2 });
+      const first = await take(c);
+      assert.equal(first.offset, 10n);
+      const s = subs[0] as (typeof subs)[number];
+      s.peer.push(failure(s.id, ErrorCode.NOT_LEADER, { leader: 2, term: 2n }));
+      const second = await take(c);
+      assert.equal(second.offset, 11n, "kept: the new subscription holds it still");
+      assert.equal(await c.poll(SHORT), null, "subscribed again, nothing new");
+      const again = b.requests("Subscribe");
+      assert.equal(again.length, 1);
+      assert.equal(again[0]?.resume, 77n, "resumes as the consumer it was");
+      assert.equal(a.requests("Subscribe")[0]?.resume, undefined, "a new consumer first");
+      // A requeue of a message from before goes on the new subscription, which took it back.
+      await c.nack(first, true);
+      const nacks = b.requests("Nack");
+      assert.equal(nacks.length, 1);
+      assert.equal(nacks[0]?.subscriptionId, (subs[1] as (typeof subs)[number]).id);
+      assert.deepEqual(nacks[0]?.ranges, [{ from: 10n, to: 11n }]);
+      c.close();
+    });
+
     test("a push with UNKNOWN_RESOURCE drops the route", async () => {
       serve(a);
       const c = await connect(a).subscribe("jobs");

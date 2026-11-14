@@ -1179,6 +1179,7 @@ export class LotseClient {
   private queueHost(): QueueHost {
     return {
       tenant: this.cfg.tenant,
+      retryForMs: this.cfg.retryForMs,
       retrying: (attempt, signal) => this.retrying(attempt, signal),
       route: (queue, partition, signal) => this.route(queue, partition, signal),
       connect: (address) => this.connect(address),

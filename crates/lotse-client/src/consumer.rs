@@ -6,12 +6,17 @@
 //! The consumer hands them out one at a time and adds credit as they are
 //! used up, so at most `credit` messages wait unprocessed on this side.
 //!
-//! When the subscription ends (the leader changed, the connection broke, or
-//! the consumer held a message longer than the queue's ack timeout) the
-//! leader gives its unacknowledged messages to other consumers, so messages
-//! waiting here are dropped, and the consumer subscribes again on the next
-//! call. Acknowledging a message that went to someone else meanwhile still
-//! settles it: an ack names an offset, not a delivery.
+//! When the subscription ends the consumer subscribes again on the next
+//! call. The leader gave it a consumer id with the first subscription
+//! (ADR 0109), which it names when it subscribes again: after a failover
+//! or a broken connection the messages it holds are still its own at the
+//! new subscription, so it keeps the ones waiting here, and acks them,
+//! within a transaction too, through the new one. Only after the ack
+//! timeout, or when the consumer did not come back within the queue's
+//! resume window, did the leader give them to others; after the ack timeout
+//! the ones waiting here are dropped. Acknowledging a message that went to
+//! someone else meanwhile still settles it: an ack names an offset, not a
+//! delivery.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::future::poll_fn;
@@ -46,8 +51,15 @@ impl Message {
     }
 }
 
-/// The requests that end a subscription, and its connection.
-type Cleanup<C> = (Arc<Connection<C>>, Vec<Request>);
+/// What ending a subscription takes: see [`Consumer::cleanup`].
+struct Cleanup<C: lotse_rt::Conn> {
+    conn: Arc<Connection<C>>,
+    queue_id: u64,
+    sub: u32,
+    pushes: PushQueue,
+    /// Messages here that were never handed out.
+    offsets: BTreeSet<u64>,
+}
 
 struct Sub<C: lotse_rt::Conn> {
     conn: Arc<Connection<C>>,
@@ -66,8 +78,15 @@ pub struct Consumer<'a, R: Net + Clock + Spawn + Rng> {
     resource_id: u64,
     credit: u32,
     sub: Option<Sub<R::Conn>>,
-    /// Delivered to this subscription, not handed out yet.
+    /// Delivered to this consumer, not handed out yet.
     buffered: VecDeque<Message>,
+    /// The id the leader gave this consumer, which it resumes with (ADR
+    /// 0109); 0 until one is given, or from a node that gives none.
+    consumer_id: u64,
+    /// Requeues `(offset, delay ms)` that did not reach the leader because
+    /// it moved or the connection broke: the messages are still this
+    /// consumer's at the new subscription, which gives them back.
+    unsent: std::sync::Mutex<Vec<(u64, u32)>>,
     /// Messages and bytes used since credit was last added.
     used: (u32, u32),
     /// How often it has subscribed.
@@ -95,6 +114,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             credit: credit.max(1),
             sub: None,
             buffered: VecDeque::new(),
+            consumer_id: 0,
+            unsent: std::sync::Mutex::new(Vec::new()),
             used: (0, 0),
             subscribed: 0,
         };
@@ -115,7 +136,23 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     async fn ensure_subscribed(&mut self) -> Result<(), ClientError> {
         if self.sub.is_none() {
-            let (sub, resource_id) = self.client.retrying(|| self.subscribe_once()).await?;
+            let (sub, resource_id, consumer_id) = self.client.retrying(|| self.subscribe_once()).await?;
+            if consumer_id != 0 {
+                self.consumer_id = consumer_id;
+            }
+            // Requeues that missed the old subscription go on the new one,
+            // which took their messages back (ADR 0109).
+            let unsent = std::mem::take(&mut *self.unsent.lock().expect("unsent lock"));
+            for (offset, delay_ms) in unsent {
+                let nack = Request::Nack(NackRequest {
+                    queue_id: resource_id,
+                    ranges: vec![(offset, offset + 1)],
+                    requeue: true,
+                    delay_ms,
+                    subscription_id: Some(sub.id),
+                });
+                let _ = sub.conn.send_only(&nack).await;
+            }
             self.sub = Some(sub);
             self.subscribed += 1;
             self.resource_id = resource_id;
@@ -124,7 +161,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         Ok(())
     }
 
-    async fn subscribe_once(&self) -> Result<(Sub<R::Conn>, u64), Attempt> {
+    async fn subscribe_once(&self) -> Result<(Sub<R::Conn>, u64, u64), Attempt> {
         let c = self.client;
         let (route, addr) = c.route(&self.queue, 0).await?;
         let conn = match c.connection(&addr).await {
@@ -142,6 +179,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             credit_bytes: u32::MAX,
             exclusive: false,
             notify_active: true,
+            resume: Some(self.consumer_id).filter(|c| *c != 0),
         });
         let resp = match conn.call(&req, &c.rt, c.cfg.request_timeout).await {
             Ok(Response::Subscribe(r)) => r,
@@ -158,7 +196,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             ErrorCode::NONE => match conn.register(resp.subscription_id) {
                 Some(pushes) => {
                     let sub = Sub { conn, id: resp.subscription_id, pushes, standby: resp.standby };
-                    Ok((sub, route.resource_id))
+                    Ok((sub, route.resource_id, resp.consumer_id))
                 }
                 None => Err(Attempt::Retry("the connection broke".into())),
             },
@@ -204,14 +242,16 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             });
             match race(next, self.client.rt.sleep(deadline - now)).await {
                 None => return Ok(None),
-                Some(Err(_broken)) => self.ended(),
+                Some(Err(_broken)) => self.ended(true)?,
                 Some(Ok(push)) if push.error != ErrorCode::NONE => {
                     if push.error == ErrorCode::NOT_LEADER {
                         self.client.redirect(&self.queue, 0, push.leader_hint);
                     } else if push.error == ErrorCode::UNKNOWN_RESOURCE {
                         self.client.forget(&self.queue, 0);
                     }
-                    self.ended();
+                    // A failover leaves this consumer its messages; the ack
+                    // timeout, or a queue that is gone, does not.
+                    self.ended(push.error == ErrorCode::NOT_LEADER)?;
                 }
                 Some(Ok(push)) if push.is_activation() => {
                     if let Some(sub) = &mut self.sub {
@@ -219,19 +259,7 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
                     }
                 }
                 Some(Ok(push)) => {
-                    let corrupt = |e: lotse_record::Error| ClientError::Broker {
-                        code: ErrorCode::CORRUPT_BATCH,
-                        message: Some(e.to_string()),
-                    };
-                    let (batch, _) = lotse_record::Batch::parse(&push.batch).map_err(corrupt)?;
-                    let mine: std::collections::BTreeMap<u64, u16> =
-                        push.deliveries.iter().map(|d| (d.offset, d.delivery_count)).collect();
-                    for record in batch.records().map_err(corrupt)? {
-                        if let Some(&delivery_count) = mine.get(&record.offset) {
-                            let subscription = push.subscription_id;
-                            self.buffered.push_back(Message { record, delivery_count, subscription });
-                        }
-                    }
+                    self.buffer(&push)?;
                     self.used.1 = self.used.1.saturating_add(push.batch.len() as u32);
                     // Messages come to the active consumer only.
                     if let Some(sub) = &mut self.sub {
@@ -257,13 +285,50 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
         self.sub.as_ref().is_some_and(|s| s.standby)
     }
 
-    /// The subscription is over: its messages go to others, so the ones
-    /// waiting here are dropped.
-    fn ended(&mut self) {
-        if let Some(sub) = self.sub.take() {
-            sub.conn.unregister(sub.id);
+    /// Keeps the messages of a delivery push that are this consumer's.
+    fn buffer(&mut self, push: &lotse_proto::DeliverPush) -> Result<(), ClientError> {
+        let corrupt = |e: lotse_record::Error| ClientError::Broker {
+            code: ErrorCode::CORRUPT_BATCH,
+            message: Some(e.to_string()),
+        };
+        let (batch, _) = lotse_record::Batch::parse(&push.batch).map_err(corrupt)?;
+        let mine: std::collections::BTreeMap<u64, u16> =
+            push.deliveries.iter().map(|d| (d.offset, d.delivery_count)).collect();
+        for record in batch.records().map_err(corrupt)? {
+            if let Some(&delivery_count) = mine.get(&record.offset) {
+                let subscription = push.subscription_id;
+                self.buffered.push_back(Message { record, delivery_count, subscription });
+            }
         }
-        self.buffered.clear();
+        Ok(())
+    }
+
+    /// The subscription is over. If the leader gave this consumer an id and
+    /// it ended for a failover or a broken connection (`resumable`), its
+    /// messages are still its own when it subscribes again (ADR 0109): the
+    /// ones waiting here stay, with those pushed but not read yet.
+    /// Otherwise they went to others and are dropped.
+    fn ended(&mut self, resumable: bool) -> Result<(), ClientError> {
+        let Some(sub) = self.sub.take() else { return Ok(()) };
+        sub.conn.unregister(sub.id);
+        if !(resumable && self.consumer_id != 0) {
+            self.buffered.clear();
+            return Ok(());
+        }
+        let unread: Vec<_> = sub.pushes.lock().expect("push lock").0.drain(..).flatten().collect();
+        for push in unread {
+            if push.error == ErrorCode::NONE && !push.is_activation() {
+                self.buffer(&push)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The subscription to send a nack or a transactional ack of `message`
+    /// on: its own, or, once the leader gave this consumer an id, the
+    /// current one, which took back what earlier ones held (ADR 0109).
+    fn sub_for(&self, message: &Message) -> Option<&Sub<R::Conn>> {
+        self.sub.as_ref().filter(|s| s.id == message.subscription || self.consumer_id != 0)
     }
 
     /// Adds credit once half of it is used up.
@@ -290,22 +355,52 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     /// Acknowledges a message within a transaction (ADR 0075): it is settled
     /// if the transaction commits and delivered again if it aborts, and
     /// until then no one else receives it. Adds the queue to the
-    /// transaction first. Only a message this subscription holds can be
+    /// transaction first. Only a message this consumer holds can be
     /// acknowledged so; any error leaves the transaction to abort.
-    pub async fn ack_in(&self, txn: &mut Transaction<'_, R>, message: &Message) -> Result<(), ClientError> {
+    ///
+    /// The ack goes on the subscription's connection. If the leader changed
+    /// or the connection broke, the consumer subscribes again, naming its
+    /// id, and sends it on the new subscription, which holds the message
+    /// still (ADR 0109); only if the message went to someone else meanwhile
+    /// is it `MESSAGE_NOT_HELD`.
+    pub async fn ack_in(&mut self, txn: &mut Transaction<'_, R>, message: &Message) -> Result<(), ClientError> {
         txn.add(&self.queue, 0).await?;
-        let res = self.ack_in_once(txn, message.offset()).await;
+        let res = self.ack_in_resuming(txn, message).await;
         if let Err(e) = &res {
             txn.poisoned = Some(e.to_string());
         }
         res
     }
 
-    async fn ack_in_once(&self, txn: &Transaction<'_, R>, offset: u64) -> Result<(), ClientError> {
+    async fn ack_in_resuming(&mut self, txn: &Transaction<'_, R>, message: &Message) -> Result<(), ClientError> {
         let gone = |why: &str| ClientError::Broker { code: ErrorCode::MESSAGE_NOT_HELD, message: Some(why.into()) };
-        // The messages are the subscription's connection's: on another one
-        // they are not held.
-        let Some(sub) = &self.sub else { return Err(gone("the subscription ended; the message went back")) };
+        let deadline = self.client.rt.now() + self.client.cfg.retry_for;
+        loop {
+            if self.sub.is_none() && self.consumer_id != 0 {
+                self.ensure_subscribed().await?;
+            }
+            // Without an id the message is held only on its subscription's
+            // connection, which is gone if this is another one.
+            let Some(sub) = self.sub_for(message) else {
+                return Err(gone("the subscription ended; the message went back"));
+            };
+            let resumable = self.consumer_id != 0;
+            match self.ack_in_once(sub, txn, message.offset()).await {
+                Ok(()) => return Ok(()),
+                // The leader moved or the connection broke: subscribe again,
+                // as this consumer, and send it there.
+                // (The connection is shared: only the subscription goes.)
+                Err(Resend(_)) if resumable && self.client.rt.now() < deadline => {
+                    self.client.forget(&self.queue, 0);
+                    self.ended(true)?;
+                }
+                Err(Resend(why)) => return Err(gone(&why)),
+                Err(Done(e)) => return Err(e),
+            }
+        }
+    }
+
+    async fn ack_in_once(&self, sub: &Sub<R::Conn>, txn: &Transaction<'_, R>, offset: u64) -> Result<(), AckInError> {
         let c = self.client;
         let req = Request::Ack(AckRequest {
             queue_id: self.resource_id,
@@ -314,19 +409,19 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             producer: Some((txn.producer_id, txn.epoch)),
             ranges: vec![(offset, offset + 1)],
         });
-        c.retrying(|| async {
+        let mut lost = 0;
+        loop {
             match sub.conn.call(&req, &c.rt, c.cfg.request_timeout).await {
-                Ok(Response::Outcome(r)) if r.error == ErrorCode::NONE => Ok(()),
-                Ok(Response::Outcome(r)) => Err(Attempt::Fail(ClientError::Broker { code: r.error, message: None })),
-                Ok(other) => Err(Attempt::RetryMaybeDone(format!("unexpected response {other:?}"))),
-                // Sent again on the same connection: the leader takes a
-                // retry for what the transaction holds already.
-                Err(CallError::Lost(why)) => Err(Attempt::RetryMaybeDone(why)),
-                Err(CallError::NotSent(_)) => Err(Attempt::Fail(gone("the connection broke; the message went back"))),
-                Err(e) => Err(e.into()),
+                Ok(Response::Outcome(r)) if r.error == ErrorCode::NONE => return Ok(()),
+                Ok(Response::Outcome(r)) if r.error.retriable() => return Err(Resend(r.error.to_string())),
+                Ok(Response::Outcome(r)) => return Err(Done(ClientError::Broker { code: r.error, message: None })),
+                Ok(other) => return Err(Resend(format!("unexpected response {other:?}"))),
+                // Sent again on the same connection first: the leader takes
+                // a retry for what the transaction holds already.
+                Err(CallError::Lost(_)) if lost < 2 => lost += 1,
+                Err(e) => return Err(Resend(e.to_string())),
             }
-        })
-        .await
+        }
     }
 
     /// Rejects a message: with `requeue` it is delivered again (to any
@@ -350,8 +445,10 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
 
     async fn requeue(&self, message: &Message, delay_ms: u32) -> Result<(), ClientError> {
         // Only the subscription's connection can give a message back; if it
-        // is gone, so is the message (it went back with the subscription).
-        let Some(sub) = &self.sub else { return Ok(()) };
+        // is gone, the message went back with it, or waits at the new leader
+        // for this consumer, which takes it back when it subscribes again and
+        // gives it back from there.
+        let Some(sub) = self.sub_for(message) else { return Ok(()) };
         let offset = message.offset();
         let req = Request::Nack(NackRequest {
             queue_id: self.resource_id,
@@ -359,16 +456,25 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
             requeue: true,
             delay_ms,
             // A message from an earlier subscription went back when that
-            // ended; a newer one may hold it again now and keeps it.
-            subscription_id: Some(message.subscription),
+            // ended, and a newer one may hold it again now and keeps it;
+            // unless this consumer resumed it there (ADR 0109).
+            subscription_id: Some(sub.id),
         });
         match sub.conn.call(&req, &self.client.rt, self.client.cfg.request_timeout).await {
-            Ok(Response::Outcome(r)) if !r.error.retriable() && r.error != ErrorCode::NONE => {
+            Ok(Response::Outcome(r)) if r.error == ErrorCode::NONE => Ok(()),
+            Ok(Response::Outcome(r)) if !r.error.retriable() => {
                 Err(ClientError::Broker { code: r.error, message: None })
             }
             // Not done (no leader, broken connection): the subscription ends
-            // with it and the message goes back anyway.
-            _ => Ok(()),
+            // with it. Without an id the message goes back with it; with one
+            // it stays this consumer's, and the next subscription gives it
+            // back.
+            _ => {
+                if self.consumer_id != 0 {
+                    self.unsent.lock().expect("unsent lock").push((offset, delay_ms));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -409,57 +515,67 @@ impl<R: Net + Clock + Spawn + Rng> Consumer<'_, R> {
     /// ones not handed out yet, also those pushed but not read, go back to
     /// the queue.
     pub async fn close(mut self) {
-        if let Some((conn, reqs)) = self.cleanup() {
-            for req in reqs {
-                let _ = conn.send_only(&req).await;
-            }
+        if let Some(c) = self.cleanup() {
+            finish(c, self.client.rt.clone(), self.client.cfg.request_timeout).await;
         }
     }
 
-    /// The requests that end the subscription, and the connection to send
-    /// them on.
+    /// Takes the subscription for ending it, with the messages here that
+    /// were never handed out.
     fn cleanup(&mut self) -> Option<Cleanup<R::Conn>> {
         let sub = self.sub.take()?;
-        sub.conn.unregister(sub.id);
-        let mut reqs = vec![Request::Unsubscribe(UnsubscribeRequest { subscription_id: sub.id })];
-        let mut offsets: BTreeSet<u64> = self.buffered.drain(..).map(|m| m.offset()).collect();
-        // Pushes that arrived but were never read: the node counts their
-        // messages as in flight too, and without a nack they would wait for
-        // the ack timeout. Nothing reads them after this, so take them all.
-        {
-            let mut q = sub.pushes.lock().expect("push lock");
-            for push in q.0.drain(..).flatten() {
-                if push.error == ErrorCode::NONE && !push.is_activation() {
-                    offsets.extend(push.deliveries.iter().map(|d| d.offset));
-                }
-            }
-        }
-        if !offsets.is_empty() {
-            let ranges = offsets.iter().map(|o| (*o, o + 1)).collect();
-            // Named, so that a newer subscription on this connection keeps
-            // what it received since, should this arrive late (ADR 0106).
-            let subscription_id = Some(sub.id);
-            reqs.push(Request::Nack(NackRequest {
-                queue_id: self.resource_id,
-                ranges,
-                requeue: true,
-                delay_ms: 0,
-                subscription_id,
-            }));
-        }
-        Some((sub.conn, reqs))
+        let offsets = self.buffered.drain(..).map(|m| m.offset()).collect();
+        Some(Cleanup { conn: sub.conn, queue_id: self.resource_id, sub: sub.id, pushes: sub.pushes, offsets })
     }
 }
 
+/// Ends a subscription: unsubscribes and waits for the answer, then gives
+/// back what was never handed out. Pushes and answers come in order on the
+/// connection, so every push the leader sent before it took the
+/// unsubscribe has arrived by then (the leader writes a checkout before it
+/// pushes, ADR 0109, so one may still be on its way when the consumer ends);
+/// the leader counts their messages as in flight with the subscription, and
+/// without a nack they would wait for the ack timeout. Nothing reads the
+/// pushes after this, so all of them are taken.
+async fn finish<R: Clock, C: lotse_rt::Conn>(c: Cleanup<C>, rt: R, timeout: Duration) {
+    let Cleanup { conn, queue_id, sub, pushes, mut offsets } = c;
+    let unsubscribe = Request::Unsubscribe(UnsubscribeRequest { subscription_id: sub });
+    let _ = conn.call(&unsubscribe, &rt, timeout).await;
+    conn.unregister(sub);
+    {
+        let mut q = pushes.lock().expect("push lock");
+        for push in q.0.drain(..).flatten() {
+            if push.error == ErrorCode::NONE && !push.is_activation() {
+                offsets.extend(push.deliveries.iter().map(|d| d.offset));
+            }
+        }
+    }
+    if !offsets.is_empty() {
+        let ranges = offsets.iter().map(|o| (*o, o + 1)).collect();
+        // Named, so that a newer subscription on this connection keeps what
+        // it received since, should this arrive late (ADR 0106).
+        let nack =
+            Request::Nack(NackRequest { queue_id, ranges, requeue: true, delay_ms: 0, subscription_id: Some(sub) });
+        let _ = conn.send_only(&nack).await;
+    }
+}
+
+/// Why a transactional ack did not go through on a subscription.
+enum AckInError {
+    /// The leader moved or the connection broke: worth sending again on a
+    /// new subscription.
+    Resend(String),
+    /// The leader's answer.
+    Done(ClientError),
+}
+use AckInError::{Done, Resend};
+
 impl<R: Net + Clock + Spawn + Rng> Drop for Consumer<'_, R> {
     fn drop(&mut self) {
-        if let Some((conn, reqs)) = self.cleanup() {
+        if let Some(c) = self.cleanup() {
+            let (rt, timeout) = (self.client.rt.clone(), self.client.cfg.request_timeout);
             // Detached: dropping the handle leaves the task running.
-            drop(self.client.rt.spawn(async move {
-                for req in reqs {
-                    let _ = conn.send_only(&req).await;
-                }
-            }));
+            drop(self.client.rt.spawn(async move { finish(c, rt, timeout).await }));
         }
     }
 }

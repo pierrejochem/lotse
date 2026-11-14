@@ -180,6 +180,7 @@ const MESSAGE_TTL: &str = "message.ttl.ms";
 const DEAD_LETTER: &str = "dead.letter.queue";
 const SINGLE_ACTIVE: &str = "single.active.consumer";
 const PRIORITY_LEVELS: &str = "priority.levels";
+const RESUME_WINDOW: &str = "resume.window.ms";
 /// The most priority levels a queue may have.
 const MAX_PRIORITY_LEVELS: u8 = 10;
 /// The most deliveries a limit may name: a delivery count is 16 bits.
@@ -309,13 +310,16 @@ fn set_queue(
             // One level is no priorities: stored as none.
             change.priority_levels = Some(if n <= 1 { 0 } else { n as u8 });
         }
-        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER | SINGLE_ACTIVE | PRIORITY_LEVELS => {
+        RESUME_WINDOW if change.resume_window_ms.is_none() => {
+            change.resume_window_ms = Some(number("a number of milliseconds above 0", u64::MAX)?);
+        }
+        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER | SINGLE_ACTIVE | PRIORITY_LEVELS | RESUME_WINDOW => {
             return Err(twice());
         }
         _ => {
             return Err(format!(
                 "queues have no setting {key}; {ACK_TIMEOUT}, {MAX_DELIVERIES}, {MESSAGE_TTL}, {DEAD_LETTER}, \
-                 {SINGLE_ACTIVE} and {PRIORITY_LEVELS} can be set"
+                 {SINGLE_ACTIVE}, {PRIORITY_LEVELS} and {RESUME_WINDOW} can be set"
             ));
         }
     }
@@ -1042,7 +1046,8 @@ impl Clients {
         let default_ms = super::QueueConfig::DEFAULT_ACK_TIMEOUT.as_millis() as u64;
         let entry = |ms: u64, source| ConfigEntry { key: ACK_TIMEOUT.into(), value: ms.to_string(), source };
         // A queue's limits: 0 (off) and no dead-letter queue are the defaults.
-        let limit_entries = |max: u32, ttl: u64, dlq: u64, single: bool, levels: u8, source| {
+        let window_default = super::QueueConfig::DEFAULT_RESUME_WINDOW.as_millis() as u64;
+        let limit_entries = |max: u32, ttl: u64, dlq: u64, single: bool, levels: u8, window: u64, source| {
             let on = |set: bool| if set { source } else { config_source::DEFAULT };
             let dlq_name = view.queues.iter().find(|q| q.resource_id == dlq).map_or(String::new(), |q| q.name.clone());
             vec![
@@ -1051,6 +1056,11 @@ impl Clients {
                 ConfigEntry { key: DEAD_LETTER.into(), value: dlq_name, source: on(dlq != 0) },
                 ConfigEntry { key: SINGLE_ACTIVE.into(), value: single.to_string(), source: on(single) },
                 ConfigEntry { key: PRIORITY_LEVELS.into(), value: levels.max(1).to_string(), source: on(levels > 1) },
+                ConfigEntry {
+                    key: RESUME_WINDOW.into(),
+                    value: if window == 0 { window_default } else { window }.to_string(),
+                    source: on(window != 0),
+                },
             ]
         };
         let resources = req
@@ -1070,6 +1080,7 @@ impl Clients {
                         l.dead_letter,
                         l.single_active,
                         l.priority_levels,
+                        l.resume_window_ms,
                         config_source::DYNAMIC,
                     ));
                     Some(all)
@@ -1090,6 +1101,11 @@ impl Clients {
                         q.dead_letter.unwrap_or(0),
                         q.single_active,
                         q.priority_levels,
+                        if q.resume_window == super::QueueConfig::DEFAULT_RESUME_WINDOW {
+                            0
+                        } else {
+                            q.resume_window.as_millis() as u64
+                        },
                         config_source::STATIC,
                     ));
                     Some(all)
