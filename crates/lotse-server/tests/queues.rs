@@ -227,6 +227,7 @@ impl World {
                         coordinator: Some(2),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
@@ -1102,7 +1103,10 @@ fn queue_acks_commit_and_abort_with_their_transaction() {
             let mut audit = quiet.subscribe("audit", 10).await.expect("subscribed");
             let out = audit.next(Duration::from_secs(5)).await.unwrap().expect("the committed output");
             assert_eq!(value_of(&out), "made of first");
-            assert!(audit.next(ACK_TIMEOUT).await.unwrap().is_none(), "the aborted output stays hidden");
+            // Acknowledged first: unacknowledged, the committed output comes
+            // again once the ack timeout passes.
+            audit.ack(&out).await.unwrap();
+            assert!(audit.next(ACK_TIMEOUT * 3).await.unwrap().is_none(), "the aborted output stays hidden");
             drop(jobs);
             let mut fresh = quiet.subscribe("jobs", 10).await.expect("subscribed");
             assert!(fresh.next(ACK_TIMEOUT * 3).await.unwrap().is_none(), "the committed ack settled it");
@@ -1935,6 +1939,11 @@ fn higher_priorities_go_first_also_after_a_failover() {
                     got.push(value_of(&m));
                     sub.ack(&m).await.unwrap();
                 }
+                // Closed, not dropped: a dropped subscription can still be
+                // handed the next fill's first message before its
+                // `Unsubscribe` arrives, and that one comes back only after
+                // the ack timeout, out of its level's turn.
+                sub.close().await;
                 got
             };
             fill("a-").await;

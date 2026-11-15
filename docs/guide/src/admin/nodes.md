@@ -31,7 +31,7 @@ A joining node starts outside the configured groups. Their leaders make it a mem
 
 A new node fills up by itself ([ADR 0050](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0050-rebalancing-groups-onto-new-nodes.md)). While no node drains, the metadata leader moves one replica at a time from the node with the most replicas to the one with the fewest. It stops when the two differ by at most one replica or a tenth of the fullest node's count. At most four groups move at a time across the cluster. When a move is due, the group that evens out the two nodes' bytes most goes first ([ADR 0052](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0052-rebalancing-weighs-moves-by-size.md)).
 
-Leaders spread too. Every node computes the same preferred leader for each group, one of its voters. A leader hands over to it with a Raft leader transfer, once that voter has every entry: at most one handover per node every 100 ticks and per group every 1000.
+Leaders spread too. Every node computes the same preferred leader for each group, one of its voters. A leader hands over to it with a Raft leader transfer, once that voter has held every committed entry for a minute: at most one handover per node every 100 ticks and per group every 1000. After a failover, the group goes back to a returning node about a minute after it has caught up. Each recent election beyond the first doubles the wait, up to 30 minutes, so a node short of CPU that keeps losing its groups stops getting them back every few seconds.
 
 Each move is a full copy of the group through Raft. Rebalancing counts replicas; it uses sizes only to choose which group moves, so nodes with equal counts and very different sizes stay as they are. Traffic is not weighed.
 
@@ -55,7 +55,7 @@ A drained node cannot come back under its old id. To return the machine to the c
 A cluster admin can pin a partition's leader to one of its voters with `MoveLeader` (`move_leader` in `lotse-client`) ([ADR 0065](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0065-pinned-leaders.md)). It works for partitions of streams and queues created at runtime. A node id of 0 unpins.
 
 - The pin is kept in the metadata state, so it holds across failovers and restarts. When the pinned node comes back, leadership returns to it.
-- The handover waits until the target has every entry and is paced like the automatic one.
+- The handover waits until the target has every entry and is paced like the automatic one, but skips the minute's wait: you asked for it.
 - A pin to a node that is no longer a voter counts for nothing, so a drain or rebalance is never blocked by it. A pin is dropped when its resource is deleted or its node leaves the cluster.
 
 The console can move leaders as the signed-in user ([ADR 0066](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0066-console-actions.md)). It does not show whether a partition is pinned.

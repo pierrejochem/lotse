@@ -14,6 +14,7 @@
 //!   removed.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use lotse_raft::{Membership, NodeId};
 
@@ -218,6 +219,72 @@ pub(crate) fn hand_over_to(
         return None;
     }
     (matched.get(&p).copied().unwrap_or(0) >= last).then_some(p)
+}
+
+/// How long a group's elections count towards its hand-back wait, in
+/// multiples of the node's settle time (ADR 0113).
+pub(crate) const ELECTION_WINDOW_SETTLES: u32 = 60;
+/// The longest a hand-back waits, in multiples of the settle time: below
+/// the window, so the elections that made it long still count when it ends.
+pub(crate) const MAX_WAIT_SETTLES: u32 = 30;
+
+/// What a node notes about one group to decide when its leader may hand the
+/// group back to its preferred voter (ADR 0113): the elections it saw, and
+/// since when, while it led, the preferred voter has held everything
+/// committed.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Steadiness {
+    /// The term of the last leader seen.
+    term: Option<u64>,
+    elections: Vec<lotse_rt::Instant>,
+    held_since: Option<(NodeId, lotse_rt::Instant)>,
+}
+
+impl Steadiness {
+    /// Notes the group's term and leader as this node sees them now, in any
+    /// role. A leader of a higher term than the last one seen is an
+    /// election; terms without a leader, as split votes leave, are not. The
+    /// first leader a node sees is none, so neither a restart nor a new
+    /// group's first election counts.
+    pub(crate) fn see_term(&mut self, term: u64, leader: Option<NodeId>, now: lotse_rt::Instant, settle: Duration) {
+        if leader.is_some() && self.term.is_none_or(|t| term > t) {
+            if self.term.is_some() {
+                self.elections.push(now);
+            }
+            self.term = Some(term);
+        }
+        let window = settle * ELECTION_WINDOW_SETTLES;
+        self.elections.retain(|t| now - *t < window);
+    }
+
+    /// Notes, while this node leads, whether the preferred voter `p` holds
+    /// everything committed. Anything else, or another preferred voter,
+    /// starts the wait again.
+    pub(crate) fn see_leading(&mut self, p: Option<NodeId>, holds: bool, now: lotse_rt::Instant) {
+        self.held_since = match (p, holds, self.held_since) {
+            (Some(p), true, Some((q, since))) if q == p => Some((p, since)),
+            (Some(p), true, _) => Some((p, now)),
+            _ => None,
+        };
+    }
+
+    /// Notes that this node does not lead the group.
+    pub(crate) fn see_following(&mut self) {
+        self.held_since = None;
+    }
+
+    /// How long the preferred voter must hold everything before the leader
+    /// hands over: `settle`, doubled for each election seen within the
+    /// window beyond the first, at most [`MAX_WAIT_SETTLES`] times.
+    pub(crate) fn wait(&self, settle: Duration) -> Duration {
+        let doublings = self.elections.len().saturating_sub(1).min(16) as u32;
+        settle.saturating_mul(1 << doublings).min(settle * MAX_WAIT_SETTLES)
+    }
+
+    /// Whether the preferred voter has held everything for long enough.
+    pub(crate) fn steady(&self, now: lotse_rt::Instant, settle: Duration) -> bool {
+        self.held_since.is_some_and(|(_, since)| now - since >= self.wait(settle))
+    }
 }
 
 /// How many voters the metadata and coordinator groups should have with

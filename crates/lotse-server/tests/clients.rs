@@ -179,6 +179,7 @@ impl World {
                         coordinator: Some(3),
                         max_producers: producers.max,
                         producer_expiration: producers.expiration,
+                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),

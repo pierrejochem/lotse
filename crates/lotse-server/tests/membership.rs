@@ -51,6 +51,8 @@ impl StateMachine for Nothing {
 }
 
 const TICK: Duration = Duration::from_millis(10);
+/// Short, so leaders spread within the run (ADR 0113).
+const LEADER_SETTLE: Duration = Duration::from_secs(1);
 const STREAMS: [&str; 2] = ["s1", "s2"];
 
 fn message(value: &str) -> Bytes {
@@ -98,6 +100,7 @@ fn config(id: NodeId, log: LogConfig, pre_vote: bool) -> NodeConfig {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+        leader_settle: LEADER_SETTLE,
         retention: lotse_server::RetentionConfig::keep(),
         join: id > 3,
         auth: lotse_server::AuthConfig::none(),
@@ -353,8 +356,10 @@ async fn run(rt: SimRuntime) {
     // What the metadata group wants is what every group has, three voters
     // each, none of them the removed node. A node that hosts a partition
     // reports its Raft voters and its leader; the others report the voters
-    // the metadata group lists.
-    let deadline = rt.now() + Duration::from_secs(30);
+    // the metadata group lists. Leaders spread once each preferred voter
+    // has held everything for its wait, which recent elections lengthen up
+    // to thirty settle times (ADR 0113).
+    let deadline = rt.now() + Duration::from_secs(30) + LEADER_SETTLE * 30;
     loop {
         let mut wrong = Vec::new();
         let mut led: BTreeMap<(String, u32), u32> = BTreeMap::new();

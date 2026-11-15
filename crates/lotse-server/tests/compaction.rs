@@ -139,6 +139,7 @@ impl World {
                         coordinator: Some(2),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         // Half the runs map 6 to 12 keys per sweep (ADR 0098),
                         // fewer than the run writes now and then, so a
                         // partition takes several sweeps; fewer still would
@@ -548,6 +549,7 @@ fn returned_config(id: NodeId, log: LogConfig) -> NodeConfig {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
         retention: RetentionConfig::keep(),
         join: id > 3,
         auth: lotse_server::AuthConfig::none(),
