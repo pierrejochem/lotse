@@ -94,9 +94,14 @@ pub struct NodeConfig {
     /// The group that coordinates producers (hands out producer ids); one
     /// of `groups`. `None`: no idempotent produce.
     pub coordinator: Option<GroupId>,
-    /// Producers kept per replica for idempotence; every node must use the
-    /// same value ([`crate::DEFAULT_MAX_PRODUCERS`] by default).
+    /// Producers each partition admits for idempotence; while it holds this
+    /// many, a new one is refused (ADR 0110). Every node must use the same
+    /// value ([`crate::DEFAULT_MAX_PRODUCERS`] by default).
     pub max_producers: usize,
+    /// How long a producer may write nothing to a partition before its
+    /// leader forgets it (ADR 0110; [`crate::DEFAULT_PRODUCER_EXPIRATION`]
+    /// by default).
+    pub producer_expiration: Duration,
     /// How clients authenticate.
     pub auth: AuthConfig,
     /// What streams keep unless they say otherwise (ADR 0046).
@@ -1119,6 +1124,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     map_bytes: cfg.retention.compaction_map_bytes,
                 };
                 group.retain_with(now_ms, sweep).await?;
+                group.expire_producers(rt.now(), cfg.producer_expiration);
                 if sweeping.is_none() && group.sweeping() {
                     sweeping = Some(g);
                     sweep_turn = g;

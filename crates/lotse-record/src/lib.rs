@@ -782,8 +782,9 @@ pub fn raft_control(batch: &Batch) -> Result<Option<(RaftControl, Bytes)>, Error
     Ok(Some((kind, rec.value.unwrap_or_default())))
 }
 
-/// The broker's own records in a coordinator group, stored as control
-/// batches so that no user state machine or consumer takes them for data.
+/// The broker's own records (most in the coordinator and metadata groups),
+/// stored as control batches so that no user state machine or consumer
+/// takes them for data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InternalControl {
     /// A producer id allocation; the entry's Raft index is the id.
@@ -798,6 +799,9 @@ pub enum InternalControl {
     Metadata,
     /// Coordinator keys to forget: of a tenant's incarnation that is gone.
     Forget,
+    /// Producers a partition's leader found idle long enough to forget
+    /// (ADR 0110): `(producer id, last write)` pairs.
+    ExpireProducers,
 }
 
 /// Builds an internal control batch carrying `payload`.
@@ -820,6 +824,7 @@ pub fn internal_control_batch(kind: InternalControl, payload: &[u8]) -> Result<B
         InternalControl::GroupOffsets => 7,
         InternalControl::Metadata => 8,
         InternalControl::Forget => 9,
+        InternalControl::ExpireProducers => 10,
     };
     let mut key = [0u8; 4]; // version u16 | type u16
     key[2..].copy_from_slice(&ty.to_le_bytes());
@@ -1319,6 +1324,7 @@ pub fn control(batch: &Batch) -> Result<Option<Control>, Error> {
         7 => Control::Internal(InternalControl::GroupOffsets, value),
         8 => Control::Internal(InternalControl::Metadata, value),
         9 => Control::Internal(InternalControl::Forget, value),
+        10 => Control::Internal(InternalControl::ExpireProducers, value),
         _ => return Err(Error::Malformed("unknown control type")),
     }))
 }

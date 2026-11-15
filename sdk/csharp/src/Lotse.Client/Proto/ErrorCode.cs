@@ -106,6 +106,9 @@ public readonly record struct ErrorCode(ushort Code)
     /// <summary>A mandatory published message routes to no queue (ADR 0079).</summary>
     public static readonly ErrorCode Unroutable = new(32);
 
+    /// <summary>A new producer, and the partition holds as many as it admits: retry once an idle one is forgotten (ADR 0110).</summary>
+    public static readonly ErrorCode ProducerLimit = new(33);
+
     private static readonly string[] Names =
     {
         "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -115,7 +118,7 @@ public readonly record struct ErrorCode(ushort Code)
         "COORDINATOR_NOT_AVAILABLE", "CONCURRENT_TRANSACTIONS", "COORDINATOR_FENCED", "INVALID_REQUEST",
         "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
         "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
-        "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE",
+        "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE", "PRODUCER_LIMIT",
     };
 
     /// <summary>Whether this is <see cref="None"/>.</summary>
@@ -128,7 +131,7 @@ public readonly record struct ErrorCode(ushort Code)
     /// Whether the same request may succeed later, after reloading metadata. Retrying a request whose outcome is
     /// unknown (<see cref="RequestTimedOut"/>) is only safe where the request is idempotent.
     /// </summary>
-    public bool Retriable => Code is 1 or 2 or 5 or 6 or 18 or 19 or 24 or 25;
+    public bool Retriable => Code is 1 or 2 or 5 or 6 or 18 or 19 or 24 or 25 or 33;
 
     /// <inheritdoc/>
     public override string ToString() => $"{CodeName} ({Code})";

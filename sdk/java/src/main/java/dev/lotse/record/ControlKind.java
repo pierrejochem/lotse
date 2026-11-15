@@ -24,7 +24,9 @@ public enum ControlKind {
     /** A change to the cluster's resources, in the metadata group. */
     METADATA(8),
     /** Coordinator keys of a tenant incarnation that is gone, to forget (ADR 0069). */
-    FORGET(9);
+    FORGET(9),
+    /** Producers a partition's leader found idle long enough to forget (ADR 0110). */
+    EXPIRE_PRODUCERS(10);
 
     private final int code;
 
