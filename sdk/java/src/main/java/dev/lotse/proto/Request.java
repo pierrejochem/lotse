@@ -399,6 +399,10 @@ public sealed interface Request {
      * @param exclusive an exclusive consumer, the only one the queue may have: not built, refused; a single active
      *     consumer is the queue's setting {@code single.active.consumer} (ADR 0076)
      * @param notifyActive asks for a push when the subscription becomes the queue's single active consumer; a tag
+     * @param resume the consumer this subscription continues (ADR 0109), 0 for a new one; a tag
+     * @param held with {@code resume}: the messages the consumer holds, received and not settled (ADR 0112); the leader
+     *     takes back only these and hands its other messages out again at once, since their pushes never reached it;
+     *     {@code null} (absent) takes back everything handed to the consumer; a tag
      */
     record Subscribe(
             long queueId,
@@ -407,17 +411,34 @@ public sealed interface Request {
             long creditBytes,
             boolean exclusive,
             boolean notifyActive,
-            long resume)
+            long resume,
+            List<Range> held)
             implements Request {
         /** Without asking to hear about becoming active. */
         public Subscribe(long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive) {
-            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, false, 0);
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, false, 0, null);
         }
 
         /** A new consumer: resuming none. */
         public Subscribe(
                 long queueId, String consumerTag, long creditMsgs, long creditBytes, boolean exclusive, boolean notifyActive) {
-            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive, 0);
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive, 0, null);
+        }
+
+        /** Resuming without naming what it holds. */
+        public Subscribe(
+                long queueId,
+                String consumerTag,
+                long creditMsgs,
+                long creditBytes,
+                boolean exclusive,
+                boolean notifyActive,
+                long resume) {
+            this(queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive, resume, null);
+        }
+
+        public Subscribe {
+            held = held == null ? null : List.copyOf(held);
         }
 
         @Override
@@ -437,6 +458,11 @@ public sealed interface Request {
                 v.u64(resume);
                 tags.add(new Tag(Messages.TAG_RESUME, ByteString.copyOf(v.toByteArray())));
             }
+            if (held != null) {
+                Writer v = new Writer();
+                Messages.putRanges(v, held);
+                tags.add(new Tag(Messages.TAG_HELD, ByteString.copyOf(v.toByteArray())));
+            }
             if (tags.isEmpty()) {
                 w.noTags();
             } else {
@@ -452,18 +478,21 @@ public sealed interface Request {
             boolean exclusive = r.bool();
             boolean notify = false;
             long resume = 0;
+            List<Range> held = null;
             for (Tag t : r.tags()) {
                 Reader vr = new Reader(t.value().toByteArray());
                 if (t.tag() == Messages.TAG_NOTIFY_ACTIVE) {
                     notify = vr.u8() != 0;
                 } else if (t.tag() == Messages.TAG_RESUME) {
                     resume = vr.u64();
+                } else if (t.tag() == Messages.TAG_HELD) {
+                    held = Messages.getRanges(vr);
                 } else {
                     continue; // from a newer version: skipped
                 }
                 vr.finish();
             }
-            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume);
+            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume, held);
         }
     }
 

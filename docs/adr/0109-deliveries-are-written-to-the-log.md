@@ -1,6 +1,6 @@
 # 109. Deliveries are written to the log
 
-- Status: Accepted (refined by [ADR 0111](0111-checkouts-commit-with-new-data.md): checkouts commit with new data)
+- Status: Accepted (refined by [ADR 0111](0111-checkouts-commit-with-new-data.md): checkouts commit with new data; and by [ADR 0112](0112-a-resuming-consumer-names-what-it-holds.md): a resuming consumer names what it holds)
 - Date: 2026-11-14
 
 ## Context

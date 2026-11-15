@@ -83,6 +83,12 @@ export interface SubscribeRequest {
    * messages a leader handed to it and no one has settled are this subscription's again.
    */
   readonly resume?: bigint;
+  /**
+   * Tag 3, with `resume`: the messages the consumer holds, received and not settled (ADR 0112). The leader takes back
+   * only these and hands its other messages out again at once: their pushes never reached it. Absent, the subscription
+   * takes back everything handed to the consumer.
+   */
+  readonly held?: readonly m.Range[];
 }
 export interface CreditRequest {
   readonly type: "Credit";
@@ -567,6 +573,11 @@ export function writeRequest(w: Writer, req: Request): void {
         if (req.resume !== undefined && req.resume !== 0n) {
           tags.push({ tag: m.TAG_RESUME, value: new Writer().u64(req.resume).toBytes() });
         }
+        if (req.held !== undefined) {
+          const v = new Writer();
+          m.putRanges(v, req.held);
+          tags.push({ tag: m.TAG_HELD, value: v.toBytes() });
+        }
         m.putTagList(w, tags);
       }
       return;
@@ -844,19 +855,22 @@ export function readRequest(apiKey: number, r: Reader): Request {
       const exclusive = r.bool();
       let notifyActive = false;
       let resume: bigint | undefined;
+      let held: m.Range[] | undefined;
       for (const t of r.tags()) {
         const vr = new Reader(t.value);
         if (t.tag === m.TAG_NOTIFY_ACTIVE) {
           notifyActive = vr.u8() !== 0;
         } else if (t.tag === m.TAG_RESUME) {
           resume = vr.u64();
+        } else if (t.tag === m.TAG_HELD) {
+          held = m.getRanges(vr);
         } else {
           continue; // from a newer version: skipped
         }
         vr.finish();
       }
       const out: SubscribeRequest = { type: "Subscribe", queueId, consumerTag, creditMsgs, creditBytes, exclusive, notifyActive };
-      return resume === undefined ? out : { ...out, resume };
+      return { ...out, ...(resume === undefined ? {} : { resume }), ...(held === undefined ? {} : { held }) };
     }
     case ApiKey.CREDIT: {
       const x: CreditRequest = { type: "Credit", subscriptionId: r.u32(), addMsgs: r.u32(), addBytes: r.u32() };
