@@ -1901,3 +1901,54 @@ fn a_cut_off_leader_hands_out_nothing_once_no_quorum_answers() {
         })
     });
 }
+
+// A consumer that waits for messages gets a new one about when its
+// producer hears it is written, not one commit later: the leader checks it
+// out as soon as it has appended it, and the append that carries it
+// carries the checkout too (ADR 0111). Measured over a run of messages
+// produced one by one, with the network's latency well above the disks'.
+// Before, a delivery waited for the produce's commit and then for its
+// checkout's: about one and a half times as long as the produce.
+#[test]
+fn a_waiting_consumer_gets_a_new_message_with_its_commit() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::classic()).await;
+            let patient = ClientConfig { retry_for: Duration::from_secs(10), ..client_config() };
+            let producer = Arc::new(Client::new(rt.node("p"), patient.clone()));
+            let consumer = Client::new(rt.node("c"), patient);
+            let mut jobs = consumer.subscribe("jobs", 10).await.expect("subscribed");
+            // Leaders settled and connections open before anything counts.
+            producer.produce("jobs", 0, message("warm")).await.expect("written");
+            let m = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            jobs.ack(&m).await.expect("acked");
+
+            rt.net().set_max_latency(Duration::from_millis(20));
+            let (mut produced, mut delivered) = (Duration::ZERO, Duration::ZERO);
+            for i in 0..20 {
+                let t0 = rt.now();
+                let (p, clock) = (producer.clone(), rt.clone());
+                let value = format!("m{i}");
+                let written = rt.spawn(async move {
+                    p.produce("jobs", 0, message(&value)).await.expect("written");
+                    clock.now()
+                });
+                let m = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+                assert_eq!(value_of(&m), format!("m{i}"));
+                delivered += rt.now() - t0;
+                produced += written.await - t0;
+                jobs.ack(&m).await.expect("acked");
+            }
+            assert!(
+                delivered * 4 < produced * 5,
+                "deliveries took {delivered:?}, produces {produced:?}: a delivery waited for a commit of its own"
+            );
+
+            rt.net().set_max_latency(Duration::from_millis(5));
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}

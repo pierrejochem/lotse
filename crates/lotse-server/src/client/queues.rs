@@ -19,8 +19,12 @@
 //! The leader delivers only once it has applied an entry of its own term:
 //! everything committed before, every ack included, is applied then, so an
 //! acknowledged message is never delivered again. It delivers only below
-//! the last stable offset (messages of open transactions wait), and only
-//! what is applied.
+//! the last stable offset (messages of open transactions wait). Past what
+//! is applied, it checks out the plain data it has appended and not yet
+//! committed (ADR 0111): the checkout lands behind that data, so it commits
+//! only if the data does, and the node sends both in one append. A requeue
+//! that comes before the leader adopted the earlier checkouts waits for the
+//! adoption.
 //!
 //! An `Ack` is a batch in the queue's log, answered once committed under the
 //! same rule as a produce; the message counts as settled when the batch is
@@ -554,6 +558,14 @@ impl Clients {
             let batch = lotse_record::ack_batch(&req.ranges).expect("ranges fit a batch");
             return self.write_queue(Some((outbox, correlation_id)), g, replica, QueueBatch::new(batch), view.now);
         }
+        // Before the leader has adopted what earlier leaders handed out, a
+        // message this consumer resumed is not in flight here yet: the
+        // requeue waits for the adoption rather than find nothing to take,
+        // which would leave the message with a consumer that gave it back.
+        if self.queues.get(&g).is_some_and(|s| s.term == replica.raft_ref().term() && !s.adopted) {
+            self.early_nacks.push((outbox, correlation_id, req));
+            return;
+        }
         // Only this connection's messages in flight go back; nothing else
         // needs doing for the rest (not delivered here, or settled). A Nack
         // that names its subscription takes back only what that one holds:
@@ -595,6 +607,26 @@ impl Clients {
         .expect("counts fit a batch");
         let what = QueueBatch { release: taken, ..QueueBatch::new(batch) };
         self.write_queue(Some((outbox, correlation_id)), g, replica, what, view.now);
+    }
+
+    /// Handles the requeues that waited for their leader to adopt, once it
+    /// has, or once it no longer leads (they are refused then).
+    pub(super) fn replay_nacks<R: Runtime, S: StateMachine>(
+        &mut self,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        for (outbox, id, req) in std::mem::take(&mut self.early_nacks) {
+            let waits = Self::queue_group(view, req.queue_id).is_some_and(|g| {
+                let term = groups.get(&g).filter(|r| r.raft_ref().role() == Role::Leader).map(|r| r.raft_ref().term());
+                self.queues.get(&g).is_some_and(|s| Some(s.term) == term && !s.adopted)
+            });
+            if waits {
+                self.early_nacks.push((outbox, id, req));
+            } else {
+                self.nack(outbox, id, req, view, groups);
+            }
+        }
     }
 
     /// Proposes an ack or queue-state batch; see [`QueueBatch`].
@@ -750,7 +782,7 @@ impl Clients {
             if raft.log().term_at(replica.applied()) != Some(raft.term()) {
                 continue;
             }
-            let limit = deliverable(replica);
+            let (limit, passing) = appended(replica, deliverable(replica)).await?;
             let s = self.queues.get_mut(&g).expect("serving");
             let q = replica.queue().expect("a queue group");
             s.dispatcher.sweep(q);
@@ -800,8 +832,11 @@ impl Clients {
             let s = self.queues.get_mut(&g).expect("serving");
             s.hand_over(qc.single_active, replica.queue().expect("a queue group"));
             read_levels(s, replica, limit, qc.priority_levels).await?;
-            let none = std::collections::BTreeSet::new();
-            let skip = self.retiring.get(&g).map_or(&none, retire::Retiring::claiming);
+            let mut skip = passing;
+            if let Some(r) = self.retiring.get(&g) {
+                skip.extend(r.claiming());
+            }
+            let skip = &skip;
             let due = Due { now: view.now, unix_ms: view.unix_ms, limits: qc.limits };
             let (rounds, late) = deliver(s, replica, limit, due, skip).await?;
             if late && let Some(r) = self.retiring.get_mut(&g) {
@@ -831,6 +866,59 @@ impl Clients {
         }
         Ok(())
     }
+}
+
+/// Bytes of the leader's uncommitted tail a round looks through at most for
+/// messages to check out.
+const TAIL_BYTES_PER_ROUND: usize = 1 << 20;
+
+/// How far a queue leader may hand out messages, given `limit`, what is
+/// applied and stable: past it, over the plain data it has appended and not
+/// yet committed (ADR 0111). A checkout of those lands behind them in the
+/// log, so it commits only if they do, and the push waits for it. Its own
+/// queue batches in between are passed over, and their offsets returned:
+/// they are not messages. It stops at whatever could make a message not
+/// deliverable once applied: transactional data, a control batch (a marker,
+/// Raft's own), and dead letters, whose repeats are recognised only when
+/// applied. Behind an open transaction the limit stays.
+async fn appended<R: Runtime, S: StateMachine>(
+    replica: &Replica<R, S>,
+    limit: u64,
+) -> Result<(u64, std::collections::BTreeSet<u64>), Error> {
+    let mut passing = std::collections::BTreeSet::new();
+    // Offsets below the applied index are applied (index = offset + 1).
+    if limit < replica.applied() {
+        return Ok((limit, passing));
+    }
+    let (mut at, end) = (limit, replica.log().next_offset());
+    let mut budget = TAIL_BYTES_PER_ROUND;
+    while at < end && budget > 0 {
+        let read = replica.log().read(at, budget).await?;
+        if read.is_empty() {
+            break;
+        }
+        budget = budget.saturating_sub(read.len());
+        for batch in crate::replica::batches(read)? {
+            let a = batch.attributes();
+            if batch.base_offset() != at || a.control {
+                return Ok((at, passing));
+            }
+            match a.kind {
+                lotse_record::BatchKind::Data if a.transactional => return Ok((at, passing)),
+                lotse_record::BatchKind::Data => {}
+                // A transactional ack among them: it holds messages, and
+                // makes none new.
+                lotse_record::BatchKind::Ack
+                | lotse_record::BatchKind::QueueState
+                | lotse_record::BatchKind::Timer
+                | lotse_record::BatchKind::Retire
+                | lotse_record::BatchKind::Checkout => passing.extend(batch.base_offset()..batch.next_offset()),
+                lotse_record::BatchKind::DeadLetter => return Ok((at, passing)),
+            }
+            at = batch.next_offset();
+        }
+    }
+    Ok((at, passing))
 }
 
 /// Bytes of the log a round reads for priority levels at most: a new

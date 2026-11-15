@@ -290,7 +290,8 @@ pub struct Proposed {
 /// What a [`Replica::process`] round produced for the node.
 #[derive(Debug, Default)]
 pub struct Output {
-    /// Messages to send, filled.
+    /// Messages to send: filled by [`Replica::process`], not yet by
+    /// [`Replica::process_unfilled`].
     pub messages: Vec<Send>,
     /// Confirmed reads; the state machine has applied each one's index.
     pub reads: Vec<ReadState>,
@@ -691,6 +692,17 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
 
     /// Persists, applies and sends whatever the group has ready.
     pub async fn process(&mut self) -> Result<Output, Error> {
+        let mut out = self.process_unfilled().await?;
+        self.fill_messages(&mut out.messages).await?;
+        Ok(out)
+    }
+
+    /// [`Replica::process`], with appends not yet filled with entries:
+    /// [`Replica::fill_messages`] fills them from the log as it is then.
+    /// A node fills after its queue leaders have written their checkouts,
+    /// so an append carries the data and the checkout behind it together
+    /// (ADR 0111).
+    pub async fn process_unfilled(&mut self) -> Result<Output, Error> {
         if !self.raft.has_ready() {
             return Ok(Output::default());
         }
@@ -764,11 +776,17 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             snapshots::remove(&self.disk, &self.dir, snapshots::INCOMING).await?;
         }
         self.raft.advance();
-        let mut out = Output { messages: ready.messages, reads: ready.reads, reads_aborted: ready.reads_aborted };
-        for s in &mut out.messages {
+        Ok(Output { messages: ready.messages, reads: ready.reads, reads_aborted: ready.reads_aborted })
+    }
+
+    /// Fills the appends and snapshot chunks among `messages` from the log
+    /// and snapshot files: an append with what the log holds from where it
+    /// starts, everything persisted so far.
+    pub async fn fill_messages(&self, messages: &mut [Send]) -> Result<(), Error> {
+        for s in messages {
             self.fill(s).await?;
         }
-        Ok(out)
+        Ok(())
     }
 
     async fn apply(&mut self, first: u64, last: u64) -> Result<(), Error> {
