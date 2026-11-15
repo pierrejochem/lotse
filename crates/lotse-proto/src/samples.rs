@@ -66,6 +66,7 @@ pub fn requests() -> Vec<Request> {
             exclusive: false,
             notify_active: false,
             resume: None,
+            held: None,
         }),
         Request::Subscribe(SubscribeRequest {
             queue_id: 9,
@@ -75,6 +76,7 @@ pub fn requests() -> Vec<Request> {
             exclusive: false,
             notify_active: true,
             resume: None,
+            held: None,
         }),
         Request::Credit(CreditRequest { subscription_id: 3, add_msgs: 10, add_bytes: 4096 }),
         Request::Ack(AckRequest::plain(9, vec![(0, 3), (5, 6)])),
@@ -443,6 +445,27 @@ pub fn requests() -> Vec<Request> {
             exclusive: false,
             notify_active: false,
             resume: Some(0x8000_0000_0000_0001),
+            held: None,
+        }),
+        Request::Subscribe(SubscribeRequest {
+            queue_id: 9,
+            consumer_tag: "worker-1".into(),
+            credit_msgs: 100,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+            notify_active: false,
+            resume: Some(0x8000_0000_0000_0001),
+            held: Some(vec![(4, 6), (9, 10)]),
+        }),
+        Request::Subscribe(SubscribeRequest {
+            queue_id: 9,
+            consumer_tag: "worker-1".into(),
+            credit_msgs: 0,
+            credit_bytes: 1 << 20,
+            exclusive: false,
+            notify_active: false,
+            resume: Some(0x8000_0000_0000_0001),
+            held: Some(Vec::new()),
         }),
     ]
 }

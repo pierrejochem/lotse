@@ -53,6 +53,9 @@ public static class Messages
     /// <summary>Tag of the consumer id the leader gave a subscription (ADR 0109).</summary>
     internal const long TagConsumer = 2;
 
+    /// <summary>Tag of the messages a resuming consumer holds (ADR 0112).</summary>
+    internal const long TagHeld = 3;
+
     /// <summary>Tag of a transactional ack's producer id and epoch (ADR 0075).</summary>
     internal const long TagProducer = 2;
 

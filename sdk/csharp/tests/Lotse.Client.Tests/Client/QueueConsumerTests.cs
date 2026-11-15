@@ -739,13 +739,114 @@ public sealed class QueueConsumerTests : IDisposable
         List<Request.Subscribe> again = _b.Requests<Request.Subscribe>();
         Assert.Single(again);
         Assert.Equal(77UL, again[0].Resume); // resumes as the consumer it was
+        Assert.Equal(Ranges((10, 12)), again[0].Held!); // ADR 0112: names what it holds
         Assert.Equal(0UL, _a.Requests<Request.Subscribe>()[0].Resume); // a new consumer first
+        Assert.Null(_a.Requests<Request.Subscribe>()[0].Held); // and names nothing
         // A requeue of a message from before goes on the new subscription, which took it back.
         await c.NackAsync(first, true);
         List<Request.Nack> nacks = _b.Requests<Request.Nack>();
         Assert.Single(nacks);
         Assert.Equal(subB, nacks[0].SubscriptionId);
         Assert.Equal(Ranges((10, 11)), nacks[0].Ranges);
+    }
+
+    /// <summary>ADR 0112: an acked message is not named as held; a requeue not sent yet is, to be given back there.</summary>
+    [Fact]
+    public async Task ASettledMessageIsNotNamedAsHeldARequeueNotSentYetIs()
+    {
+        var seen = new Seen();
+        int subscribes = 0;
+        Script(_a, (n, conn, r) =>
+        {
+            if (r is Request.Subscribe)
+            {
+                uint id = NewSub();
+                if (Interlocked.Increment(ref subscribes) == 1)
+                {
+                    seen.Conn = conn;
+                    seen.Id = id;
+                    conn.Push(PushAll(id, 10, 3));
+                }
+                return new Response.Subscribe(ErrorCode.None, id, null, false, 77);
+            }
+            // The leader moved before the requeue reached it.
+            if (r is Request.Nack { Requeue: true })
+            {
+                return new Response.Outcome(ErrorCode.NotLeader, null);
+            }
+            return Plain(n, conn, r);
+        });
+        Connect(_a);
+        await using QueueConsumer c = await Client.SubscribeAsync("jobs", SubscribeOptions.WithCredit(3));
+        Delivery first = await Take(c);
+        Delivery second = await Take(c);
+        await c.AckAsync(first);
+        seen.Conn!.Push(Failure(seen.Id, ErrorCode.NotLeader, new LeaderHint(1, 2)));
+        Assert.Equal(12UL, (await Take(c)).Offset); // kept
+        // Not taken: the requeue waits for the next subscription.
+        await c.NackAsync(second, true);
+        Assert.Null(await c.PollAsync(Short));
+        List<Request.Subscribe> again = _a.Requests<Request.Subscribe>();
+        Assert.Equal(2, again.Count);
+        Assert.Equal(Ranges((11, 13)), again[1].Held!); // 11 to give back there, 12 handed out; 10 acked
+    }
+
+    /// <summary>ADR 0112: closing after the leader forgot the subscription gives back what was not handed out, at once.</summary>
+    [Fact]
+    public async Task ClosingAfterTheLeaderForgotTheSubscriptionGivesBackWhatWasNotHandedOut()
+    {
+        var ids = new List<uint>();
+        Script(_a, (n, conn, r) =>
+        {
+            if (r is Request.Subscribe)
+            {
+                uint id = NewSub();
+                lock (ids)
+                {
+                    ids.Add(id);
+                    if (ids.Count == 1)
+                    {
+                        conn.Push(PushAll(id, 10, 3));
+                    }
+                }
+                return new Response.Subscribe(ErrorCode.None, id, null, false, 77);
+            }
+            // The leader moved: the first subscription is unknown here now.
+            if (r is Request.Unsubscribe u && u.SubscriptionId == ids[0])
+            {
+                return new Response.Outcome(ErrorCode.UnknownSubscription, null);
+            }
+            return Plain(n, conn, r);
+        });
+        Connect(_a);
+        QueueConsumer c = await Client.SubscribeAsync("jobs", SubscribeOptions.WithCredit(3));
+        Assert.Equal(10UL, (await Take(c)).Offset);
+        await Task.Delay(100); // 11 and 12 are received
+        await c.DisposeAsync();
+        List<Request.Subscribe> subscribes = _a.Requests<Request.Subscribe>();
+        Assert.Equal(2, subscribes.Count);
+        Request.Subscribe back = subscribes[1];
+        Assert.Equal(77UL, back.Resume);
+        Assert.Equal(0u, back.CreditMsgs); // takes nothing new
+        Assert.Equal(Ranges((10, 11)), back.Held!); // keeps only what was handed out
+        List<Request.Unsubscribe> unsubscribes = _a.Requests<Request.Unsubscribe>();
+        Assert.Equal(2, unsubscribes.Count);
+        Assert.Equal(ids[1], unsubscribes[1].SubscriptionId); // and ends at once
+    }
+
+    /// <summary>ADR 0112: closing a subscription the leader still knows subscribes no more.</summary>
+    [Fact]
+    public async Task ClosingASubscriptionTheLeaderStillKnowsGivesBackNothingMore()
+    {
+        Script(_a, (n, conn, r) => r is Request.Subscribe
+            ? new Response.Subscribe(ErrorCode.None, NewSub(), null, false, 77)
+            : Plain(n, conn, r));
+        Connect(_a);
+        QueueConsumer c = await Client.SubscribeAsync("jobs");
+        await c.DisposeAsync();
+        await Task.Delay(Short);
+        Assert.Equal(1, _a.Count<Request.Unsubscribe>());
+        Assert.Equal(1, _a.Count<Request.Subscribe>()); // no second subscription
     }
 
     [Fact]

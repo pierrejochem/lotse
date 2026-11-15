@@ -102,6 +102,18 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// <summary>Requeues that missed a subscription because the leader moved or the connection broke.</summary>
     private readonly List<(ulong Offset, uint DelayMs)> _unsent = new(); // guarded by _mu
 
+    /// <summary>
+    /// Messages handed out and not settled yet, as far as this consumer knows: a resuming subscription names them, with
+    /// the ones received and the requeues not sent yet, as what it holds (ADR 0112).
+    /// </summary>
+    private readonly SortedSet<ulong> _outstanding = new(); // guarded by _mu
+
+    /// <summary>
+    /// The last subscription ended for a failover or a broken connection while the consumer had an id: messages may
+    /// wait for it at the leader, which closing gives back.
+    /// </summary>
+    private bool _resumable; // guarded by _mu
+
     /// <summary>The leader moved or the connection broke: a transactional ack is worth sending on a new subscription.</summary>
     private sealed class ResendException : Exception
     {
@@ -133,8 +145,13 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 return;
             }
         }
+        List<Messages.OffsetRange>? held;
+        lock (_mu)
+        {
+            held = Held();
+        }
         (Sub made, ulong resourceId, ulong consumerId) =
-            await _client.RetryingAsync(() => SubscribeOnceAsync(ct), ct).ConfigureAwait(false);
+            await _client.RetryingAsync(() => SubscribeOnceAsync((uint)_credit, held, ct), ct).ConfigureAwait(false);
         bool abandon;
         var missed = new List<(ulong Offset, uint DelayMs)>();
         lock (_mu)
@@ -144,6 +161,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             {
                 _sub = made;
                 _resourceId = resourceId;
+                _resumable = false;
                 if (consumerId != 0)
                 {
                     _consumerId = consumerId;
@@ -169,7 +187,25 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
     }
 
-    private async Task<(Sub, ulong, ulong)> SubscribeOnceAsync(CancellationToken ct)
+    /// <summary>
+    /// What a resuming subscription names as held (ADR 0112): the messages handed out and not settled, the ones received
+    /// and not handed out, and the requeues not sent yet; <c>null</c> before the consumer has an id. Called with the
+    /// lock held.
+    /// </summary>
+    private List<Messages.OffsetRange>? Held()
+    {
+        if (_consumerId == 0)
+        {
+            return null;
+        }
+        var all = new List<ulong>(_outstanding);
+        all.AddRange(_buffered.Select(d => d.Offset));
+        all.AddRange(_unsent.Select(u => u.Offset));
+        return OffsetRanges.Of(all);
+    }
+
+    private async Task<(Sub, ulong, ulong)> SubscribeOnceAsync(
+        uint creditMsgs, List<Messages.OffsetRange>? held, CancellationToken ct)
     {
         LotseClient.Routed routed = await _client.RouteAsync(_queue, 0, ct).ConfigureAwait(false);
         Connection conn;
@@ -188,7 +224,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
         // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076), and resumes
         // as the consumer it was (ADR 0109).
-        var request = new Request.Subscribe(routed.Route.ResourceId, string.Empty, (uint)_credit, U32Max, false, true, resume);
+        var request = new Request.Subscribe(routed.Route.ResourceId, string.Empty, creditMsgs, U32Max, false, true, resume, held);
         Response response;
         try
         {
@@ -277,6 +313,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 if (_buffered.Count > 0)
                 {
                     output = _buffered.Dequeue();
+                    _outstanding.Add(output.Offset);
                     _usedMsgs++;
                     creditRequest = Refill();
                     on = _sub;
@@ -466,6 +503,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             }
             else
             {
+                _resumable = true;
                 while (which.Events.TryRead(out object? ev))
                 {
                     if (ev is Frames.DeliverPush { Error.IsOk: true } p && !p.IsActivation)
@@ -521,10 +559,23 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     // ---- settling ----
 
     /// <summary>Acknowledges a message: once this returns, it is never delivered again.</summary>
-    public Task AckAsync(Delivery delivery, CancellationToken cancellationToken = default)
+    public async Task AckAsync(Delivery delivery, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
-        return SettleAsync(OffsetRanges.Of(new[] { delivery.Offset }), nack: false, cancellationToken);
+        await SettleAsync(OffsetRanges.Of(new[] { delivery.Offset }), nack: false, cancellationToken).ConfigureAwait(false);
+        Settled(new[] { delivery });
+    }
+
+    /// <summary>The messages are settled or given back: no longer held.</summary>
+    private void Settled(IEnumerable<Delivery> deliveries)
+    {
+        lock (_mu)
+        {
+            foreach (Delivery d in deliveries)
+            {
+                _outstanding.Remove(d.Offset);
+            }
+        }
     }
 
     /// <summary>
@@ -544,6 +595,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         try
         {
             await AckInResumingAsync(txn, delivery, cancellationToken).ConfigureAwait(false);
+            Settled(new[] { delivery }); // the transaction holds it now, not this consumer
         }
         catch (Exception e) when (e is ClientException or OperationCanceledException or ObjectDisposedException)
         {
@@ -641,12 +693,15 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// Acknowledges several messages in as few ranges as their offsets allow. The outcome of an ack that was lost is
     /// retried: settling twice is harmless.
     /// </summary>
-    public Task AckAsync(IReadOnlyCollection<Delivery> deliveries, CancellationToken cancellationToken = default)
+    public async Task AckAsync(IReadOnlyCollection<Delivery> deliveries, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(deliveries);
-        return deliveries.Count == 0
-            ? Task.CompletedTask
-            : SettleAsync(OffsetRanges.Of(Offsets(deliveries)), nack: false, cancellationToken);
+        if (deliveries.Count == 0)
+        {
+            return;
+        }
+        await SettleAsync(OffsetRanges.Of(Offsets(deliveries)), nack: false, cancellationToken).ConfigureAwait(false);
+        Settled(deliveries);
     }
 
     /// <summary>
@@ -660,16 +715,20 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     }
 
     /// <summary><see cref="NackAsync(Delivery, bool, CancellationToken)"/> for several messages.</summary>
-    public Task NackAsync(IReadOnlyCollection<Delivery> deliveries, bool requeue, CancellationToken cancellationToken = default)
+    public async Task NackAsync(IReadOnlyCollection<Delivery> deliveries, bool requeue, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(deliveries);
         if (deliveries.Count == 0)
         {
-            return Task.CompletedTask;
+            return;
         }
-        return requeue
-            ? RequeueAsync(deliveries, 0, cancellationToken)
-            : SettleAsync(OffsetRanges.Of(Offsets(deliveries)), nack: true, cancellationToken);
+        if (requeue)
+        {
+            await RequeueAsync(deliveries, 0, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        await SettleAsync(OffsetRanges.Of(Offsets(deliveries)), nack: true, cancellationToken).ConfigureAwait(false);
+        Settled(deliveries);
     }
 
     /// <summary>
@@ -705,6 +764,10 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
                 {
                     held.Add(d);
                 }
+                else if (on is not null)
+                {
+                    _outstanding.Remove(d.Offset); // it went back with its subscription
+                }
             }
             if (on is null && resumable)
             {
@@ -732,6 +795,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
         if (response is Response.Outcome { Error.IsOk: true })
         {
+            Settled(held);
             return;
         }
         if (response is Response.Outcome o && !o.Error.Retriable)
@@ -811,26 +875,75 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// <see cref="ObjectDisposedException"/>. This does not wait for the broker; <see cref="DisposeAsync"/> waits until
     /// the subscription has ended and what goes back is sent.
     /// </summary>
+    /// <remarks>
+    /// If the subscription had already ended for a failover or a broken connection, or its leader no longer knows it, a
+    /// new leader may keep this consumer's messages for it until the resume window is over. Then it subscribes once
+    /// more, naming only the messages handed out as held and with no credit, and unsubscribes, so the leader hands the
+    /// others out again at once (ADR 0112).
+    /// </remarks>
     public void Dispose()
     {
-        (Sub? ending, List<ulong> back, ulong queueId) = BeginClose();
-        if (ending is not null)
+        (Sub? ending, List<ulong> back, ulong queueId, bool first) = BeginClose();
+        if (first)
         {
-            _ = FinishCloseAsync(ending, back, queueId);
+            _ = EndAsync(ending, back, queueId);
         }
     }
 
     /// <summary>Like <see cref="Dispose"/>, and completes once the subscription has ended and what goes back is sent.</summary>
     public async ValueTask DisposeAsync()
     {
-        (Sub? ending, List<ulong> back, ulong queueId) = BeginClose();
-        if (ending is not null)
+        (Sub? ending, List<ulong> back, ulong queueId, bool first) = BeginClose();
+        if (first)
         {
-            await FinishCloseAsync(ending, back, queueId).ConfigureAwait(false);
+            await EndAsync(ending, back, queueId).ConfigureAwait(false);
         }
     }
 
-    private (Sub?, List<ulong>, ulong) BeginClose()
+    /// <summary>
+    /// Ends the subscription, if there is one; if it had ended already or its leader did not take the unsubscribe, gives
+    /// back at the leader what was not handed out (ADR 0112).
+    /// </summary>
+    private async Task EndAsync(Sub? ending, List<ulong> back, ulong queueId)
+    {
+        bool taken;
+        if (ending is not null)
+        {
+            taken = await FinishCloseAsync(ending, back, queueId).ConfigureAwait(false);
+        }
+        else
+        {
+            lock (_mu)
+            {
+                taken = !_resumable;
+            }
+        }
+        List<Messages.OffsetRange> held;
+        lock (_mu)
+        {
+            if (taken || _consumerId == 0)
+            {
+                return;
+            }
+            held = OffsetRanges.Of(_outstanding.ToList());
+        }
+        Sub made;
+        ulong resourceId;
+        try
+        {
+            // Bounded by the client's retry time.
+            (made, resourceId, _) = await _client
+                .RetryingAsync(() => SubscribeOnceAsync(0, held, CancellationToken.None), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is ClientException or OperationCanceledException)
+        {
+            return; // the resume window gives them back
+        }
+        await FinishCloseAsync(made, new List<ulong>(), resourceId).ConfigureAwait(false);
+    }
+
+    private (Sub?, List<ulong>, ulong, bool) BeginClose()
     {
         Sub? ending;
         List<ulong> back;
@@ -839,7 +952,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         {
             if (_closed)
             {
-                return (null, new List<ulong>(), 0);
+                return (null, new List<ulong>(), 0, false);
             }
             _closed = true;
             ending = _sub;
@@ -849,7 +962,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             back = Offsets(_buffered);
             _buffered.Clear();
         }
-        return (ending, back, queueId);
+        return (ending, back, queueId, true);
     }
 
     /// <summary>
@@ -857,9 +970,9 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
     /// come in order on the connection, so every push the leader sent before it took the unsubscribe has arrived by
     /// then (the leader writes a checkout before it pushes, ADR 0109, so one may still be on its way); the broker
     /// keeps the messages of a subscription that is ending until they are settled, so they would otherwise wait for the
-    /// ack timeout.
+    /// ack timeout. Returns whether the leader took the unsubscribe: if not, the subscription had ended.
     /// </summary>
-    private async Task FinishCloseAsync(Sub ending, List<ulong> back, ulong queueId)
+    private async Task<bool> FinishCloseAsync(Sub ending, List<ulong> back, ulong queueId)
     {
         var unread = new List<object>();
         while (ending.Events.TryRead(out object? ev))
@@ -868,11 +981,14 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
         }
         // A task waiting for a message wakes and sees the consumer closed.
         ending.Add(ClosedEvent);
+        bool taken = false;
         using (var timeout = new CancellationTokenSource(_client.RequestTimeout))
         {
             try
             {
-                await _client.CallOnAsync(ending.Conn, new Request.Unsubscribe(ending.Id), timeout.Token).ConfigureAwait(false);
+                Response r = await _client.CallOnAsync(ending.Conn, new Request.Unsubscribe(ending.Id), timeout.Token)
+                    .ConfigureAwait(false);
+                taken = r is Response.Outcome { Error.IsOk: true };
             }
             catch (Exception e) when (e is CallFailure or OperationCanceledException)
             {
@@ -897,6 +1013,7 @@ public sealed class QueueConsumer : IAsyncDisposable, IDisposable
             await SendQuietlyAsync(ending.Conn, new Request.Nack(queueId, OffsetRanges.Of(back), true, 0, ending.Id))
                 .ConfigureAwait(false);
         }
+        return taken;
     }
 
     private void CheckOpen()

@@ -1218,6 +1218,125 @@ fn a_transactional_ack_survives_a_failover() {
     });
 }
 
+/// The leader can go after it wrote a checkout and before the push reached
+/// the consumer. The consumer resumes at the new leader naming what it got,
+/// so a message whose push was lost goes out again at once, not after the
+/// ack timeout (ADR 0112). Ack timeout and resume window are longer than
+/// the scenario: only that rule brings such a message back in time.
+#[test]
+fn a_message_whose_push_was_lost_in_a_failover_comes_again_at_once() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let long = Duration::from_secs(600);
+            let mut scenario = Scenario::classic();
+            for q in &mut scenario.queues {
+                q.ack_timeout = long;
+                q.resume_window = long;
+            }
+            let mut w = World::new(rt.clone(), scenario).await;
+            let patient = || ClientConfig { retry_for: Duration::from_secs(20), ..client_config() };
+            let quiet = Client::new(rt.node("p"), patient());
+            let got: Arc<Mutex<BTreeMap<String, u16>>> = Arc::default();
+            let stop = Arc::new(AtomicBool::new(false));
+            let reader = {
+                let (rt, got, stop) = (rt.clone(), got.clone(), stop.clone());
+                rt.clone().spawn(async move {
+                    let c = Client::new(
+                        rt.node("c"),
+                        ClientConfig { retry_for: Duration::from_secs(20), ..client_config() },
+                    );
+                    let mut jobs = c.subscribe("jobs", 5).await.expect("subscribed");
+                    while !stop.load(Ordering::SeqCst) {
+                        let Ok(Some(m)) = jobs.next(Duration::from_millis(200)).await else { continue };
+                        if jobs.ack(&m).await.is_ok() {
+                            got.lock().unwrap().entry(value_of(&m)).or_insert(m.delivery_count);
+                        }
+                    }
+                    jobs.close().await;
+                })
+            };
+            let rounds = 12;
+            for i in 0..rounds {
+                quiet.produce("jobs", 0, message(&format!("m{i}"))).await.expect("written");
+                // The leader goes somewhere around its checkout and push.
+                rt.sleep(Duration::from_millis(rt.next_u64() % 30)).await;
+                let leader = queue_leader(&rt, &quiet, "jobs").await;
+                w.crash(leader, false).await;
+                rt.sleep(Duration::from_millis(500)).await;
+                w.start(leader).await;
+                rt.sleep(Duration::from_millis(500)).await;
+            }
+            let t0 = rt.now();
+            while got.lock().unwrap().len() < rounds && rt.now() - t0 < Duration::from_secs(60) {
+                rt.sleep(Duration::from_millis(100)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+            let _ = reader.await;
+            let got = got.lock().unwrap().clone();
+            let missing: Vec<String> = (0..rounds).map(|i| format!("m{i}")).filter(|v| !got.contains_key(v)).collect();
+            assert!(missing.is_empty(), "seed {seed}: still out after a minute: {missing:?}");
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+/// A consumer that closes after its leader went gives back, at the new
+/// leader, the messages it never handed out: they go to another consumer at
+/// once, not after the resume window (ADR 0112). The one it handed out
+/// stays its own.
+#[test]
+fn a_consumer_that_closes_after_a_failover_gives_back_what_it_did_not_hand_out() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let long = Duration::from_secs(600);
+            let mut scenario = Scenario::classic();
+            for q in &mut scenario.queues {
+                q.ack_timeout = long;
+                q.resume_window = long;
+            }
+            let mut w = World::new(rt.clone(), scenario).await;
+            let patient = || ClientConfig { retry_for: Duration::from_secs(20), ..client_config() };
+            let quiet = Client::new(rt.node("p"), patient());
+            for i in 0..3 {
+                quiet.produce("jobs", 0, message(&format!("m{i}"))).await.expect("written");
+            }
+            let closing = Client::new(rt.node("c"), patient());
+            let mut jobs = closing.subscribe("jobs", 5).await.expect("subscribed");
+            let first = jobs.next(Duration::from_secs(5)).await.unwrap().expect("delivered");
+            rt.sleep(Duration::from_millis(300)).await; // the others are pushed
+            let leader = queue_leader(&rt, &quiet, "jobs").await;
+            w.crash(leader, false).await;
+            rt.sleep(Duration::from_secs(1)).await;
+            jobs.close().await;
+
+            let other = Client::new(rt.node("o"), patient());
+            let mut theirs = other.subscribe("jobs", 5).await.expect("subscribed");
+            let mut got = Vec::new();
+            let t0 = rt.now();
+            while got.len() < 2 && rt.now() - t0 < Duration::from_secs(10) {
+                if let Some(m) = theirs.next(Duration::from_millis(200)).await.unwrap() {
+                    got.push(value_of(&m));
+                    theirs.ack(&m).await.expect("acked");
+                }
+            }
+            got.sort();
+            let rest: Vec<String> =
+                ["m0", "m1", "m2"].into_iter().filter(|v| *v != value_of(&first)).map(String::from).collect();
+            assert_eq!(got, rest, "seed {seed}: given back at once");
+            assert!(theirs.next(Duration::from_secs(1)).await.unwrap().is_none(), "the one handed out stays");
+            drop(theirs);
+            w.start(leader).await;
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
 #[derive(Default)]
 struct MoveOutcomes {
     /// Values `jobs` acknowledged.

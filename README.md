@@ -189,7 +189,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 ### Weaknesses
 
-- **Leadership moves after a failover.** A new group starts on its preferred node, so creating a queue or stream no longer leads to a move (ADR 0095); but after a failover, or an election that a node short of CPU loses, clients meet `NOT_LEADER` and subscribe again. A consumer keeps its messages and its transaction across the move (ADR 0109); one that does not come back within the queue's resume window (30 s by default) has its messages given to others. `DescribeMetrics` names a leader only while a quorum answers it, so for a moment after an election no node may.
+- **Leadership moves after a failover.** A new group starts on its preferred node, so creating a queue or stream no longer leads to a move (ADR 0095); but after a failover, or an election that a node short of CPU loses, clients meet `NOT_LEADER` and subscribe again. A consumer keeps its messages and its transaction across the move (ADR 0109), and what it never received goes to others at once (ADR 0112); one that does not come back within the queue's resume window (30 s by default) has its messages given to others, unless it closed, which gives them back at once. `DescribeMetrics` names a leader only while a quorum answers it, so for a moment after an election no node may.
 
 ### Not built yet
 
