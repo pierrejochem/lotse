@@ -29,6 +29,8 @@ const TAG_STANDBY: u64 = 1;
 const TAG_RESUME: u64 = 2;
 /// The consumer id the leader gave a subscription (ADR 0109).
 const TAG_CONSUMER: u64 = 2;
+/// The messages a resuming consumer holds (ADR 0112).
+const TAG_HELD: u64 = 3;
 /// The metadata index through which a node has removed the files of every
 /// deleted resource (ADR 0100), in its `DescribeMetrics` answer.
 const TAG_REMOVED_THROUGH: u64 = 1;
@@ -1223,6 +1225,12 @@ pub struct SubscribeRequest {
     /// again, and its connection may ack them in a transaction. Sent as a
     /// tag.
     pub resume: Option<u64>,
+    /// With `resume`: the messages the consumer holds, received and not yet
+    /// settled, as `[from, to)` ranges (ADR 0112). The leader takes back
+    /// only these and hands the consumer's other messages out again at
+    /// once: their pushes never reached it. Absent, the subscription takes
+    /// back everything handed to the consumer. Sent as a tag.
+    pub held: Option<Vec<(u64, u64)>>,
 }
 
 impl SubscribeRequest {
@@ -1241,6 +1249,11 @@ impl SubscribeRequest {
             v.u64(c);
             tags.push((TAG_RESUME, v.finish()));
         }
+        if let Some(held) = &self.held {
+            let mut v = Writer::new();
+            put_ranges(&mut v, held);
+            tags.push((TAG_HELD, v.finish()));
+        }
         if tags.is_empty() {
             w.no_tags();
         } else {
@@ -1256,12 +1269,14 @@ impl SubscribeRequest {
             exclusive: r.u8()? != 0,
             notify_active: false,
             resume: None,
+            held: None,
         };
         for (tag, value) in r.tags()? {
             let mut v = Reader::new(value);
             match tag {
                 TAG_NOTIFY_ACTIVE => req.notify_active = v.u8()? != 0,
                 TAG_RESUME => req.resume = Some(v.u64()?),
+                TAG_HELD => req.held = Some(get_ranges(&mut v)?),
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }

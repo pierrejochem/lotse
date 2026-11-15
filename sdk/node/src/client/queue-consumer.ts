@@ -2,7 +2,7 @@ import type { Address } from "../net/address.js";
 import type { Connection } from "../net/connection.js";
 import { ConnectionError } from "../net/errors.js";
 import { describeError, ErrorCode, isRetriable } from "../proto/error-code.js";
-import type { LeaderHint } from "../proto/messages.js";
+import type { LeaderHint, Range } from "../proto/messages.js";
 import type { DeliverPush } from "../proto/index.js";
 import { isActivation } from "../proto/frames.js";
 import type { Request } from "../proto/request.js";
@@ -131,6 +131,16 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
   private consumerId = 0n;
   /** Requeues that missed a subscription because the leader moved or the connection broke. */
   private readonly unsent: { offset: bigint; delayMs: number }[] = [];
+  /**
+   * Messages handed out and not settled yet, as far as this consumer knows: a resuming subscription names them, with
+   * the ones received and the requeues not sent yet, as what it holds (ADR 0112).
+   */
+  private readonly outstanding = new Set<bigint>();
+  /**
+   * The last subscription ended for a failover or a broken connection while the consumer had an id: messages may wait
+   * for it at the leader, which `close` gives back.
+   */
+  private resumable = false;
 
   constructor(
     private readonly host: QueueHost,
@@ -159,6 +169,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     }
     this.sub = made.sub;
     this.resourceId = made.resourceId;
+    this.resumable = false;
     if (made.consumerId !== 0n) {
       this.consumerId = made.consumerId;
     }
@@ -177,7 +188,22 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     }
   }
 
-  private async subscribeOnce(signal?: AbortSignal): Promise<Subscribed> {
+  /**
+   * What a resuming subscription names as held (ADR 0112): the messages handed out and not settled, the ones received
+   * and not handed out, and the requeues not sent yet. `undefined` before the consumer has an id.
+   */
+  private held(): Range[] | undefined {
+    if (this.consumerId === 0n) {
+      return undefined;
+    }
+    return offsetRanges([...this.outstanding, ...this.buffered.map((d) => d.offset), ...this.unsent.map((u) => u.offset)]);
+  }
+
+  private async subscribeOnce(
+    signal?: AbortSignal,
+    credit: number = this.credit,
+    held: Range[] | undefined = this.held(),
+  ): Promise<Subscribed> {
     const routed = await this.host.route(this.queue, 0, signal);
     let conn: Connection;
     try {
@@ -194,11 +220,12 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       type: "Subscribe",
       queueId: routed.route.resourceId,
       consumerTag: "",
-      creditMsgs: this.credit,
+      creditMsgs: credit,
       creditBytes: U32_MAX,
       exclusive: false,
       notifyActive: true,
       ...(this.consumerId !== 0n ? { resume: this.consumerId } : {}),
+      ...(held !== undefined ? { held } : {}),
     };
     let resp: Response;
     try {
@@ -283,6 +310,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       this.checkOpen();
       const out = this.buffered.shift();
       if (out !== undefined) {
+        this.outstanding.add(out.offset);
         this.usedMsgs++;
         const credit = this.refill();
         if (credit !== null && this.sub !== null) {
@@ -363,6 +391,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     if (!resumable || this.consumerId === 0n) {
       this.buffered.length = 0;
     } else {
+      this.resumable = true;
       for (const e of which.events.splice(0)) {
         if (typeof e === "object" && !(e instanceof ConnectionError) && e.error === ErrorCode.NONE && !isActivation(e)) {
           this.buffered.push(...deliveriesOf(which, e));
@@ -442,6 +471,14 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     const list = asList(deliveries);
     if (list.length > 0) {
       await this.settle(offsetRanges(list.map((d) => d.offset)), false, options.signal);
+      this.settled(list);
+    }
+  }
+
+  /** The messages are settled or given back: no longer held. */
+  private settled(list: readonly Delivery[]): void {
+    for (const d of list) {
+      this.outstanding.delete(d.offset);
     }
   }
 
@@ -459,6 +496,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       await txn.add(this.queue, 0, options.signal);
       try {
         await this.ackInResuming(txn, delivery, options.signal);
+        this.settled([delivery]); // the transaction holds it now, not this consumer
       } catch (e) {
         txn.mustAbort((e as Error).message);
         throw e;
@@ -544,6 +582,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     }
     if (!requeue) {
       await this.settle(offsetRanges(list.map((d) => d.offset)), true, options.signal);
+      this.settled(list);
       return;
     }
     await this.requeue(list, 0);
@@ -572,6 +611,8 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       return;
     }
     const held = deliveries.filter((d) => this.subFor(d) !== null);
+    // The others went back with their subscription.
+    this.settled(deliveries.filter((d) => this.subFor(d) === null));
     if (held.length === 0) {
       return;
     }
@@ -593,6 +634,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
       resp = null;
     }
     if (resp !== null && resp.type === "Outcome" && resp.error === ErrorCode.NONE) {
+      this.settled(held);
       return;
     }
     if (resp !== null && resp.type === "Outcome" && !isRetriable(resp.error)) {
@@ -656,24 +698,45 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
     this.sub = null;
     const unread = this.buffered.map((d) => d.offset);
     this.buffered.length = 0;
-    if (ending !== null) {
-      void this.finish(ending, unread, this.resourceId);
+    void this.end(ending, unread);
+  }
+
+  /**
+   * Ends the subscription, if there is one. If it had already ended for a failover or a broken connection, or its
+   * leader no longer knows it, a new leader may keep this consumer's messages for it until the resume window is over.
+   * Then it subscribes once more, naming only the messages handed out as held and with no credit, and unsubscribes, so
+   * the leader hands the others out again at once (ADR 0112).
+   */
+  private async end(ending: Sub | null, unread: bigint[]): Promise<void> {
+    const taken = ending !== null ? await this.finish(ending, unread, this.resourceId) : !this.resumable;
+    if (taken || this.consumerId === 0n) {
+      return;
     }
+    const held = offsetRanges([...this.outstanding]);
+    let made: Subscribed;
+    try {
+      made = await this.host.retrying(() => this.subscribeOnce(undefined, 0, held));
+    } catch {
+      return; // the resume window gives them back
+    }
+    await this.finish(made.sub, [], made.resourceId);
   }
 
   /**
    * Unsubscribes, waits for the answer, then gives back what was received and not handed out. Pushes and answers come
    * in order on the connection, so every push the leader sent before it took the unsubscribe has arrived by then (the
    * leader writes a checkout before it pushes, ADR 0109, so one may still be on its way); the broker holds their
-   * messages for this subscription.
+   * messages for this subscription. Returns whether the leader took the unsubscribe: if not, the subscription had ended.
    */
-  private async finish(ending: Sub, unread: bigint[], queueId: bigint): Promise<void> {
+  private async finish(ending: Sub, unread: bigint[], queueId: bigint): Promise<boolean> {
     // Readers waiting on the subscription wake and see the consumer closed.
     const waiting = ending.events.filter((e) => e !== CLOSED);
     ending.events.length = 0;
     ending.add(CLOSED);
+    let taken = false;
     try {
-      await this.host.callOn(ending.conn, { type: "Unsubscribe", subscriptionId: ending.id });
+      const resp = await this.host.callOn(ending.conn, { type: "Unsubscribe", subscriptionId: ending.id });
+      taken = resp.type === "Outcome" && resp.error === ErrorCode.NONE;
     } catch {
       // the subscription ends with the connection
     }
@@ -694,6 +757,7 @@ export class QueueConsumer implements AsyncIterable<Delivery> {
         subscriptionId: ending.id,
       });
     }
+    return taken;
   }
 
   private checkOpen(): void {

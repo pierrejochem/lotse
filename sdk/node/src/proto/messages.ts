@@ -44,6 +44,8 @@ export const TAG_STANDBY = 1;
 export const TAG_RESUME = 2;
 /** The consumer id the leader gave a subscription (ADR 0109). */
 export const TAG_CONSUMER = 2;
+/** The messages a resuming consumer holds (ADR 0112). */
+export const TAG_HELD = 3;
 export const TAG_PRODUCER = 2;
 /** The subscription a requeueing `Nack` came on (ADR 0106). */
 export const TAG_NACK_SUBSCRIPTION = 0;

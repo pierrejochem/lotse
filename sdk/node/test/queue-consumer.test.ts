@@ -698,7 +698,9 @@ describe("a queue consumer against scripted brokers", () => {
       const again = b.requests("Subscribe");
       assert.equal(again.length, 1);
       assert.equal(again[0]?.resume, 77n, "resumes as the consumer it was");
+      assert.deepEqual(again[0]?.held, [{ from: 10n, to: 12n }], "ADR 0112: names what it holds");
       assert.equal(a.requests("Subscribe")[0]?.resume, undefined, "a new consumer first");
+      assert.equal(a.requests("Subscribe")[0]?.held, undefined, "and names nothing");
       // A requeue of a message from before goes on the new subscription, which took it back.
       await c.nack(first, true);
       const nacks = b.requests("Nack");
@@ -706,6 +708,85 @@ describe("a queue consumer against scripted brokers", () => {
       assert.equal(nacks[0]?.subscriptionId, (subs[1] as (typeof subs)[number]).id);
       assert.deepEqual(nacks[0]?.ranges, [{ from: 10n, to: 11n }]);
       c.close();
+    });
+
+    test("ADR 0112: a settled message is not named as held, a requeue not sent yet is", async () => {
+      serve(a, (r, peer) => {
+        if (r.type === "Subscribe") {
+          const id = ++nextSub;
+          subs.push({ node: 1, peer, id });
+          if (subs.length === 1) {
+            peer.push(pushAll(id, 10, 3));
+          }
+          return { ...subscribed(id), consumerId: 77n };
+        }
+        // The leader moved before the requeue reached it.
+        if (r.type === "Nack" && r.requeue) {
+          return outcome(ErrorCode.NOT_LEADER);
+        }
+        return undefined;
+      });
+      const c = await connect(a).subscribe("jobs", { credit: 3 });
+      const first = await take(c);
+      const second = await take(c);
+      await c.ack(first);
+      const s = subs[0] as (typeof subs)[number];
+      s.peer.push(failure(s.id, ErrorCode.NOT_LEADER, { leader: 1, term: 2n }));
+      assert.equal((await take(c)).offset, 12n, "kept");
+      // Not taken: the requeue waits for the next subscription.
+      await c.nack(second, true);
+      assert.equal(await c.poll(SHORT), null);
+      const again = a.requests("Subscribe");
+      assert.equal(again.length, 2);
+      assert.deepEqual(again[1]?.held, [{ from: 11n, to: 13n }], "11 to give back there, 12 handed out; 10 acked");
+      c.close();
+    });
+
+    test("ADR 0112: closing after the leader forgot the subscription gives back what was not handed out", async () => {
+      serve(a, (r, peer) => {
+        if (r.type === "Subscribe") {
+          const id = ++nextSub;
+          subs.push({ node: 1, peer, id });
+          if (subs.length === 1) {
+            peer.push(pushAll(id, 10, 3));
+          }
+          return { ...subscribed(id), consumerId: 77n };
+        }
+        // The leader moved: the first subscription is unknown here now.
+        if (r.type === "Unsubscribe" && r.subscriptionId === (subs[0] as (typeof subs)[number]).id) {
+          return outcome(ErrorCode.UNKNOWN_SUBSCRIPTION);
+        }
+        return undefined;
+      });
+      const c = await connect(a).subscribe("jobs", { credit: 3 });
+      assert.equal((await take(c)).offset, 10n);
+      await sleep(100); // 11 and 12 are received
+      c.close();
+      await eventually("both unsubscribed", () => a.count("Unsubscribe") === 2);
+      const subscribes = a.requests("Subscribe");
+      assert.equal(subscribes.length, 2);
+      const back = subscribes[1];
+      assert.equal(back?.resume, 77n);
+      assert.equal(back?.creditMsgs, 0, "takes nothing new");
+      assert.deepEqual(back?.held, [{ from: 10n, to: 11n }], "keeps only what was handed out");
+      const unsub = a.requests("Unsubscribe");
+      assert.equal(unsub[1]?.subscriptionId, (subs[1] as (typeof subs)[number]).id, "and ends at once");
+    });
+
+    test("ADR 0112: closing a subscription the leader still knows gives back nothing more", async () => {
+      serve(a, (r, peer) => {
+        if (r.type === "Subscribe") {
+          const id = ++nextSub;
+          subs.push({ node: 1, peer, id });
+          return { ...subscribed(id), consumerId: 77n };
+        }
+        return undefined;
+      });
+      const c = await connect(a).subscribe("jobs");
+      c.close();
+      await eventually("unsubscribed", () => a.count("Unsubscribe") === 1);
+      await sleep(SHORT);
+      assert.equal(a.count("Subscribe"), 1, "no second subscription");
     });
 
     test("a push with UNKNOWN_RESOURCE drops the route", async () => {

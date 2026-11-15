@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -89,6 +90,16 @@ public final class QueueConsumer implements AutoCloseable {
     private long consumerId; // guarded by mu
     /** Requeues that missed a subscription because the leader moved or the connection broke: offset, delay ms. */
     private final List<long[]> unsent = new ArrayList<>(); // guarded by mu
+    /**
+     * Messages handed out and not settled yet, as far as this consumer knows: a resuming subscription names them, with
+     * the ones received and the requeues not sent yet, as what it holds (ADR 0112).
+     */
+    private final TreeSet<Long> outstanding = new TreeSet<>(); // guarded by mu
+    /**
+     * The last subscription ended for a failover or a broken connection while the consumer had an id: messages may
+     * wait for it at the leader, which {@link #close} gives back.
+     */
+    private boolean resumable; // guarded by mu
 
     QueueConsumer(LotseClient client, String queue, int credit) {
         this.client = client;
@@ -110,7 +121,11 @@ public final class QueueConsumer implements AutoCloseable {
                 return;
             }
         }
-        Subscribed made = client.retrying(this::subscribeOnce);
+        List<Range> held;
+        synchronized (mu) {
+            held = held();
+        }
+        Subscribed made = client.retrying(() -> subscribeOnce(credit, held));
         boolean abandon;
         List<long[]> missed = List.of();
         synchronized (mu) {
@@ -118,6 +133,7 @@ public final class QueueConsumer implements AutoCloseable {
             if (!abandon) {
                 sub = made.sub;
                 resourceId = made.resourceId;
+                resumable = false;
                 if (made.consumerId != 0) {
                     consumerId = made.consumerId;
                 }
@@ -141,7 +157,26 @@ public final class QueueConsumer implements AutoCloseable {
 
     private record Subscribed(Sub sub, long resourceId, long consumerId) {}
 
-    private Subscribed subscribeOnce() {
+    /**
+     * What a resuming subscription names as held (ADR 0112): the messages handed out and not settled, the ones
+     * received and not handed out, and the requeues not sent yet; {@code null} before the consumer has an id. Called
+     * with {@code mu} held.
+     */
+    private List<Range> held() {
+        if (consumerId == 0) {
+            return null;
+        }
+        List<Long> all = new ArrayList<>(outstanding);
+        for (Delivery d : buffered) {
+            all.add(d.offset());
+        }
+        for (long[] u : unsent) {
+            all.add(u[0]);
+        }
+        return OffsetRanges.of(all.stream().mapToLong(Long::longValue).toArray());
+    }
+
+    private Subscribed subscribeOnce(long creditMsgs, List<Range> held) {
         LotseClient.Routed routed = client.route(queue, 0);
         Connection conn;
         try {
@@ -155,7 +190,7 @@ public final class QueueConsumer implements AutoCloseable {
         }
         // Asks to be told when it becomes the single active consumer, should the queue have one (ADR 0076), and
         // resumes as the consumer it was (ADR 0109).
-        Request req = new Request.Subscribe(routed.route().resourceId(), "", credit, U32_MAX, false, true, resume);
+        Request req = new Request.Subscribe(routed.route().resourceId(), "", creditMsgs, U32_MAX, false, true, resume, held);
         Response resp;
         try {
             resp = client.callOn(conn, req);
@@ -222,6 +257,7 @@ public final class QueueConsumer implements AutoCloseable {
                 checkOpen();
                 out = buffered.pollFirst();
                 if (out != null) {
+                    outstanding.add(out.offset());
                     usedMsgs++;
                     creditRequest = refill();
                     on = sub;
@@ -362,6 +398,7 @@ public final class QueueConsumer implements AutoCloseable {
             if (!resumable || consumerId == 0) {
                 buffered.clear();
             } else {
+                this.resumable = true;
                 List<Object> unread = new ArrayList<>();
                 which.events.drainTo(unread);
                 for (Object e : unread) {
@@ -409,6 +446,16 @@ public final class QueueConsumer implements AutoCloseable {
     /** Acknowledges a message: once this returns, it is never delivered again. */
     public void ack(Delivery delivery) {
         settle(OffsetRanges.of(new long[] {delivery.offset()}), null);
+        settled(List.of(delivery));
+    }
+
+    /** The messages are settled or given back: no longer held. */
+    private void settled(Collection<Delivery> deliveries) {
+        synchronized (mu) {
+            for (Delivery d : deliveries) {
+                outstanding.remove(d.offset());
+            }
+        }
     }
 
     /**
@@ -418,6 +465,7 @@ public final class QueueConsumer implements AutoCloseable {
     public void ack(Collection<Delivery> deliveries) {
         if (!deliveries.isEmpty()) {
             settle(OffsetRanges.of(offsets(deliveries)), null);
+            settled(deliveries);
         }
     }
 
@@ -434,6 +482,7 @@ public final class QueueConsumer implements AutoCloseable {
         txn.add(queue, 0);
         try {
             ackInResuming(txn, delivery);
+            settled(List.of(delivery)); // the transaction holds it now, not this consumer
         } catch (ClientException e) {
             txn.mustAbort(e.getMessage());
             throw e;
@@ -536,6 +585,7 @@ public final class QueueConsumer implements AutoCloseable {
         List<Range> ranges = OffsetRanges.of(offsets(deliveries));
         if (!requeue) {
             settle(ranges, Boolean.FALSE);
+            settled(deliveries);
             return;
         }
         requeue(deliveries, 0);
@@ -566,6 +616,8 @@ public final class QueueConsumer implements AutoCloseable {
             for (Delivery d : deliveries) {
                 if (subFor(d) != null) {
                     held.add(d);
+                } else if (on != null) {
+                    outstanding.remove(d.offset()); // it went back with its subscription
                 }
             }
             if (on == null && resumable) {
@@ -587,6 +639,7 @@ public final class QueueConsumer implements AutoCloseable {
             resp = null;
         }
         if (resp instanceof Response.Outcome o && o.error().isOk()) {
+            settled(held);
             return;
         }
         if (resp instanceof Response.Outcome o && !o.error().retriable()) {
@@ -648,15 +701,47 @@ public final class QueueConsumer implements AutoCloseable {
      * Ends the subscription. Messages handed out stay with this consumer until acknowledged (or until this client's
      * connection closes); the ones not handed out yet, also those pushed and not read, go back to the queue. A thread waiting in {@link #next} gets
      * an {@link IllegalStateException}.
+     *
+     * <p>If the subscription had already ended for a failover or a broken connection, or its leader no longer knows
+     * it, a new leader may keep this consumer's messages for it until the resume window is over. Then it subscribes
+     * once more, naming only the messages handed out as held and with no credit, and unsubscribes, so the leader hands
+     * the others out again at once (ADR 0112).
      */
     @Override
     public void close() {
+        boolean taken = end();
+        List<Range> held;
+        synchronized (mu) {
+            if (taken || consumerId == 0) {
+                return;
+            }
+            held = OffsetRanges.of(outstanding.stream().mapToLong(Long::longValue).toArray());
+        }
+        Subscribed made;
+        try {
+            made = client.retrying(() -> subscribeOnce(0, held));
+        } catch (ClientException e) {
+            return; // the resume window gives them back
+        }
+        try {
+            client.callOn(made.sub.conn, new Request.Unsubscribe(made.sub.id));
+        } catch (CallFailure e) {
+            // the subscription ends with the connection
+        }
+        made.sub.conn.unregister(made.sub.id);
+    }
+
+    /**
+     * Ends the subscription, if there is one, and gives back what it received and did not hand out. Returns whether
+     * the leader took the unsubscribe; without a subscription, whether none had ended resumably.
+     */
+    private boolean end() {
         Sub ending;
         long queueId;
         List<Long> back = new ArrayList<>();
         synchronized (mu) {
             if (closed) {
-                return;
+                return true;
             }
             closed = true;
             ending = sub;
@@ -668,13 +753,17 @@ public final class QueueConsumer implements AutoCloseable {
             buffered.clear();
         }
         if (ending == null) {
-            return;
+            synchronized (mu) {
+                return !resumable;
+            }
         }
         // Unsubscribed, and the answer waited for: pushes and answers come in order on the connection, so every push
         // the leader sent before it took the unsubscribe has arrived by then (the leader writes a checkout before it
         // pushes, ADR 0109, so one may still be on its way). The broker holds their messages for this subscription.
+        boolean taken = false;
         try {
-            client.callOn(ending.conn, new Request.Unsubscribe(ending.id));
+            taken = client.callOn(ending.conn, new Request.Unsubscribe(ending.id)) instanceof Response.Outcome o
+                    && o.error().isOk();
         } catch (CallFailure e) {
             // the subscription ends with the connection
         }
@@ -693,6 +782,7 @@ public final class QueueConsumer implements AutoCloseable {
             // Named (ADR 0106): sent late, it must not take what a newer subscription on the connection holds.
             sendQuietly(ending.conn, new Request.Nack(queueId, OffsetRanges.of(back.stream().mapToLong(Long::longValue).toArray()), true, 0, ending.id));
         }
+        return taken;
     }
 
     private void checkOpen() {

@@ -79,6 +79,13 @@ struct Subscription {
     /// When it subscribed, among this dispatcher's subscriptions: standbys
     /// take over in this order.
     order: u64,
+    /// The messages it said it holds, as `[from, to)` ranges, if it named
+    /// them (ADR 0112): it takes back only these of what waits for its
+    /// consumer.
+    held: Option<Vec<(u64, u64)>>,
+    /// Named what it holds and not resumed yet: kept until it is, even
+    /// unsubscribed, so that what waits for its consumer goes back then.
+    unresumed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +132,10 @@ pub struct Dispatcher {
     waiting: BTreeMap<u64, Waiting>,
     /// When this dispatcher adopted them: the resume window starts then.
     adopted: Option<Instant>,
+    /// Messages that waited for a consumer which, resuming, did not name
+    /// them: their pushes never reached it (ADR 0112). Held back like
+    /// unclaimed ones.
+    returned: Vec<u64>,
     /// Unsettled messages above level 0, and their levels.
     levels: BTreeMap<u64, u8>,
     /// The same, highest level first: `(u8::MAX - level, offset)`.
@@ -167,6 +178,7 @@ impl Dispatcher {
             deferred: BTreeMap::new(),
             waiting: BTreeMap::new(),
             adopted: None,
+            returned: Vec::new(),
             levels: BTreeMap::new(),
             ranked: BTreeSet::new(),
         }
@@ -188,9 +200,38 @@ impl Dispatcher {
     /// Adds subscription `id` of consumer `consumer` with an initial credit
     /// window.
     pub fn subscribe(&mut self, id: SubscriptionId, conn: ConnId, consumer: u64, credit_msgs: u32, credit_bytes: u32) {
+        self.add(id, conn, consumer, (credit_msgs, credit_bytes), None);
+    }
+
+    /// Adds subscription `id` of a consumer that names the messages it holds
+    /// (ADR 0112), as `[from, to)` ranges: when it resumes, it takes back
+    /// only those of what waits for it, and the rest goes out again. Kept until it has resumed, even
+    /// if it unsubscribes first.
+    pub fn subscribe_holding(
+        &mut self,
+        id: SubscriptionId,
+        conn: ConnId,
+        consumer: u64,
+        credit: (u32, u32),
+        held: Vec<(u64, u64)>,
+    ) {
+        self.add(id, conn, consumer, credit, Some(held));
+    }
+
+    fn add(
+        &mut self,
+        id: SubscriptionId,
+        conn: ConnId,
+        consumer: u64,
+        credit: (u32, u32),
+        held: Option<Vec<(u64, u64)>>,
+    ) {
         let order = self.next_order;
         self.next_order += 1;
-        self.subs.insert(id, Subscription { conn, consumer, credit_msgs, credit_bytes, closing: false, order });
+        let (credit_msgs, credit_bytes) = credit;
+        let unresumed = held.is_some();
+        let sub = Subscription { conn, consumer, credit_msgs, credit_bytes, closing: false, order, held, unresumed };
+        self.subs.insert(id, sub);
     }
 
     /// Subscription `id` takes back what waits for its consumer: those
@@ -200,12 +241,25 @@ impl Dispatcher {
     /// nothing else is out: it was the active one. Messages that wait for
     /// another consumer keep it a standby, since a connection that went
     /// without writing to the log leaves its checkouts behind, and those
-    /// come back older than what an active one would get next. Returns how
-    /// many it took.
+    /// come back older than what an active one would get next. A
+    /// subscription that named the messages it holds takes back only those;
+    /// the consumer's others are held back to go out again (ADR 0112), see
+    /// [`Dispatcher::unclaimed`]. Returns how many it took.
     pub fn resume(&mut self, id: SubscriptionId) -> usize {
-        let Some(consumer) = self.subs.get(&id).map(|s| s.consumer) else { return 0 };
-        let mine: Vec<(u64, Instant)> =
+        let Some(sub) = self.subs.get_mut(&id) else { return 0 };
+        sub.unresumed = false;
+        let consumer = sub.consumer;
+        let held = sub.held.take();
+        let all: Vec<(u64, Instant)> =
             self.waiting.iter().filter(|(_, w)| w.consumer == consumer).map(|(o, w)| (*o, w.at)).collect();
+        let (mine, lost): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|(o, _)| held.as_ref().is_none_or(|h| h.iter().any(|&(from, to)| from <= *o && *o < to)));
+        for &(o, _) in &lost {
+            self.waiting.remove(&o);
+            self.out.insert(o);
+            self.returned.push(o);
+        }
         for &(o, at) in &mine {
             self.waiting.remove(&o);
             self.in_flight.insert(o, InFlight { sub: id, at });
@@ -218,6 +272,7 @@ impl Dispatcher {
             self.active = Some(id);
             self.activated.push(id);
         }
+        self.drop_finished();
         mine.len()
     }
 
@@ -233,13 +288,14 @@ impl Dispatcher {
     }
 
     /// Messages that waited for their consumer in vain: the resume window
-    /// since [`Dispatcher::adopt`] is over, or their ack timeout is. They
-    /// are held back like timed-out ones until the caller has persisted
-    /// their counts and releases them.
+    /// since [`Dispatcher::adopt`] is over, or their ack timeout is, or the
+    /// consumer resumed without naming them (ADR 0112). They are held back
+    /// like timed-out ones until the caller has persisted their counts and
+    /// releases them.
     pub fn unclaimed(&mut self, now: Instant, window: Duration, timeout: Duration) -> Vec<u64> {
         let over = self.adopted.is_some_and(|a| now - a >= window);
-        let gone: Vec<u64> =
-            self.waiting.iter().filter(|(_, w)| over || now - w.at >= timeout).map(|(o, _)| *o).collect();
+        let mut gone: Vec<u64> = std::mem::take(&mut self.returned);
+        gone.extend(self.waiting.iter().filter(|(_, w)| over || now - w.at >= timeout).map(|(o, _)| *o));
         for o in &gone {
             self.waiting.remove(o);
             self.out.insert(*o);
@@ -457,7 +513,7 @@ impl Dispatcher {
 
     fn drop_finished(&mut self) {
         let in_flight = &self.in_flight;
-        self.subs.retain(|id, s| !s.closing || in_flight.values().any(|f| f.sub == *id));
+        self.subs.retain(|id, s| !s.closing || s.unresumed || in_flight.values().any(|f| f.sub == *id));
     }
 
     /// Notes the priority level of the message at `offset`; level 0 is

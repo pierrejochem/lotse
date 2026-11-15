@@ -837,6 +837,56 @@ fn a_new_leader_keeps_a_consumers_messages_for_it_until_it_resumes() {
     assert!(d.candidates(&q, 5, 10, &BTreeSet::new()).contains(&2));
 }
 
+/// A consumer that resumes naming what it holds takes back only that: a
+/// message whose checkout was written but whose push never reached it goes
+/// out again at once, not after the ack timeout (ADR 0112).
+#[test]
+fn a_resuming_consumer_takes_back_only_what_it_names() {
+    let mut q = queue(5); // messages 0..5
+    q.apply(&checkout(5, 7, 1_000, &[(0, 1), (1, 1), (2, 1)])).unwrap();
+    let t0 = Instant::from_nanos(1_000_000_000);
+    let mut d = Dispatcher::new(&q);
+    d.adopt(&q, t0, 1_500);
+    // It got 0 and 2; the push of 1 was lost. 4 is not its own.
+    d.subscribe_holding(2, 20, 7, (100, u32::MAX), vec![(0, 1), (2, 3), (4, 5)]);
+    assert_eq!(d.resume(2), 2);
+    assert_eq!(d.in_flight_of(2), vec![0, 2]);
+    assert!(!d.is_waiting(1), "no longer waits for its consumer");
+    let gone = d.unclaimed(t0, Duration::from_secs(30), Duration::from_secs(600));
+    assert_eq!(gone, vec![1], "held back for its count at once, inside the resume window");
+    assert!(!d.candidates(&q, 5, 10, &BTreeSet::new()).contains(&1), "until the count is written");
+    d.release([1]);
+    let next = d.candidates(&q, 5, 10, &BTreeSet::new());
+    assert!(next.contains(&1) && next.contains(&4) && !next.contains(&0), "1 goes out again: {next:?}");
+    assert!(d.unclaimed(t0, Duration::from_secs(30), Duration::from_secs(600)).is_empty(), "only once");
+}
+
+/// A consumer that closes after its leader moved subscribes naming nothing
+/// and unsubscribes at once, before the new leader has adopted: it is kept
+/// until it resumes, so its messages go out again then rather than after
+/// the resume window (ADR 0112).
+#[test]
+fn a_consumer_that_names_nothing_and_unsubscribes_gives_everything_back() {
+    let mut q = queue(3);
+    q.apply(&checkout(3, 7, 1_000, &[(0, 1), (1, 1)])).unwrap();
+    let t0 = Instant::from_nanos(1_000_000_000);
+    let mut d = Dispatcher::new(&q);
+    d.subscribe_holding(1, 10, 7, (0, u32::MAX), Vec::new());
+    d.unsubscribe(1);
+    assert_eq!(d.subscriptions().count(), 1, "kept until it has resumed");
+    d.adopt(&q, t0, 1_500);
+    assert_eq!(d.resume(1), 0);
+    assert_eq!(d.subscriptions().count(), 0, "then gone");
+    assert_eq!(d.unclaimed(t0, Duration::from_secs(30), Duration::from_secs(600)), vec![0, 1]);
+    // Without a list, a resuming consumer takes back everything, as before.
+    let mut d = Dispatcher::new(&q);
+    d.adopt(&q, t0, 1_500);
+    d.subscribe(2, 20, 7, 0, u32::MAX);
+    assert_eq!(d.resume(2), 2);
+    d.unsubscribe(2);
+    assert_eq!(d.subscriptions().count(), 1, "closing, holding two");
+}
+
 #[test]
 fn a_waiting_message_keeps_its_age_for_the_ack_timeout() {
     let mut q = queue(2);
