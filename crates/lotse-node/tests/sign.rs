@@ -16,8 +16,20 @@ use tokio::sync::oneshot;
 /// The request the browser code made for `alice` (see `certificates.rs`).
 const BROWSER_CSR: &str = "MIHKMHICAQAwEDEOMAwGA1UEAwwFYWxpY2UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARnKUSI4DRkymlj6IpyYHjl9g4fkO/KxbIv1mwPnPz6Uzzgu6zhq+BZCN0Ag5wvdlBj3SbgAATmU4mbaITAsGl6oAAwCgYIKoZIzj0EAwIDSAAwRQIgQKvHGNTyKosN+lfdcw26mTmMr9BK5y34EAESHttDA1kCIQCFfhWHtobQFEY8SXm5AquJHSijZHVx/Xps8gbif2hQvQ==";
 
+/// A port nothing listens on, below the ephemeral range (32768 and up on
+/// Linux, 49152 and up elsewhere): a port the system hands out could be
+/// taken by an outgoing connection between this check and the node binding
+/// it.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let start = (std::process::id() % 1_200) as u16 * 10;
+    loop {
+        let port = 20_000 + (start + NEXT.fetch_add(1, Ordering::Relaxed)) % 12_000;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Runs `lotse` off the async threads, stdin closed.
