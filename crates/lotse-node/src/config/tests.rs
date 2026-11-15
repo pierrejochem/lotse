@@ -74,6 +74,19 @@ fn the_compaction_map_has_a_default_and_may_be_set() {
 }
 
 #[test]
+fn producers_have_defaults_and_may_be_set() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.max_producers, lotse_server::DEFAULT_MAX_PRODUCERS);
+    assert_eq!(c.producer_expiration, lotse_server::DEFAULT_PRODUCER_EXPIRATION);
+    let set = format!("{THREE}\n[producers]\nmax = 500\nexpiration_ms = 3600000\n");
+    let c = ClusterFile::parse(&set, "t").unwrap().node_config(1).unwrap();
+    assert_eq!((c.max_producers, c.producer_expiration), (500, std::time::Duration::from_secs(3600)));
+    for bad in ["max = 0", "expiration_ms = 0", "keep = 1"] {
+        assert!(ClusterFile::parse(&format!("{THREE}\n[producers]\n{bad}\n"), "t").is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn minus_one_means_no_limit() {
     let f = ClusterFile::parse(&THREE.replace("bytes = 1073741824", "ms = -1"), "t").unwrap();
     let c = f.node_config(2).unwrap();

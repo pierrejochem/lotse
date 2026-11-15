@@ -18,6 +18,7 @@ export const ControlKind = {
   GROUP_OFFSETS: 7,
   METADATA: 8,
   FORGET: 9,
+  EXPIRE_PRODUCERS: 10,
 } as const;
 export type ControlKind = (typeof ControlKind)[keyof typeof ControlKind];
 
@@ -80,7 +81,7 @@ export function controlKind(batch: Batch): ControlKind | null {
     throw RecordFormatError.malformed("control record has the wrong size");
   }
   const code = controlCode(rec.key);
-  if (code > ControlKind.FORGET) {
+  if (code > ControlKind.EXPIRE_PRODUCERS) {
     throw RecordFormatError.malformed("unknown control type");
   }
   if (code === ControlKind.ABORT_MARKER || code === ControlKind.COMMIT_MARKER) {

@@ -32,7 +32,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted |
 | 0026 | [Native protocol: the first cut](0026-native-protocol-first-cut.md) | Accepted |
 | 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted; job layout amended by 0030 |
-| 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted |
+| 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted, in part superseded by [0110](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) |
 | 0029 | [Transactions](0029-transactions.md) | Accepted |
 | 0030 | [Client simulation in its own CI job](0030-client-simulation-in-its-own-ci-job.md) | Accepted |
 | 0031 | [Queues: the first cut](0031-queues-first-cut.md) | Accepted |
@@ -113,5 +113,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0107 | [Sequences belong to a stream's incarnation](0107-sequences-belong-to-a-stream-s-incarnation.md) | Accepted |
 | 0108 | [A replica placed again starts from an empty log](0108-a-replica-placed-again-starts-from-an-empty-log.md) | Accepted |
 | 0109 | [Deliveries are written to the log](0109-deliveries-are-written-to-the-log.md) | Accepted |
+| 0110 | [Idle producers expire, and a full partition refuses new ones](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

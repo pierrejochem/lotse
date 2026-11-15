@@ -76,17 +76,109 @@ fn the_tail_counts_and_is_cut_with_the_log() {
     assert_eq!(s.check(&batch(7, 0, 1, 1)), Check::Duplicate { first: next, last: next, term: None });
 }
 
+/// Appends and applies an `ExpireProducers` batch naming `producers` at
+/// `first`.
+fn expire(s: &mut ProducerState, first: u64, producers: &[(u64, u64)]) -> u64 {
+    expire_raw(s, first, &encode_expired(producers))
+}
+
+fn expire_raw(s: &mut ProducerState, first: u64, payload: &[u8]) -> u64 {
+    let raw = lotse_record::internal_control_batch(InternalControl::ExpireProducers, payload).unwrap();
+    let b = Batch::parse(&raw).unwrap().0;
+    s.appended(first, first, 1, &b);
+    s.applied(first, first, &b);
+    first + 1
+}
+
+fn at(secs: u64) -> Instant {
+    Instant::from_nanos(secs * 1_000_000_000)
+}
+
+const DAY: Duration = Duration::from_secs(24 * 3600);
+
 #[test]
-fn the_producer_with_the_oldest_write_is_evicted() {
+fn a_full_partition_refuses_new_producers_and_keeps_the_live_ones() {
     let mut s = ProducerState::new(2);
     let mut first = commit(&mut s, 1, &batch(1, 0, 0, 1));
     first = commit(&mut s, first, &batch(2, 0, 0, 1));
-    first = commit(&mut s, first, &batch(1, 0, 1, 1)); // producer 1 writes again
-    commit(&mut s, first, &batch(3, 0, 0, 1)); // one too many: 2 wrote last longest ago
-    assert_eq!(s.len(), 2);
-    assert!(matches!(s.check(&batch(1, 0, 1, 1)), Check::Duplicate { .. }));
-    assert!(matches!(s.check(&batch(3, 0, 0, 1)), Check::Duplicate { .. }));
-    assert_eq!(s.check(&batch(2, 0, 0, 1)), Check::New, "evicted: its retry can no longer be recognised");
+    assert_eq!(s.check(&batch(3, 0, 0, 1)), Check::Full, "a third producer waits");
+    assert!(matches!(s.check(&batch(1, 0, 0, 1)), Check::Duplicate { .. }), "the first keeps its place");
+    assert!(matches!(s.check(&batch(2, 0, 0, 1)), Check::Duplicate { .. }));
+    assert_eq!(s.check(&batch(1, 0, 1, 1)), Check::New, "a known producer goes on");
+    assert_eq!(s.check(&batch(0, 0, -1, 1)), Check::New, "not idempotent: no limit");
+    // Whatever reaches the log anyway (a marker for a transaction begun
+    // before) is applied: applying never drops a producer to make room.
+    commit(&mut s, first, &batch(3, 0, 0, 1));
+    assert_eq!(s.len(), 3);
+
+    // A producer only in the tail counts too.
+    let mut s = ProducerState::new(2);
+    let next = commit(&mut s, 1, &batch(1, 0, 0, 1));
+    s.appended(next, next, 1, &batch(2, 0, 0, 1));
+    assert_eq!(s.check(&batch(3, 0, 0, 1)), Check::Full);
+    assert_eq!(s.check(&batch(2, 0, 1, 1)), Check::New, "continues the tail");
+}
+
+#[test]
+fn producers_idle_for_the_expiration_are_named_once_and_forgotten() {
+    let mut s = ProducerState::new(2);
+    let mut first = commit(&mut s, 1, &batch(1, 0, 0, 1));
+    first = commit(&mut s, first, &batch(2, 0, 0, 1));
+    let mut clock = IdleClock::default();
+    clock.for_term(1);
+    assert!(s.idle(&mut clock, at(0), DAY, |_| false).is_empty(), "first seen now");
+    assert!(s.idle(&mut clock, at(3600), DAY, |_| false).is_empty());
+    // Producer 1 writes again: its idle time starts over.
+    first = commit(&mut s, first, &batch(1, 0, 1, 1));
+    assert!(s.idle(&mut clock, at(7200), DAY, |_| false).is_empty());
+    let idle = s.idle(&mut clock, at(24 * 3600), DAY, |_| false);
+    assert_eq!(idle, vec![(2, 2)], "only producer 2 has been quiet a day");
+    assert!(s.idle(&mut clock, at(24 * 3600 + 1), DAY, |_| false).is_empty(), "named once while on its way");
+    expire(&mut s, first, &idle);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s.check(&batch(2, 0, 0, 1)), Check::New, "forgotten");
+    assert_eq!(s.check(&batch(3, 0, 0, 1)), Check::New, "room for a new producer");
+    assert!(matches!(s.check(&batch(1, 0, 1, 1)), Check::Duplicate { .. }), "the live one stays");
+}
+
+#[test]
+fn a_producer_that_wrote_after_it_was_named_stays() {
+    let mut s = ProducerState::new(10);
+    let mut first = commit(&mut s, 1, &batch(1, 0, 0, 1));
+    let named = [(1, 1)];
+    // Its next batch reaches the log before the expiry does.
+    first = commit(&mut s, first, &batch(1, 0, 1, 1));
+    expire(&mut s, first, &named);
+    assert_eq!(s.len(), 1);
+    assert!(matches!(s.check(&batch(1, 0, 1, 1)), Check::Duplicate { .. }), "its retry is still recognised");
+}
+
+#[test]
+fn an_open_transaction_and_a_new_term_keep_a_producer() {
+    let mut s = ProducerState::new(10);
+    commit(&mut s, 1, &batch(1, 0, 0, 1));
+    commit(&mut s, 2, &batch(2, 0, 0, 1));
+    let mut clock = IdleClock::default();
+    clock.for_term(1);
+    s.idle(&mut clock, at(0), DAY, |_| false);
+    assert_eq!(s.idle(&mut clock, at(24 * 3600), DAY, |id| id == 1), vec![(2, 2)], "1 has a transaction open");
+    // A new leader counts from when it took over.
+    let mut clock = IdleClock::default();
+    clock.for_term(1);
+    s.idle(&mut clock, at(0), DAY, |_| false);
+    clock.for_term(2);
+    assert!(s.idle(&mut clock, at(24 * 3600), DAY, |_| false).is_empty(), "the new term saw them first now");
+    assert_eq!(s.idle(&mut clock, at(48 * 3600), DAY, |_| false).len(), 2);
+}
+
+#[test]
+fn a_damaged_expiry_forgets_nothing() {
+    let mut s = ProducerState::new(10);
+    let first = commit(&mut s, 1, &batch(1, 0, 0, 1));
+    let mut payload = encode_expired(&[(1, 1)]).to_vec();
+    payload.pop();
+    expire_raw(&mut s, first, &payload);
+    assert_eq!(s.len(), 1);
 }
 
 #[test]
@@ -101,7 +193,6 @@ fn the_committed_state_round_trips_and_damage_is_refused() {
     let mut back = ProducerState::new(10);
     back.restore(&bytes).unwrap();
     assert_eq!(back.committed, s.committed);
-    assert_eq!(back.by_last_write, s.by_last_write);
     assert!(back.tail.is_empty(), "the tail is rebuilt from the log, not the snapshot");
     for cut in 0..bytes.len() {
         assert!(ProducerState::new(10).restore(&bytes[..cut]).is_err(), "cut at {cut}");

@@ -1,6 +1,6 @@
 # 28. Idempotent producers
 
-- Status: Accepted
+- Status: Accepted; forgetting producers is superseded by [ADR 0110](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) (an idle producer expires, a full partition refuses new ones)
 - Date: 2026-10-28
 
 ## Context
