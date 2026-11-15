@@ -33,4 +33,8 @@ pub use producers::{DEFAULT_MAX_PRODUCERS, DEFAULT_PRODUCER_EXPIRATION};
 pub const DEFAULT_GROUP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// How often group members send heartbeats (Kafka's default).
 pub const DEFAULT_GROUP_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a group's preferred voter holds everything committed before its
+/// leader hands the group back to it, when the group saw no other election
+/// recently (ADR 0113).
+pub const DEFAULT_LEADER_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, Retention, StateMachine, Sweep};

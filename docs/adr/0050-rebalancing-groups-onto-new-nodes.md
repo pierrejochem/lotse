@@ -1,6 +1,6 @@
 # 50. Rebalancing groups onto new nodes
 
-- Status: Accepted
+- Status: Accepted, refined by [ADR 0113](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) (a hand-back waits until the preferred voter is steady)
 - Date: 2026-10-30
 - Supersedes in part: [ADR 0048](0048-adding-and-removing-nodes.md) (a node never returns to a group it left; a node link only from a listed node)
 
