@@ -409,6 +409,7 @@ impl ClusterFile {
                 .producers
                 .expiration_ms
                 .map_or(lotse_server::DEFAULT_PRODUCER_EXPIRATION, Duration::from_millis),
+            leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

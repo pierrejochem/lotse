@@ -107,6 +107,7 @@ async fn every_way_in_on_real_sockets() {
             coordinator: Some(2),
             max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
             producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+            leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
             retention: lotse_server::RetentionConfig::keep(),
             join: false,
             auth: auth.clone(),

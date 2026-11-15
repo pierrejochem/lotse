@@ -172,6 +172,7 @@ impl World {
                         coordinator: Some(2),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
@@ -1161,6 +1162,60 @@ fn a_new_groups_first_leader_is_the_one_it_keeps() {
                 rt.sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(first.len(), names.len(), "every stream has a leader: {first:?}");
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}
+
+/// After a failover the new leader hands the group back to its preferred
+/// node only once that node has held everything committed for the settle
+/// time (ADR 0113), not as soon as it has caught up: clients meet the
+/// second move a minute later, not a moment after the first.
+#[test]
+fn a_group_goes_back_to_its_preferred_node_only_after_the_settle_time() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("back", 1, 3).await.unwrap();
+            let (mut preferred, mut voters) = leader_of(&admin, "back").await;
+            while preferred == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (preferred, voters) = leader_of(&admin, "back").await;
+            }
+            // A new group starts on its preferred node (ADR 0095).
+            w.crash(u64::from(preferred), false).await;
+            let mut interim = 0;
+            for _ in 0..200 {
+                let (l, _) = leader_of(&admin, "back").await;
+                if l != 0 && l != preferred {
+                    interim = l;
+                    break;
+                }
+                rt.sleep(Duration::from_millis(100)).await;
+            }
+            assert_ne!(interim, 0, "another voter takes over");
+            rt.sleep(Duration::from_secs(1)).await;
+            w.start(u64::from(preferred)).await;
+            let back = rt.now();
+            // It catches up at once, then waits: one election, one settle
+            // time.
+            while rt.now() < back + (lotse_server::DEFAULT_LEADER_SETTLE - Duration::from_secs(1)) {
+                let (l, _) = leader_of(&admin, "back").await;
+                assert!(
+                    l == 0 || l == interim,
+                    "led by node {l} {:?} after node {preferred} came back, not by node {interim}",
+                    rt.now() - back
+                );
+                rt.sleep(Duration::from_millis(500)).await;
+            }
+            assert!(led_by(&rt, &admin, "back", preferred).await, "handed back once settled");
             for (_, n) in std::mem::take(&mut w.running) {
                 if let Some((node, handle)) = n {
                     handle.stop();

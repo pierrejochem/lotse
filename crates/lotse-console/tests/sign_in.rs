@@ -280,6 +280,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         coordinator: Some(2),
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth,
