@@ -190,6 +190,9 @@ public final class Messages {
     /** Tag of the consumer id the leader gave a subscription (ADR 0109). */
     static final long TAG_CONSUMER = 2;
 
+    /** Tag of the messages a resuming consumer holds (ADR 0112). */
+    static final long TAG_HELD = 3;
+
     /** Tag of a transactional ack's producer id and epoch (ADR 0075). */
     static final long TAG_PRODUCER = 2;
 

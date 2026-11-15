@@ -384,7 +384,14 @@ impl Clients {
             None => self.consumer_id(),
         };
         let s = self.serving(g, replica);
-        s.dispatcher.subscribe(id, conn, consumer, req.credit_msgs, req.credit_bytes);
+        // Naming what it holds, it takes back only that (ADR 0112): the
+        // pushes of the rest never reached it.
+        match req.held.as_ref().filter(|_| req.resume.is_some_and(|c| c != 0)) {
+            Some(held) => {
+                s.dispatcher.subscribe_holding(id, conn, consumer, (req.credit_msgs, req.credit_bytes), held.clone())
+            }
+            None => s.dispatcher.subscribe(id, conn, consumer, req.credit_msgs, req.credit_bytes),
+        }
         // A leader that has applied an entry of its term adopts now rather
         // than at the end of the round, so the first subscriber of a single
         // active consumer queue is not told it waits when no one is ahead.

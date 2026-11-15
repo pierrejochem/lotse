@@ -714,6 +714,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             exclusive: false,
             notify_active: false,
             resume: None,
+            held: None,
         });
         let (r, pushes) = send(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         assert!(matches!(&r[..], [Response::Subscribe(s)] if s.error == ErrorCode::NONE), "{r:?}");
@@ -791,6 +792,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
                 exclusive: false,
                 notify_active: false,
                 resume: None,
+                held: None,
             })
         };
         let id_of = |r: &[Response]| match r {
@@ -924,6 +926,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             exclusive: false,
             notify_active: false,
             resume: None,
+            held: None,
         });
         let req = ClientRequest {
             outbox: outbox.clone(),
@@ -2269,6 +2272,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             exclusive: false,
             notify_active: false,
             resume: None,
+            held: None,
         });
         handle(&mut clients, &mut groups, ApiKey::SUBSCRIBE, sub).await;
         rounds(&mut clients, &mut groups).await;
@@ -2500,6 +2504,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
                 exclusive: false,
                 notify_active: false,
                 resume: None,
+                held: None,
             })
         };
         // Pushes in the outbox, by subscription.
@@ -2592,6 +2597,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
                 exclusive: false,
                 notify_active: false,
                 resume: None,
+                held: None,
             });
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 5, flags: 0 };
             let req = ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous };
@@ -2655,6 +2661,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
                 exclusive: false,
                 notify_active: false,
                 resume: None,
+                held: None,
             }),
         )
         .await;
@@ -2794,6 +2801,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
                 exclusive: false,
                 notify_active: false,
                 resume: None,
+                held: None,
             }),
         )
         .await;

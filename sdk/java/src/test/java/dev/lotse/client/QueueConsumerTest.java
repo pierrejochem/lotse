@@ -734,7 +734,9 @@ class QueueConsumerTest {
             List<Request.Subscribe> again = b.requests(Request.Subscribe.class);
             assertEquals(1, again.size());
             assertEquals(77, again.get(0).resume(), "resumes as the consumer it was");
+            assertEquals(List.of(new Range(10, 12)), again.get(0).held(), "ADR 0112: names what it holds");
             assertEquals(0, a.requests(Request.Subscribe.class).get(0).resume(), "a new consumer first");
+            assertNull(a.requests(Request.Subscribe.class).get(0).held(), "and names nothing");
             // A requeue of a message from before goes on the new subscription, which took it back.
             c.nack(first, true);
             List<Request.Nack> nacks = b.requests(Request.Nack.class);
@@ -742,6 +744,94 @@ class QueueConsumerTest {
             assertEquals(subB.get(), nacks.get(0).subscriptionId());
             assertEquals(List.of(new Range(10, 11)), nacks.get(0).ranges());
         }
+    }
+
+    /** ADR 0112: an acked message is not named as held; a requeue not sent yet is, to be given back there. */
+    @Test
+    void aSettledMessageIsNotNamedAsHeldARequeueNotSentYetIs() throws Exception {
+        AtomicReference<Conn> where = new AtomicReference<>();
+        List<Long> subs = new java.util.concurrent.CopyOnWriteArrayList<>();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                long id = nextSub.incrementAndGet();
+                subs.add(id);
+                if (subs.size() == 1) {
+                    where.set(conn);
+                    conn.push(pushAll(id, 10, 3));
+                }
+                return new Response.Subscribe(ErrorCode.NONE, id, null, false, 77);
+            }
+            // The leader moved before the requeue reached it.
+            if (r instanceof Request.Nack nack && nack.requeue()) {
+                return new Response.Outcome(ErrorCode.NOT_LEADER, null);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        try (QueueConsumer c = client.subscribe("jobs", SubscribeOptions.withCredit(3))) {
+            Delivery first = take(c);
+            Delivery second = take(c);
+            c.ack(first);
+            where.get().push(failure(subs.get(0), ErrorCode.NOT_LEADER, new LeaderHint(1, 2)));
+            assertEquals(12, take(c).offset(), "kept");
+            // Not taken: the requeue waits for the next subscription.
+            c.nack(second, true);
+            assertNull(c.poll(SHORT));
+            List<Request.Subscribe> again = a.requests(Request.Subscribe.class);
+            assertEquals(2, again.size());
+            assertEquals(List.of(new Range(11, 13)), again.get(1).held(), "11 to give back there, 12 handed out; 10 acked");
+        }
+    }
+
+    /** ADR 0112: closing after the leader forgot the subscription gives back what was not handed out, at once. */
+    @Test
+    void closingAfterTheLeaderForgotTheSubscriptionGivesBackWhatWasNotHandedOut() throws Exception {
+        List<Long> subs = new java.util.concurrent.CopyOnWriteArrayList<>();
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                long id = nextSub.incrementAndGet();
+                subs.add(id);
+                if (subs.size() == 1) {
+                    conn.push(pushAll(id, 10, 3));
+                }
+                return new Response.Subscribe(ErrorCode.NONE, id, null, false, 77);
+            }
+            // The leader moved: the first subscription is unknown here now.
+            if (r instanceof Request.Unsubscribe u && u.subscriptionId() == subs.get(0)) {
+                return new Response.Outcome(ErrorCode.UNKNOWN_SUBSCRIPTION, null);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        QueueConsumer c = client.subscribe("jobs", SubscribeOptions.withCredit(3));
+        assertEquals(10, take(c).offset());
+        Thread.sleep(100); // 11 and 12 are received
+        c.close();
+        await(() -> a.count(Request.Unsubscribe.class) == 2);
+        List<Request.Subscribe> subscribes = a.requests(Request.Subscribe.class);
+        assertEquals(2, subscribes.size());
+        Request.Subscribe back = subscribes.get(1);
+        assertEquals(77, back.resume());
+        assertEquals(0, back.creditMsgs(), "takes nothing new");
+        assertEquals(List.of(new Range(10, 11)), back.held(), "keeps only what was handed out");
+        assertEquals((long) subs.get(1), a.requests(Request.Unsubscribe.class).get(1).subscriptionId(), "and ends at once");
+    }
+
+    /** ADR 0112: closing a subscription the leader still knows subscribes no more. */
+    @Test
+    void closingASubscriptionTheLeaderStillKnowsGivesBackNothingMore() throws Exception {
+        script(a, (n, conn, r) -> {
+            if (r instanceof Request.Subscribe) {
+                return new Response.Subscribe(ErrorCode.NONE, nextSub.incrementAndGet(), null, false, 77);
+            }
+            return plain(n, conn, r);
+        });
+        connect(a);
+        QueueConsumer c = client.subscribe("jobs");
+        c.close();
+        await(() -> a.count(Request.Unsubscribe.class) == 1);
+        Thread.sleep(SHORT.toMillis());
+        assertEquals(1, a.count(Request.Subscribe.class), "no second subscription");
     }
 
     @Test

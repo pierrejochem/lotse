@@ -322,6 +322,9 @@ public abstract record Request
     /// <param name="Exclusive">Refused by the broker; do not set.</param>
     /// <param name="NotifyActive">Ask for a push when this subscription becomes the single active consumer (ADR 0076).</param>
     /// <param name="Resume">The consumer this subscription continues, the id an earlier answer gave; 0 for a new one (ADR 0109).</param>
+    /// <param name="Held">With <paramref name="Resume"/>: the messages the consumer holds, received and not settled (ADR 0112). The
+    /// leader takes back only these and hands its other messages out again at once, since their pushes never reached it;
+    /// <c>null</c> (absent) takes back everything handed to the consumer.</param>
     public sealed record Subscribe(
         ulong QueueId,
         string ConsumerTag,
@@ -329,7 +332,8 @@ public abstract record Request
         uint CreditBytes,
         bool Exclusive,
         bool NotifyActive = false,
-        ulong Resume = 0)
+        ulong Resume = 0,
+        IReadOnlyList<OffsetRange>? Held = null)
         : Request
     {
         /// <inheritdoc/>
@@ -350,6 +354,12 @@ public abstract record Request
                 v.U64(Resume);
                 tags.Add(new Tag(TagResume, ByteString.CopyOf(v.ToByteArray())));
             }
+            if (Held is not null)
+            {
+                var v = new Writer();
+                PutRanges(v, Held);
+                tags.Add(new Tag(TagHeld, ByteString.CopyOf(v.ToByteArray())));
+            }
             if (tags.Count == 0)
             {
                 w.NoTags();
@@ -369,6 +379,7 @@ public abstract record Request
             bool exclusive = r.Bool();
             bool notify = false;
             ulong resume = 0;
+            List<OffsetRange>? held = null;
             foreach (Tag t in r.Tags())
             {
                 var vr = new Reader(t.Value.ToByteArray());
@@ -380,13 +391,17 @@ public abstract record Request
                 {
                     resume = vr.U64();
                 }
+                else if (t.Number == TagHeld)
+                {
+                    held = GetRanges(vr);
+                }
                 else
                 {
                     continue; // from a newer version: skipped
                 }
                 vr.Finish();
             }
-            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume);
+            return new Subscribe(queueId, tag, msgs, bytes, exclusive, notify, resume, held);
         }
     }
 
