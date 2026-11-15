@@ -1,5 +1,6 @@
 use super::*;
 use crate::metadata::{NodeMeta, StreamSettings, record_payload};
+use std::time::Duration;
 
 fn set(n: &[NodeId]) -> BTreeSet<NodeId> {
     n.iter().copied().collect()
@@ -495,4 +496,61 @@ fn a_membership_newer_than_this_nodes_view_waits() {
     assert!(!ahead_of_view(&s, g, &Message::TimeoutNow { term: 3 }));
     let other = crate::metadata::group_id(77, 0);
     assert!(ahead_of_view(&s, other, &append(vec![config(1)])), "a group this node has seen no decision of");
+}
+
+fn at(secs: u64) -> lotse_rt::Instant {
+    lotse_rt::Instant::from_nanos(secs * 1_000_000_000)
+}
+
+#[test]
+fn a_leader_hands_back_only_once_the_preferred_voter_held_everything_a_while() {
+    let settle = Duration::from_secs(60);
+    let mut s = Steadiness::default();
+    s.see_term(0, None, at(0), settle);
+    s.see_term(1, Some(3), at(0), settle);
+    assert_eq!(s.wait(settle), settle, "a new group's first leader is no election");
+    s.see_term(2, None, at(1), settle);
+    s.see_term(3, None, at(1), settle);
+    s.see_term(4, Some(1), at(1), settle);
+    assert_eq!(s.elections.len(), 1, "terms without a leader do not count");
+    s.see_term(4, Some(1), at(2), settle);
+    assert_eq!(s.elections.len(), 1, "nor the same leader again");
+    let mut s = Steadiness::default();
+    s.see_term(3, Some(2), at(0), settle);
+    assert!(s.elections.is_empty(), "the first leader a node sees is none");
+    s.see_term(4, Some(1), at(1), settle);
+    s.see_leading(Some(2), false, at(1));
+    assert!(!s.steady(at(500), settle), "the preferred voter is down or behind");
+    s.see_leading(Some(2), true, at(10));
+    s.see_leading(Some(2), true, at(69));
+    assert!(!s.steady(at(69), settle), "held everything for 59 s");
+    s.see_leading(Some(2), true, at(70));
+    assert!(s.steady(at(70), settle), "after one election the wait is the settle time");
+    s.see_leading(Some(2), false, at(71));
+    s.see_leading(Some(2), true, at(72));
+    assert!(!s.steady(at(131), settle), "falling behind starts the wait again");
+    s.see_leading(Some(3), true, at(132));
+    assert!(!s.steady(at(150), settle), "another preferred voter starts it again");
+    s.see_following();
+    assert!(!s.steady(at(1000), settle), "a follower hands nothing over");
+}
+
+#[test]
+fn a_group_that_keeps_electing_waits_longer_each_time() {
+    let settle = Duration::from_secs(60);
+    let mut s = Steadiness::default();
+    s.see_term(1, Some(1), at(0), settle);
+    for (i, term) in (2..=4).enumerate() {
+        s.see_term(term, Some(1), at(10 * i as u64), settle);
+    }
+    assert_eq!(s.wait(settle), settle * 4, "three elections: doubled twice");
+    for term in 5..=20 {
+        s.see_term(term, Some(2), at(100), settle);
+    }
+    assert_eq!(s.wait(settle), settle * MAX_WAIT_SETTLES, "never past the cap");
+    // Elections an hour old no longer count.
+    s.see_term(20, Some(2), at(100 + 60 * 60), settle);
+    assert_eq!(s.wait(settle), settle);
+    s.see_term(21, Some(3), at(100 + 60 * 60 + 1), settle);
+    assert_eq!(s.wait(settle), settle, "one recent election");
 }

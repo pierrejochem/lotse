@@ -125,6 +125,7 @@ impl World {
                         coordinator: Some(5),
                         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
                         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),

@@ -102,6 +102,10 @@ pub struct NodeConfig {
     /// leader forgets it (ADR 0110; [`crate::DEFAULT_PRODUCER_EXPIRATION`]
     /// by default).
     pub producer_expiration: Duration,
+    /// How long a group's preferred voter must hold everything committed
+    /// before its leader hands the group back to it, longer after recent
+    /// elections (ADR 0113; [`crate::DEFAULT_LEADER_SETTLE`] by default).
+    pub leader_settle: Duration,
     /// How clients authenticate.
     pub auth: AuthConfig,
     /// What streams keep unless they say otherwise (ADR 0046).
@@ -202,6 +206,9 @@ struct Moves {
     /// When it last tried for each group, so that a preferred leader that
     /// does not take over is not asked again at once.
     tried: BTreeMap<GroupId, lotse_rt::Instant>,
+    /// Each group's elections and how long its preferred voter has held
+    /// everything (ADR 0113).
+    steadiness: BTreeMap<GroupId, crate::membership::Steadiness>,
 }
 
 /// A node hands over at most one group's leadership in this time.
@@ -231,9 +238,14 @@ fn membership_pass<R: Runtime, S: StateMachine>(
         &crate::client::managed_groups(state, &core, configured_voters),
         &state.pins,
     );
+    let now = rt.now();
+    moves.steadiness.retain(|g, _| groups.contains_key(g));
     for (&g, replica) in groups.iter_mut() {
         let raft = replica.raft();
+        let steadiness = moves.steadiness.entry(g).or_default();
+        steadiness.see_term(raft.term(), raft.leader(), now, cfg.leader_settle);
         if raft.role() != Role::Leader {
+            steadiness.see_following();
             continue;
         }
         let current = raft.membership().clone();
@@ -258,15 +270,21 @@ fn membership_pass<R: Runtime, S: StateMachine>(
             crate::membership::Step::Wait => {}
             crate::membership::Step::Settled => {
                 let voters: Vec<NodeId> = target.iter().copied().collect();
-                let now = rt.now();
                 if !crate::client::moving(state, g, &voters) {
-                    // In place: spread the leaders (ADR 0050).
+                    // In place: spread the leaders (ADR 0050), once the
+                    // preferred voter has held everything committed for a
+                    // while, longer after recent elections (ADR 0113). A pin
+                    // is an operator's choice and moves without waiting.
                     let last = raft.last_index();
                     let matched = raft.matched().unwrap_or_default();
+                    let p = preferred.get(&g).copied();
+                    let holds = p.is_some_and(|p| matched.get(&p).copied().unwrap_or(0) >= raft.commit());
+                    steadiness.see_leading(p, holds, now);
+                    let pinned = state.pins.get(&g).is_some_and(|n| Some(*n) == p);
                     let due = moves.last_handover.is_none_or(|t| now - t >= cfg.tick * HANDOVER_EVERY_TICKS)
-                        && moves.tried.get(&g).is_none_or(|t| now - *t >= cfg.tick * HANDOVER_RETRY_TICKS);
-                    let to =
-                        crate::membership::hand_over_to(&current, cfg.id, preferred.get(&g).copied(), &matched, last);
+                        && moves.tried.get(&g).is_none_or(|t| now - *t >= cfg.tick * HANDOVER_RETRY_TICKS)
+                        && (pinned || steadiness.steady(now, cfg.leader_settle));
+                    let to = crate::membership::hand_over_to(&current, cfg.id, p, &matched, last);
                     if let (true, Some(to)) = (due, to) {
                         moves.last_handover = Some(now);
                         moves.tried.insert(g, now);
