@@ -189,6 +189,9 @@ const RETENTION_MS: &str = "retention.ms";
 const RETENTION_BYTES: &str = "retention.bytes";
 
 const CLEANUP_POLICY: &str = "cleanup.policy";
+/// How many replicas each partition of a stream or queue is to have
+/// (ADR 0115); set on its own.
+const REPLICATION_FACTOR: &str = "replication.factor";
 const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 
 /// Sets (`Some`) or resets (`None`) one of a stream's settings: for the
@@ -516,7 +519,12 @@ impl Clients {
             let why = format!("the stream has {now} partitions: ask for more, at most {MAX_PARTITIONS}");
             return outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None));
         }
-        let replication = stream.partitions.first().map_or(1, |(_, v)| v.len().clamp(1, usize::from(u8::MAX)) as u8);
+        // As many replicas as the stream's factor, or its first partition
+        // (ADR 0115).
+        let replication = match replica.metadata().replication.get(&req.resource_id) {
+            Some(n) => (*n).clamp(1, u32::from(u8::MAX)) as u8,
+            None => stream.partitions.first().map_or(1, |(_, v)| v.len().clamp(1, usize::from(u8::MAX)) as u8),
+        };
         let partitions = Self::place(view, replica, replication, (req.count - now) as usize);
         let change = Change::AddPartitions { resource_id: req.resource_id, partitions };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
@@ -691,6 +699,32 @@ impl Clients {
         let refuse = |why: String| admin_response(ErrorCode::INVALID_REQUEST, Some(&why), None);
         if req.set.is_empty() && req.delete.is_empty() {
             return outbox.push(id, &refuse("nothing to change".into()));
+        }
+        let names_replication =
+            req.set.iter().any(|(k, _)| k == REPLICATION_FACTOR) || req.delete.iter().any(|k| k == REPLICATION_FACTOR);
+        if names_replication {
+            // Its own record: it moves replicas, the others change settings.
+            if req.set.len() + req.delete.len() != 1 {
+                return outbox.push(id, &refuse(format!("{REPLICATION_FACTOR} is changed on its own")));
+            }
+            let state = replica.metadata();
+            if !state.streams.contains_key(&req.resource_id) && !state.queues.contains_key(&req.resource_id) {
+                return outbox.push(id, &refuse("exchanges have no replicas".into()));
+            }
+            let active = view.admin.nodes.iter().filter(|n| !state.draining.contains(n)).count();
+            let replication = match req.set.first() {
+                None => 0,
+                Some((_, v)) => match v.parse::<u32>() {
+                    Ok(n) if n >= 1 && n as usize <= active => n,
+                    _ => {
+                        let why =
+                            format!("{REPLICATION_FACTOR} is a number of replicas from 1 to the {active} active nodes");
+                        return outbox.push(id, &refuse(why));
+                    }
+                },
+            };
+            let change = Change::SetReplication { resource_id: req.resource_id, replication };
+            return self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
         }
         let (change, then) = if replica.metadata().streams.contains_key(&req.resource_id) {
             // A stream: its retention, each key set or reset once.
@@ -1063,6 +1097,18 @@ impl Clients {
                 },
             ]
         };
+        // A runtime resource's replica count: the factor set at runtime, or
+        // what its first partition has (ADR 0115).
+        let replication = |resource_id: u64, voters: usize| match state.replication.get(&resource_id) {
+            Some(n) => {
+                ConfigEntry { key: REPLICATION_FACTOR.into(), value: n.to_string(), source: config_source::DYNAMIC }
+            }
+            None => ConfigEntry {
+                key: REPLICATION_FACTOR.into(),
+                value: voters.to_string(),
+                source: config_source::DEFAULT,
+            },
+        };
         let resources = req
             .resource_ids
             .iter()
@@ -1083,9 +1129,12 @@ impl Clients {
                         l.resume_window_ms,
                         config_source::DYNAMIC,
                     ));
+                    all.push(replication(resource_id, q.voters.len()));
                     Some(all)
                 } else if let Some(st) = state.streams.get(&resource_id) {
-                    Some(stream_configs(st.settings, view.admin.retention))
+                    let mut all = stream_configs(st.settings, view.admin.retention);
+                    all.push(replication(resource_id, st.partitions.first().map_or(0, |(_, v)| v.len())));
+                    Some(all)
                 } else if state.exchanges.contains_key(&resource_id) {
                     Some(Vec::new())
                 } else if configured(resource_id) && view.streams.iter().any(|st| st.resource_id == resource_id) {

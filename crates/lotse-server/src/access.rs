@@ -269,6 +269,7 @@ impl Access {
             | Request::AddNode(_)
             | Request::RemoveNode(_)
             | Request::MoveLeader(_)
+            | Request::ReassignPartition(_)
             | Request::RevokeSessions(_)
             | Request::RevokeCertificate(_)
             | Request::DescribeCertificates(_)

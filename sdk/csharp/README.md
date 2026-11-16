@@ -210,6 +210,7 @@ Every call takes a `CancellationToken` and follows `lotse-client` and the Java S
 | `RequestCertificateAsync`, `DescribeCertificateRequestsAsync`, `RecordCertificateAsync` | Certificate requests (ADR 0092): ask with a PKCS#10 signing request, list the requests with their state (`CertificateRequestState.Pending`, `Signed`, `Expired`), and record the certificate the CA holder signed. Cluster admin. |
 | `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync` | ADR 0048. |
 | `MoveLeaderAsync(name, partition, node)` | Pins a leader to a voter; `null` unpins (ADR 0065). Cluster admin. |
+| `ReassignPartitionAsync(name, partition, voters)` | Places a partition on the named nodes; an empty list releases it (ADR 0115). Cluster admin. `replication.factor` for every partition goes through `AlterConfigsAsync`. |
 | `NodeMetricsAsync` | Asks each node the metadata names for `DescribeMetrics`; a node that does not answer is a `NodeMetrics` with `Error` (`NoAnswerException` or `BrokerErrorException`), not a failure of the call. |
 
 Names become ids through `Metadata` asked of every known broker, and a name no broker knows is `UnknownStreamException`. A change whose answer was lost is asked again; a refusal after such a lost attempt is `OutcomeUnknownException`, as the earlier attempt may have been carried out. A missing role is a `BrokerErrorException` with `UNAUTHORIZED` at once. Tenants are created by a cluster admin and a duplicate is `RESOURCE_EXISTS`; `CreateStreamAsync` and the other creates use the configured tenant.

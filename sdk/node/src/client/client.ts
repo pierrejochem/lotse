@@ -2056,6 +2056,33 @@ export class LotseClient {
   }
 
   /**
+   * Places `partition` of the stream or queue `name` on the nodes `voters`, as Kafka's partition reassignment does, or
+   * releases it with no nodes so the cluster manages it again (ADR 0115). The partition's leader moves its replicas
+   * shortly after; rebalancing then leaves it where it was placed, and only a drain moves it. Refused while the partition
+   * is moving. Needs the cluster-admin role. To change how many replicas every partition has, set `replication.factor`
+   * with {@link alterConfigs}.
+   */
+  async reassignPartition(
+    name: string,
+    partition: number,
+    voters: readonly (number | bigint)[],
+    options: CallOptions = {},
+  ): Promise<void> {
+    this.checkOpen();
+    if (!Number.isInteger(partition) || partition < 0 || partition > U32_MAX) {
+      throw new RangeError(`partition must be a u32, not ${partition}`);
+    }
+    for (const v of voters) {
+      checkNodeId(v);
+    }
+    const id = await this.resourceId(name);
+    return this.adminChange(
+      { type: "ReassignPartition", resourceId: id, partition, voters: voters.map((v) => BigInt(v)) },
+      options.signal,
+    );
+  }
+
+  /**
    * Raises the partition count of the stream `name`, created at runtime, to `count` (ADR 0074). Existing partitions stay as
    * they are, so a key may map to another partition afterwards; consumer groups spread over the new ones on their next
    * heartbeat. Needs the tenant-admin role.

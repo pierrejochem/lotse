@@ -213,6 +213,13 @@ export interface MoveLeaderRequest {
   readonly partition: number;
   readonly nodeId: bigint;
 }
+/** Places a partition on the named nodes, or releases it with none (cluster admin, ADR 0115). */
+export interface ReassignPartitionRequest {
+  readonly type: "ReassignPartition";
+  readonly resourceId: bigint;
+  readonly partition: number;
+  readonly voters: readonly bigint[];
+}
 export interface PublishRequest {
   readonly type: "Publish";
   readonly txnId?: string | null;
@@ -375,6 +382,7 @@ export type Request =
   | UnbindRequest
   | DeleteResourceRequest
   | MoveLeaderRequest
+  | ReassignPartitionRequest
   | PublishRequest
   | CreatePartitionsRequest
   | RevokeSessionsRequest
@@ -428,6 +436,7 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   Unbind: ApiKey.UNBIND,
   DeleteResource: ApiKey.DELETE_RESOURCE,
   MoveLeader: ApiKey.MOVE_LEADER,
+  ReassignPartition: ApiKey.REASSIGN_PARTITION,
   Publish: ApiKey.PUBLISH,
   CreatePartitions: ApiKey.CREATE_PARTITIONS,
   RevokeSessions: ApiKey.REVOKE_SESSIONS,
@@ -677,6 +686,11 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "MoveLeader":
       w.u64(req.resourceId).u32(req.partition).u64(req.nodeId).noTags();
+      return;
+    case "ReassignPartition":
+      w.u64(req.resourceId).u32(req.partition);
+      w.array(req.voters, (w1, v) => w1.u64(v));
+      w.noTags();
       return;
     case "Publish":
       w.optString(req.txnId).u32(req.timeoutMs);
@@ -1034,6 +1048,14 @@ export function readRequest(apiKey: number, r: Reader): Request {
     case ApiKey.MOVE_LEADER: {
       const x: MoveLeaderRequest = { type: "MoveLeader", resourceId: r.u64(), partition: r.u32(), nodeId: r.u64() };
       r.tags();
+      return x;
+    }
+    case ApiKey.REASSIGN_PARTITION: {
+      const resourceId = r.u64();
+      const partition = r.u32();
+      const voters = r.array(8, (r1) => r1.u64());
+      r.tags();
+      const x: ReassignPartitionRequest = { type: "ReassignPartition", resourceId, partition, voters };
       return x;
     }
     case ApiKey.PUBLISH: {

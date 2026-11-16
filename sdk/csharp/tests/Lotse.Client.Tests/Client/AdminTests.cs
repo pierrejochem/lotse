@@ -499,6 +499,13 @@ public sealed class AdminTests : IDisposable
         Assert.Equal((StreamId, 2u, 0UL), (pins[1].ResourceId, pins[1].Partition, pins[1].NodeId)); // unpinned
         Assert.Equal((QueueId, 0u, 1UL), (pins[2].ResourceId, pins[2].Partition, pins[2].NodeId));
 
+        await _client!.ReassignPartitionAsync("s", 1, new ulong[] { 2, 4, 5 });
+        await _client!.ReassignPartitionAsync("q", 0, Array.Empty<ulong>());
+        List<Request.ReassignPartition> placed = _b.Requests<Request.ReassignPartition>();
+        Assert.Equal((StreamId, 1u), (placed[0].ResourceId, placed[0].Partition));
+        Assert.Equal(new ulong[] { 2, 4, 5 }, placed[0].Voters.ToArray());
+        Assert.Equal((QueueId, 0u, 0), (placed[1].ResourceId, placed[1].Partition, placed[1].Voters.Count)); // released
+
         await _client!.RevokeSessionsAsync("ops", true);
         await _client!.RevokeSessionsAsync("bob", false);
         List<Request.RevokeSessions> revoked = _b.Requests<Request.RevokeSessions>();
@@ -536,6 +543,8 @@ public sealed class AdminTests : IDisposable
         await Assert.ThrowsAsync<UnknownStreamException>(() => _client!.PurgeAsync("nothing"));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _client!.CreatePartitionsAsync("s", 0));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _client!.MoveLeaderAsync("s", -1, 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _client!.ReassignPartitionAsync("s", -1, new ulong[] { 1 }));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => _client!.ReassignPartitionAsync("s", 0, null!));
         await Assert.ThrowsAsync<ArgumentNullException>(() => _client!.DeleteAsync(null!));
         await Assert.ThrowsAsync<ArgumentNullException>(() => _client!.SetUserPasswordAsync("u", null!));
         Assert.DoesNotContain(_b.Requests(), r => r is not Request.Metadata);

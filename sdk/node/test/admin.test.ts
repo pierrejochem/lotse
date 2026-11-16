@@ -470,6 +470,12 @@ describe("admin calls against scripted brokers", () => {
       { type: "MoveLeader", resourceId: STREAM_ID, partition: 1, nodeId: 3n },
       { type: "MoveLeader", resourceId: STREAM_ID, partition: 0, nodeId: 0n },
     ]);
+    await client.reassignPartition("s", 1, [2, 4n, 5]);
+    await client.reassignPartition("s", 0, []);
+    assert.deepEqual(b.requests("ReassignPartition"), [
+      { type: "ReassignPartition", resourceId: STREAM_ID, partition: 1, voters: [2n, 4n, 5n] },
+      { type: "ReassignPartition", resourceId: STREAM_ID, partition: 0, voters: [] },
+    ]);
     await client.revokeSessions("ops", true);
     await client.revokeSessions("bob");
     await client.revokeSessions("carol", false);
@@ -520,6 +526,8 @@ describe("admin calls against scripted brokers", () => {
     await assert.rejects(client.moveLeader("s", -1, 1), RangeError);
     await assert.rejects(client.moveLeader("s", 2 ** 32, 1), RangeError);
     await assert.rejects(client.moveLeader("s", 0, 0), RangeError, "node 0 would unpin: say null");
+    await assert.rejects(client.reassignPartition("s", -1, [1]), RangeError);
+    await assert.rejects(client.reassignPartition("s", 0, [0]), RangeError, "node ids start at 1");
     await assert.rejects(client.addNode(-1, "p", "c"), RangeError);
     assert.deepEqual(a.requests().concat(b.requests()).filter((r) => r.type !== "Metadata"), []);
   });

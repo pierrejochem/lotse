@@ -1182,6 +1182,38 @@ public sealed interface Request {
     }
 
     /**
+     * Places a partition of a stream or queue created at runtime on the named nodes (cluster admin, ADR 0115), as
+     * Kafka's partition reassignment does; rebalancing then leaves it there and only a drain moves it. No voters
+     * release it. Answered with {@link Response.Admin}.
+     *
+     * @param resourceId the stream or queue, a {@code u64}
+     * @param partition the partition, a {@code u32} (0 for a queue)
+     * @param voters the nodes to hold it, distinct {@code u64}s; empty to release it
+     */
+    record ReassignPartition(long resourceId, long partition, List<Long> voters) implements Request {
+        /** Copies {@code voters}. */
+        public ReassignPartition {
+            voters = List.copyOf(voters);
+        }
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.REASSIGN_PARTITION;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u64(resourceId).u32(partition).array(voters, Writer::u64).noTags();
+        }
+
+        static ReassignPartition read(Reader r) {
+            ReassignPartition x = new ReassignPartition(r.u64(), r.u32(), r.array(8, Reader::u64));
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * Publishes messages through exchanges (ADR 0079): the node that gets it routes each message by the exchange's
      * bindings as it knows them and writes it to every queue it routes to, if the publisher may write each of them.
      * Not atomic across queues.

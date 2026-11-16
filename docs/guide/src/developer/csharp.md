@@ -139,7 +139,7 @@ After an exception that aborted the transaction, call `group.Rewind()` to read t
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `DeleteAsync`, `DeleteIfEmptyAsync`, `PurgeAsync`, `RequeueAsync`, `AlterConfigsAsync`, `DescribeConfigsAsync`, `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync`, `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync`, `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync`, `RevokeSessionsAsync`, `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync`, `MoveLeaderAsync`, `CreatePartitionsAsync` and `NodeMetricsAsync`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call throws `ResourceExistsException` with the id.
+The admin calls are methods of `LotseClient`: `DeleteAsync`, `DeleteIfEmptyAsync`, `PurgeAsync`, `RequeueAsync`, `AlterConfigsAsync`, `DescribeConfigsAsync`, `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync`, `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync`, `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync`, `RevokeSessionsAsync`, `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync`, `MoveLeaderAsync`, `ReassignPartitionAsync`, `CreatePartitionsAsync` and `NodeMetricsAsync`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call throws `ResourceExistsException` with the id.
 
 ## Compressed batches
 

@@ -173,6 +173,7 @@ public static class Frames
             55 => Request.RequestCertificate.Read(r),
             56 => Request.DescribeCertificateRequests.Read(r),
             57 => Request.RecordCertificate.Read(r),
+            58 => Request.ReassignPartition.Read(r),
             _ => throw new InvalidOperationException("checked against the implemented keys"),
         };
         r.Finish();
@@ -242,7 +243,7 @@ public static class Frames
             10 => Response.Subscribe.Read(r),
             13 or 14 or 15 or 24 or 28 or 44 => Response.Outcome.Read(r),
             21 or 22 or 23 => Response.Create.Read(r),
-            25 or 27 or 32 or 34 or 35 or 37 or 40 or 41 or 43 or 49 or 50 or 51 or 52 or 54 or 55 or 57 => Response.Admin.Read(r),
+            25 or 27 or 32 or 34 or 35 or 37 or 40 or 41 or 43 or 49 or 50 or 51 or 52 or 54 or 55 or 57 or 58 => Response.Admin.Read(r),
             42 => Response.DescribeNodes.Read(r),
             26 => Response.DescribeConfigs.Read(r),
             29 => Response.DescribeMetrics.Read(r),

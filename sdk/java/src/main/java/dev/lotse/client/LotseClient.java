@@ -1715,6 +1715,19 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
+     * Places {@code partition} of the stream or queue {@code name} on the nodes {@code voters}, as Kafka's partition
+     * reassignment does, or releases it with no nodes so the cluster manages it again (ADR 0115). The partition's
+     * leader moves its replicas shortly after; rebalancing then leaves it where it was placed, and only a drain moves
+     * it. Refused while the partition is moving. Needs the cluster-admin role. To change how many replicas every
+     * partition has, set {@code replication.factor} with {@link #alterConfigs}.
+     */
+    public void reassignPartition(String name, int partition, List<Long> voters) {
+        checkOpen();
+        long id = resourceId(name);
+        adminChange(new Request.ReassignPartition(id, partition, voters));
+    }
+
+    /**
      * Raises the partition count of the stream {@code name}, created at runtime, to {@code count} (ADR 0074).
      * Existing partitions stay as they are, so a key may map to another partition afterwards; consumer groups spread
      * over the new ones on their next heartbeat. Needs the tenant-admin role.

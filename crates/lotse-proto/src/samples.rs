@@ -361,6 +361,16 @@ pub fn requests() -> Vec<Request> {
         Request::Requeue(QueueActionRequest { queue_id: 1_099_511_627_778, up_to: 5_000 }),
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 3 }),
         Request::MoveLeader(MoveLeaderRequest { resource_id: 1_099_511_627_776, partition: 1, node_id: 0 }),
+        Request::ReassignPartition(ReassignPartitionRequest {
+            resource_id: 1_099_511_627_776,
+            partition: 1,
+            voters: vec![2, 4, 5],
+        }),
+        Request::ReassignPartition(ReassignPartitionRequest {
+            resource_id: 1_099_511_627_776,
+            partition: 0,
+            voters: vec![],
+        }),
         Request::CreatePartitions(CreatePartitionsRequest { resource_id: 1_099_511_627_776, count: 12 }),
         Request::Publish(PublishRequest {
             txn_id: None,

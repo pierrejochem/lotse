@@ -50,6 +50,14 @@ A draining node that was cut off while the cluster forgot it asks the metadata l
 
 A drained node cannot come back under its old id. To return the machine to the cluster, join it under a new id.
 
+## Change replication
+
+Every partition of a stream or queue created at runtime keeps the replica count it was created with until you change it ([ADR 0115](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0115-replication-changes-at-runtime.md)).
+
+- **For all partitions:** set `replication.factor` with `AlterConfigs`, on its own in the request, from 1 to the number of active nodes. The planner adds the least loaded nodes or removes the busiest ones, four groups at a time; each new replica is a full copy through Raft. Resetting the key leaves the partitions as they are. `DescribeConfigs` shows the factor, or the first partition's count.
+- **For one partition, on nodes you choose:** a cluster admin sends `ReassignPartition` (`reassign_partition` in `lotse-client`, `reassignPartition` in the SDKs) with the partition's voters, as with Kafka's partition reassignment. Rebalancing and the factor then leave the partition where you put it; only a drain moves a replica off it. An empty list hands it back to the planner. A placement is refused while the partition is still moving: ask again once it has settled.
+- Setting `replication.factor` releases the placed partitions of that resource.
+
 ## Pin a leader
 
 A cluster admin can pin a partition's leader to one of its voters with `MoveLeader` (`move_leader` in `lotse-client`) ([ADR 0065](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0065-pinned-leaders.md)). It works for partitions of streams and queues created at runtime. A node id of 0 unpins.

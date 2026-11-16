@@ -488,6 +488,7 @@ impl Clients {
             Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
+            Request::ReassignPartition(req) => self.reassign_partition(outbox, id, req, view, groups),
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
             Request::RevokeCertificate(req) => self.revoke_certificate(outbox, id, req, view, groups),
             Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, view, groups),
