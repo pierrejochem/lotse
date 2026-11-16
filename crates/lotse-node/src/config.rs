@@ -84,6 +84,11 @@ pub struct Cluster {
     /// Consumer groups: how often members send heartbeats, ms.
     #[serde(default)]
     pub group_heartbeat_ms: Option<u64>,
+    /// How long a follower may go without having applied what its leader
+    /// said was committed and still serve `Fetch` and `ListOffsets`, ms
+    /// (default 10,000; ADR 0116), like Kafka's `replica.lag.time.max.ms`.
+    #[serde(default)]
+    pub follower_max_lag_ms: Option<u64>,
 }
 
 fn default_tick_ms() -> u64 {
@@ -289,6 +294,9 @@ impl ClusterFile {
         if self.producers.max == Some(0) {
             return invalid("producers.max must be at least 1".into());
         }
+        if self.cluster.follower_max_lag_ms == Some(0) {
+            return invalid("cluster.follower_max_lag_ms must be at least 1".into());
+        }
         if self.producers.expiration_ms == Some(0) {
             return invalid("producers.expiration_ms must be at least 1".into());
         }
@@ -410,6 +418,10 @@ impl ClusterFile {
                 .expiration_ms
                 .map_or(lotse_server::DEFAULT_PRODUCER_EXPIRATION, Duration::from_millis),
             leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
+            follower_max_lag: self
+                .cluster
+                .follower_max_lag_ms
+                .map_or(lotse_server::DEFAULT_FOLLOWER_MAX_LAG, Duration::from_millis),
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

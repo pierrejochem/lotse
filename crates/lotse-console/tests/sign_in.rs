@@ -281,6 +281,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
+        follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth,

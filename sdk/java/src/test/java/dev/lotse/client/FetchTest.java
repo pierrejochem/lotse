@@ -273,6 +273,10 @@ class FetchTest {
                 return Fx.metadataInZones(both, List.of("a", "b"), Fx.stream("s", STREAM_ID, Fx.partition(0, 1, 5, 1L, 2L)));
             }
             ErrorCode code = node.id == 2 ? followerCode : ErrorCode.NONE;
+            if (request instanceof Request.ListOffsets) {
+                return new dev.lotse.proto.Response.ListOffsets(List.of(new Messages.ListOffsetsResourceResponse(
+                        STREAM_ID, List.of(new Messages.ListOffsetsPartitionResponse(0, code, node.id * 10L, -1, null)))));
+            }
             ByteString records = code.isOk() ? data(0, 0, false, "from " + node.id) : ByteString.EMPTY;
             return Fx.fetched(STREAM_ID, 0, code, records, 1, 1, 0, List.of(), null);
         };
@@ -296,6 +300,26 @@ class FetchTest {
             client.close();
         }
         assertTrue(a.requests(Request.Fetch.class).stream().noneMatch(Request.Fetch::allowFollower));
+        client = null;
+    }
+
+    @Test
+    void aClientInAZoneListsOffsetsAtTheReplicaThereAndLeavesOneThatLags() {
+        zones(ErrorCode.NONE);
+        client = new LotseClient(Fx.config(a).zone("b").build());
+        assertEquals(20, client.listOffset("s", 0, OffsetAt.LATEST), "the follower in zone b answers");
+        assertEquals(0, a.count(Request.ListOffsets.class));
+        assertTrue(b.requests(Request.ListOffsets.class).get(0).allowFollower());
+        client.close();
+        // A follower that lags too far answers NOT_LEADER (ADR 0116): asked once, then left for the leader.
+        zones(ErrorCode.NOT_LEADER);
+        int before = b.count(Request.ListOffsets.class);
+        client = new LotseClient(Fx.config(a).zone("b").build());
+        assertEquals(10, client.listOffset("s", 0, OffsetAt.LATEST));
+        assertEquals(10, client.listOffset("s", 0, OffsetAt.LATEST));
+        assertEquals(before + 1, b.count(Request.ListOffsets.class));
+        assertTrue(a.requests(Request.ListOffsets.class).stream().noneMatch(Request.ListOffsets::allowFollower));
+        client.close();
         client = null;
     }
 

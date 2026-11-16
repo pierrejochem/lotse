@@ -1161,7 +1161,16 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     }
 
     async fn list_offset_once(&self, stream: &str, partition: u32, at: OffsetAt) -> Result<u64, Attempt> {
-        let (route, addr) = self.route(stream, partition).await?;
+        let (route, leader_addr) = self.route(stream, partition).await?;
+        // Like a fetch, from the replica in this client's zone, which may
+        // lag the leader (ADR 0116); one that fails is left for the leader.
+        let replica = self.replica_in_zone(stream, partition, route.leader);
+        let allow_follower = replica.is_some();
+        let addr = replica.unwrap_or(leader_addr);
+        let leave_replica = |why: String| {
+            self.not_in_zone.lock().expect("zone lock").insert((stream.to_string(), partition));
+            Err(Attempt::Retry(why))
+        };
         let timestamp = match at {
             OffsetAt::Earliest => lotse_proto::list_offsets::EARLIEST,
             OffsetAt::Latest => lotse_proto::list_offsets::LATEST,
@@ -1173,10 +1182,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 resource_id: route.resource_id,
                 partitions: vec![lotse_proto::ListOffsetsPartition { partition, timestamp }],
             }],
+            allow_follower,
         });
         let resp = match self.call(&addr, &req).await {
             Ok(Response::ListOffsets(r)) => r,
             Ok(other) => return Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            Err(e) if allow_follower => return leave_replica(format!("{addr}: {e}")),
             Err(e) => {
                 self.forget(stream, partition);
                 return Err(e.into());
@@ -1188,6 +1199,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             .next()
             .and_then(|r| r.partitions.into_iter().next())
             .ok_or_else(|| Attempt::Retry("empty list-offsets response".into()))?;
+        if allow_follower && p.error != ErrorCode::NONE {
+            return leave_replica(format!("{addr}: {}", p.error));
+        }
         match p.error {
             ErrorCode::NONE => Ok(p.offset),
             code if code.retriable() => {

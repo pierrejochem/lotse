@@ -33,6 +33,8 @@ export interface ListOffsetsRequest {
   readonly type: "ListOffsets";
   readonly isolation: number;
   readonly resources: readonly m.ListOffsetsResource[];
+  /** Tag 0: a follower may answer from what it has committed and applied (ADR 0116). */
+  readonly allowFollower?: boolean;
 }
 /** Fetch's tag: a follower may answer (ADR 0104). */
 const TAG_ALLOW_FOLLOWER = 0;
@@ -538,7 +540,11 @@ export function writeRequest(w: Writer, req: Request): void {
         });
         w1.noTags();
       });
-      w.noTags();
+      if (req.allowFollower) {
+        w.tags([{ tag: TAG_ALLOW_FOLLOWER, value: Uint8Array.of(1) }]);
+      } else {
+        w.noTags();
+      }
       return;
     case "Fetch":
       w.u32(req.maxWaitMs).u32(req.minBytes).u32(req.maxBytes).u8(req.isolation);
@@ -812,8 +818,15 @@ export function readRequest(apiKey: number, r: Reader): Request {
         r1.tags();
         return { resourceId, partitions };
       });
-      r.tags();
-      return { type: "ListOffsets", isolation, resources };
+      let allowFollower = false;
+      for (const t of r.tags()) {
+        if (t.tag === TAG_ALLOW_FOLLOWER) {
+          const vr = new Reader(t.value);
+          allowFollower = vr.u8() !== 0;
+          vr.finish();
+        }
+      }
+      return { type: "ListOffsets", isolation, resources, ...(allowFollower ? { allowFollower } : {}) };
     }
     case ApiKey.FETCH: {
       const maxWaitMs = r.u32();

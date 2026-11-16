@@ -36,7 +36,7 @@
 //! from the node configuration ([`StreamConfig`], [`QueueConfig`]), and so
 //! does the coordinator group.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -296,6 +296,10 @@ pub(crate) struct ClusterView<'a> {
     pub(crate) unix_ms: u64,
     /// Who may do what.
     pub(crate) access: &'a Access,
+    /// Groups this node follows but must not serve follower reads of: it
+    /// has not heard its leader lately, or not caught up with what the
+    /// leader said was committed within `follower_max_lag` (ADR 0116).
+    pub(crate) lagging: &'a BTreeSet<GroupId>,
 }
 
 impl ClusterView<'_> {
@@ -948,9 +952,11 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                     let hw = raft.commit();
                     let start = replica.log().start_offset();
                     // A follower asked for what it has serves the committed
-                    // data it has applied (ADR 0104); it may lag the leader.
+                    // data it has applied (ADR 0104); it may lag the leader,
+                    // but not for longer than `follower_max_lag`, and only
+                    // while it hears the leader (ADR 0116).
                     let leads = raft.role() == Role::Leader;
-                    let follower = !leads && req.allow_follower;
+                    let follower = !leads && req.allow_follower && group.is_some_and(|g| !view.lagging.contains(&g));
                     if !leads && !follower {
                         out.error = ErrorCode::NOT_LEADER;
                         out.leader_hint = hint(raft);
