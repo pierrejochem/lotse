@@ -557,6 +557,38 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
+    /// Places <paramref name="partition"/> of the stream or queue <paramref name="name"/> on the nodes
+    /// <paramref name="voters"/>, as Kafka's partition reassignment does, or releases it with no nodes so the cluster
+    /// manages it again (ADR 0115). The partition's leader moves its replicas shortly after; rebalancing then leaves it
+    /// where it was placed, and only a drain moves it. Refused while the partition is moving. Needs the cluster-admin
+    /// role. To change how many replicas every partition has, set <c>replication.factor</c> with
+    /// <see cref="AlterConfigsAsync"/>.
+    /// </summary>
+    /// <param name="name">The stream or queue.</param>
+    /// <param name="partition">The partition (0 for a queue).</param>
+    /// <param name="voters">The nodes to hold it; empty to release it.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task ReassignPartitionAsync(
+        string name,
+        int partition,
+        IReadOnlyList<ulong> voters,
+        CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(voters);
+        ArgumentOutOfRangeException.ThrowIfNegative(partition);
+        return ReassignPartitionCoreAsync(name, partition, voters, cancellationToken);
+    }
+
+    private async Task ReassignPartitionCoreAsync(string name, int partition, IReadOnlyList<ulong> voters, CancellationToken ct)
+    {
+        ulong id = await ResourceIdAsync(name, ct).ConfigureAwait(false);
+        var req = new Request.ReassignPartition(id, (uint)partition, voters.ToArray());
+        await AdminChangeAsync(req, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Raises the partition count of the stream <paramref name="name"/>, created at runtime, to
     /// <paramref name="count"/> (ADR 0074). Existing partitions stay as they are, so a key may map to another partition
     /// afterwards; consumer groups spread over the new ones on their next heartbeat. Needs the tenant-admin role.

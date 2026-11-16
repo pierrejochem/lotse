@@ -71,7 +71,7 @@ The example below creates a stream, writes ten messages and reads them back. It 
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `createPartitions` and `nodeMetrics`.
+The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`.
 
 ## Kotlin
 

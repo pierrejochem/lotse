@@ -289,6 +289,12 @@ class AdminTest {
         assertEquals(3, b.requests(Request.MoveLeader.class).get(0).nodeId());
         assertEquals(0, b.requests(Request.MoveLeader.class).get(1).nodeId(), "unpinned");
         assertEquals(STREAM_ID, b.requests(Request.MoveLeader.class).get(0).resourceId());
+        client.reassignPartition("s", 1, List.of(2L, 4L, 5L));
+        client.reassignPartition("s", 0, List.of());
+        assertEquals(
+                new Request.ReassignPartition(STREAM_ID, 1, List.of(2L, 4L, 5L)),
+                b.requests(Request.ReassignPartition.class).get(0));
+        assertEquals(List.of(), b.requests(Request.ReassignPartition.class).get(1).voters(), "released");
         client.revokeSessions("ops", true);
         assertEquals(Messages.SubjectKind.GROUP, b.requests(Request.RevokeSessions.class).get(0).subjectKind());
         client.revokeSessions("bob", false);

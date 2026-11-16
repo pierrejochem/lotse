@@ -565,3 +565,123 @@ fn a_leaving_leader_asks_the_voters_that_hold_the_most_first() {
     assert_eq!(successors(&three, 1, &BTreeMap::new()), vec![2, 3], "nothing known yet");
     assert!(successors(&m(&[1], &[]), 1, &matched).is_empty(), "no other voter");
 }
+
+/// Plans and settles until the planner has nothing left to do.
+fn plan_until_quiet(s: &mut MetadataState, at: &mut u64, active: &[NodeId]) {
+    for _ in 0..20 {
+        let next = plan(s, &[], &[], active, &BTreeMap::new());
+        assert!(next.iter().filter(|c| matches!(c, Change::SetVoters { .. })).count() <= MAX_MOVING, "{next:?}");
+        if next.is_empty() {
+            return;
+        }
+        apply_all(s, at, &next);
+        let settled: Vec<Change> = managed_groups(s, &[], &[])
+            .into_iter()
+            .filter(|(g, v)| moving(s, *g, v))
+            .map(|(group, voters)| Change::Settled { group, voters })
+            .collect();
+        apply_all(s, at, &settled);
+    }
+    panic!("the planner does not settle");
+}
+
+fn counts(s: &MetadataState) -> Vec<usize> {
+    managed_groups(s, &[], &[]).into_iter().map(|(_, v)| v.len()).collect()
+}
+
+#[test]
+fn every_partition_moves_to_its_resources_replication_factor() {
+    let partitions: Vec<Vec<NodeId>> = (0..6).map(|_| vec![1, 2, 3]).collect();
+    let refs: Vec<&[NodeId]> = partitions.iter().map(Vec::as_slice).collect();
+    let mut s = with_stream(&refs);
+    let id = crate::metadata::resource_id(10);
+    let active = [1, 2, 3, 4, 5];
+    let mut at = 100;
+    plan_until_quiet(&mut s, &mut at, &active);
+    assert!(counts(&s).iter().all(|n| *n == 3), "no factor: replicas stay as created");
+    apply_all(&mut s, &mut at, &[Change::SetReplication { resource_id: id, replication: 5 }]);
+    let first = plan(&s, &[], &[], &active, &BTreeMap::new());
+    assert_eq!(first.len(), MAX_MOVING, "a few groups at a time: {first:?}");
+    plan_until_quiet(&mut s, &mut at, &active);
+    assert!(counts(&s).iter().all(|n| *n == 5), "{:?}", counts(&s));
+    apply_all(&mut s, &mut at, &[Change::SetReplication { resource_id: id, replication: 1 }]);
+    plan_until_quiet(&mut s, &mut at, &active);
+    assert!(counts(&s).iter().all(|n| *n == 1), "{:?}", counts(&s));
+    let mut load: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (_, v) in managed_groups(&s, &[], &[]) {
+        *load.entry(v[0]).or_default() += 1;
+    }
+    assert!(load.values().max().unwrap() - load.values().min().unwrap() <= 1, "the busiest went: {load:?}");
+    // More than there are nodes: as many as there are.
+    apply_all(&mut s, &mut at, &[Change::SetReplication { resource_id: id, replication: 7 }]);
+    plan_until_quiet(&mut s, &mut at, &active);
+    assert!(counts(&s).iter().all(|n| *n == 5));
+    // Removed: partitions keep what they have.
+    apply_all(&mut s, &mut at, &[Change::SetReplication { resource_id: id, replication: 0 }]);
+    assert!(s.replication.is_empty());
+    assert!(plan(&s, &[], &[], &active, &BTreeMap::new()).is_empty());
+}
+
+#[test]
+fn a_placed_partition_stays_where_the_operator_put_it() {
+    let mut s = with_stream(&[&[1, 2, 3], &[1, 2, 3]]);
+    let id = crate::metadata::resource_id(10);
+    let groups: Vec<GroupId> = managed_groups(&s, &[], &[]).into_iter().map(|(g, _)| g).collect();
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::Reassign { group: groups[0], voters: vec![1, 2] }]);
+    assert!(s.placed.contains(&groups[0]));
+    assert_eq!(s.voters_of(groups[0]).unwrap(), &[1, 2]);
+    // Node 4 joins empty, and the factor asks for three: only the other
+    // partition moves.
+    apply_all(&mut s, &mut at, &[Change::SetReplication { resource_id: id, replication: 3 }]);
+    assert!(s.placed.is_empty(), "a factor applies to every partition again");
+    apply_all(&mut s, &mut at, &[Change::Reassign { group: groups[0], voters: vec![1, 2] }]);
+    plan_until_quiet(&mut s, &mut at, &[1, 2, 3, 4]);
+    assert_eq!(s.voters_of(groups[0]).unwrap(), &[1, 2], "neither the factor nor rebalancing moved it");
+    assert_eq!(s.voters_of(groups[1]).unwrap().len(), 3);
+    // A drain still moves it.
+    apply_all(&mut s, &mut at, &[Change::DrainNode { id: 2 }]);
+    plan_until_quiet(&mut s, &mut at, &[1, 3, 4]);
+    assert!(!s.voters_of(groups[0]).unwrap().contains(&2), "a drained node's replica moves");
+    assert_eq!(s.voters_of(groups[0]).unwrap().len(), 2);
+    // Released: managed again.
+    apply_all(&mut s, &mut at, &[Change::Reassign { group: groups[0], voters: vec![] }]);
+    assert!(s.placed.is_empty());
+    plan_until_quiet(&mut s, &mut at, &[1, 3, 4]);
+    assert_eq!(s.voters_of(groups[0]).unwrap().len(), 3, "the factor applies once released");
+}
+
+#[test]
+fn a_placement_drops_a_pin_on_a_node_it_leaves() {
+    let mut s = with_stream(&[&[1, 2, 3]]);
+    let g = managed_groups(&s, &[], &[])[0].0;
+    let mut at = 100;
+    apply_all(&mut s, &mut at, &[Change::PinLeader { group: g, node: Some(3) }]);
+    apply_all(&mut s, &mut at, &[Change::Reassign { group: g, voters: vec![1, 2, 4] }]);
+    assert!(!s.pins.contains_key(&g));
+    apply_all(&mut s, &mut at, &[Change::PinLeader { group: g, node: Some(4) }]);
+    apply_all(&mut s, &mut at, &[Change::Reassign { group: g, voters: vec![2, 4, 5] }]);
+    assert_eq!(s.pins.get(&g), Some(&4), "a pin on a node it keeps stays");
+}
+
+#[test]
+fn replication_factors_and_placements_survive_a_snapshot_and_a_delete() {
+    let mut s = with_stream(&[&[1, 2, 3], &[1, 2, 3]]);
+    let id = crate::metadata::resource_id(10);
+    let g = managed_groups(&s, &[], &[])[1].0;
+    let mut at = 100;
+    apply_all(
+        &mut s,
+        &mut at,
+        &[
+            Change::SetReplication { resource_id: id, replication: 2 },
+            Change::Reassign { group: g, voters: vec![1, 4] },
+        ],
+    );
+    let back = MetadataState::decode(&s.encode()).unwrap();
+    assert_eq!(back, s);
+    assert_eq!(back.replication.get(&id), Some(&2));
+    assert!(back.placed.contains(&g));
+    apply_all(&mut s, &mut at, &[Change::Delete { resource_id: id }]);
+    assert!(s.replication.is_empty() && s.placed.is_empty());
+}

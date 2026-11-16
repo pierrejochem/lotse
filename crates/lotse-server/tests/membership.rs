@@ -196,6 +196,31 @@ where
     }
 }
 
+/// The cluster changes in order: nodes 4 and 5 join, `removed` drains, s1
+/// goes to `factor` replicas, s2/0 is placed on `placed`.
+async fn change(
+    admin: &Client<SimRuntime>,
+    step: usize,
+    removed: NodeId,
+    placed: &[u64],
+    factor: usize,
+) -> Result<(), ClientError> {
+    match step {
+        0 | 1 => {
+            let id = 4 + step as NodeId;
+            admin.add_node(id, &addr(id, 7000), &addr(id, 9000)).await
+        }
+        2 => admin.remove_node(removed).await,
+        3 => admin.alter_configs("s1", &[("replication.factor", &factor.to_string())], &[]).await,
+        _ => admin.reassign_partition("s2", 0, placed).await,
+    }
+}
+
+/// A placement refused while the partition moves, to be asked again.
+fn moving(e: &ClientError) -> bool {
+    matches!(e, ClientError::Broker { code: ErrorCode::INVALID_REQUEST, message: Some(m) } if m.contains("moving"))
+}
+
 async fn run(rt: SimRuntime) {
     let pre_vote = rt.chance(1, 2);
     let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
@@ -223,6 +248,11 @@ async fn run(rt: SimRuntime) {
     let stop = Arc::new(AtomicBool::new(false));
     let producing = rt.spawn(producer(rt.node("p1"), out.clone(), stop.clone()));
     let removed: NodeId = 1 + rt.below(3);
+    // After the drain, s1 goes to two or four replicas and s2/0 is placed on
+    // three nodes the operator names (ADR 0115).
+    let mut placed: Vec<u64> = (1..=5).filter(|n| *n != removed).collect();
+    placed.remove(rt.below(4) as usize);
+    let factor: usize = if rt.chance(1, 2) { 2 } else { 4 };
     let hosts: Vec<String> = ["n1", "n2", "n3", "n4", "n5", "a1", "p1"].map(String::from).to_vec();
     // Who may be crashed: nodes that have started.
     let mut started: Vec<NodeId> = vec![1, 2, 3];
@@ -240,15 +270,9 @@ async fn run(rt: SimRuntime) {
         let elapsed = 8_000 - (end - rt.now()).as_millis() as u64;
         // One attempt per round, so that faults heal and nodes restart in
         // between; a change counts once it is acknowledged.
-        let due = [800, 1_800, 2_600].get(step).is_some_and(|t| elapsed > *t);
+        let due = [800, 1_800, 2_600, 3_400, 4_200].get(step).is_some_and(|t| elapsed > *t);
         if due {
-            let res = match step {
-                0 | 1 => {
-                    let id = 4 + step as NodeId;
-                    admin.add_node(id, &addr(id, 7000), &addr(id, 9000)).await
-                }
-                _ => admin.remove_node(removed).await,
-            };
+            let res = change(&admin, step, removed, &placed, factor).await;
             match res {
                 Ok(()) => {
                     if step < 2 {
@@ -258,7 +282,7 @@ async fn run(rt: SimRuntime) {
                     }
                     step += 1;
                 }
-                Err(e) if settled(&e) => {}
+                Err(e) if settled(&e) || moving(&e) => {}
                 Err(e) => panic!("membership change {step}: {e}"),
             }
         }
@@ -283,15 +307,9 @@ async fn run(rt: SimRuntime) {
     // Changes not made during the faults are made now.
     rt.net().heal();
     let deadline = rt.now() + Duration::from_secs(60);
-    while step < 3 {
+    while step < 5 {
         assert!(rt.now() < deadline, "membership change {step} never went through on the healed cluster");
-        let res = match step {
-            0 | 1 => {
-                let id = 4 + step as NodeId;
-                admin.add_node(id, &addr(id, 7000), &addr(id, 9000)).await
-            }
-            _ => admin.remove_node(removed).await,
-        };
+        let res = change(&admin, step, removed, &placed, factor).await;
         match res {
             Ok(()) => {
                 if step < 2 && !w.running.contains_key(&(4 + step as NodeId)) {
@@ -299,7 +317,7 @@ async fn run(rt: SimRuntime) {
                 }
                 step += 1;
             }
-            Err(e) if settled(&e) => {}
+            Err(e) if settled(&e) || moving(&e) => rt.sleep(TICK * 10).await,
             Err(e) => panic!("membership change {step}: {e}"),
         }
     }
@@ -329,7 +347,19 @@ async fn run(rt: SimRuntime) {
         let hi = nodes.iter().map(|n| n.replicas).max().unwrap_or(0) as i64;
         let lo = nodes.iter().map(|n| n.replicas).min().unwrap_or(0) as i64;
         let even = hi - lo <= 1.max(hi / 10);
-        if !ids.contains(&removed) && quiet && even {
+        // Or nothing could even them out: no partition that is not placed
+        // holds the fullest node and not the emptiest (ADR 0115).
+        let full = nodes.iter().max_by_key(|n| (n.replicas, n.node_id)).map_or(0, |n| n.node_id as u32);
+        let empty = nodes.iter().min_by_key(|n| (n.replicas, n.node_id)).map_or(0, |n| n.node_id as u32);
+        let stuck = match checker.metadata(&STREAMS).await {
+            Ok(m) => !m.resources.iter().any(|r| {
+                r.partitions.iter().any(|p| {
+                    !(r.name == "s2" && p.partition == 0) && p.voters.contains(&full) && !p.voters.contains(&empty)
+                })
+            }),
+            Err(_) => false,
+        };
+        if !ids.contains(&removed) && quiet && (even || stuck) {
             let expected: BTreeSet<u64> = (1..=5).filter(|n| *n != removed).collect();
             assert_eq!(ids, expected, "the cluster's nodes");
             break;
@@ -353,8 +383,9 @@ async fn run(rt: SimRuntime) {
         node.join().await.expect("a drained node stops cleanly");
     }
 
-    // What the metadata group wants is what every group has, three voters
-    // each, none of them the removed node. A node that hosts a partition
+    // What the metadata group wants is what every group has, none of them
+    // the removed node: s1 its replication factor of voters, s2/0 the
+    // nodes it was placed on, s2/1 three (ADR 0115). A node that hosts a partition
     // reports its Raft voters and its leader; the others report the voters
     // the metadata group lists. Leaders spread once each preferred voter
     // has held everything for its wait, which recent elections lengthen up
@@ -373,7 +404,12 @@ async fn run(rt: SimRuntime) {
             for r in &m.resources {
                 for p in &r.partitions {
                     let voters: BTreeSet<u32> = p.voters.iter().copied().collect();
-                    if voters.len() != 3 || voters.contains(&(removed as u32)) {
+                    let right = match (r.name.as_str(), p.partition) {
+                        ("s1", _) => voters.len() == factor,
+                        ("s2", 0) => voters == placed.iter().map(|n| *n as u32).collect(),
+                        _ => voters.len() == 3,
+                    };
+                    if !right || voters.contains(&(removed as u32)) {
                         wrong.push(format!("node {id}: {}/{} has voters {voters:?}", r.name, p.partition));
                     }
                     if p.leader != 0 {

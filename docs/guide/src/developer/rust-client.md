@@ -143,7 +143,7 @@ The admin calls are methods of `Client`, in `crates/lotse-client/src/admin.rs`:
 - Resources: `create_stream`, `create_stream_with`, `create_queue`, `create_queue_in`, `declare_exchange`, `bind`, `unbind`, `delete`, `delete_if_empty`, `create_partitions`.
 - Queues: `purge`, `requeue`, `alter_configs`, `describe_configs`.
 - Access: `set_user_password`, `delete_user`, `describe_users`, `create_tenant`, `delete_tenant`, `describe_tenants`, `alter_role_bindings`, `describe_role_bindings`, `who_am_i`, `revoke_sessions`.
-- Cluster: `add_node`, `remove_node`, `describe_nodes`, `move_leader`, `node_metrics`.
+- Cluster: `add_node`, `remove_node`, `describe_nodes`, `move_leader`, `reassign_partition`, `node_metrics`.
 
 Each is checked against the signed-in principal's roles on the broker ([ADR 0039](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0039-tenants-and-roles.md)).
 
