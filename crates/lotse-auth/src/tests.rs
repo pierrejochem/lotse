@@ -189,6 +189,20 @@ fn tokens_are_refused_for_every_reason() {
     )
     .unwrap();
     assert!(matches!(check(&hs), Err(TokenError::Algorithm(_))));
+    // Also when the key set holds a shared secret that names no algorithm:
+    // only the rule on the token's algorithm stands in the way.
+    let secret = b"a secret the broker holds too";
+    let set = serde_json::json!({"keys": [{"kty": "oct", "kid": "s1", "k": base64_url(secret)}]});
+    let shared = Jwks::parse(set.to_string().as_bytes()).unwrap();
+    assert!(shared.has("s1"));
+    h.kid = Some("s1".into());
+    let hs = jsonwebtoken::encode(
+        &h,
+        &serde_json::json!({"iss": i.issuer, "aud": "lotse", "sub": "a", "exp": NOW + 60}),
+        &jsonwebtoken::EncodingKey::from_secret(secret),
+    )
+    .unwrap();
+    assert!(matches!(oauth::validate(&hs, &shared, &settings(), NOW), Err(TokenError::Algorithm(_))));
     assert!(matches!(check("not.a.token"), Err(TokenError::Invalid(_))));
 }
 
@@ -305,4 +319,9 @@ fn the_credential_matches_the_browsers_vector() {
         b64.encode(&c.server_key),
         "g8+8PdM5XuazUPbNGNF2tHolTXi0sKq726W8O6Rxo6ojgek5eSxEeRvKezIBKIr9zgQiZ0TMBHNhodkJr8OyFw=="
     );
+}
+
+fn base64_url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
