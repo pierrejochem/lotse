@@ -32,7 +32,7 @@ tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "syn
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-utoipa = "5"
+utoipa = "6"
 
 [dev-dependencies]
 lotse-auth = { workspace = true, features = ["testing"] }

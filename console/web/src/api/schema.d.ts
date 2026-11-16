@@ -749,7 +749,7 @@ export interface components {
         };
         /** @description One line of the health list. */
         HealthItem: {
-            chip?: null | components["schemas"]["Chip"];
+            chip?: components["schemas"]["Chip"] | null;
             /** @description Extra context. */
             detail: string;
             /** @description What is measured. */
@@ -864,12 +864,12 @@ export interface components {
         };
         /** @description The nodes screen. */
         NodesView: {
-            disk_limits?: null | components["schemas"]["DiskLimits"];
+            disk_limits?: components["schemas"]["DiskLimits"] | null;
             /** @description Recent operator events, newest first. */
             events: components["schemas"]["OperatorEvent"][];
             /** @description Nodes. */
             nodes: components["schemas"]["Node"][];
-            upgrade?: null | components["schemas"]["Upgrade"];
+            upgrade?: components["schemas"]["Upgrade"] | null;
         };
         /** @description Something the operator did. */
         OperatorEvent: {
@@ -890,7 +890,7 @@ export interface components {
             busiest_streams: components["schemas"]["StreamRow"][];
             /** @description Cluster ID. */
             cluster: string;
-            disk_limits?: null | components["schemas"]["DiskLimits"];
+            disk_limits?: components["schemas"]["DiskLimits"] | null;
             /** @description Health list. */
             health: components["schemas"]["HealthItem"][];
             /** @description Node that leads the metadata group. */
@@ -1102,7 +1102,7 @@ export interface components {
         };
         /** @description A row in queue lists. */
         QueueRow: {
-            attention?: null | components["schemas"]["Chip"];
+            attention?: components["schemas"]["Chip"] | null;
             /**
              * Format: int64
              * @description Messages in the dead-letter queue.
@@ -1283,7 +1283,7 @@ export interface components {
         };
         /** @description The stream detail screen. */
         StreamDetail: {
-            assignment?: null | components["schemas"]["Assignment"];
+            assignment?: components["schemas"]["Assignment"] | null;
             /** @description Log compaction on. */
             compaction: boolean;
             /** @description Consumer groups. */
@@ -1322,7 +1322,7 @@ export interface components {
              * @description Replication factor.
              */
             replication: number;
-            retention?: null | components["schemas"]["StreamRetention"];
+            retention?: components["schemas"]["StreamRetention"] | null;
             /**
              * Format: int64
              * @description Bytes stored, all replicas.
@@ -1546,6 +1546,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1568,6 +1569,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1576,6 +1578,7 @@ export interface operations {
                     "application/json": components["schemas"]["BindingsView"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1602,6 +1605,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1610,6 +1614,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1618,6 +1623,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1644,6 +1650,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1652,6 +1659,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1660,6 +1668,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1682,6 +1691,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1690,6 +1700,7 @@ export interface operations {
                     "application/json": components["schemas"]["CertificateRequestsView"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1716,6 +1727,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1724,6 +1736,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1732,6 +1745,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1754,6 +1768,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1762,6 +1777,7 @@ export interface operations {
                     "application/json": components["schemas"]["CertificatesView"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1788,6 +1804,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1796,6 +1813,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1804,6 +1822,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1830,6 +1849,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1838,6 +1858,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1846,6 +1867,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1854,6 +1876,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1881,6 +1904,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1889,6 +1913,7 @@ export interface operations {
                     "application/json": components["schemas"]["Series"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1897,6 +1922,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1919,6 +1945,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1927,6 +1954,7 @@ export interface operations {
                     "application/json": components["schemas"]["NodesView"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1949,6 +1977,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1957,6 +1986,7 @@ export interface operations {
                     "application/json": components["schemas"]["Overview"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1979,6 +2009,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2005,6 +2036,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Created. */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -2013,6 +2045,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2021,6 +2054,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2029,6 +2063,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description A resource with this name exists. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2053,6 +2088,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2061,6 +2097,7 @@ export interface operations {
                     "application/json": components["schemas"]["QueueDetail"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2089,6 +2126,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2097,6 +2135,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2105,6 +2144,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2113,6 +2153,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2137,6 +2178,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2145,6 +2187,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2153,6 +2196,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2179,6 +2223,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2187,6 +2232,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2195,6 +2241,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2217,6 +2264,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2241,6 +2289,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2249,6 +2298,7 @@ export interface operations {
                     "application/json": components["schemas"]["StreamDetail"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2282,6 +2332,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2290,6 +2341,7 @@ export interface operations {
                     "application/json": components["schemas"]["RecordPage"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2298,6 +2350,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2320,6 +2373,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2342,6 +2396,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2350,6 +2405,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2372,6 +2428,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2380,6 +2437,7 @@ export interface operations {
                     "application/json": components["schemas"]["UsersView"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2406,6 +2464,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2414,6 +2473,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2422,6 +2482,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2450,6 +2511,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2458,6 +2520,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2466,6 +2529,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2474,6 +2538,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description No such cluster or resource. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2502,6 +2567,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2510,6 +2576,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
+            /** @description The request is not valid. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2518,6 +2585,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The signed-in user may not do this. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2537,6 +2605,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Success. */
             200: {
                 headers: {
                     [name: string]: unknown;
