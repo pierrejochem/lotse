@@ -19,9 +19,9 @@ java {
     }
 }
 
-val zstdJni = "com.github.luben:zstd-jni:1.5.7-25"
+val zstdJni = "com.github.luben:zstd-jni:1.5.7-26"
 // The maintained fork of lz4-java, with the fixes for CVE-2025-12183 and CVE-2025-66566.
-val lz4Java = "at.yawk.lz4:lz4-java:1.13.0"
+val lz4Java = "at.yawk.lz4:lz4-java:1.14.0"
 
 dependencies {
     // Nothing else: the client uses the JDK only.
