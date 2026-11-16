@@ -711,7 +711,14 @@ async fn run(rt: SimRuntime) {
         if *k == kind::STREAM {
             // Nothing here compacts: the compaction settings stay at their
             // defaults (ADR 0067).
-            let [ms, bytes, policy, tombstones] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+            // Nor does anything set a replication factor (ADR 0115): the
+            // first partition's voter count, by default.
+            let [ms, bytes, policy, tombstones, replication] = &configs[..] else {
+                panic!("{name} has settings {configs:?}")
+            };
+            assert_eq!(replication.key, "replication.factor", "{name}");
+            assert_eq!(replication.source, lotse_proto::config_source::DEFAULT, "{name}");
+            assert!(replication.value.parse::<usize>().is_ok_and(|n| (1..=3).contains(&n)), "{name}: {replication:?}");
             assert_eq!(
                 (policy.key.as_str(), policy.value.as_str(), policy.source),
                 ("cleanup.policy", "delete", lotse_proto::config_source::DEFAULT),
@@ -741,9 +748,13 @@ async fn run(rt: SimRuntime) {
             continue;
         }
         // The ack timeout, then the limits (ADR 0055), single active consumer
-        // (ADR 0076), priority levels (ADR 0078) and the resume window (ADR
-        // 0109), which this run never sets.
-        let [c, limits @ ..] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        // (ADR 0076), priority levels (ADR 0078), the resume window (ADR
+        // 0109) and the replication factor (ADR 0115), which this run never
+        // sets: the queue's voter count, by default.
+        let [c, limits @ .., replication] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        assert_eq!(replication.key, "replication.factor", "{name}");
+        assert_eq!(replication.source, lotse_proto::config_source::DEFAULT, "{name}");
+        assert!(replication.value.parse::<usize>().is_ok_and(|n| (1..=3).contains(&n)), "{name}: {replication:?}");
         let keys: Vec<(&str, &str, u8)> = limits.iter().map(|e| (e.key.as_str(), e.value.as_str(), e.source)).collect();
         let off = lotse_proto::config_source::DEFAULT;
         assert_eq!(

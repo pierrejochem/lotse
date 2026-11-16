@@ -375,9 +375,6 @@ pub(crate) fn plan(
         }
     }
 
-    // Rebalancing (ADR 0050): while nothing drains, one replica at a time
-    // goes from the fullest node to the emptiest, until they are within
-    // one replica (or a tenth of the fullest).
     let mut changed: BTreeSet<GroupId> = changes
         .iter()
         .filter_map(|c| match c {
@@ -385,6 +382,65 @@ pub(crate) fn plan(
             _ => None,
         })
         .collect();
+
+    // Replication factors (ADR 0115): each partition of a resource with a
+    // factor moves to that many voters, at most as many as there are active
+    // nodes, a few groups at a time. New voters are the least loaded nodes;
+    // the busiest go, the highest id among equals. A partition an operator
+    // placed stays as placed.
+    let factor: BTreeMap<GroupId, usize> = state
+        .replication
+        .iter()
+        .flat_map(|(id, n)| {
+            let groups: Vec<GroupId> = match (state.streams.get(id), state.queues.get(id)) {
+                (Some(st), _) => st.partitions.iter().map(|(g, _)| *g).collect(),
+                (None, Some(q)) => vec![q.group],
+                (None, None) => Vec::new(),
+            };
+            groups.into_iter().map(move |g| (g, *n as usize))
+        })
+        .collect();
+    for (g, voters) in &managed {
+        if in_flight >= MAX_MOVING {
+            break;
+        }
+        let Some(&want) = factor.get(g) else { continue };
+        if core.contains(g) || state.placed.contains(g) || changed.contains(g) || moving(state, *g, voters) {
+            continue;
+        }
+        let want = want.clamp(1, active.len().max(1));
+        if voters.len() == want {
+            continue;
+        }
+        let mut next = voters.clone();
+        while next.len() < want {
+            let Some(n) = least_loaded(&load, &|n| next.contains(&n)) else { break };
+            next.push(n);
+            *load.entry(n).or_default() += 1;
+        }
+        while next.len() > want {
+            let (i, _) = next
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, n)| (load.get(*n).copied().unwrap_or(usize::MAX), **n))
+                .expect("not empty");
+            let gone = next.remove(i);
+            if let Some(l) = load.get_mut(&gone) {
+                *l -= 1;
+            }
+        }
+        next.sort_unstable();
+        if next != *voters {
+            changed.insert(*g);
+            changes.push(Change::SetVoters { group: *g, voters: next });
+            in_flight += 1;
+        }
+    }
+
+    // Rebalancing (ADR 0050): while nothing drains, one replica at a time
+    // goes from the fullest node to the emptiest, until they are within
+    // one replica (or a tenth of the fullest). A placed partition stays
+    // where the operator put it (ADR 0115).
     if state.draining.is_empty() {
         while in_flight < MAX_MOVING {
             let Some((&full, &hi)) = load.iter().max_by_key(|(n, l)| (**l, **n)) else { break };
@@ -400,6 +456,7 @@ pub(crate) fn plan(
                 .enumerate()
                 .filter(|(_, (g, v))| {
                     !core.contains(g)
+                        && !state.placed.contains(g)
                         && v.contains(&full)
                         && !v.contains(&empty)
                         && !changed.contains(g)

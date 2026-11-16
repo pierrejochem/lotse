@@ -274,6 +274,10 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     public suspend fun moveLeader(name: String, partition: Int, node: Long?): Unit =
         io { java.moveLeader(name, partition, node) }
 
+    /** Places a partition on the named nodes, or releases it with none (ADR 0115). */
+    public suspend fun reassignPartition(name: String, partition: Int, voters: List<Long>): Unit =
+        io { java.reassignPartition(name, partition, voters) }
+
     /** Raises a stream's partition count (ADR 0074). */
     public suspend fun createPartitions(name: String, count: Int): Unit = io { java.createPartitions(name, count) }
 

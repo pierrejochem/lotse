@@ -671,6 +671,7 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.REMOVE_NODE:
     case ApiKey.SETTLE_VOTERS:
     case ApiKey.MOVE_LEADER:
+    case ApiKey.REASSIGN_PARTITION:
     case ApiKey.REVOKE_SESSIONS:
     case ApiKey.REVOKE_CERTIFICATE:
     case ApiKey.RECORD_CERTIFICATES:

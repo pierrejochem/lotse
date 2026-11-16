@@ -125,6 +125,15 @@ pub(crate) enum Change {
     /// New partitions for a runtime stream, one voter set each, numbered on
     /// from its last (ADR 0074).
     AddPartitions { resource_id: u64, partitions: Vec<Vec<NodeId>> },
+    /// A runtime stream's or queue's `replication.factor` (ADR 0115): the
+    /// planner moves each of its partitions to that many voters, and the
+    /// partitions an operator placed are released. 0 removes the setting:
+    /// partitions keep the voters they have.
+    SetReplication { resource_id: u64, replication: u32 },
+    /// An operator places a runtime group on these voters (ADR 0115), like
+    /// [`Change::SetVoters`], and the spreading of replicas leaves it there.
+    /// No voters releases it.
+    Reassign { group: GroupId, voters: Vec<NodeId> },
 }
 
 /// Which runtime resources a node knows to be deleted: those with a
@@ -482,11 +491,38 @@ pub(crate) struct MetadataState {
     /// Groups whose preferred leader an operator chose (ADR 0065); it
     /// counts only while the node is one of the group's voters.
     pub(crate) pins: BTreeMap<GroupId, NodeId>,
+    /// Runtime resources' `replication.factor`, where one is set
+    /// (ADR 0115).
+    pub(crate) replication: BTreeMap<u64, u32>,
+    /// Groups an operator placed (ADR 0115): rebalancing and the
+    /// replication factor leave them alone; a drain still moves them.
+    pub(crate) placed: BTreeSet<GroupId>,
 }
 
 const VERSION: u8 = 4;
 
 impl MetadataState {
+    /// Applies the voters a group is to have, from the planner or an
+    /// operator (ADR 0048, ADR 0115).
+    fn set_voters(&mut self, index: u64, group: GroupId, mut voters: Vec<NodeId>) {
+        voters.sort_unstable();
+        voters.dedup();
+        self.target_at.insert(group, index);
+        let Some(old) = self.voters_of(group).map(<[NodeId]>::to_vec) else {
+            // A configured group (not runtime, no target yet).
+            self.targets.insert(group, voters);
+            return;
+        };
+        self.initial.entry(group).or_insert_with(|| old.clone());
+        let left = self.left.entry(group).or_default();
+        left.extend(old.iter().copied().filter(|n| !voters.contains(n)));
+        if let Some(slot) = self.runtime_voters_mut(group) {
+            *slot = voters;
+        } else {
+            self.targets.insert(group, voters);
+        }
+    }
+
     /// The id of the runtime resource called `name`, if any.
     pub(crate) fn id_of(&self, name: &str) -> Option<u64> {
         self.streams
@@ -659,9 +695,11 @@ impl MetadataState {
                 if self.is_dead_letter_of_any(resource_id).is_some() {
                     return Ok(());
                 }
+                self.replication.remove(&resource_id);
                 let groups = if let Some(s) = self.streams.remove(&resource_id) {
                     for (g, _) in &s.partitions {
                         self.pins.remove(g);
+                        self.placed.remove(g);
                     }
                     s.partitions.len() as u32
                 } else if let Some(q) = self.queues.remove(&resource_id) {
@@ -669,6 +707,7 @@ impl MetadataState {
                         list.retain(|b| b.queue_id != resource_id);
                     }
                     self.pins.remove(&q.group);
+                    self.placed.remove(&q.group);
                     1
                 } else if self.exchanges.remove(&resource_id).is_some() {
                     0
@@ -753,22 +792,37 @@ impl MetadataState {
                 self.gone.insert(id);
                 self.pins.retain(|_, n| *n != id);
             }
-            Change::SetVoters { group, mut voters } => {
-                voters.sort_unstable();
-                voters.dedup();
-                self.target_at.insert(group, index);
-                let Some(old) = self.voters_of(group).map(<[NodeId]>::to_vec) else {
-                    // A configured group (not runtime, no target yet).
-                    self.targets.insert(group, voters);
+            Change::SetVoters { group, voters } => self.set_voters(index, group, voters),
+            Change::SetReplication { resource_id, replication } => {
+                let groups: Vec<GroupId> = if let Some(st) = self.streams.get(&resource_id) {
+                    st.partitions.iter().map(|(g, _)| *g).collect()
+                } else if let Some(q) = self.queues.get(&resource_id) {
+                    vec![q.group]
+                } else {
                     return Ok(());
                 };
-                self.initial.entry(group).or_insert_with(|| old.clone());
-                let left = self.left.entry(group).or_default();
-                left.extend(old.iter().copied().filter(|n| !voters.contains(n)));
-                if let Some(slot) = self.runtime_voters_mut(group) {
-                    *slot = voters;
+                if replication == 0 {
+                    self.replication.remove(&resource_id);
                 } else {
-                    self.targets.insert(group, voters);
+                    self.replication.insert(resource_id, replication);
+                }
+                for g in groups {
+                    self.placed.remove(&g);
+                }
+            }
+            Change::Reassign { group, voters } => {
+                if self.runtime_voters_mut(group).is_none() {
+                    return Ok(());
+                }
+                if voters.is_empty() {
+                    self.placed.remove(&group);
+                    return Ok(());
+                }
+                self.set_voters(index, group, voters);
+                self.placed.insert(group);
+                // A pin counts only on a voter; one placed elsewhere goes.
+                if self.pins.get(&group).is_some_and(|n| !self.voters_of(group).unwrap_or_default().contains(n)) {
+                    self.pins.remove(&group);
                 }
             }
             Change::Settled { group, mut voters } => {
@@ -994,8 +1048,9 @@ impl MetadataState {
         // inventory (ADR 0091), certificate requests (ADR 0092), the index
         // that made each tombstone (ADR 0100), the zones of nodes added at
         // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
-        // queues' resume windows (ADR 0109). A later section needs the ones
-        // before it, empty or not.
+        // queues' resume windows (ADR 0109), replication factors and placed
+        // groups (ADR 0115). A later section needs the ones before it, empty
+        // or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -1011,7 +1066,9 @@ impl MetadataState {
             .filter(|q| q.limits.resume_window_ms != 0)
             .map(|q| (q.resource_id, q.limits.resume_window_ms))
             .collect();
-        let sections = if !windows.is_empty() {
+        let sections = if !self.replication.is_empty() || !self.placed.is_empty() {
+            14
+        } else if !windows.is_empty() {
             13
         } else if !self.moved_off.is_empty() {
             12
@@ -1132,6 +1189,17 @@ impl MetadataState {
             for (id, ms) in &windows {
                 b.put_u64_le(*id);
                 b.put_u64_le(*ms);
+            }
+        }
+        if sections >= 14 {
+            b.put_u32_le(self.replication.len() as u32);
+            for (id, n) in &self.replication {
+                b.put_u64_le(*id);
+                b.put_u32_le(*n);
+            }
+            b.put_u32_le(self.placed.len() as u32);
+            for g in &self.placed {
+                b.put_u64_le(*g);
             }
         }
         b.freeze()
@@ -1336,6 +1404,17 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 12)?;
+                let id = b.get_u64_le();
+                s.replication.insert(id, b.get_u32_le());
+            }
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                s.placed.insert(b.get_u64_le());
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1474,6 +1553,16 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u64_le(*group);
             b.put_u8(u8::from(node.is_some()));
             b.put_u64_le(node.unwrap_or(0));
+        }
+        Change::SetReplication { resource_id, replication } => {
+            b.put_u8(25);
+            b.put_u64_le(*resource_id);
+            b.put_u32_le(*replication);
+        }
+        Change::Reassign { group, voters } => {
+            b.put_u8(26);
+            b.put_u64_le(*group);
+            put_nodes(&mut b, voters);
         }
         Change::AddPartitions { resource_id, partitions } => {
             b.put_u8(19);
@@ -1752,6 +1841,15 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let n = count(b)?;
             need(b, n as usize * 8)?;
             Change::ForgetDeleted { resource_ids: (0..n).map(|_| b.get_u64_le()).collect() }
+        }
+        25 => {
+            need(b, 12)?;
+            Change::SetReplication { resource_id: b.get_u64_le(), replication: b.get_u32_le() }
+        }
+        26 => {
+            need(b, 8)?;
+            let group = b.get_u64_le();
+            Change::Reassign { group, voters: get_nodes(b)? }
         }
         _ => return Err("unknown metadata change".into()),
     };

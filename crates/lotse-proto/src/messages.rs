@@ -3537,6 +3537,38 @@ impl MoveLeaderRequest {
     }
 }
 
+/// Places a partition of a stream or queue created at runtime on the named
+/// nodes (cluster admin, ADR 0115), as Kafka's partition reassignment does.
+/// The metadata group records the voters, the group's leader moves its
+/// replicas through learners and joint consensus, and the spreading of
+/// replicas (ADR 0050) leaves the partition where it was placed; a drained
+/// node's replica still moves. An empty `voters` lets the planner manage
+/// the partition again. Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReassignPartitionRequest {
+    /// The stream or queue.
+    pub resource_id: u64,
+    /// The partition (0 for a queue).
+    pub partition: u32,
+    /// The nodes to hold it, distinct; empty to release it.
+    pub voters: Vec<u64>,
+}
+
+impl ReassignPartitionRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.resource_id);
+        w.u32(self.partition);
+        w.array(&self.voters, |w, v| w.u64(*v));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req =
+            ReassignPartitionRequest { resource_id: r.u64()?, partition: r.u32()?, voters: r.array(8, Reader::u64)? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// Raises the partition count of a stream created at runtime to `count`
 /// (tenant admin, ADR 0074). New partitions are placed like those of a new
 /// stream, with as many replicas as the stream's first partition; existing

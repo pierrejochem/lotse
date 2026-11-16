@@ -189,6 +189,7 @@ Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-c
 | `requestCertificate(principal, csr)`, `describeCertificateRequests()`, `recordCertificate(id, certificate, issuer, serial, notBeforeMs, notAfterMs)` | Certificate requests (ADR 0092): ask with a PKCS#10 signing request in DER form, list the requests (`{ requests, nowMs }`, `state` is `CertificateRequestState.PENDING`, `SIGNED` or `EXPIRED`), and record the certificate the CA holder signed for a request. Cluster admin. |
 | `addNode`, `removeNode`, `describeNodes` | The node list in the metadata group (ADR 0048): `removeNode` starts a drain, `describeNodes` shows replicas and moves. Ids are never used twice. |
 | `moveLeader(name, partition, node)` | Pins a partition's leader to one of its voters; `null` unpins (ADR 0065). Cluster admin. |
+| `reassignPartition(name, partition, voters)` | Places a partition on the named nodes; an empty list releases it (ADR 0115). Cluster admin. `replication.factor` for every partition goes through `alterConfigs`. |
 | `createPartitions(name, count)` | Raises a runtime stream's partition count (ADR 0074); never lowers it. |
 | `nodeMetrics()` | Each node's `DescribeMetrics` answer, asked of the node itself: `{ nodeId, metrics, error }`. A node that does not answer has a `NoAnswerError`; the call does not reject. |
 
