@@ -80,13 +80,13 @@ fn cluster(st: &AppState, id: &str) -> ApiResult<Arc<dyn Cluster>> {
 }
 
 /// The signed-in user.
-#[utoipa::path(get, path = "/api/v1/me", responses((status = 200, body = Me)))]
+#[utoipa::path(get, path = "/api/v1/me", responses((status = 200, description = "Success.", body = Me)))]
 pub async fn me(State(st): State<AppState>, who: Identity) -> Json<Me> {
     Json(Me { principal: who.principal, display_name: who.display_name, auth_mode: st.auth.mode().into() })
 }
 
 /// Clusters this console manages.
-#[utoipa::path(get, path = "/api/v1/clusters", responses((status = 200, body = [ClusterRef])))]
+#[utoipa::path(get, path = "/api/v1/clusters", responses((status = 200, description = "Success.", body = [ClusterRef])))]
 pub async fn clusters(State(st): State<AppState>, who: Identity) -> ApiResult<Json<Vec<ClusterRef>>> {
     let mut out = Vec::with_capacity(st.clusters.len());
     for c in st.clusters.values() {
@@ -98,7 +98,7 @@ pub async fn clusters(State(st): State<AppState>, who: Identity) -> ApiResult<Js
 /// The overview screen.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/overview",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = Overview), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Overview), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn overview(State(st): State<AppState>, who: Identity, Path(id): Path<String>) -> ApiResult<Json<Overview>> {
     Ok(Json(cluster(&st, &id)?.overview(&who).await?))
 }
@@ -106,7 +106,7 @@ pub async fn overview(State(st): State<AppState>, who: Identity, Path(id): Path<
 /// Nodes, rolling upgrade and operator events.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/nodes",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = NodesView), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = NodesView), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn nodes(State(st): State<AppState>, who: Identity, Path(id): Path<String>) -> ApiResult<Json<NodesView>> {
     Ok(Json(cluster(&st, &id)?.nodes(&who).await?))
 }
@@ -114,7 +114,7 @@ pub async fn nodes(State(st): State<AppState>, who: Identity, Path(id): Path<Str
 /// Stops the rolling upgrade after the node it is on.
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/upgrade/pause",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = Done), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn pause_upgrade(State(st): State<AppState>, who: Identity, Path(id): Path<String>) -> ApiResult<Json<Done>> {
     cluster(&st, &id)?.pause_upgrade(&who).await?;
     Ok(Json(Done {
@@ -126,7 +126,7 @@ pub async fn pause_upgrade(State(st): State<AppState>, who: Identity, Path(id): 
 /// All streams.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/streams",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = [StreamRow])))]
+    responses((status = 200, description = "Success.", body = [StreamRow])))]
 pub async fn streams(
     State(st): State<AppState>,
     who: Identity,
@@ -138,7 +138,7 @@ pub async fn streams(
 /// One stream.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/streams/{name}",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Stream name")),
-    responses((status = 200, body = StreamDetail), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = StreamDetail), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn stream(
     State(st): State<AppState>,
     who: Identity,
@@ -164,7 +164,7 @@ pub struct ReadParams {
 /// Reads records without joining a consumer group.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/streams/{name}/records",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Stream name"), ReadParams),
-    responses((status = 200, body = RecordPage), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = RecordPage), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn read_records(
     State(st): State<AppState>,
     who: Identity,
@@ -185,7 +185,7 @@ pub async fn read_records(
 /// All queues.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/queues",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = [QueueRow])))]
+    responses((status = 200, description = "Success.", body = [QueueRow])))]
 pub async fn queues(
     State(st): State<AppState>,
     who: Identity,
@@ -197,7 +197,7 @@ pub async fn queues(
 /// One queue.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/queues/{name}",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Queue name")),
-    responses((status = 200, body = QueueDetail), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = QueueDetail), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn queue(
     State(st): State<AppState>,
     who: Identity,
@@ -211,7 +211,7 @@ pub async fn queue(
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues/{name}/purge",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Queue name")),
     request_body = PurgeQueue,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn purge_queue(
     State(st): State<AppState>,
     who: Identity,
@@ -231,7 +231,7 @@ pub async fn purge_queue(
 /// came from, each once.
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues/{name}/requeue",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "Dead-letter queue name")),
-    responses((status = 200, body = Done), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn requeue(
     State(st): State<AppState>,
     who: Identity,
@@ -247,7 +247,7 @@ pub async fn requeue(
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/leaders",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = MoveLeader,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn move_leader(
     State(st): State<AppState>,
     who: Identity,
@@ -269,7 +269,7 @@ pub async fn move_leader(
 /// SCRAM users. The broker lets only cluster admins list them.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/users",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = UsersView), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = UsersView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn users(State(st): State<AppState>, who: Identity, Path(id): Path<String>) -> ApiResult<Json<UsersView>> {
     Ok(Json(cluster(&st, &id)?.users(&who).await?))
 }
@@ -288,7 +288,7 @@ fn check_user_name(name: &str) -> ApiResult<()> {
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/users",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = CreateUser,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn create_user(
     State(st): State<AppState>,
     who: Identity,
@@ -309,7 +309,7 @@ pub async fn create_user(
 #[utoipa::path(put, path = "/api/v1/clusters/{cluster}/users/{name}/credential",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "User name")),
     request_body = Credential,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn set_credential(
     State(st): State<AppState>,
     who: Identity,
@@ -329,7 +329,7 @@ pub async fn set_credential(
 #[utoipa::path(delete, path = "/api/v1/clusters/{cluster}/users/{name}",
     params(("cluster" = String, Path, description = "Cluster ID"), ("name" = String, Path, description = "User name")),
     request_body = DeleteUser,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
 pub async fn delete_user(
     State(st): State<AppState>,
     who: Identity,
@@ -350,7 +350,7 @@ pub async fn delete_user(
 /// Role bindings: all for a cluster admin, one's own for everyone else.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/bindings",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = BindingsView), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = BindingsView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn bindings(
     State(st): State<AppState>,
     who: Identity,
@@ -363,7 +363,7 @@ pub async fn bindings(
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/bindings",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = BindingRow,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn add_binding(
     State(st): State<AppState>,
     who: Identity,
@@ -379,7 +379,7 @@ pub async fn add_binding(
 #[utoipa::path(delete, path = "/api/v1/clusters/{cluster}/bindings",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = BindingRow,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn remove_binding(
     State(st): State<AppState>,
     who: Identity,
@@ -408,7 +408,7 @@ fn binding_text(b: &BindingRow) -> String {
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/sessions/revoke",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = RevokeSessions,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn revoke_sessions(
     State(st): State<AppState>,
     who: Identity,
@@ -431,7 +431,7 @@ pub async fn revoke_sessions(
 /// The broker lets only cluster admins list them.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/certificates",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = CertificatesView), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = CertificatesView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn certificates(
     State(st): State<AppState>,
     who: Identity,
@@ -444,7 +444,7 @@ pub async fn certificates(
 /// of each that was signed. The broker lets only cluster admins list them.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/certificate-requests",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = CertificateRequestsView), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = CertificateRequestsView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn certificate_requests(
     State(st): State<AppState>,
     who: Identity,
@@ -459,7 +459,7 @@ pub async fn certificate_requests(
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/certificate-requests",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = RequestCertificate,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn request_certificate(
     State(st): State<AppState>,
     who: Identity,
@@ -497,7 +497,7 @@ fn hex(what: &str, text: &str) -> ApiResult<Vec<u8>> {
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/certificates/revoke",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = RevokeCertificate,
-    responses((status = 200, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn revoke_certificate(
     State(st): State<AppState>,
     who: Identity,
@@ -524,7 +524,7 @@ pub async fn revoke_certificate(
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/queues",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = CreateQueue,
-    responses((status = 201, body = Done), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 201, description = "Created.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 409, description = "A resource with this name exists.", body = ErrorBody)))]
 pub async fn create_queue(
     State(st): State<AppState>,
     who: Identity,
@@ -543,7 +543,7 @@ pub async fn create_queue(
 /// Tenants, quotas and role bindings.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/tenants",
     params(("cluster" = String, Path, description = "Cluster ID")),
-    responses((status = 200, body = TenantsView)))]
+    responses((status = 200, description = "Success.", body = TenantsView)))]
 pub async fn tenants(
     State(st): State<AppState>,
     who: Identity,
@@ -595,7 +595,7 @@ pub struct MetricsParams {
 /// latency only for cluster admins and cluster viewers.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/metrics",
     params(("cluster" = String, Path, description = "Cluster ID"), MetricsParams),
-    responses((status = 200, body = Series), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 200, description = "Success.", body = Series), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
 pub async fn metrics(
     State(st): State<AppState>,
     who: Identity,
