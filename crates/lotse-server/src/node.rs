@@ -216,6 +216,46 @@ const HANDOVER_EVERY_TICKS: u32 = 100;
 /// And asks the same group's preferred leader again only after this.
 const HANDOVER_RETRY_TICKS: u32 = 1_000;
 
+/// How often a leaving node asks a group's next voter to take over: a
+/// transfer whose target did not campaign is given up after an election
+/// timeout.
+const LEAVE_RETRY_TICKS: u32 = 50;
+
+/// One step of leaving (ADR 0114): asks a voter of every group this node
+/// leads to take over, each attempt the next in [`crate::membership::successors`]
+/// order, so a voter that is down is passed over. A leader that loses its
+/// quorum, the others down, steps down within an election timeout
+/// (check-quorum), so such a group does not hold the stop back. Returns
+/// whether nothing is left to hand over.
+fn leave_pass<R: Runtime, S: StateMachine>(
+    cfg: &NodeConfig,
+    groups: &mut BTreeMap<GroupId, Replica<R, S>>,
+    now: lotse_rt::Instant,
+    asked: &mut BTreeMap<GroupId, (lotse_rt::Instant, usize)>,
+) -> bool {
+    let mut done = true;
+    for (&g, replica) in groups.iter_mut() {
+        let raft = replica.raft();
+        if raft.role() != Role::Leader {
+            continue;
+        }
+        let matched = raft.matched().unwrap_or_default();
+        let candidates = crate::membership::successors(raft.membership(), cfg.id, &matched);
+        if candidates.is_empty() {
+            continue;
+        }
+        done = false;
+        let attempt = match asked.get(&g) {
+            Some((t, _)) if now - *t < cfg.tick * LEAVE_RETRY_TICKS => continue,
+            Some((_, n)) => n + 1,
+            None => 0,
+        };
+        asked.insert(g, (now, attempt));
+        let _ = raft.transfer_leadership(candidates[attempt % candidates.len()]);
+    }
+    done
+}
+
 /// One pass of moving groups between nodes: each group this node leads
 /// takes a step towards the voters the metadata group wants for it, or
 /// reports them in place; the metadata group's leader plans.
@@ -471,6 +511,9 @@ struct Shared {
     /// On the metadata leader: the metadata index through which each node
     /// that answered has removed the files of deleted resources (ADR 0100).
     removed_through: Mutex<BTreeMap<NodeId, Option<u64>>>,
+    /// Set by [`NodeHandle::leave`]: how long the node may take to hand
+    /// the groups it leads to other voters before it stops (ADR 0114).
+    leaving: Mutex<Option<Duration>>,
     work: Signal,
     stop: Signal,
 }
@@ -531,6 +574,16 @@ impl NodeHandle {
     /// Asks the node to stop; its task finishes once everything is closed.
     pub fn stop(&self) {
         self.shared.stop.set();
+    }
+
+    /// Asks the node to stop after handing every group it leads to another
+    /// voter, as Kafka's controlled shutdown and RabbitMQ's maintenance mode
+    /// do (ADR 0114): clients then meet a planned move, not a failover. It
+    /// stops once it leads no group another voter could take, or after
+    /// `within`, whichever comes first.
+    pub fn leave(&self, within: Duration) {
+        *self.shared.leaving.lock().expect("leaving lock") = Some(within);
+        self.shared.work.set();
     }
 
     /// Whether the node stopped by itself because it was drained: no group
@@ -937,6 +990,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let (mut next_sizes, sizing) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let mut next_membership = started;
     let mut moves = Moves::default();
+    // While leaving (ADR 0114): when the node stops at the latest, and when
+    // it last asked each group's voters to take over.
+    let mut leave_until: Option<lotse_rt::Instant> = None;
+    let mut leave_asked: BTreeMap<GroupId, (lotse_rt::Instant, usize)> = BTreeMap::new();
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth, &configured_voters).await? {
             shared.status.lock().expect("status lock").retain(|g, _| groups.contains_key(g));
@@ -1075,6 +1132,11 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 if !core.contains(&g) && crate::membership::ahead_of_view(&known.state, g, &msg) {
                     continue;
                 }
+                // A leaving node takes no group over, also not one pinned
+                // to it (ADR 0114).
+                if leave_until.is_some() && matches!(msg, Message::TimeoutNow { .. }) {
+                    continue;
+                }
                 if let Some(group) = groups.get_mut(&g) {
                     group.step(from, msg);
                 }
@@ -1167,6 +1229,14 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             next_membership = rt.now() + cfg.tick * MEMBERSHIP_EVERY_TICKS;
             membership_pass(rt, cfg, groups, &known, &configured_voters, &mut moves, &marker_client, shared, jobs);
             report_certificates(rt, &known, auth, &marker_client, shared, jobs);
+        }
+        if let Some(within) = *shared.leaving.lock().expect("leaving lock") {
+            let now = rt.now();
+            let until = *leave_until.get_or_insert(now + within);
+            if leave_pass(cfg, groups, now, &mut leave_asked) || now >= until {
+                shared.stop.set();
+                break;
+            }
         }
         for (to, messages) in outbound {
             let Some((_, peer)) = links.peers.get(&to) else { continue };

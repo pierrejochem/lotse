@@ -168,4 +168,4 @@ lotse --version
 
 `<admin>` is `--cert <file> --key <file>` (a client certificate) or `--user <name>` with the password in `LOTSE_PASSWORD`.
 
-`lotse run` stops cleanly on Ctrl-C or SIGTERM. `lotse check` prints the node count, the TLS mode, the certificates on this machine that expire within 30 days, the retention defaults and the sign-in methods.
+`lotse run` stops cleanly on Ctrl-C or SIGTERM, after handing the groups its node leads to other voters (at most 30 s). `lotse check` prints the node count, the TLS mode, the certificates on this machine that expire within 30 days, the retention defaults and the sign-in methods.
