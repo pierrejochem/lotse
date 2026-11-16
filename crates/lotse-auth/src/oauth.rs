@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, Validation};
 
 /// The mechanism's name in `SaslHandshake`.
 pub const MECHANISM: &str = "OAUTHBEARER";
@@ -160,8 +160,10 @@ pub fn key_id(token: &str) -> Result<String, TokenError> {
 pub fn validate(token: &str, jwks: &Jwks, settings: &OidcSettings, now_secs: u64) -> Result<Verified, TokenError> {
     let header = jsonwebtoken::decode_header(token).map_err(|e| TokenError::Invalid(e.to_string()))?;
     // Only asymmetric signatures: a shared secret would let anyone holding
-    // it, the broker included, mint tokens.
-    if matches!(header.alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512) {
+    // it, the broker included, mint tokens. Named by family, not refused by
+    // name, since the library may add algorithms (`Algorithm` is
+    // non-exhaustive).
+    if !matches!(header.alg.family(), AlgorithmFamily::Rsa | AlgorithmFamily::Ec | AlgorithmFamily::Ed) {
         return Err(TokenError::Algorithm(format!("{:?}", header.alg)));
     }
     let kid = header.kid.ok_or_else(|| TokenError::Invalid("no kid in the token's header".into()))?;
