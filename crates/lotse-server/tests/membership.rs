@@ -304,8 +304,13 @@ async fn run(rt: SimRuntime) {
             w.crash(id, mid_write).await;
         }
     }
-    // Changes not made during the faults are made now.
+    // Changes not made during the faults are made now, on the healed
+    // cluster: no partitions, every node up. A placement waits for a move
+    // to settle, and a move to or off a node that is down does not.
     rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
     let deadline = rt.now() + Duration::from_secs(60);
     while step < 5 {
         assert!(rt.now() < deadline, "membership change {step} never went through on the healed cluster");

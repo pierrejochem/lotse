@@ -502,7 +502,8 @@ public sealed class AdminTests : IDisposable
         await _client!.ReassignPartitionAsync("s", 1, new ulong[] { 2, 4, 5 });
         await _client!.ReassignPartitionAsync("q", 0, Array.Empty<ulong>());
         List<Request.ReassignPartition> placed = _b.Requests<Request.ReassignPartition>();
-        Assert.Equal((StreamId, 1u, new ulong[] { 2, 4, 5 }), (placed[0].ResourceId, placed[0].Partition, placed[0].Voters.ToArray()));
+        Assert.Equal((StreamId, 1u), (placed[0].ResourceId, placed[0].Partition));
+        Assert.Equal(new ulong[] { 2, 4, 5 }, placed[0].Voters.ToArray());
         Assert.Equal((QueueId, 0u, 0), (placed[1].ResourceId, placed[1].Partition, placed[1].Voters.Count)); // released
 
         await _client!.RevokeSessionsAsync("ops", true);
