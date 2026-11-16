@@ -177,6 +177,9 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>The CA holder records the certificate it signed for a request (cluster admin, ADR 0092).</summary>
     public static readonly ApiKey RecordCertificate = new(57);
 
+    /// <summary>Places a partition's replicas on named nodes (cluster admin, ADR 0115).</summary>
+    public static readonly ApiKey ReassignPartition = new(58);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
@@ -199,7 +202,7 @@ public readonly record struct ApiKey(ushort Id)
         Range(DescribeRoleBindings), Range(WhoAmI), Range(AddNode), Range(RemoveNode),
         Range(DescribeNodes), Range(PurgeQueue), Range(Requeue), Range(MoveLeader), Range(RevokeSessions),
         Range(CreatePartitions), Range(RevokeCertificate), Range(DescribeCertificates), Range(RecordCertificates),
-        Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(Publish),
+        Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(ReassignPartition), Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);

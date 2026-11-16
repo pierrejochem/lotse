@@ -1640,7 +1640,8 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 ("retention.ms", "-1", lotse_proto::config_source::DEFAULT),
                 ("retention.bytes", "4096", lotse_proto::config_source::DYNAMIC),
                 ("cleanup.policy", "compact,delete", lotse_proto::config_source::DYNAMIC),
-                ("delete.retention.ms", "0", lotse_proto::config_source::DYNAMIC)
+                ("delete.retention.ms", "0", lotse_proto::config_source::DYNAMIC),
+                ("replication.factor", "1", lotse_proto::config_source::DEFAULT)
             ]
         );
     });

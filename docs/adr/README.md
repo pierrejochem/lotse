@@ -54,7 +54,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0047 | [The `lotse` binary: one cluster file, resources at runtime](0047-the-lotse-binary.md) | Accepted |
 | 0048 | [Adding and removing nodes](0048-adding-and-removing-nodes.md) | Accepted, in part superseded by 0050 |
 | 0049 | [Packaging: an image, a systemd unit, a Debian package and releases](0049-packaging.md) | Accepted |
-| 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted, refined by [0113](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) |
+| 0050 | [Rebalancing groups onto new nodes](0050-rebalancing-groups-onto-new-nodes.md) | Accepted, refined by [0113](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) and [0115](0115-replication-changes-at-runtime.md) |
 | 0051 | [A drained node stops](0051-a-drained-node-stops.md) | Accepted, in part superseded by [0105](0105-a-forgotten-node-stops-without-seeing-its-drain.md) |
 | 0052 | [Rebalancing weighs moves by size](0052-rebalancing-weighs-moves-by-size.md) | Accepted |
 | 0053 | [Snapshots travel in chunks](0053-snapshots-travel-in-chunks.md) | Accepted; in part superseded by 0099 and 0103 |
@@ -118,5 +118,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0112 | [A resuming consumer names what it holds](0112-a-resuming-consumer-names-what-it-holds.md) | Accepted |
 | 0113 | [A leader hands back once its preferred voter is steady](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) | Accepted |
 | 0114 | [A stopping node hands its groups over first](0114-a-stopping-node-hands-its-groups-over-first.md) | Accepted |
+| 0115 | [Replication changes at runtime](0115-replication-changes-at-runtime.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

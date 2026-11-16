@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use lotse_proto::{
     AddNodeRequest, DescribeNodesRequest, DescribeNodesResponse, ErrorCode, MoveLeaderRequest, NodeEntry,
-    RemoveNodeRequest, Response, SettleVotersRequest, node_state,
+    ReassignPartitionRequest, RemoveNodeRequest, Response, SettleVotersRequest, node_state,
 };
 use lotse_raft::NodeId;
 use lotse_rt::Runtime;
@@ -163,6 +163,57 @@ impl Clients {
             }
         }
         let change = Change::PinLeader { group, node };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `ReassignPartition` (ADR 0115): places a partition on the named
+    /// nodes, as the planner places a moved one, and marks it placed, so
+    /// rebalancing and the replication factor leave it there. No voters
+    /// release it.
+    pub(super) fn reassign_partition<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: ReassignPartitionRequest,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let refuse = |code, why: &str| admin_response(code, Some(why), None);
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let state = replica.metadata();
+        let group = match (state.streams.get(&req.resource_id), state.queues.get(&req.resource_id)) {
+            (Some(s), _) => s.partitions.get(req.partition as usize).map(|(g, _)| *g),
+            (None, Some(q)) => (req.partition == 0).then_some(q.group),
+            (None, None) => {
+                let why = "only partitions of streams and queues created at runtime can be placed";
+                return outbox.push(id, &refuse(ErrorCode::UNKNOWN_RESOURCE, why));
+            }
+        };
+        let Some(group) = group else {
+            return outbox.push(id, &refuse(ErrorCode::UNKNOWN_RESOURCE, "no such partition"));
+        };
+        let mut voters = req.voters.clone();
+        voters.sort_unstable();
+        voters.dedup();
+        if voters.len() != req.voters.len() {
+            return outbox.push(id, &refuse(ErrorCode::INVALID_REQUEST, "a node is named twice"));
+        }
+        if let Some(n) = voters
+            .iter()
+            .find(|n| !view.admin.nodes.contains(n) || state.draining.contains(n) || state.gone.contains(n))
+        {
+            let why = format!("node {n} is not an active node of the cluster");
+            return outbox.push(id, &refuse(ErrorCode::INVALID_REQUEST, &why));
+        }
+        let current = state.voters_of(group).unwrap_or_default();
+        if !voters.is_empty() && moving(state, group, current) {
+            let why = "the partition is moving; place it once its move has settled";
+            return outbox.push(id, &refuse(ErrorCode::INVALID_REQUEST, why));
+        }
+        let change = Change::Reassign { group, voters };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 

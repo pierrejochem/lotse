@@ -929,6 +929,31 @@ public abstract record Request
         }
     }
 
+    /// <summary>
+    /// Places a partition of a stream or queue created at runtime on the named nodes (cluster admin, ADR 0115), as
+    /// Kafka's partition reassignment does; rebalancing then leaves it there and only a drain moves it. No voters
+    /// release it. Answered with <see cref="Response.Admin"/>.
+    /// </summary>
+    /// <param name="ResourceId">The stream or queue.</param>
+    /// <param name="Partition">The partition (0 for a queue).</param>
+    /// <param name="Voters">The nodes to hold it, distinct; empty to release it.</param>
+    public sealed record ReassignPartition(ulong ResourceId, uint Partition, IReadOnlyList<ulong> Voters) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.ReassignPartition;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) =>
+            w.U64(ResourceId).U32(Partition).Array(Voters, (w1, v) => w1.U64(v)).NoTags();
+
+        internal static ReassignPartition Read(Reader r)
+        {
+            var x = new ReassignPartition(r.U64(), r.U32(), r.Array(8, r1 => r1.U64()));
+            r.Tags();
+            return x;
+        }
+    }
+
     /// <summary>Publishes messages through exchanges; the node routes (ADR 0079).</summary>
     /// <param name="TxnId">Must be <c>null</c>.</param>
     /// <param name="TimeoutMs">How long the node waits for each queue.</param>

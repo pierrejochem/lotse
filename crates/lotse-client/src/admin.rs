@@ -250,8 +250,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     }
 
     /// Changes settings of a resource created at runtime: `set` gives keys
-    /// new values, `reset` returns keys to their default. Only a queue's
-    /// `ack.timeout.ms` can change so far.
+    /// new values, `reset` returns keys to their default. `replication.factor`
+    /// (ADR 0115) changes on its own: every partition then moves to that
+    /// many replicas.
     pub async fn alter_configs(&self, name: &str, set: &[(&str, &str)], reset: &[&str]) -> Result<(), ClientError> {
         let resource_id = self.resource_id(name).await?;
         let req = Request::AlterConfigs(AlterConfigsRequest {
@@ -401,6 +402,21 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let resource_id = self.resource_id(name).await?;
         let req = lotse_proto::MoveLeaderRequest { resource_id, partition, node_id: node.unwrap_or(0) };
         self.admin_change(Request::MoveLeader(req)).await
+    }
+
+    /// Places `partition` of the stream or queue `name` on the nodes
+    /// `voters`, as Kafka's partition reassignment does, or releases it with
+    /// no nodes so the cluster manages it again (ADR 0115). The partition's
+    /// leader moves its replicas shortly after, through learners and joint
+    /// consensus; rebalancing then leaves it where it was placed, and only a
+    /// drain moves it. A placement is refused while the partition is
+    /// moving. Needs the cluster-admin role. To change how many replicas
+    /// every partition has, set `replication.factor` with
+    /// [`Client::alter_configs`].
+    pub async fn reassign_partition(&self, name: &str, partition: u32, voters: &[u64]) -> Result<(), ClientError> {
+        let resource_id = self.resource_id(name).await?;
+        let req = lotse_proto::ReassignPartitionRequest { resource_id, partition, voters: voters.to_vec() };
+        self.admin_change(Request::ReassignPartition(req)).await
     }
 
     /// Raises the partition count of the stream `name`, created at runtime,

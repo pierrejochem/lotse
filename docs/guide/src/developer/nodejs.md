@@ -126,7 +126,7 @@ await group.close();                          // commits the positions and leave
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `createPartitions` and `nodeMetrics`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call rejects with `ResourceExistsError` and the id.
+The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call rejects with `ResourceExistsError` and the id.
 
 ## Compressed batches
 

@@ -145,7 +145,7 @@ client.deleteIfEmpty("audit");
 - A create whose answer was lost is retried. If the first attempt did create the resource, the call fails with `ClientException.ResourceExists`, which carries the id to compare with what you expected. A delete is done once the resource is gone, whoever deleted it.
 - `setUserPassword` sends only a salted SCRAM credential, with a new salt each time; the password does not leave the client.
 - `purge` and `requeue` work through the queue in rounds until its leader says there is no more; messages produced meanwhile are left alone.
-- Also there: `describeConfigs`, `unbind`, `bindHeaders`, `delete`, `createPartitions`, `moveLeader`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `describeUsers`, `deleteUser`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes` and `nodeMetrics`, each as in `lotse-client`.
+- Also there: `describeConfigs`, `unbind`, `bindHeaders`, `delete`, `createPartitions`, `moveLeader`, `reassignPartition`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `describeUsers`, `deleteUser`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes` and `nodeMetrics`, each as in `lotse-client`.
 
 ### Kotlin
 
