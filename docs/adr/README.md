@@ -117,5 +117,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0111 | [Checkouts commit with new data](0111-checkouts-commit-with-new-data.md) | Accepted |
 | 0112 | [A resuming consumer names what it holds](0112-a-resuming-consumer-names-what-it-holds.md) | Accepted |
 | 0113 | [A leader hands back once its preferred voter is steady](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) | Accepted |
+| 0114 | [A stopping node hands its groups over first](0114-a-stopping-node-hands-its-groups-over-first.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
