@@ -37,4 +37,8 @@ pub const DEFAULT_GROUP_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Dur
 /// leader hands the group back to it, when the group saw no other election
 /// recently (ADR 0113).
 pub const DEFAULT_LEADER_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a follower may go without having applied what its leader said
+/// was committed and still serve reads (ADR 0116), like Kafka's
+/// `replica.lag.time.max.ms`.
+pub const DEFAULT_FOLLOWER_MAX_LAG: std::time::Duration = std::time::Duration::from_secs(10);
 pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, Retention, StateMachine, Sweep};

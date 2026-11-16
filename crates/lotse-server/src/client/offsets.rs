@@ -1,9 +1,10 @@
 //! `ListOffsets` (ADR 0059): where a partition starts, where a reader's view
 //! of it ends, and where a point in time falls in it.
 //!
-//! Only the leader answers, as for `Fetch`, with the same bounds: the log
-//! start, the high watermark and, for read_committed, the last stable
-//! offset. A time is found through the segments' newest timestamps, which
+//! The leader answers, as for `Fetch`, with the same bounds: the log start,
+//! the high watermark and, for read_committed, the last stable offset. A
+//! follower answers a request that allows it with its own, which may lag,
+//! unless it lags too far (ADR 0116). A time is found through the segments' newest timestamps, which
 //! the log keeps anyway, and a scan of batch headers from the first segment
 //! that may hold it; there is no time index.
 
@@ -47,9 +48,10 @@ impl Clients {
                     leader_hint: None,
                 };
                 let group = view.stream_group_of(res.resource_id, p.partition);
+                let follower_ok = req.allow_follower && group.is_some_and(|g| !view.lagging.contains(&g));
                 match group.and_then(|g| groups.get(&g)) {
                     None => out.error = view.absent(res.resource_id, group),
-                    Some(replica) if replica.raft_ref().role() != Role::Leader => {
+                    Some(replica) if replica.raft_ref().role() != Role::Leader && !follower_ok => {
                         out.error = ErrorCode::NOT_LEADER;
                         out.leader_hint = hint(replica.raft_ref());
                     }

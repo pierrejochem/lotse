@@ -803,18 +803,26 @@ export class LotseClient {
 
   private async listOffsetOnce(stream: string, partition: number, at: OffsetAt, signal?: AbortSignal): Promise<bigint> {
     const routed = await this.route(stream, partition, signal);
+    // Like a fetch, from the replica in this client's zone, which may lag the leader (ADR 0116).
+    const replica = this.replicaInZone(stream, partition, routed.route.leader);
+    const allowFollower = replica !== null;
+    const addr = replica ?? routed.address;
     const req: Request = {
       type: "ListOffsets",
       isolation: Isolation.COMMITTED,
       resources: [
         { resourceId: routed.route.resourceId, partitions: [{ partition, timestamp: at.timestamp }] },
       ],
+      ...(allowFollower ? { allowFollower } : {}),
     };
     let resp: Response;
     try {
-      resp = await this.call(routed.address, req);
+      resp = await this.call(addr, req);
     } catch (e) {
       if (e instanceof CallFailure) {
+        if (allowFollower) {
+          throw this.leaveReplica(stream, partition, `${formatAddress(addr)}: ${e.describe()}`);
+        }
         this.forget(stream, partition);
         throw e.toAttempt();
       }
@@ -826,6 +834,9 @@ export class LotseClient {
     const p = resp.resources[0]?.partitions[0];
     if (p === undefined) {
       throw Attempt.retry("empty list-offsets response");
+    }
+    if (allowFollower && p.error !== ErrorCode.NONE) {
+      throw this.leaveReplica(stream, partition, `${formatAddress(addr)}: ${describeError(p.error)}`);
     }
     if (p.error === ErrorCode.NONE) {
       return p.offset;

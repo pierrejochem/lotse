@@ -300,6 +300,15 @@ pub fn requests() -> Vec<Request> {
                     ListOffsetsPartition { partition: 2, timestamp: 1_700_000_000_000 },
                 ],
             }],
+            allow_follower: false,
+        }),
+        Request::ListOffsets(ListOffsetsRequest {
+            isolation: isolation::COMMITTED,
+            resources: vec![ListOffsetsResource {
+                resource_id: 7,
+                partitions: vec![ListOffsetsPartition { partition: 1, timestamp: list_offsets::LATEST }],
+            }],
+            allow_follower: true,
         }),
         // Ids in a tenant other than the default one carry it as a tag
         // (ADR 0062).

@@ -1112,3 +1112,31 @@ fn a_leader_cut_off_stops_claiming_a_quorum_before_it_steps_down() {
     }
     assert!(claimed_until <= 10, "claimed for {claimed_until} ticks without a quorum");
 }
+
+#[test]
+fn a_follower_knows_what_its_leader_committed_and_whether_it_hears_it() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.nodes.get_mut(&l).unwrap().propose(1, "a").unwrap();
+    c.ticks(3);
+    let (raft, leader) = (&c.nodes[&f].raft, &c.nodes[&l].raft);
+    assert!(raft.hears_leader());
+    assert!(!leader.hears_leader(), "a leader follows no one");
+    assert_eq!(raft.leader_commit(), leader.commit());
+    assert_eq!(raft.leader_commit(), raft.commit(), "caught up");
+    // Cut off: the follower stops hearing its leader within an election
+    // timeout and learns no new commit index.
+    c.cut.insert(f);
+    let before = c.nodes[&f].raft.leader_commit();
+    c.nodes.get_mut(&l).unwrap().propose(1, "b").unwrap();
+    c.ticks(30);
+    assert!(!c.nodes[&f].raft.hears_leader());
+    assert_eq!(c.nodes[&f].raft.leader_commit(), before);
+    assert!(c.nodes[&l].raft.commit() > before, "the others commit on");
+    c.cut.clear();
+    c.ticks(30);
+    let raft = &c.nodes[&f].raft;
+    assert!(raft.hears_leader(), "back in touch");
+    assert_eq!(raft.leader_commit(), c.nodes[&c.leader().unwrap()].raft.commit());
+}

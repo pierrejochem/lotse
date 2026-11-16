@@ -107,7 +107,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0101 | [A publish refused by a node behind is sent again](0101-a-publish-refused-by-a-node-behind-is-sent-again.md) | Accepted |
 | 0102 | [A leader probes after a conflict](0102-a-leader-probes-after-a-conflict.md) | Accepted |
 | 0103 | [Snapshot chunks travel in a window](0103-snapshot-chunks-travel-in-a-window.md) | Accepted |
-| 0104 | [Followers serve fetches in their zone](0104-followers-serve-fetches-in-their-zone.md) | Accepted |
+| 0104 | [Followers serve fetches in their zone](0104-followers-serve-fetches-in-their-zone.md) | Accepted, refined by [0116](0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md) |
 | 0105 | [A forgotten node stops without seeing its drain](0105-a-forgotten-node-stops-without-seeing-its-drain.md) | Accepted |
 | 0106 | [A requeue names its subscription](0106-a-requeue-names-its-subscription.md) | Accepted |
 | 0107 | [Sequences belong to a stream's incarnation](0107-sequences-belong-to-a-stream-s-incarnation.md) | Accepted |
@@ -119,5 +119,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0113 | [A leader hands back once its preferred voter is steady](0113-a-leader-hands-back-once-its-preferred-voter-is-steady.md) | Accepted |
 | 0114 | [A stopping node hands its groups over first](0114-a-stopping-node-hands-its-groups-over-first.md) | Accepted |
 | 0115 | [Replication changes at runtime](0115-replication-changes-at-runtime.md) | Accepted |
+| 0116 | [Followers answer ListOffsets and stop serving when they lag](0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

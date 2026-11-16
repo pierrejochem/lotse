@@ -193,7 +193,7 @@ None known. Report one as an issue.
 
 ### Not built yet
 
-- **Raft:** followers serving reads other than `Fetch` (metadata, offsets and `ListOffsets` still go to the leader), and sending a consumer back to the leader when its follower lags far behind (ADR 0104).
+- **Raft:** followers serve `Fetch` and `ListOffsets` in a client's zone and stop when they lag (ADR 0104, ADR 0116); committed offsets and admin reads still go to their leaders, and a reader sent to the leader returns to its zone only at its next metadata refresh.
 - **Certificates and sessions:** a user asking for a certificate in their own name (cluster admins ask, ADR 0092); anything that tells the CA holder a request is waiting; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** queue length limits cannot change after creation (replication can, ADR 0115); a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
 - **`DescribeMetrics`:** which subscription of a single active consumer queue is active, and counts per priority level.

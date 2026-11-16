@@ -129,7 +129,8 @@ public abstract record Request
     /// <summary>Looks up offsets by time or at either end of partitions.</summary>
     /// <param name="Isolation">See <see cref="Messages.Isolation"/>.</param>
     /// <param name="Resources">The partitions to look up.</param>
-    public sealed record ListOffsets(byte Isolation, IReadOnlyList<ListOffsetsResource> Resources) : Request
+    /// <param name="AllowFollower">A follower may answer from what it has committed and applied (ADR 0116).</param>
+    public sealed record ListOffsets(byte Isolation, IReadOnlyList<ListOffsetsResource> Resources, bool AllowFollower = false) : Request
     {
         /// <inheritdoc/>
         public override ApiKey ApiKey => ApiKey.ListOffsets;
@@ -149,7 +150,14 @@ public abstract record Request
                 });
                 w1.NoTags();
             });
-            w.NoTags();
+            if (AllowFollower)
+            {
+                w.Tags(new[] { new Tag(Fetch.TagAllowFollower, ByteString.CopyOf(new byte[] { 1 })) });
+            }
+            else
+            {
+                w.NoTags();
+            }
         }
 
         internal static ListOffsets Read(Reader r)
@@ -167,8 +175,17 @@ public abstract record Request
                 r1.Tags();
                 return new ListOffsetsResource(id, partitions);
             });
-            r.Tags();
-            return new ListOffsets(isolation, resources);
+            bool allowFollower = false;
+            foreach (Tag t in r.Tags())
+            {
+                if (t.Number == Fetch.TagAllowFollower)
+                {
+                    var vr = new Reader(t.Value.ToByteArray());
+                    allowFollower = vr.U8() != 0;
+                    vr.Finish();
+                }
+            }
+            return new ListOffsets(isolation, resources, allowFollower);
         }
     }
 

@@ -53,6 +53,7 @@ In `cluster.data_dir`, `tls.cert` and `tls.key`, the text `{id}` becomes the nod
 | `segment_bytes` | integer, bytes | 134217728 (128 MiB) | Log segment size. Retention deletes whole segments. Must be at least 4096. |
 | `group_session_timeout_ms` | integer, ms | 45000 | A consumer group member without a heartbeat for this long is removed. |
 | `group_heartbeat_ms` | integer, ms | 5000 | How often group members send heartbeats. |
+| `follower_max_lag_ms` | integer, ms | 10000 | How long a follower may go without having applied what its leader said was committed and still serve reads to clients in its zone; after that it sends them to the leader, like Kafka's `replica.lag.time.max.ms` ([ADR 0116](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md)). |
 
 ## `[[node]]`
 

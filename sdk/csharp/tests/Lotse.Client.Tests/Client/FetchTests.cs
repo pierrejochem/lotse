@@ -280,11 +280,40 @@ public sealed class FetchTests : IDisposable
                 return meta;
             }
             ErrorCode code = node.Id == 2 ? followerCode : ErrorCode.None;
+            if (request is Request.ListOffsets)
+            {
+                return new Response.ListOffsets(new[]
+                {
+                    new Messages.ListOffsetsResourceResponse(
+                        StreamId, new[] { new Messages.ListOffsetsPartitionResponse(0, code, (ulong)node.Id * 10, -1, null) }),
+                });
+            }
             ByteString records = code.IsOk ? Data(0, 0, false, "from " + node.Id) : ByteString.Empty;
             return Fx.Fetched(StreamId, 0, code, records, 1, 1, 0);
         };
         _a.On(handler);
         _b.On(handler);
+    }
+
+    [Fact]
+    public async Task AClientInAZoneListsOffsetsAtTheReplicaThereAndLeavesOneThatLags()
+    {
+        Zones(ErrorCode.None);
+        _client = new LotseClient(Fx.Config(_a).WithZone("b").Build());
+        Assert.Equal(20UL, await _client.ListOffsetAsync("s", 0, OffsetAt.Latest)); // the follower in zone b
+        Assert.Equal(0, _a.Count<Request.ListOffsets>());
+        Assert.True(_b.Requests<Request.ListOffsets>()[0].AllowFollower);
+        await _client.DisposeAsync();
+        // A follower that lags too far answers NOT_LEADER (ADR 0116): asked once, then left for the leader.
+        Zones(ErrorCode.NotLeader);
+        int before = _b.Count<Request.ListOffsets>();
+        _client = new LotseClient(Fx.Config(_a).WithZone("b").Build());
+        Assert.Equal(10UL, await _client.ListOffsetAsync("s", 0, OffsetAt.Latest));
+        Assert.Equal(10UL, await _client.ListOffsetAsync("s", 0, OffsetAt.Latest));
+        Assert.Equal(before + 1, _b.Count<Request.ListOffsets>());
+        Assert.All(_a.Requests<Request.ListOffsets>(), r => Assert.False(r.AllowFollower));
+        await _client.DisposeAsync();
+        _client = null;
     }
 
     [Fact]
