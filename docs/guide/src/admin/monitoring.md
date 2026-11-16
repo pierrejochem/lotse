@@ -53,4 +53,4 @@ The repository ships no alert rules. These follow from the fields above; the thr
 - A consumer group whose committed offsets fall behind `log_end`.
 - Certificates within 30 days of expiry: run `lotse check` on each node.
 
-Logs: set `LOTSE_LOG` for the filter (default `info`). A node logs "starting", "stopping", "stopped", "drained", and "TLS files changed: reloaded" with the number of revoked connections closed. It logs "TLS files do not load; keeping the material in use" once when new certificate files are broken.
+Logs: set `LOTSE_LOG` for the filter (default `info`). A node logs "starting", "stopping: handing the groups this node leads to other voters", "stopped", "drained", and "TLS files changed: reloaded" with the number of revoked connections closed. It logs "TLS files do not load; keeping the material in use" once when new certificate files are broken.

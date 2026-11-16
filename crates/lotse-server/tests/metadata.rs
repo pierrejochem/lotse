@@ -1172,6 +1172,100 @@ fn a_new_groups_first_leader_is_the_one_it_keeps() {
     });
 }
 
+/// A node asked to leave hands every group it leads to another voter
+/// before it stops (ADR 0114), as Kafka's controlled shutdown does: when its
+/// task ends, each of those groups already has a leader elsewhere, which a
+/// node that just stopped would leave to an election timeout.
+#[test]
+fn a_leaving_node_hands_its_groups_over_before_it_stops() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("leaving", 1, 3).await.unwrap();
+            let (mut leader, mut voters) = leader_of(&admin, "leaving").await;
+            while leader == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (leader, voters) = leader_of(&admin, "leaving").await;
+            }
+            let id = u64::from(leader);
+            let (node, handle) = w.running.get_mut(&id).unwrap().take().unwrap();
+            let led: Vec<_> = handle
+                .statuses()
+                .into_iter()
+                .filter(|(_, s)| s.role == lotse_raft::Role::Leader)
+                .map(|(g, _)| g)
+                .collect();
+            assert!(!led.is_empty());
+            let asked = rt.now();
+            handle.leave(Duration::from_secs(30));
+            node.join().await.unwrap();
+            assert!(
+                rt.now() - asked < Duration::from_secs(5),
+                "it stopped once it had handed over, not at the deadline"
+            );
+            // Status is noted once a round: allow a few ticks, well below an
+            // election timeout.
+            rt.sleep(Duration::from_millis(30)).await;
+            for g in led {
+                let elsewhere = w
+                    .running
+                    .iter()
+                    .filter_map(|(n, r)| r.as_ref().map(|(_, h)| (*n, h)))
+                    .find(|(_, h)| h.status(g).is_some_and(|s| s.role == lotse_raft::Role::Leader));
+                assert!(elsewhere.is_some(), "group {g} has no leader the moment node {id} stopped");
+            }
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}
+
+/// A leaving node passes over a voter that is down, and the last node of a
+/// cluster, whose groups have no quorum and so cannot elect anyone else,
+/// stops without waiting out its deadline (ADR 0114).
+#[test]
+fn a_leaving_node_passes_over_a_voter_that_is_down() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("passing", 1, 3).await.unwrap();
+            let (mut leader, mut voters) = leader_of(&admin, "passing").await;
+            while leader == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (leader, voters) = leader_of(&admin, "passing").await;
+            }
+            // The voter asked first among equals, the lowest id, is down.
+            let down = (1..=3u64).find(|n| *n != u64::from(leader)).unwrap();
+            let last = (1..=3u64).find(|n| *n != u64::from(leader) && *n != down).unwrap();
+            w.crash(down, false).await;
+            let (node, handle) = w.running.get_mut(&u64::from(leader)).unwrap().take().unwrap();
+            let asked = rt.now();
+            handle.leave(Duration::from_secs(30));
+            node.join().await.unwrap();
+            assert!(rt.now() - asked < Duration::from_secs(5), "node {leader} waited for node {down}, which is down");
+            let (node, handle) = w.running.get_mut(&last).unwrap().take().unwrap();
+            let asked = rt.now();
+            handle.leave(Duration::from_secs(30));
+            node.join().await.unwrap();
+            assert!(rt.now() - asked < Duration::from_secs(5), "the last node waited for voters that are gone");
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}
+
 /// After a failover the new leader hands the group back to its preferred
 /// node only once that node has held everything committed for the settle
 /// time (ADR 0113), not as soon as it has caught up: clients meet the

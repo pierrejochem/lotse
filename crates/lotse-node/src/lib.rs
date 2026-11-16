@@ -180,13 +180,25 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
             }
             return Ok(());
         }
-        () = shutdown => tracing::info!(node = id, "stopping"),
+        () = shutdown => tracing::info!(node = id, "stopping: handing the groups this node leads to other voters"),
     }
-    handle.stop();
-    stopped.await?;
+    // Like Kafka's controlled shutdown: the groups this node leads move
+    // before it stops, so clients meet a planned move, not a failover
+    // (ADR 0114). Bounded, within systemd's TimeoutStopSec of 60 s.
+    handle.leave(LEAVE_WITHIN);
+    tokio::select! {
+        res = &mut stopped => res?,
+        () = tokio::time::sleep(LEAVE_WITHIN + std::time::Duration::from_secs(5)) => {
+            handle.stop();
+            stopped.await?;
+        }
+    }
     tracing::info!(node = id, "stopped");
     Ok(())
 }
+
+/// How long a stopping node may take to hand over the groups it leads.
+const LEAVE_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Aborts a task when dropped.
 struct AbortOnDrop(tokio::task::AbortHandle);
