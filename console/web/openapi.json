@@ -17,7 +17,7 @@
         "operationId": "clusters",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -50,7 +50,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -60,7 +60,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -98,7 +98,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -108,7 +108,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -118,7 +118,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -156,7 +156,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -166,7 +166,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -176,7 +176,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -206,7 +206,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -216,7 +216,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -254,7 +254,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -264,7 +264,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -274,7 +274,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -304,7 +304,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -314,7 +314,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -354,7 +354,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -364,7 +364,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -374,7 +374,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -414,7 +414,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -424,7 +424,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -434,7 +434,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -444,7 +444,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -492,7 +492,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -502,7 +502,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -512,7 +512,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -542,7 +542,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -552,7 +552,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -582,7 +582,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -592,7 +592,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -622,7 +622,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -663,7 +663,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "Created.",
             "content": {
               "application/json": {
                 "schema": {
@@ -673,7 +673,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -683,7 +683,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -693,7 +693,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "A resource with this name exists.",
             "content": {
               "application/json": {
                 "schema": {
@@ -732,7 +732,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -742,7 +742,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -791,7 +791,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -801,7 +801,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -811,7 +811,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -821,7 +821,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -860,7 +860,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -870,7 +870,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -880,7 +880,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -920,7 +920,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -930,7 +930,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -940,7 +940,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -970,7 +970,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1012,7 +1012,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1022,7 +1022,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1103,7 +1103,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1113,7 +1113,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1123,7 +1123,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1153,7 +1153,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1183,7 +1183,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1193,7 +1193,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1223,7 +1223,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1233,7 +1233,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1271,7 +1271,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1281,7 +1281,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1291,7 +1291,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1340,7 +1340,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1350,7 +1350,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1360,7 +1360,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1370,7 +1370,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "No such cluster or resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1419,7 +1419,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1429,7 +1429,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "The request is not valid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1439,7 +1439,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "The signed-in user may not do this.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1458,7 +1458,7 @@
         "operationId": "me",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2168,11 +2168,11 @@
           "chip": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Chip",
                 "description": "Status chip, if the item has one."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2390,11 +2390,11 @@
           "disk_limits": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DiskLimits",
                 "description": "Disk thresholds, if the cluster has them."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2415,11 +2415,11 @@
           "upgrade": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Upgrade",
                 "description": "Running upgrade, if any."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -2494,11 +2494,11 @@
           "disk_limits": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DiskLimits",
                 "description": "Disk thresholds for the bars, if the cluster has them."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2908,11 +2908,11 @@
           "attention": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Chip",
                 "description": "Why the queue needs attention, if it does."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -3278,11 +3278,11 @@
           "assignment": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Assignment",
                 "description": "Assignment of the group the UI highlights."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -3359,11 +3359,11 @@
           "retention": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StreamRetention",
                 "description": "What the stream keeps; `None` when the cluster did not say."
+              },
+              {
+                "type": "null"
               }
             ]
           },
