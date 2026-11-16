@@ -221,6 +221,17 @@ pub(crate) fn hand_over_to(
     (matched.get(&p).copied().unwrap_or(0) >= last).then_some(p)
 }
 
+/// Whom a leaving leader `me` asks to take a group over (ADR 0114), in
+/// turn: the other voters, those that hold the most of the log (`matched`)
+/// first, the lower id among equals. Empty if `me` is the only voter. A
+/// voter that is down does not take over; the next attempt asks the next
+/// one. During a change of voters a transfer is refused and asked again.
+pub(crate) fn successors(current: &Membership, me: NodeId, matched: &BTreeMap<NodeId, u64>) -> Vec<NodeId> {
+    let mut others: Vec<NodeId> = current.voters.iter().copied().filter(|v| *v != me).collect();
+    others.sort_by_key(|v| (std::cmp::Reverse(matched.get(v).copied().unwrap_or(0)), *v));
+    others
+}
+
 /// How long a group's elections count towards its hand-back wait, in
 /// multiples of the node's settle time (ADR 0113).
 pub(crate) const ELECTION_WINDOW_SETTLES: u32 = 60;

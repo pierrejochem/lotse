@@ -554,3 +554,14 @@ fn a_group_that_keeps_electing_waits_longer_each_time() {
     s.see_term(21, Some(3), at(100 + 60 * 60 + 1), settle);
     assert_eq!(s.wait(settle), settle, "one recent election");
 }
+
+#[test]
+fn a_leaving_leader_asks_the_voters_that_hold_the_most_first() {
+    let three = m(&[1, 2, 3], &[]);
+    let matched: BTreeMap<NodeId, u64> = [(1, 50), (2, 40), (3, 45)].into_iter().collect();
+    assert_eq!(successors(&three, 1, &matched), vec![3, 2]);
+    let even: BTreeMap<NodeId, u64> = [(1, 50), (2, 45), (3, 45)].into_iter().collect();
+    assert_eq!(successors(&three, 1, &even), vec![2, 3], "the lower id among equals");
+    assert_eq!(successors(&three, 1, &BTreeMap::new()), vec![2, 3], "nothing known yet");
+    assert!(successors(&m(&[1], &[]), 1, &matched).is_empty(), "no other voter");
+}
