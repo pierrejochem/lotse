@@ -1140,3 +1140,25 @@ fn a_follower_knows_what_its_leader_committed_and_whether_it_hears_it() {
     assert!(raft.hears_leader(), "back in touch");
     assert_eq!(raft.leader_commit(), c.nodes[&c.leader().unwrap()].raft.commit());
 }
+
+#[test]
+fn a_leader_knows_which_members_answer_it() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.ticks(3);
+    let all: BTreeSet<NodeId> = c.nodes.keys().copied().collect();
+    assert_eq!(c.nodes[&l].raft.responsive(), Some(all.clone()));
+    assert_eq!(c.nodes[&f].raft.responsive(), None, "only a leader knows");
+    // Cut off: within an election timeout the leader stops counting it.
+    c.cut.insert(f);
+    c.ticks(5);
+    assert!(c.nodes[&l].raft.responsive().unwrap().contains(&f), "not yet an election timeout");
+    c.ticks(10);
+    let heard = c.nodes[&l].raft.responsive().unwrap();
+    assert!(!heard.contains(&f));
+    assert!(heard.contains(&l), "a leader counts itself");
+    c.cut.clear();
+    c.ticks(3);
+    assert_eq!(c.nodes[&c.leader().unwrap()].raft.responsive(), Some(all));
+}

@@ -25,7 +25,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0018 | [Leader transfer with TimeoutNow](0018-leader-transfer-with-timeoutnow.md) | Accepted |
 | 0019 | [Management console on a dedicated node with the user's identity](0019-management-console-on-a-dedicated-node-with-the-user-s-identity.md) | Accepted |
 | 0020 | [Console user groups, role mapping and audit](0020-console-user-groups-role-mapping-and-audit.md) | Accepted |
-| 0021 | [Metrics: admin API for the console, Prometheus for operations](0021-metrics-admin-api-for-the-console-prometheus-for-operations.md) | Accepted |
+| 0021 | [Metrics: admin API for the console, Prometheus for operations](0021-metrics-admin-api-for-the-console-prometheus-for-operations.md) | Accepted, carried out by 0117 |
 | 0022 | [Brand: Lotse and the Fairway mark](0022-brand-lotse-and-the-fairway-mark.md) | Accepted |
 | 0023 | [Persist the hard state after the log](0023-persist-the-hard-state-after-the-log.md) | Accepted |
 | 0024 | [Tool-independent project memory and agent](0024-tool-independent-project-memory-and-agent.md) | Accepted |
@@ -40,7 +40,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
 | 0034 | [The metadata group: resources created at runtime](0034-metadata-group.md) | Accepted |
 | 0035 | [Deleting resources and changing settings](0035-deleting-resources-and-changing-settings.md) | Accepted; in part superseded by 0100 |
-| 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted |
+| 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted, refined by 0117 |
 | 0037 | [TLS and node identity](0037-tls-and-node-identity.md) | Accepted |
 | 0038 | [Authentication](0038-authentication.md) | Accepted |
 | 0039 | [Tenants and roles](0039-tenants-and-roles.md) | Accepted |
@@ -120,5 +120,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0114 | [A stopping node hands its groups over first](0114-a-stopping-node-hands-its-groups-over-first.md) | Accepted |
 | 0115 | [Replication changes at runtime](0115-replication-changes-at-runtime.md) | Accepted |
 | 0116 | [Followers answer ListOffsets and stop serving when they lag](0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md) | Accepted |
+| 0117 | [Prometheus metrics and health endpoints on every node](0117-prometheus-metrics-and-health-endpoints-on-every-node.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

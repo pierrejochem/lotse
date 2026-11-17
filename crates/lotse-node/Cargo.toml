@@ -34,6 +34,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 
 [dev-dependencies]
 base64.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 
 [lints]

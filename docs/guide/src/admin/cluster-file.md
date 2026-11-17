@@ -67,8 +67,9 @@ One entry per node, at least one.
 | `peer_bind` | `host:port` | the `peer` address | Where the node listens for nodes, if not on `peer`, such as `0.0.0.0:7000`. |
 | `client_bind` | `host:port` | the `client` address | Where the node listens for clients, if not on `client`. |
 | `zone` | string | none | The node's zone (a data centre or availability zone). Clients that name the same zone fetch from its replicas (ADR 0104). A node added later takes it with `lotse node add --zone`. |
+| `metrics` | `host:port` | none | Where the node serves `/metrics`, `/healthz`, `/readyz` and `/safe-to-stop` over HTTP ([ADR 0117](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0117-prometheus-metrics-and-health-endpoints-on-every-node.md)). Plain HTTP on a loopback address, TLS with the node's certificate anywhere else. Left out, nothing listens. See [Monitoring](monitoring.md). |
 
-Every `peer` and `client` address must be unique in the file.
+Every `peer`, `client` and `metrics` address must be unique in the file.
 
 ## `[tls]`
 

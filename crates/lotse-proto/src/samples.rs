@@ -1187,8 +1187,10 @@ pub fn metrics() -> DescribeMetricsResponse {
             }],
             offsets: vec![CommittedOffset { resource_id: 7, partition: 0, offset: 42 }],
         }],
-        // Between nodes only: the SDKs need not know the tag (ADR 0100).
+        // Between nodes only: the SDKs need not know the tags (ADR 0100,
+        // ADR 0117).
         removed_through: None,
+        responsive: Vec::new(),
     }
 }
 

@@ -71,7 +71,7 @@ impl Shared {
         Arc::new(Shared { current: RwLock::new(tls), conns: Mutex::new(Vec::new()) })
     }
 
-    fn current(&self) -> TlsConfig {
+    pub(crate) fn current(&self) -> TlsConfig {
         self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 

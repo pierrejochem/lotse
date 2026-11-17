@@ -210,6 +210,16 @@ fn metrics_round_trip_in_full() {
     metrics_round_trip(samples::metrics());
     metrics_round_trip(DescribeMetricsResponse { removed_through: Some(1 << 40), ..samples::metrics() });
     metrics_round_trip(DescribeMetricsResponse { removed_through: Some(0), ..DescribeMetricsResponse::default() });
+    let responsive = vec![
+        GroupResponsive { group: 1, term: 3, nodes: vec![1, 2, 3] },
+        GroupResponsive { group: 1 << 33, term: 1 << 40, nodes: Vec::new() },
+    ];
+    metrics_round_trip(DescribeMetricsResponse { responsive: responsive.clone(), ..samples::metrics() });
+    metrics_round_trip(DescribeMetricsResponse {
+        removed_through: Some(7),
+        responsive,
+        ..DescribeMetricsResponse::default()
+    });
 }
 
 /// Each array of a metrics answer filled with its smallest elements, one
