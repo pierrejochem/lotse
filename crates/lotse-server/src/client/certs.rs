@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::admin::{AdminThen, admin_response};
 use super::{Clients, ClusterView, Outbox};
 use crate::auth::Principal;
-use crate::metadata::{CertKey, Change, REQUEST_TTL_MS, SeenCert};
+use crate::metadata::{CertKey, CertRequest, Change, REQUEST_TTL_MS, SeenCert};
 use crate::replica::StateMachine;
 
 type Groups<R, S> = std::collections::BTreeMap<crate::wire::GroupId, crate::replica::Replica<R, S>>;
@@ -40,6 +40,10 @@ const MAX_CERT: usize = 8192;
 /// Most requests the state holds at once: a request is cheap to make and
 /// stays for 7 days, or 30 once signed, so the number is bounded.
 const MAX_REQUESTS: usize = 256;
+
+/// Most of those a user asked for in their own name: the rest stays for
+/// cluster admins (ADR 0119).
+const MAX_OWN_REQUESTS: usize = 192;
 
 /// Longest principal name in a request, bytes; as `lotse certs --client`
 /// takes it, so the CA holder can sign it.
@@ -160,8 +164,9 @@ impl Clients {
 
 impl Clients {
     /// `RequestCertificate`: a cluster admin asks the CA holder for a client
-    /// certificate. The request is the SHA-256 of its signing request, so
-    /// the same one sent twice is one.
+    /// certificate, or a user asks for one in their own name (ADR 0119).
+    /// The request is the SHA-256 of its signing request, so the same one
+    /// sent twice is one.
     pub(super) fn request_certificate<R: Runtime, S: StateMachine>(
         &mut self,
         outbox: Arc<Outbox>,
@@ -172,7 +177,17 @@ impl Clients {
         groups: &mut Groups<R, S>,
     ) {
         let invalid = |why: &str| outbox.push(id, &admin_response(ErrorCode::INVALID_REQUEST, Some(why), None));
+        // Access let a user who is not a cluster admin through only for
+        // their own name.
+        let own = !view.access.cluster_admin(principal);
         if !principal_ok(&req.principal) {
+            if own {
+                return invalid(&format!(
+                    "the name {:?} cannot be a certificate's principal: a principal is letters, digits, `.`, `_`, \
+                     `-` and `@`, at most 128 bytes, not starting with `.`; ask a cluster admin",
+                    req.principal
+                ));
+            }
             return invalid(
                 "a principal is letters, digits, `.`, `_`, `-` and `@`, at most 128 bytes, not starting with `.`",
             );
@@ -189,15 +204,38 @@ impl Clients {
         if known.contains_key(&key) {
             return outbox.push(id, &admin_response(ErrorCode::NONE, None, None));
         }
-        if known.len() >= MAX_REQUESTS {
-            return invalid("256 requests are open or recently signed; wait for the CA holder or until they lapse");
-        }
-        let change = Change::RequestCertificate {
-            id: key,
-            principal: req.principal,
-            csr: req.csr.to_vec(),
-            requested_by: principal.to_string(),
-            at_ms: view.unix_ms,
+        let change = if own {
+            // The user's pending request goes when this one applies, so it
+            // does not count against the caps.
+            let replaced = |r: &CertRequest| r.own() && r.principal == req.principal && r.pending(view.unix_ms);
+            let held = known.values().filter(|r| !replaced(r)).count();
+            if held >= MAX_REQUESTS {
+                return invalid("256 requests are open or recently signed; wait for the CA holder or until they lapse");
+            }
+            let own_held = known.values().filter(|r| r.own() && !replaced(r)).count();
+            if own_held >= MAX_OWN_REQUESTS {
+                return invalid(
+                    "192 requests in their askers' own names are open or recently signed; wait for the CA holder \
+                     or until they lapse, or ask a cluster admin",
+                );
+            }
+            Change::RequestOwnCertificate {
+                id: key,
+                principal: req.principal,
+                csr: req.csr.to_vec(),
+                at_ms: view.unix_ms,
+            }
+        } else {
+            if known.len() >= MAX_REQUESTS {
+                return invalid("256 requests are open or recently signed; wait for the CA holder or until they lapse");
+            }
+            Change::RequestCertificate {
+                id: key,
+                principal: req.principal,
+                csr: req.csr.to_vec(),
+                requested_by: principal.to_string(),
+                at_ms: view.unix_ms,
+            }
         };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
@@ -262,11 +300,13 @@ impl Clients {
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 
-    /// `DescribeCertificateRequests`: the requests, newest first.
+    /// `DescribeCertificateRequests`: the requests, newest first; to a user
+    /// who is not a cluster admin, only those they asked for (ADR 0119).
     pub(super) fn describe_certificate_requests<R: Runtime, S: StateMachine>(
         &mut self,
         outbox: Arc<Outbox>,
         id: u32,
+        principal: &Principal,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
@@ -278,10 +318,14 @@ impl Clients {
             }
         };
         let now = view.unix_ms;
+        let all = view.access.cluster_admin(principal);
+        let asker = principal.to_string();
+        let mine = |r: &CertRequest| all || r.requested_by == asker;
         let mut requests: Vec<CertificateRequestEntry> = replica
             .metadata()
             .cert_requests
             .iter()
+            .filter(|(_, r)| mine(r))
             .map(|(key, r)| {
                 let expires_at_ms = r.at_ms.saturating_add(REQUEST_TTL_MS);
                 let state = match &r.signed {

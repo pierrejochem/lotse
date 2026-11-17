@@ -797,17 +797,17 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
                 admin.request_certificate("bulk", i.to_le_bytes().to_vec()).await.unwrap();
             }
             invalid(admin.request_certificate("bulk", vec![0xff; 8]).await);
+            // A user in their own name finds no place either (ADR 0119).
+            let alice = cert_client(&rt, "alice");
+            invalid(alice.request_certificate("alice", test_csr(7, "alice")).await);
 
-            // Only a cluster admin asks, lists or records.
-            let alice = Client::new(
-                rt.node("svc").with_identity(Some(PeerIdentity::Principal("alice".into()))),
-                ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect()),
-            );
+            // Only a cluster admin asks for others, sees every request or
+            // records; a user sees what they asked for (ADR 0119).
             let unauthorized = |r: Result<(), ClientError>| {
                 assert!(matches!(r, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{r:?}")
             };
-            unauthorized(alice.request_certificate("alice", vec![1, 2, 3]).await);
-            unauthorized(alice.describe_certificate_requests().await.map(|_| ()));
+            unauthorized(alice.request_certificate("mallory", vec![1, 2, 3]).await);
+            assert!(alice.describe_certificate_requests().await.unwrap().requests.is_empty());
             let cert = test_cert(1, 2, "alice", 0x42);
             let (_, parsed) =
                 <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(&cert).unwrap();
@@ -868,6 +868,107 @@ fn a_certificate_request_waits_for_the_ca_holder_and_is_answered_once() {
             let entry = inventory.certificates.iter().find(|c| c.serial[..] == [0x42]).expect("in the inventory");
             assert_eq!((entry.principal.as_str(), entry.first_seen_ms), ("alice", 0));
             assert_eq!(entry.issuer[..], issuer_of(&cert)[..], "the issuer by name and key identifier");
+            stop(nodes).await;
+        });
+    });
+}
+
+/// A client that signs in with a client certificate naming `name`.
+fn cert_client(rt: &SimRuntime, name: &str) -> Client<SimRuntime> {
+    Client::new(
+        rt.node(&format!("svc-{name}")).with_identity(Some(PeerIdentity::Principal(name.into()))),
+        ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect()),
+    )
+}
+
+/// ADR 0119: any user asks for a certificate in their own name, has one
+/// pending request at a time, sees only what they asked for, and users'
+/// own requests leave room for cluster admins.
+#[test]
+fn a_user_asks_for_a_certificate_in_their_own_name() {
+    use lotse_proto::certificate_request_state as state;
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let alice = cert_client(&rt, "alice");
+            let code = |r: Result<(), ClientError>| match r {
+                Ok(()) => ErrorCode::NONE,
+                Err(ClientError::Broker { code, .. }) => code,
+                Err(e) => panic!("{e:?}"),
+            };
+            let ids = |listed: lotse_proto::DescribeCertificateRequestsResponse| {
+                let mut v: Vec<(String, String, Vec<u8>)> =
+                    listed.requests.into_iter().map(|r| (r.principal, r.requested_by, r.csr.to_vec())).collect();
+                v.sort();
+                v
+            };
+
+            // Alice asks for herself; for someone else she may not.
+            let first = test_csr(2, "alice");
+            alice.request_certificate("alice", first.clone()).await.unwrap();
+            assert_eq!(code(alice.request_certificate("bob", test_csr(3, "bob")).await), ErrorCode::UNAUTHORIZED);
+            // An admin asks in her name too: she does not see that one.
+            let by_admin = test_csr(4, "alice");
+            admin.request_certificate("alice", by_admin.clone()).await.unwrap();
+            let mine = alice.describe_certificate_requests().await.unwrap();
+            assert_eq!(mine.requests.len(), 1);
+            assert_eq!(mine.requests[0].state, state::PENDING);
+            assert_eq!(ids(mine), vec![("alice".into(), "alice".into(), first.clone())]);
+
+            // Asking again, say after losing the key, replaces her pending
+            // request; the admin's stays.
+            let second = test_csr(5, "alice");
+            alice.request_certificate("alice", second.clone()).await.unwrap();
+            assert_eq!(
+                ids(alice.describe_certificate_requests().await.unwrap()),
+                vec![("alice".into(), "alice".into(), second.clone())]
+            );
+            assert_eq!(
+                ids(admin.describe_certificate_requests().await.unwrap()),
+                vec![
+                    ("alice".into(), "admin".into(), by_admin.clone()),
+                    ("alice".into(), "alice".into(), second.clone()),
+                ]
+            );
+
+            // A name the CA holder could not sign is refused with a reason.
+            let idp = issuer("k1");
+            let odd = client(&rt, "c2", bearer(token(&rt, &idp, "oidc|bob", 3600)));
+            assert_eq!(code(odd.request_certificate("oidc|bob", vec![1; 8]).await), ErrorCode::INVALID_REQUEST);
+
+            // Users' own requests stop at 192 of the 256 places: Alice holds
+            // one, 191 others fill the rest.
+            for i in 0..191u32 {
+                let user = cert_client(&rt, &format!("u{i}"));
+                user.request_certificate(&format!("u{i}"), i.to_le_bytes().to_vec()).await.unwrap();
+            }
+            let late = cert_client(&rt, "late");
+            assert_eq!(code(late.request_certificate("late", vec![7; 8]).await), ErrorCode::INVALID_REQUEST);
+            // Alice may still replace hers: it gives its place to the new one.
+            let third = test_csr(6, "alice");
+            alice.request_certificate("alice", third.clone()).await.unwrap();
+            let all = admin.describe_certificate_requests().await.unwrap();
+            assert_eq!(all.requests.iter().filter(|r| r.requested_by == r.principal).count(), 192);
+            assert!(all.requests.iter().any(|r| r.csr[..] == third[..]));
+            assert!(!all.requests.iter().any(|r| r.csr[..] == second[..]));
+            // Admins keep room for the rest.
+            admin.request_certificate("svc", vec![9; 8]).await.unwrap();
+
+            // Every node tells the operator how many wait for the CA holder:
+            // the 192 users' and the admin's two, once each node applied them.
+            for node in &nodes {
+                let h = node.handle();
+                let since = rt.now();
+                loop {
+                    let obs = h.observe(lotse_server::ops::Scraper::Local).await.unwrap();
+                    if obs.certificate_requests_pending == Some(194) {
+                        break;
+                    }
+                    assert!(rt.now() - since < Duration::from_secs(10), "{:?}", obs.certificate_requests_pending);
+                    rt.sleep(Duration::from_millis(100)).await;
+                }
+            }
             stop(nodes).await;
         });
     });

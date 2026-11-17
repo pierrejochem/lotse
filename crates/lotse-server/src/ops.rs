@@ -107,6 +107,10 @@ pub struct Observation {
     pub resources: BTreeMap<u64, ResourceName>,
     /// Every group it hosts.
     pub groups: BTreeMap<GroupId, GroupHealth>,
+    /// Client certificate requests waiting for the CA holder, as this
+    /// node's replica of the metadata group has applied them (ADR 0119);
+    /// `None` on a node without one.
+    pub certificate_requests_pending: Option<u64>,
     /// Whether the scraper that asked may read the metrics: they name every
     /// tenant's resources (ADR 0021).
     pub may_scrape: bool,
@@ -184,6 +188,15 @@ pub fn render(obs: &Observation) -> String {
     out.sample("lotse_node_ready", &node, u64::from(obs.not_ready().is_empty()));
     out.family("lotse_node_connections", "gauge", "Open client connections.", "");
     out.sample("lotse_node_connections", &node, u64::from(m.connections));
+    out.family(
+        "lotse_certificate_requests_pending",
+        "gauge",
+        "Client certificate requests waiting for the CA holder, as this node has applied them.",
+        "",
+    );
+    if let Some(n) = obs.certificate_requests_pending {
+        out.sample("lotse_certificate_requests_pending", &node, n);
+    }
     for (name, help, v) in [
         ("lotse_client_received_bytes", "Bytes received from clients.", m.client_in_bytes),
         ("lotse_client_sent_bytes", "Bytes sent to clients.", m.client_out_bytes),

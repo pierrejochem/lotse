@@ -191,7 +191,7 @@
     "/api/v1/clusters/{cluster}/certificate-requests": {
       "get": {
         "tags": [],
-        "summary": "The requests for client certificates, newest first, with the certificate\nof each that was signed. The broker lets only cluster admins list them.",
+        "summary": "The requests for client certificates, newest first, with the certificate\nof each that was signed: every request for a cluster admin, the caller's\nown for everyone else.",
         "operationId": "certificate_requests",
         "parameters": [
           {
@@ -229,7 +229,7 @@
       },
       "post": {
         "tags": [],
-        "summary": "Asks the CA holder for a client certificate. The body carries a signing\nrequest made in the browser: the private key never reaches the console,\nand the CA holder signs with `lotse certs --sign`.",
+        "summary": "Asks the CA holder for a client certificate: a cluster admin in any name,\neveryone else in their own, where a new request replaces their pending\none. The body carries a signing request made in the browser: the private\nkey never reaches the console, and the CA holder signs with\n`lotse certs --sign`.",
         "operationId": "request_certificate",
         "parameters": [
           {
@@ -1696,21 +1696,43 @@
         "description": "The certificate requests screen.",
         "required": [
           "requests",
-          "now_ms"
+          "now_ms",
+          "all",
+          "pending",
+          "principal",
+          "bound_by_name"
         ],
         "properties": {
+          "all": {
+            "type": "boolean",
+            "description": "Whether `requests` lists every request: the caller is a cluster\nadmin and may ask in any name."
+          },
+          "bound_by_name": {
+            "type": "boolean",
+            "description": "Whether a role is bound to that name itself. A certificate signs in\nwithout the identity provider's groups, so roles bound only to a\ngroup do not come with it."
+          },
           "now_ms": {
             "type": "integer",
             "format": "int64",
             "description": "The cluster's clock when the list was made, ms since the Unix epoch.",
             "minimum": 0
           },
+          "pending": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Requests in the list that wait for the CA holder.",
+            "minimum": 0
+          },
+          "principal": {
+            "type": "string",
+            "description": "The name a certificate for the caller carries; empty if the caller\nhas none (not signed in as a user)."
+          },
           "requests": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CertificateRequestRow"
             },
-            "description": "Newest first."
+            "description": "Newest first: every request for a cluster admin, the caller's own\nfor everyone else (ADR 0119)."
           }
         }
       },

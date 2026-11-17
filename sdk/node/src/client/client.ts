@@ -1952,15 +1952,18 @@ export class LotseClient {
 
   /**
    * Asks for a certificate with a PKCS#10 signing request in DER form, made by the requester: its private key never
-   * reaches the cluster (ADR 0092). The request's id is the SHA-256 of `csr`, so asking twice is one request. Needs the
-   * cluster-admin role.
+   * reaches the cluster (ADR 0092). The request's id is the SHA-256 of `csr`, so asking twice is one request. A cluster
+   * admin asks in any name; anyone else only in their own, and a new request replaces their pending one (ADR 0119).
    */
   async requestCertificate(principal: string, csr: Uint8Array, options: CallOptions = {}): Promise<void> {
     this.checkOpen();
     return this.adminChange({ type: "RequestCertificate", principal, csr }, options.signal);
   }
 
-  /** The certificate requests, newest first, with `nowMs`, the answering node's clock (ADR 0092). Cluster admin. */
+  /**
+   * The certificate requests, newest first, with `nowMs`, the answering node's clock (ADR 0092): all of them for a
+   * cluster admin, the caller's own for anyone else (ADR 0119).
+   */
   async describeCertificateRequests(
     options: CallOptions = {},
   ): Promise<{ readonly requests: readonly CertificateRequestEntry[]; readonly nowMs: bigint }> {

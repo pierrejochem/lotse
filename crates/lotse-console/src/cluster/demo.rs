@@ -1184,7 +1184,16 @@ impl Cluster for DemoCluster {
             });
         }
         requests.sort_by_key(|r| std::cmp::Reverse(r.requested_at_ms));
-        Ok(CertificateRequestsView { requests, now_ms: now })
+        // Everyone is a cluster admin of the demo cluster.
+        let pending = requests.iter().filter(|r| r.state == "pending").count() as u32;
+        Ok(CertificateRequestsView {
+            requests,
+            now_ms: now,
+            all: true,
+            pending,
+            principal: who.principal.clone(),
+            bound_by_name: true,
+        })
     }
 
     async fn request_certificate(&self, _who: &Identity, principal: &str, csr: Vec<u8>) -> ApiResult<()> {
