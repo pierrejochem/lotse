@@ -152,10 +152,15 @@ public sealed interface Request {
      * @param isolation see {@link Isolation}: what latest means and where a time lookup stops
      * @param resources what to look up
      */
-    record ListOffsets(int isolation, List<ListOffsetsResource> resources) implements Request {
+    record ListOffsets(int isolation, List<ListOffsetsResource> resources, boolean allowFollower) implements Request {
         /** Creates the request. */
         public ListOffsets {
             resources = List.copyOf(resources);
+        }
+
+        /** A request only the leader answers. */
+        public ListOffsets(int isolation, List<ListOffsetsResource> resources) {
+            this(isolation, resources, false);
         }
 
         @Override
@@ -175,7 +180,11 @@ public sealed interface Request {
                 });
                 w1.noTags();
             });
-            w.noTags();
+            if (allowFollower) {
+                w.tags(List.of(new Tag(Fetch.TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1}))));
+            } else {
+                w.noTags();
+            }
         }
 
         static ListOffsets read(Reader r) {
@@ -190,8 +199,15 @@ public sealed interface Request {
                 r1.tags();
                 return new ListOffsetsResource(id, partitions);
             });
-            r.tags();
-            return new ListOffsets(isolation, resources);
+            boolean allowFollower = false;
+            for (Tag t : r.tags()) {
+                if (t.tag() == Fetch.TAG_ALLOW_FOLLOWER) {
+                    Reader vr = new Reader(t.value().toByteArray());
+                    allowFollower = vr.u8() != 0;
+                    vr.finish();
+                }
+            }
+            return new ListOffsets(isolation, resources, allowFollower);
         }
     }
 
@@ -241,7 +257,7 @@ public sealed interface Request {
                 w1.noTags();
             });
             if (allowFollower) {
-                w.tags(List.of(new Tag(TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1}))));
+                w.tags(List.of(new Tag(Fetch.TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1}))));
             } else {
                 w.noTags();
             }
@@ -264,7 +280,7 @@ public sealed interface Request {
             });
             boolean allowFollower = false;
             for (Tag t : r.tags()) {
-                if (t.tag() == TAG_ALLOW_FOLLOWER) {
+                if (t.tag() == Fetch.TAG_ALLOW_FOLLOWER) {
                     Reader vr = new Reader(t.value().toByteArray());
                     allowFollower = vr.u8() != 0;
                     vr.finish();

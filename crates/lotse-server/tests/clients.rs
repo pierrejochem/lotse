@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use lotse_client::{Client, ClientConfig, ClientError};
+use lotse_client::{Client, ClientConfig, ClientError, OffsetAt};
 use lotse_log::LogConfig;
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
@@ -140,19 +140,23 @@ impl Producers {
 impl World {
     async fn new(rt: SimRuntime, producers: Producers) -> World {
         let n = if rt.chance(1, 2) { 3 } else { 5 };
+        // In half the runs nodes sit in two zones, and consumers in a zone
+        // fetch from a follower there (ADR 0104).
+        let zones: BTreeMap<NodeId, String> = if rt.chance(1, 2) {
+            (1..=n).map(|id| (id, if id % 2 == 0 { "a" } else { "b" }.to_string())).collect()
+        } else {
+            BTreeMap::new()
+        };
+        World::build(rt, producers, n, zones).await
+    }
+
+    async fn build(rt: SimRuntime, producers: Producers, n: NodeId, zones: BTreeMap<NodeId, String>) -> World {
         let ids: Vec<NodeId> = (1..=n).collect();
         let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
         let client_addrs: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:9000"))).collect();
         let pre_vote = rt.chance(1, 2);
         let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
         let streams = vec![StreamConfig { name: STREAM.into(), resource_id: 7, partitions: vec![1, 2] }];
-        // In half the runs nodes sit in two zones, and consumers in a zone
-        // fetch from a follower there (ADR 0104).
-        let zones: BTreeMap<NodeId, String> = if rt.chance(1, 2) {
-            ids.iter().map(|id| (*id, if id % 2 == 0 { "a" } else { "b" }.to_string())).collect()
-        } else {
-            BTreeMap::new()
-        };
         let cfgs = ids
             .iter()
             .map(|&id| {
@@ -180,6 +184,7 @@ impl World {
                         max_producers: producers.max,
                         producer_expiration: producers.expiration,
                         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
+                        follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
@@ -530,4 +535,71 @@ async fn wait_for_a_place(rt: SimRuntime) {
 #[test]
 fn a_new_producer_waits_for_an_idle_one_to_be_forgotten() {
     check_few_seeds(3, |seed| Sim::new(seed).run(wait_for_a_place));
+}
+
+/// A follower cut off from its leader stops serving reads once it no longer
+/// hears it (ADR 0116): a reader in its zone then asks the leader, and finds
+/// what was written after the cut, through `ListOffsets` and `Fetch` alike.
+async fn leave_a_cut_off_follower(rt: SimRuntime) {
+    let zones: BTreeMap<NodeId, String> = (1..=3).map(|id| (id, format!("z{id}"))).collect();
+    let mut w = World::build(rt.clone(), Producers::DEFAULT, 3, zones).await;
+    let writer = Client::new(rt.node("writer"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+    let first = writer.produce(STREAM, 1, batch("before", 1)).await.expect("written");
+    let (leader, voters) = loop {
+        let m = writer.metadata(&[STREAM]).await.expect("metadata");
+        let p = &m.resources[0].partitions[1];
+        if p.leader != 0 && p.voters.len() == 3 {
+            break (p.leader, p.voters.clone());
+        }
+        rt.sleep(TICK * 10).await;
+    };
+    let follower = voters.into_iter().find(|v| *v != leader).expect("a follower");
+    // Two readers in the follower's zone, so that each kind of read finds
+    // its own way to the leader.
+    let in_zone = |name: &str| {
+        Client::new(
+            rt.node(name),
+            ClientConfig { zone: Some(format!("z{follower}")), retry_for: Duration::from_secs(10), ..client_config() },
+        )
+    };
+    let (lister, fetcher) = (in_zone("lister"), in_zone("fetcher"));
+    // The follower serves while it keeps up.
+    let deadline = rt.now() + Duration::from_secs(5);
+    while lister.list_offset(STREAM, 1, OffsetAt::Latest).await.expect("an end") <= first {
+        assert!(rt.now() < deadline, "the follower never caught up");
+        rt.sleep(TICK * 5).await;
+    }
+    let f = fetcher.fetch(STREAM, 1, first, TICK * 20).await.expect("a fetch");
+    assert_eq!(committed(&f).first().map(|(o, _)| *o), Some(first), "the follower serves what it has");
+    for other in (1..=3u64).filter(|n| *n != u64::from(follower)) {
+        rt.net().block(&format!("n{follower}"), &format!("n{other}"));
+    }
+    let after = writer.produce(STREAM, 1, batch("after", 1)).await.expect("written");
+    let cut = rt.now();
+    let fetched = loop {
+        let f = fetcher.fetch(STREAM, 1, after, TICK * 20).await.expect("a fetch");
+        if !f.records.is_empty() {
+            break f;
+        }
+        assert!(rt.now() - cut < Duration::from_secs(3), "the reader still fetches from a follower that is cut off");
+    };
+    assert_eq!(committed(&fetched).first().map(|(o, _)| *o), Some(after));
+    loop {
+        let end = lister.list_offset(STREAM, 1, OffsetAt::Latest).await.expect("an end");
+        if end > after {
+            break;
+        }
+        assert!(rt.now() - cut < Duration::from_secs(3), "the reader still asks a follower that is cut off: end {end}");
+        rt.sleep(TICK * 5).await;
+    }
+    rt.net().heal();
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn a_reader_leaves_a_follower_that_is_cut_off() {
+    check_few_seeds(3, |seed| Sim::new(seed).run(leave_a_cut_off_follower));
 }

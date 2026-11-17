@@ -23,6 +23,7 @@ fn config(peers: &[NodeId], id: NodeId, join: bool) -> NodeConfig {
         max_producers: crate::DEFAULT_MAX_PRODUCERS,
         producer_expiration: crate::DEFAULT_PRODUCER_EXPIRATION,
         leader_settle: crate::DEFAULT_LEADER_SETTLE,
+        follower_max_lag: crate::DEFAULT_FOLLOWER_MAX_LAG,
         auth: AuthConfig::none(),
         retention: RetentionConfig::keep(),
         join,
@@ -129,4 +130,15 @@ fn a_node_not_listed_yet_is_heard_only_for_the_metadata_group() {
     assert_eq!(groups(heard(5, false, true, Some(1), frame())), Some(vec![1]), "a learned one, for the metadata group");
     assert_eq!(groups(heard(5, false, false, Some(1), frame())), None, "anyone else, not at all");
     assert_eq!(groups(heard(6, true, false, Some(1), frame())), None, "nor a node speaking for another");
+}
+
+#[test]
+fn a_follower_serves_reads_only_while_it_hears_its_leader_and_keeps_up() {
+    let at = |ms: u64| lotse_rt::Instant::from_nanos(ms * 1_000_000);
+    let lag = Duration::from_secs(10);
+    assert!(follower_current(true, Some(at(1_000)), at(1_000), lag));
+    assert!(follower_current(true, Some(at(1_000)), at(11_000), lag), "behind for exactly the limit");
+    assert!(!follower_current(true, Some(at(1_000)), at(11_001), lag), "behind for longer");
+    assert!(!follower_current(true, None, at(5), lag), "never caught up");
+    assert!(!follower_current(false, Some(at(1_000)), at(1_000), lag), "does not hear its leader");
 }
