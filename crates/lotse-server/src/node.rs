@@ -458,6 +458,33 @@ type Incoming = (NodeId, Vec<(GroupId, Message)>);
 
 type Reply = Arc<Mutex<(Option<Result<(u64, u64), String>>, Option<std::task::Waker>)>>;
 
+/// Where the main loop leaves an answer for a handle, and the handle's waker.
+type Slot<T> = Arc<Mutex<(Option<T>, Option<std::task::Waker>)>>;
+
+/// Leaves `value` in `slot` and wakes whoever waits for it.
+fn fill<T>(slot: &Slot<T>, value: T) {
+    let mut s = slot.lock().expect("slot lock");
+    s.0 = Some(value);
+    if let Some(w) = s.1.take() {
+        w.wake();
+    }
+}
+
+/// Waits for `slot` to be filled, or for `stop`.
+async fn taken<T>(slot: Slot<T>, stop: &Signal) -> Option<T> {
+    let answer = std::future::poll_fn(|cx| {
+        let mut s = slot.lock().expect("slot lock");
+        match s.0.take() {
+            Some(v) => std::task::Poll::Ready(v),
+            None => {
+                s.1 = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        }
+    });
+    race(answer, &[stop]).await
+}
+
 enum Command {
     Propose {
         group: GroupId,
@@ -492,6 +519,15 @@ enum Command {
         term: u64,
         offsets: Vec<u64>,
         ok: bool,
+    },
+    /// The operator's endpoint asks what the node sees of itself (ADR 0117).
+    Observe {
+        scraper: crate::ops::Scraper,
+        reply: Slot<crate::ops::Observation>,
+    },
+    /// The operator's endpoint asks whether the node may stop (ADR 0117).
+    SafeToStop {
+        reply: Slot<Result<Vec<crate::ops::Critical>, String>>,
     },
 }
 
@@ -568,6 +604,31 @@ impl NodeHandle {
             }
         });
         race(answer, &[&stop]).await.unwrap_or_else(|| Err("node stopped".into()))
+    }
+
+    /// What the node sees of itself, for the operator's endpoint (ADR
+    /// 0117): its metrics, unfiltered, and where each of its groups stands,
+    /// with whether `scraper` may read the metrics. `None` once the node
+    /// stopped. An answer at all says the main loop runs (`/healthz`).
+    pub async fn observe(&self, scraper: crate::ops::Scraper) -> Option<crate::ops::Observation> {
+        let reply: Slot<crate::ops::Observation> = Arc::new(Mutex::new((None, None)));
+        self.shared
+            .commands
+            .lock()
+            .expect("commands lock")
+            .push_back(Command::Observe { scraper, reply: reply.clone() });
+        self.shared.work.set();
+        taken(reply, &self.shared.stop.clone()).await
+    }
+
+    /// The groups that would be left without a quorum if this node stopped
+    /// now, from what every node answers about the groups it leads (ADR
+    /// 0117); empty when it may stop. An error when the node stopped.
+    pub async fn safe_to_stop(&self) -> Result<Vec<crate::ops::Critical>, String> {
+        let reply: Slot<Result<Vec<crate::ops::Critical>, String>> = Arc::new(Mutex::new((None, None)));
+        self.shared.commands.lock().expect("commands lock").push_back(Command::SafeToStop { reply: reply.clone() });
+        self.shared.work.set();
+        taken(reply, &self.shared.stop.clone()).await.unwrap_or_else(|| Err("node stopped".into()))
     }
 
     /// The last known status of `group`.
@@ -1146,6 +1207,17 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.published(key, results);
                     continue;
                 }
+                Command::Observe { scraper, reply } => {
+                    let mut obs = clients.observe(&view, groups);
+                    obs.may_scrape = may_scrape(&scraper, auth, &known.access);
+                    fill(&reply, obs);
+                    continue;
+                }
+                Command::SafeToStop { reply } => {
+                    let mine = groups.iter().map(|(g, r)| (*g, r.raft_ref().membership().clone())).collect();
+                    jobs.spawn(rt, judge_stopping(cfg.id, mine, marker_client.clone(), reply, shared.stop.clone()));
+                    continue;
+                }
             };
             let res = match groups.get_mut(&group) {
                 Some(g) => g.propose(batch).map(|p| (p.first, p.last)).map_err(|e: ProposeError| e.to_string()),
@@ -1361,6 +1433,51 @@ fn ask_for_nodes<R: Runtime, S: StateMachine>(
         }
         asking.store(false, std::sync::atomic::Ordering::Relaxed);
     });
+}
+
+/// Whether `scraper` may read the node's metrics, which name every
+/// tenant's resources (ADR 0117): on loopback anyone on the machine; over
+/// TLS the principal a client certificate names, as a session would take
+/// it, if it sees the whole cluster (cluster-admin or cluster-viewer, ADR
+/// 0043) and a cluster admin has not revoked the certificate (ADR 0090).
+/// Without authentication required, whoever asks.
+fn may_scrape<R: Runtime>(scraper: &crate::ops::Scraper, auth: &Auth<R>, access: &Access) -> bool {
+    let crate::ops::Scraper::Tls { identity, cert } = scraper else { return true };
+    if cert.as_ref().is_some_and(|c| auth.cert_revoked(c)) {
+        return false;
+    }
+    let principal = match identity {
+        Some(PeerIdentity::Node(_)) => return false,
+        Some(PeerIdentity::Principal(name)) if auth.cfg.mtls => {
+            crate::auth::Principal::User { name: name.clone(), groups: Vec::new() }
+        }
+        _ if !auth.cfg.required => crate::auth::Principal::Anonymous,
+        _ => return false,
+    };
+    access.sees_cluster(&principal)
+}
+
+/// Asks every node for its metrics and judges, from what the leaders of
+/// this node's groups heard lately, whether stopping it leaves one without
+/// a quorum (ADR 0117). A node that does not answer leaves its groups
+/// without a leader's word, which counts as critical: a rolling restart
+/// waits rather than guesses.
+async fn judge_stopping<R: Runtime>(
+    me: NodeId,
+    mine: BTreeMap<GroupId, lotse_raft::Membership>,
+    client: Arc<lotse_client::Client<R>>,
+    reply: Slot<Result<Vec<crate::ops::Critical>, String>>,
+    stop: Signal,
+) {
+    let answer = match race(client.node_metrics(), &[&stop]).await {
+        Some(Ok(nodes)) => {
+            let reports: Vec<_> = nodes.into_iter().filter_map(|(_, m)| m.ok()).collect();
+            Ok(crate::ops::quorum_critical(me, &mine, &reports))
+        }
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("node stopped".into()),
+    };
+    fill(&reply, answer);
 }
 
 /// How often the metadata group's leader asks the nodes for their groups'

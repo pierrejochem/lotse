@@ -1,6 +1,6 @@
 # 21. Metrics: admin API for the console, Prometheus for operations
 
-- Status: Accepted
+- Status: Accepted (carried out by [ADR 0117](0117-prometheus-metrics-and-health-endpoints-on-every-node.md))
 - Date: 2026-10-27
 
 ## Context

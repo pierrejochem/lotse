@@ -234,6 +234,14 @@ fn every_request_needs_its_role() {
                 .flat_map(|(_, m)| m.as_ref().unwrap().partitions.iter().map(|p| p.resource_id))
                 .collect();
             assert!(!parts.is_empty() && !parts.contains(&7), "the viewer sees shop's partitions only: {parts:?}");
+            // Who answers each group's leader is for the nodes and who sees
+            // the whole cluster (ADR 0117).
+            let told = |all: &[(u32, Result<lotse_proto::DescribeMetricsResponse, ClientError>)]| {
+                all.iter().any(|(_, m)| m.as_ref().is_ok_and(|m| !m.responsive.is_empty()))
+            };
+            assert!(!told(&metrics), "a tenant's viewer learns nothing of the cluster's groups");
+            assert!(!told(&nobody.node_metrics().await.unwrap()));
+            assert!(told(&root.node_metrics().await.unwrap()), "a cluster admin is told");
 
             // Every request on a resource needs its role, also those the client
             // only sends in the middle of something (a viewer, logged in by its
