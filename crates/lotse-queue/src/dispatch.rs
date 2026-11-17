@@ -746,6 +746,19 @@ impl Dispatcher {
         self.subs.get(&id).map_or(0, |s| s.credit_msgs)
     }
 
+    /// Every message with a consumer as this dispatcher knows it: in
+    /// flight, held by a transaction, or waiting for the consumer an earlier
+    /// leader handed it to. Whether it has adopted the log's checkouts yet
+    /// is [`Dispatcher::has_adopted`].
+    pub fn busy(&self) -> impl Iterator<Item = u64> + '_ {
+        self.in_flight.keys().chain(self.held.keys()).chain(self.waiting.keys()).copied()
+    }
+
+    /// Whether the log's checkouts are adopted (ADR 0109).
+    pub fn has_adopted(&self) -> bool {
+        self.adopted.is_some()
+    }
+
     /// Messages delivered and not settled or released, over all
     /// subscriptions.
     pub fn in_flight_count(&self) -> u64 {

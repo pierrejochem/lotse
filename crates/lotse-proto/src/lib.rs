@@ -346,10 +346,15 @@ impl ErrorCode {
     /// admits: retry once an idle one is forgotten (ADR 0110). Nothing was
     /// written.
     pub const PRODUCER_LIMIT: ErrorCode = ErrorCode(33);
+    /// The queue holds as many messages, or bytes, as its length limit
+    /// admits and its overflow is `reject-publish` (ADR 0118). Nothing was
+    /// written; the caller decides whether to try again once consumers have
+    /// made room.
+    pub const QUEUE_FULL: ErrorCode = ErrorCode(34);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 34] = [
+        const NAMES: [&str; 35] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -384,6 +389,7 @@ impl ErrorCode {
             "MESSAGE_NOT_HELD",
             "UNROUTABLE",
             "PRODUCER_LIMIT",
+            "QUEUE_FULL",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }

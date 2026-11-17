@@ -1075,3 +1075,31 @@ fn a_snapshot_that_starts_over_replaces_the_chunks_of_another() {
         assert_eq!(decode_snapshot(installed).unwrap(), (meta, data), "exactly the leader's snapshot");
     });
 }
+
+#[test]
+fn a_full_queue_refuses_only_a_batch_that_is_new_here() {
+    Sim::new(7).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let mut r = Replica::open(rt.clone(), "g", cfg, Recorder::default(), LogConfig::default()).await.unwrap();
+        elect(&mut r).await;
+        let full = |_: &lotse_record::Batch| Err("full".to_string());
+        // Taken while there was room, in flight or committed: a retry is
+        // answered as the original, never refused (ADR 0118).
+        let a = r.propose(from_producer(7, 0, "a")).unwrap();
+        let again = r.propose_admitted(from_producer(7, 0, "a"), full).unwrap();
+        assert!(again.duplicate && again.last == a.last, "in flight: the original");
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        let again = r.propose_admitted(from_producer(7, 0, "a"), full).unwrap();
+        assert!(again.duplicate && again.last == a.last, "committed: the original");
+        // A new batch is asked about, and refused.
+        assert!(matches!(r.propose_admitted(from_producer(7, 1, "b"), full), Err(ProposeError::QueueFull(_))));
+        // Refused for its sequence before it is asked: nothing changes.
+        assert!(matches!(
+            r.propose_admitted(from_producer(7, 5, "c"), full),
+            Err(ProposeError::OutOfOrderSequence { expected: 1 })
+        ));
+        // With room, the refused batch's sequence is free.
+        assert!(!r.propose(from_producer(7, 1, "b")).unwrap().duplicate);
+    });
+}

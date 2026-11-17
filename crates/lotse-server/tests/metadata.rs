@@ -750,8 +750,9 @@ async fn run(rt: SimRuntime) {
         }
         // The ack timeout, then the limits (ADR 0055), single active consumer
         // (ADR 0076), priority levels (ADR 0078), the resume window (ADR
-        // 0109) and the replication factor (ADR 0115), which this run never
-        // sets: the queue's voter count, by default.
+        // 0109), the length limit (ADR 0118) and the replication factor (ADR
+        // 0115), which this run never sets: the queue's voter count, by
+        // default.
         let [c, limits @ .., replication] = &configs[..] else { panic!("{name} has settings {configs:?}") };
         assert_eq!(replication.key, "replication.factor", "{name}");
         assert_eq!(replication.source, lotse_proto::config_source::DEFAULT, "{name}");
@@ -766,7 +767,10 @@ async fn run(rt: SimRuntime) {
                 ("dead.letter.queue", "", off),
                 ("single.active.consumer", "false", off),
                 ("priority.levels", "1", off),
-                ("resume.window.ms", "30000", off)
+                ("resume.window.ms", "30000", off),
+                ("max.length", "0", off),
+                ("max.length.bytes", "0", off),
+                ("overflow", "reject-publish", off)
             ],
             "{name}: no limits were set"
         );

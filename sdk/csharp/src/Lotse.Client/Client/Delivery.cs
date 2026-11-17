@@ -9,7 +9,7 @@ namespace Lotse.Client;
 /// Where a dead-lettered message came from, read from the <c>x-lotse-dead-letter-*</c> headers the broker adds when it
 /// moves a message to a dead-letter queue. They describe the latest move.
 /// </summary>
-/// <param name="Reason">Why: <c>max-deliveries</c> or <c>expired</c>.</param>
+/// <param name="Reason">Why: <c>max-deliveries</c>, <c>expired</c>, <c>requeued</c> or <c>max-length</c> (ADR 0118).</param>
 /// <param name="Queue">The name of the queue the message came from.</param>
 /// <param name="QueueId">That queue's resource id.</param>
 /// <param name="Offset">The message's offset there.</param>

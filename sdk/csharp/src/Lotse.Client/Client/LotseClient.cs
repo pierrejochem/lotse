@@ -420,11 +420,13 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 {
                     case Attempt.Kind.Fail:
                         // A failed login or a refusal now says nothing of an earlier attempt whose answer was lost:
-                        // that one may have been carried out. (An answer about the request itself, such as
-                        // RESOURCE_EXISTS, is the caller's to read.)
+                        // that one may have been carried out. So does a full queue (ADR 0118): an earlier attempt
+                        // may commit at a leader that has it in its log. (An answer about the request itself, such
+                        // as RESOURCE_EXISTS, is the caller's to read.)
                         ClientException e = a.Error!;
                         bool refusal = e is ClientAuthenticationException
-                            || (e is BrokerErrorException b && b.Code.Equals(ErrorCode.Unauthorized));
+                            || (e is BrokerErrorException b
+                                && (b.Code.Equals(ErrorCode.Unauthorized) || b.Code.Equals(ErrorCode.QueueFull)));
                         if (maybeDone && refusal)
                         {
                             throw new OutcomeUnknownException("an earlier attempt may have been carried out; then " + e.Message);

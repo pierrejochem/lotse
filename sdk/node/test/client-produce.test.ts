@@ -276,6 +276,32 @@ describe("produce against a scripted broker", () => {
     assert.equal(node.count("InitProducer"), 1, "the producer id stayed");
   });
 
+  test("a full queue refuses at once and the sequence stays free", async () => {
+    // ADR 0118: nothing was written, and the caller decides whether to try again.
+    serve((n) => (n === 2 ? fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUEUE_FULL) : ok()));
+    const lotse = client(true);
+    await lotse.produce("s", 0, messages(1));
+    await assert.rejects(lotse.produce("s", 0, messages(1)), (e: unknown) => {
+      assert.ok(e instanceof BrokerResponseError);
+      assert.equal(e.code, ErrorCode.QUEUE_FULL);
+      return true;
+    });
+    await lotse.produce("s", 0, messages(1));
+    const sent = node.requests("Produce");
+    assert.equal(sent.length, 3, "not asked again");
+    assert.equal(batchOf(sent[2] as never).baseSequence, 1, "the sequence of a batch that was not written is free");
+  });
+
+  test("a full queue after a lost attempt is reported as unknown", async () => {
+    // The lost attempt may still commit at a leader that has it in its log.
+    serve((n) => (n === 1 ? DROP : fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUEUE_FULL)));
+    await assert.rejects(client(true).produce("s", 0, messages(1)), (e: unknown) => {
+      assert.ok(e instanceof UnknownOutcomeError);
+      assert.match(e.message, /may have been carried out/);
+      return true;
+    });
+  });
+
   test("produce to the same partition is serialised and to others is not", async () => {
     let release!: () => void;
     const released = new Promise<void>((r) => {

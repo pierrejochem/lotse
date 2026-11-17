@@ -109,6 +109,9 @@ public readonly record struct ErrorCode(ushort Code)
     /// <summary>A new producer, and the partition holds as many as it admits: retry once an idle one is forgotten (ADR 0110).</summary>
     public static readonly ErrorCode ProducerLimit = new(33);
 
+    /// <summary>The queue holds as many messages, or bytes, as its length limit admits and refuses more (ADR 0118); nothing was written.</summary>
+    public static readonly ErrorCode QueueFull = new(34);
+
     private static readonly string[] Names =
     {
         "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -119,6 +122,7 @@ public readonly record struct ErrorCode(ushort Code)
         "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
         "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
         "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE", "PRODUCER_LIMIT",
+        "QUEUE_FULL",
     };
 
     /// <summary>Whether this is <see cref="None"/>.</summary>

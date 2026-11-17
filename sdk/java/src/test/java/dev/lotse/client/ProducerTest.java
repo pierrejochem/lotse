@@ -147,6 +147,34 @@ class ProducerTest {
         assertEquals(1, node.count(Request.InitProducer.class), "the producer id stayed");
     }
 
+    @Test
+    void aFullQueueRefusesAtOnceAndTheSequenceStaysFree() {
+        // ADR 0118: nothing was written, and the caller decides whether to try again.
+        serve(n -> n == 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.QUEUE_FULL, 0, null) : ok());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(1));
+        ClientException.Broker e = assertThrows(ClientException.Broker.class, () -> lotse.produce("s", 0, messages(1)));
+        assertEquals(ErrorCode.QUEUE_FULL, e.code());
+        lotse.produce("s", 0, messages(1));
+        List<Request.Produce> sent = node.requests(Request.Produce.class);
+        assertEquals(3, sent.size(), "not asked again");
+        assertEquals(1, Fx.batchOf(sent.get(2)).baseSequence(), "the sequence of a batch that was not written is free");
+    }
+
+    @Test
+    void aFullQueueAfterALostAttemptIsReportedAsUnknown() {
+        // The lost attempt may still commit at a leader that has it in its log.
+        serve(n -> {
+            if (n == 1) {
+                throw new FakeNode.Drop();
+            }
+            return Fx.produced(STREAM_ID, 0, ErrorCode.QUEUE_FULL, 0, null);
+        });
+        LotseClient lotse = client(true);
+        ClientException.Unknown e = assertThrows(ClientException.Unknown.class, () -> lotse.produce("s", 0, messages(1)));
+        assertTrue(e.getMessage().contains("may have been carried out"), e.getMessage());
+    }
+
     /**
      * Stream {@code s} has the resource id in {@code current}. A produce to another id is refused with NOT_LEADER
      * (nothing written), as a node that applied the delete would; with {@code swallowThen} set, the next produce's
