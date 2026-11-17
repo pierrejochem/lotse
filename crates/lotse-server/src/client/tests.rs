@@ -665,6 +665,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            length: Default::default(),
             resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
@@ -759,6 +760,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            length: Default::default(),
             resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
@@ -874,6 +876,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            length: Default::default(),
             resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let addrs = BTreeMap::new();
@@ -1336,6 +1339,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                         dead_letter: None,
                         single_active: false,
                         priority_levels: 0,
+                        length: Default::default(),
                         resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
                     }
                 })
@@ -1520,6 +1524,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            length: Default::default(),
             resume_window: QueueConfig::DEFAULT_RESUME_WINDOW,
         }];
         let exchanges = [Exchange {
@@ -2912,5 +2917,122 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
         }
         let late = pushed(&outbox);
         assert!(late.contains(&x) && late.contains(&(x + 1)), "delivered once applied: {late:?}");
+    });
+}
+
+/// Two produces handled in one round, before the log is read again: the
+/// second counts the first, so together they do not pass the limit (ADR
+/// 0118). Likewise a produce after a dead letter.
+#[test]
+fn writes_taken_in_one_round_count_against_the_length_limit() {
+    Sim::new(4).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        let replica = groups.get_mut(&G).unwrap();
+        for _ in 0..40 {
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let length = lotse_queue::LengthLimit { max_messages: 2, ..Default::default() };
+        let queues = [QueueConfig { length, ..QueueConfig::new("jobs", 7, G) }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+        // Three produces in one round: two fit.
+        for v in ["a", "b", "c"] {
+            let req = ClientRequest {
+                outbox: outbox.clone(),
+                header: header(ApiKey::PRODUCE),
+                request: produce_request(v),
+                principal: Principal::Anonymous,
+            };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+        }
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view, &mut groups).await.unwrap();
+        }
+        let errors: Vec<ErrorCode> = drain(&outbox, ApiKey::PRODUCE)
+            .0
+            .iter()
+            .map(|r| match r {
+                Response::Produce(p) => p.resources[0].partitions[0].error,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        // The refusal is answered at once, the others once committed.
+        assert_eq!(errors, [ErrorCode::QUEUE_FULL, ErrorCode::NONE, ErrorCode::NONE]);
+
+        // Acked, one fits again; a produce and a dead letter in one round
+        // count each other too.
+        let ack = ClientRequest {
+            outbox: outbox.clone(),
+            header: header(ApiKey::ACK),
+            request: Request::Ack(lotse_proto::AckRequest::plain(7, vec![(1, 2)])),
+            principal: Principal::Anonymous,
+        };
+        clients.handle(ack, &view, &mut groups).await.unwrap();
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view, &mut groups).await.unwrap();
+        }
+        outbox.queue.lock().unwrap().clear();
+        let Request::Produce(x) = produce_request("x") else { unreachable!() };
+        let record = Batch::parse(&x.resources[0].partitions[0].batch).unwrap().0.records().unwrap().remove(0);
+        let info = lotse_record::DeadLetterInfo {
+            queue: "other",
+            queue_id: 8,
+            offset: 3,
+            floor: 0,
+            reason: lotse_record::dead_letter::Reason::MaxLength,
+            deliveries: 0,
+        };
+        let letter = lotse_record::dead_letter_item(&record, info).unwrap();
+        // A dead letter, then a produce, in one round: the dead letter
+        // takes the last place.
+        let requests = [
+            (
+                ApiKey::DEAD_LETTER,
+                Request::DeadLetter(lotse_proto::DeadLetterRequest { queue_id: 7, batches: vec![letter] }),
+            ),
+            (ApiKey::PRODUCE, produce_request("d")),
+        ];
+        let letters = Arc::new(Outbox::default());
+        for (key, request) in requests {
+            let outbox = if key == ApiKey::DEAD_LETTER { letters.clone() } else { outbox.clone() };
+            let req = ClientRequest { outbox, header: header(key), request, principal: Principal::Anonymous };
+            clients.handle(req, &view, &mut groups).await.unwrap();
+        }
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view, &mut groups).await.unwrap();
+        }
+        let (r, _) = drain(&letters, ApiKey::DEAD_LETTER);
+        assert!(matches!(&r[..], [Response::Outcome(o)] if o.error == ErrorCode::NONE), "{r:?}");
+        let (r, _) = drain(&outbox, ApiKey::PRODUCE);
+        assert!(
+            matches!(&r[..], [Response::Produce(p)] if p.resources[0].partitions[0].error == ErrorCode::QUEUE_FULL),
+            "the dead letter took the last place: {r:?}"
+        );
     });
 }

@@ -68,6 +68,7 @@ mod coord;
 mod empty;
 mod groups;
 mod ids;
+mod length;
 mod nodes;
 mod offsets;
 mod publish;
@@ -385,6 +386,9 @@ pub(crate) struct Clients {
     early_nacks: Vec<(Arc<Outbox>, u32, lotse_proto::NackRequest)>,
     /// What queue leaders retire and forward, per group (ADR 0055).
     retiring: BTreeMap<GroupId, retire::Retiring>,
+    /// What waits in each queue with a length limit this node leads (ADR
+    /// 0118).
+    lengths: BTreeMap<GroupId, length::Counting>,
     /// Dead letters for the node to forward through the protocol.
     forward_jobs: Vec<retire::ForwardJob>,
     /// Transactions this node asks the coordinator about (ADR 0057).
@@ -575,7 +579,12 @@ impl Clients {
                             }
                             _ => {
                                 let bytes = p.batch.len() as u64;
-                                waiting.extend(propose_one(replica, g, batch, bytes, &mut out, (ri, pi)));
+                                let qc = view.queues.iter().find(|q| q.group == g);
+                                let gate = qc.and_then(|qc| self.gate(qc, replica));
+                                let at = (ri, pi);
+                                let (w, end) = propose_one(replica, g, batch, bytes, &mut out, at, gate.as_ref());
+                                waiting.extend(w);
+                                self.took_batch(g, end, &p.batch);
                             }
                         }
                     }
@@ -844,7 +853,9 @@ fn settle<R: Runtime, S: StateMachine>(
 }
 
 /// Proposes one partition's batch and fills in its answer: a [`Waiting`]
-/// for a batch whose commit decides, `None` for one answered now.
+/// for a batch whose commit decides, `None` for one answered now. A queue
+/// with a length limit passes its [`length::Gate`] (ADR 0118); the second
+/// value is where a batch new here ends, for the queue's count.
 fn propose_one<R: Runtime, S: StateMachine>(
     replica: &mut Replica<R, S>,
     g: GroupId,
@@ -852,15 +863,22 @@ fn propose_one<R: Runtime, S: StateMachine>(
     bytes: u64,
     out: &mut ProducePartitionResponse,
     (ri, pi): (usize, usize),
-) -> Option<Waiting> {
-    let records = Batch::parse(&batch).map_or(0, |(b, _)| b.record_count() as u64);
-    match replica.propose(batch) {
-        Ok(Proposed { first, last, term, .. }) => {
+    gate: Option<&length::Gate>,
+) -> (Option<Waiting>, Option<u64>) {
+    let parsed = Batch::parse(&batch).ok().map(|(b, _)| b);
+    let records = parsed.as_ref().map_or(0, |b| b.record_count() as u64);
+    let admit = |b: &Batch| gate.map_or(Ok(()), |gate| gate.check(length::amount_of(b)));
+    match replica.propose_admitted(batch, admit) {
+        Ok(Proposed { first, last, term, duplicate }) => {
             out.base_offset = first - 1;
             // A duplicate of an applied batch is written; anything else (new,
             // or the original still in flight) is answered once its entry's
             // commit decides.
-            return term.map(|term| Waiting { resource: ri, partition: pi, group: g, last, term, bytes, records });
+            let waiting =
+                term.map(|term| Waiting { resource: ri, partition: pi, group: g, last, term, bytes, records });
+            // Index = offset + 1: the last entry's index is where the batch
+            // ends.
+            return (waiting, (!duplicate).then_some(last));
         }
         Err(ProposeError::NotLeader(_)) => {
             out.error = ErrorCode::NOT_LEADER;
@@ -882,12 +900,16 @@ fn propose_one<R: Runtime, S: StateMachine>(
             out.error = ErrorCode::PRODUCER_LIMIT;
             out.error_msg = Some(e.to_string());
         }
+        Err(ProposeError::QueueFull(why)) => {
+            out.error = ErrorCode::QUEUE_FULL;
+            out.error_msg = Some(why);
+        }
         Err(e) => {
             out.error = ErrorCode::CORRUPT_BATCH;
             out.error_msg = Some(e.to_string());
         }
     }
-    None
+    (None, None)
 }
 
 /// Answers an `InitProducer` once its allocation entry is committed here.

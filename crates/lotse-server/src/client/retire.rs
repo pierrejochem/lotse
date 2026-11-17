@@ -1,6 +1,8 @@
 //! A queue's limits at work (ADR 0055): messages that were delivered as
-//! often as the queue allows (`max.deliveries`) or waited longer than its
-//! `message.ttl.ms` leave the queue, into its dead-letter queue if it has one.
+//! often as the queue allows (`max.deliveries`), waited longer than its
+//! `message.ttl.ms`, or are the oldest of a queue over its length limit with
+//! `overflow = drop-head` (ADR 0118) leave the queue, into its dead-letter
+//! queue if it has one.
 //!
 //! Only the leader decides, and every decision is a batch in the queue's own
 //! log, so replicas never consult a clock or a count of their own:
@@ -172,6 +174,12 @@ impl Clients {
         if self.retiring.get(&g).is_some_and(|r| r.term != term) {
             self.retiring.remove(&g);
         }
+        // A queue over its length limit with `drop-head` loses its oldest
+        // waiting messages (ADR 0118).
+        let heads = {
+            let skip = self.retiring.get(&g).map(|r| r.claiming.clone()).unwrap_or_default();
+            self.heads(qc, replica, deliverable(replica), &skip, MAX_CLAIM)
+        };
         let st = self.retiring.entry(g).or_insert_with(|| Retiring::new(term));
         let dispatcher = self.queues.get(&g).filter(|s| s.term == term).map(|s| &s.dispatcher);
         let q = replica.queue().expect("a queue group");
@@ -184,6 +192,11 @@ impl Clients {
         let mut claims: BTreeMap<u64, (Reason, u16)> = BTreeMap::new();
         for (o, n) in lotse_queue::exhausted(q, dispatcher, limits, &st.claiming, MAX_CLAIM) {
             claims.insert(o, (Reason::MaxDeliveries, n));
+        }
+        for o in heads {
+            if !st.claiming.contains(&o) {
+                claims.entry(o).or_insert((Reason::MaxLength, q.delivery_count(o)));
+            }
         }
         if limits.message_ttl_ms > 0
             && (view.unix_ms as i64 >= st.scan_at_ms || st.scan_ttl_ms != limits.message_ttl_ms)
@@ -381,8 +394,22 @@ impl Clients {
         if items.is_empty() {
             return refuse(ErrorCode::NONE, None);
         }
+        // A full queue with `reject-publish` takes no dead letters either:
+        // they stay owed in their source queue, which sends them again
+        // later (ADR 0118).
+        let adding =
+            items.iter().map(super::length::amount_of).fold(lotse_queue::Amount::default(), lotse_queue::Amount::plus);
+        if let Some(gate) = self.gate(qc, replica)
+            && gate.check(adding).is_err()
+        {
+            return refuse(ErrorCode::QUEUE_FULL, None);
+        }
         match lotse_record::dead_letter_batch(&items, view.unix_ms as i64) {
-            Ok(batch) => self.write_queue(Some((outbox, id)), qc.group, replica, QueueBatch::new(batch), view.now),
+            Ok(batch) => {
+                self.write_queue(Some((outbox, id)), qc.group, replica, QueueBatch::new(batch), view.now);
+                // Index = offset + 1: the last entry's index is where it ends.
+                self.took(qc.group, replica.raft_ref().last_index(), adding);
+            }
             Err(_) => refuse(ErrorCode::INVALID_REQUEST, None),
         }
     }

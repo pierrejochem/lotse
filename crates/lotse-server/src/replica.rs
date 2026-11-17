@@ -122,6 +122,9 @@ pub enum ProposeError {
     /// forgotten once it has been idle long enough (ADR 0110).
     #[error("the partition holds {0} producers, as many as it admits: try again later")]
     ProducerLimit(usize),
+    /// A queue at its length limit refuses a new batch (ADR 0118).
+    #[error("{0}")]
+    QueueFull(String),
 }
 
 /// What became of a marker the coordinator asked for.
@@ -519,6 +522,19 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// it is stamped when it is persisted. An idempotent batch that is in
     /// the log already is not proposed again: the original is returned.
     pub fn propose(&mut self, batch: Bytes) -> Result<Proposed, ProposeError> {
+        self.propose_admitted(batch, |_| Ok(()))
+    }
+
+    /// [`Replica::propose`], asking `admit` about a batch that is new here:
+    /// not about a duplicate, which is written already and answered as
+    /// such, nor about one refused for another reason. A queue's length
+    /// limit (ADR 0118) refuses this way: a retry of a batch that was taken
+    /// must not be refused, or its producer would take its sequence as free.
+    pub fn propose_admitted(
+        &mut self,
+        batch: Bytes,
+        admit: impl FnOnce(&Batch) -> Result<(), String>,
+    ) -> Result<Proposed, ProposeError> {
         let (parsed, rest) = Batch::parse(&batch)?;
         if !rest.is_empty() {
             return Err(ProposeError::Invalid(lotse_record::Error::Malformed("more than one batch")));
@@ -563,6 +579,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             Check::Fenced { current } => return Err(ProposeError::ProducerFenced { current }),
             Check::Full => return Err(ProposeError::ProducerLimit(self.state.producers.max())),
         }
+        admit(&parsed).map_err(ProposeError::QueueFull)?;
         let (first, last) =
             self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
         let term = self.raft.term();

@@ -355,6 +355,8 @@ pub(crate) struct QueueLimits {
     pub(crate) priority_levels: u8,
     /// `resume.window.ms` (ADR 0109); 0 for the default.
     pub(crate) resume_window_ms: u64,
+    /// `max.length`, `max.length.bytes` and `overflow` (ADR 0118).
+    pub(crate) length: lotse_queue::LengthLimit,
 }
 
 /// What an `AlterQueue` does: each field is left (`None`) or set, 0
@@ -370,9 +372,19 @@ pub(crate) struct QueueChange {
     pub(crate) priority_levels: Option<u8>,
     /// 0 for the default.
     pub(crate) resume_window_ms: Option<u64>,
+    /// 0 for no limit (ADR 0118).
+    pub(crate) max_length: Option<u64>,
+    /// 0 for no limit.
+    pub(crate) max_length_bytes: Option<u64>,
+    pub(crate) overflow: Option<lotse_queue::Overflow>,
 }
 
 impl QueueChange {
+    /// Whether it changes the length limit (ADR 0118).
+    fn changes_length(&self) -> bool {
+        self.max_length.is_some() || self.max_length_bytes.is_some() || self.overflow.is_some()
+    }
+
     /// Whether the queue is as this change would leave it.
     pub(crate) fn holds_in(&self, q: &DynQueue) -> bool {
         self.ack_timeout_ms.is_none_or(|v| q.ack_timeout_ms == v) && self.applied_to(q.limits) == q.limits
@@ -394,6 +406,9 @@ impl QueueChange {
         l.single_active = self.single_active.unwrap_or(l.single_active);
         l.priority_levels = self.priority_levels.unwrap_or(l.priority_levels);
         l.resume_window_ms = self.resume_window_ms.unwrap_or(l.resume_window_ms);
+        l.length.max_messages = self.max_length.unwrap_or(l.length.max_messages);
+        l.length.max_bytes = self.max_length_bytes.unwrap_or(l.length.max_bytes);
+        l.length.overflow = self.overflow.unwrap_or(l.length.overflow);
         l
     }
 }
@@ -1049,8 +1064,8 @@ impl MetadataState {
         // that made each tombstone (ADR 0100), the zones of nodes added at
         // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
         // queues' resume windows (ADR 0109), replication factors and placed
-        // groups (ADR 0115). A later section needs the ones before it, empty
-        // or not.
+        // groups (ADR 0115), queues' length limits (ADR 0118). A later
+        // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
         let levels: Vec<(u64, u8)> = self
@@ -1066,7 +1081,15 @@ impl MetadataState {
             .filter(|q| q.limits.resume_window_ms != 0)
             .map(|q| (q.resource_id, q.limits.resume_window_ms))
             .collect();
-        let sections = if !self.replication.is_empty() || !self.placed.is_empty() {
+        let lengths: Vec<(u64, lotse_queue::LengthLimit)> = self
+            .queues
+            .values()
+            .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
+            .map(|q| (q.resource_id, q.limits.length))
+            .collect();
+        let sections = if !lengths.is_empty() {
+            15
+        } else if !self.replication.is_empty() || !self.placed.is_empty() {
             14
         } else if !windows.is_empty() {
             13
@@ -1200,6 +1223,13 @@ impl MetadataState {
             b.put_u32_le(self.placed.len() as u32);
             for g in &self.placed {
                 b.put_u64_le(*g);
+            }
+        }
+        if sections >= 15 {
+            b.put_u32_le(lengths.len() as u32);
+            for (id, l) in &lengths {
+                b.put_u64_le(*id);
+                put_length(&mut b, l);
             }
         }
         b.freeze()
@@ -1415,6 +1445,14 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let id = b.get_u64_le();
+                let length = get_length(b)?;
+                s.queues.get_mut(&id).ok_or("length limit of an unknown queue")?.limits.length = length;
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1485,7 +1523,8 @@ fn change_bytes(change: &Change) -> Bytes {
                 | u8::from(change.dead_letter.is_some()) << 3
                 | u8::from(change.single_active.is_some()) << 4
                 | u8::from(change.priority_levels.is_some()) << 5
-                | u8::from(change.resume_window_ms.is_some()) << 6;
+                | u8::from(change.resume_window_ms.is_some()) << 6
+                | u8::from(change.changes_length()) << 7;
             b.put_u8(mask);
             b.put_u64_le(change.ack_timeout_ms.unwrap_or(0));
             b.put_u32_le(change.max_deliveries.unwrap_or(0));
@@ -1499,6 +1538,23 @@ fn change_bytes(change: &Change) -> Bytes {
             }
             if let Some(ms) = change.resume_window_ms {
                 b.put_u64_le(ms);
+            }
+            // Bit 7: a second mask for the length limit (ADR 0118), then
+            // what it says comes.
+            if change.changes_length() {
+                let more = u8::from(change.max_length.is_some())
+                    | u8::from(change.max_length_bytes.is_some()) << 1
+                    | u8::from(change.overflow.is_some()) << 2;
+                b.put_u8(more);
+                if let Some(n) = change.max_length {
+                    b.put_u64_le(n);
+                }
+                if let Some(n) = change.max_length_bytes {
+                    b.put_u64_le(n);
+                }
+                if let Some(o) = change.overflow {
+                    b.put_u8(o.code());
+                }
             }
         }
         Change::AlterStream { resource_id, change } => {
@@ -1670,7 +1726,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let mut limits = get_limits(b)?;
             if b.has_remaining() {
                 let flags = get_flags(b)?;
-                (limits.single_active, limits.priority_levels, limits.resume_window_ms) = flags;
+                (limits.single_active, limits.priority_levels, limits.resume_window_ms, limits.length) = flags;
             }
             Change::CreateQueue { name, tenant, voters, ack_timeout_ms, limits }
         }
@@ -1695,7 +1751,7 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let resource_id = b.get_u64_le();
             let mask = b.get_u8();
             let (ack, max, ttl, dlq) = (b.get_u64_le(), b.get_u32_le(), b.get_u64_le(), b.get_u64_le());
-            let change = QueueChange {
+            let mut change = QueueChange {
                 ack_timeout_ms: (mask & 1 != 0).then_some(ack),
                 max_deliveries: (mask & 2 != 0).then_some(max),
                 message_ttl_ms: (mask & 4 != 0).then_some(ttl),
@@ -1713,7 +1769,27 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
                 } else {
                     None
                 },
+                ..QueueChange::default()
             };
+            if mask & 128 != 0 {
+                need(b, 1)?;
+                let more = b.get_u8();
+                if more == 0 || more > 7 {
+                    return Err("unknown queue length change".into());
+                }
+                if more & 1 != 0 {
+                    need(b, 8)?;
+                    change.max_length = Some(b.get_u64_le());
+                }
+                if more & 2 != 0 {
+                    need(b, 8)?;
+                    change.max_length_bytes = Some(b.get_u64_le());
+                }
+                if more & 4 != 0 {
+                    need(b, 1)?;
+                    change.overflow = Some(get_overflow(b)?);
+                }
+            }
             Change::AlterQueue { resource_id, change }
         }
         7 => {
@@ -1874,15 +1950,19 @@ fn get_limits(b: &mut &[u8]) -> Result<QueueLimits, String> {
         single_active: false,
         priority_levels: 0,
         resume_window_ms: 0,
+        length: lotse_queue::LengthLimit::default(),
     })
 }
 
 /// A queue's flags, written only when one is set: bit 0 single active
 /// consumer; bit 1 priority levels, whose count follows; bit 2 a resume
-/// window, whose ms follow (ADR 0109).
+/// window, whose ms follow (ADR 0109); bit 3 a length limit, whose messages,
+/// bytes and overflow follow (ADR 0118).
 fn put_flags(b: &mut BytesMut, l: &QueueLimits) {
     let (levels, window) = (l.priority_levels, l.resume_window_ms);
-    let flags = u8::from(l.single_active) | u8::from(levels != 0) << 1 | u8::from(window != 0) << 2;
+    let length = l.length != lotse_queue::LengthLimit::default();
+    let flags =
+        u8::from(l.single_active) | u8::from(levels != 0) << 1 | u8::from(window != 0) << 2 | u8::from(length) << 3;
     if flags != 0 {
         b.put_u8(flags);
     }
@@ -1892,14 +1972,35 @@ fn put_flags(b: &mut BytesMut, l: &QueueLimits) {
     if window != 0 {
         b.put_u64_le(window);
     }
+    if length {
+        put_length(b, &l.length);
+    }
+}
+
+/// A length limit (ADR 0118): messages, bytes, overflow.
+fn put_length(b: &mut BytesMut, l: &lotse_queue::LengthLimit) {
+    b.put_u64_le(l.max_messages);
+    b.put_u64_le(l.max_bytes);
+    b.put_u8(l.overflow.code());
+}
+
+fn get_length(b: &mut &[u8]) -> Result<lotse_queue::LengthLimit, String> {
+    need(b, 16)?;
+    let (max_messages, max_bytes) = (b.get_u64_le(), b.get_u64_le());
+    Ok(lotse_queue::LengthLimit { max_messages, max_bytes, overflow: get_overflow(b)? })
+}
+
+fn get_overflow(b: &mut &[u8]) -> Result<lotse_queue::Overflow, String> {
+    need(b, 1)?;
+    lotse_queue::Overflow::from_code(b.get_u8()).ok_or_else(|| "unknown queue overflow".to_string())
 }
 
 /// The flags [`put_flags`] writes; in an `AlterQueue` record only bit 0
 /// is ever set.
-fn get_flags(b: &mut &[u8]) -> Result<(bool, u8, u64), String> {
+fn get_flags(b: &mut &[u8]) -> Result<(bool, u8, u64, lotse_queue::LengthLimit), String> {
     need(b, 1)?;
     let flags = b.get_u8();
-    if flags > 7 {
+    if flags > 15 {
         return Err("unknown queue flags".into());
     }
     let levels = if flags & 2 != 0 {
@@ -1914,7 +2015,8 @@ fn get_flags(b: &mut &[u8]) -> Result<(bool, u8, u64), String> {
     } else {
         0
     };
-    Ok((flags & 1 != 0, levels, window))
+    let length = if flags & 8 != 0 { get_length(b)? } else { lotse_queue::LengthLimit::default() };
+    Ok((flags & 1 != 0, levels, window, length))
 }
 
 fn need(b: &&[u8], n: usize) -> Result<(), String> {

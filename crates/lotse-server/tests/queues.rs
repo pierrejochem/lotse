@@ -38,7 +38,7 @@ use bytes::Bytes;
 use lotse_client::OutMessage;
 use lotse_client::{Client, ClientConfig, ClientError};
 use lotse_log::LogConfig;
-use lotse_queue::Limits;
+use lotse_queue::{LengthLimit, Limits, Overflow};
 use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_route::{Binding, Exchange, ExchangeKind};
@@ -2074,6 +2074,502 @@ fn a_waiting_consumer_gets_a_new_message_with_its_commit() {
             );
 
             rt.net().set_max_latency(Duration::from_millis(5));
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+// Length limits (ADR 0118).
+
+const BOUNDED: u64 = 50;
+const RECENT: u64 = 51;
+const SPILL: u64 = 52;
+const SIZED: u64 = 53;
+const CUT: u64 = 54;
+const PIT: u64 = 55;
+/// `bounded` holds this many waiting messages, `recent` this many less two.
+const BOUND: u64 = 6;
+
+impl Scenario {
+    /// `bounded` refuses past `BOUND` messages (and 200 bytes); `recent`
+    /// keeps its newest `BOUND - 2`, dropping the oldest into `spill`;
+    /// `sized` refuses past 100 bytes; `cut` keeps its newest message and
+    /// drops the rest into `pit`, which takes two at most.
+    fn lengths() -> Scenario {
+        let queue = |name: &str, id, group, length, dead_letter| QueueConfig {
+            ack_timeout: ACK_TIMEOUT,
+            length,
+            dead_letter,
+            ..QueueConfig::new(name, id, group)
+        };
+        let reject = |messages, bytes| LengthLimit {
+            max_messages: messages,
+            max_bytes: bytes,
+            overflow: Overflow::RejectPublish,
+        };
+        let drop_head = LengthLimit { max_messages: BOUND - 2, max_bytes: 0, overflow: Overflow::DropHead };
+        let queues = vec![
+            queue("bounded", BOUNDED, 21, reject(BOUND, 200), None),
+            queue("recent", RECENT, 22, drop_head, Some(SPILL)),
+            queue("spill", SPILL, 23, LengthLimit::default(), None),
+            queue("sized", SIZED, 24, reject(0, 100), None),
+            queue("cut", CUT, 25, LengthLimit { max_messages: 1, ..drop_head }, Some(PIT)),
+            queue("pit", PIT, 26, reject(2, 0), None),
+        ];
+        Scenario { queues, exchanges: Vec::new(), groups: vec![2, 21, 22, 23, 24, 25, 26] }
+    }
+}
+
+fn full(r: &Result<u64, ClientError>) -> bool {
+    matches!(r, Err(ClientError::Broker { code, .. }) if *code == lotse_proto::ErrorCode::QUEUE_FULL)
+}
+
+/// Produces `value` to `queue` until it is taken or refused as full; a full
+/// queue's new leader may refuse while it reads the backlog, so a refusal
+/// counts only once it has held for `patience`.
+async fn offer(rt: &SimRuntime, c: &Client<SimRuntime>, queue: &str, value: &str, patience: Duration) -> Option<u64> {
+    let since = rt.now();
+    loop {
+        let r = c.produce(queue, 0, message(value)).await;
+        match r {
+            Ok(offset) => return Some(offset),
+            _ if full(&r) && rt.now() - since >= patience => return None,
+            _ if full(&r) => rt.sleep(TICK * 5).await,
+            Err(e) => panic!("producing {value} to {queue}: {e}"),
+        }
+    }
+}
+
+/// Drains `queue` with one subscription, acknowledging everything, until it
+/// stays quiet; what it held, by offset.
+async fn drain(rt: &SimRuntime, c: &Client<SimRuntime>, queue: &str) -> BTreeMap<u64, String> {
+    let mut sub = c.subscribe(queue, 10).await.expect("subscribed");
+    let mut got = BTreeMap::new();
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < ACK_TIMEOUT * 3 {
+        let Some(m) = sub.next(TICK * 20).await.expect("delivers") else { continue };
+        quiet_since = rt.now();
+        got.insert(m.offset(), value_of(&m));
+        sub.ack(&m).await.expect("takes acks");
+    }
+    sub.close().await;
+    got
+}
+
+#[test]
+fn a_full_queue_refuses_until_consumers_make_room_also_after_a_failover() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            let patience = Duration::from_secs(2);
+            for i in 0..BOUND {
+                assert!(offer(&rt, &c, "bounded", &format!("a{i}"), patience).await.is_some(), "a{i} fits");
+            }
+            let r = c.produce("bounded", 0, message("a-over")).await;
+            assert!(full(&r), "the seventh is refused: {r:?}");
+            // Two handed to a consumer do not count, as in RabbitMQ: two more
+            // fit. They wait in the consumer's buffer, which asks for no more
+            // until it is read, and are taken well within the ack timeout.
+            let mut sub = c.subscribe("bounded", 2).await.unwrap();
+            rt.sleep(ACK_TIMEOUT / 4).await;
+            assert!(offer(&rt, &c, "bounded", "b0", patience).await.is_some());
+            assert!(offer(&rt, &c, "bounded", "b1", patience).await.is_some());
+            assert!(offer(&rt, &c, "bounded", "b-over", patience).await.is_none(), "full again");
+            let held = [
+                sub.next(Duration::from_secs(5)).await.unwrap().unwrap(),
+                sub.next(Duration::from_secs(5)).await.unwrap().unwrap(),
+            ];
+
+            // A new leader counts the backlog from the log, the two out with
+            // the consumer left out: still full.
+            let leader = queue_leader(&rt, &c, "bounded").await;
+            w.crash(leader, false).await;
+            assert!(offer(&rt, &c, "bounded", "c-over", patience).await.is_none(), "full after the failover");
+            w.start(leader).await;
+            let mut acked = 0;
+            for m in &held {
+                acked += u64::from(sub.ack(m).await.is_ok());
+            }
+            sub.close().await;
+            // Emptied, it takes `BOUND` again and no more. Eight were taken.
+            let drained = drain(&rt, &c, "bounded").await;
+            assert_eq!(drained.len() as u64, BOUND + 2 - acked, "{drained:?}");
+            for v in ["a-over", "b-over", "c-over"] {
+                assert!(!drained.values().any(|x| x == v), "{v} was refused, then delivered");
+            }
+            for i in 0..BOUND {
+                assert!(offer(&rt, &c, "bounded", &format!("d{i}"), patience).await.is_some(), "d{i} fits");
+            }
+            assert!(offer(&rt, &c, "bounded", "d-over", patience).await.is_none());
+            // A transaction's first batch waits for its coordinator, then
+            // meets the same limit.
+            let t = Client::new(
+                rt.node("t"),
+                ClientConfig { retry_for: Duration::from_secs(10), ..transformer_config("t") },
+            );
+            let mut txn = t.begin_transaction().await.expect("begun");
+            let r = txn.produce("bounded", 0, message("t-over")).await;
+            assert!(full(&r), "a transactional batch is refused too: {r:?}");
+            txn.abort().await.expect("aborted");
+
+            // Bytes: three 30-byte values fit into 100 bytes, a fourth not.
+            let value = |i: u64| format!("{i}{}", "x".repeat(29));
+            for i in 0..3 {
+                assert!(offer(&rt, &c, "sized", &value(i), patience).await.is_some());
+            }
+            assert!(offer(&rt, &c, "sized", &value(3), patience).await.is_none(), "the bytes are full");
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+#[test]
+fn a_queue_with_drop_head_keeps_its_newest_and_dead_letters_the_rest() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            let keep = BOUND - 2;
+            for i in 0..10 {
+                c.produce("recent", 0, message(&format!("r{i}"))).await.expect("drop-head never refuses");
+            }
+            // Again across a failover: the new leader counts the backlog
+            // before it drops anything.
+            let leader = queue_leader(&rt, &c, "recent").await;
+            w.crash(leader, false).await;
+            for i in 10..14 {
+                c.produce("recent", 0, message(&format!("r{i}"))).await.expect("drop-head never refuses");
+            }
+            w.start(leader).await;
+            rt.sleep(Duration::from_secs(1)).await;
+            let kept: Vec<String> = drain(&rt, &c, "recent").await.into_values().collect();
+            let newest: Vec<String> = (14 - keep..14).map(|i| format!("r{i}")).collect();
+            assert_eq!(kept, newest, "the newest {keep} stay");
+            let mut sub = c.subscribe("spill", 20).await.unwrap();
+            let mut spilled = BTreeSet::new();
+            while spilled.len() < (14 - keep) as usize {
+                let m = sub.next(Duration::from_secs(5)).await.unwrap().expect("the dropped ones are dead letters");
+                assert_eq!(header(&m, lotse_record::dead_letter::REASON).as_deref(), Some("max-length"));
+                assert_eq!(header(&m, lotse_record::dead_letter::QUEUE).as_deref(), Some("recent"));
+                spilled.insert(value_of(&m));
+                sub.ack(&m).await.unwrap();
+            }
+            let dropped: BTreeSet<String> = (0..14 - keep).map(|i| format!("r{i}")).collect();
+            assert_eq!(spilled, dropped);
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+#[derive(Default)]
+struct LengthOutcomes {
+    /// Where each acknowledged produce put its message.
+    produced: BTreeMap<At, String>,
+    /// Values refused as full: nothing was written.
+    refused: BTreeSet<String>,
+    settled: BTreeSet<At>,
+    maybe_settled: BTreeSet<At>,
+    /// Every value a consumer of `bounded` or `recent` was handed.
+    seen: BTreeSet<String>,
+    /// `spill`'s messages by origin in `recent`: their values.
+    spilled: BTreeMap<u64, String>,
+}
+
+async fn length_producer(rt: SimRuntime, name: &'static str, out: Arc<Mutex<LengthOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    let mut n = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        n += 1;
+        let queue = if rt.chance(1, 2) { "bounded" } else { "recent" };
+        let value = format!("{queue}-{name}-{n}");
+        let r = client.produce(queue, 0, message(&value)).await;
+        {
+            let mut o = out.lock().unwrap();
+            match r {
+                Ok(offset) => {
+                    let before = o.produced.insert((queue.into(), offset), value);
+                    assert!(before.is_none(), "{queue} offset {offset} acknowledged twice");
+                }
+                _ if full(&r) => {
+                    assert_eq!(queue, "bounded", "only reject-publish refuses: {r:?}");
+                    o.refused.insert(value);
+                }
+                Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => {}
+                Err(e) => panic!("unexpected produce error: {e}"),
+            }
+        }
+        rt.sleep(TICK * (1 + rt.below(3) as u32)).await;
+    }
+}
+
+/// Reads `bounded` and `recent` slowly, away now and then, so that both
+/// fill up: acks most, requeues some, sits on a few.
+async fn length_consumer(rt: SimRuntime, out: Arc<Mutex<LengthOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    while !stop.load(Ordering::Relaxed) {
+        rt.sleep(TICK * (5 + rt.below(60) as u32)).await;
+        let queue = if rt.chance(1, 2) { "bounded" } else { "recent" };
+        let mut consumer = match client.subscribe(queue, 1 + rt.below(3) as u32).await {
+            Ok(c) => c,
+            Err(ClientError::GaveUp(..)) => continue,
+            Err(e) => panic!("unexpected subscribe error: {e}"),
+        };
+        for _ in 0..1 + rt.below(6) {
+            let m = match consumer.next(TICK * 10).await {
+                Ok(Some(m)) => m,
+                Ok(None) | Err(ClientError::GaveUp(..)) => continue,
+                Err(e) => panic!("unexpected error receiving: {e}"),
+            };
+            let at = (queue.to_string(), m.offset());
+            out.lock().unwrap().seen.insert(value_of(&m));
+            match rt.below(8) {
+                0 => {
+                    let _ = consumer.nack(&m, true).await;
+                }
+                1 => {} // sat on until the subscription ends
+                _ => {
+                    let res = consumer.ack(&m).await;
+                    let mut o = out.lock().unwrap();
+                    match res {
+                        Ok(()) => o.settled.insert(at),
+                        Err(ClientError::GaveUp(..) | ClientError::Unknown(_)) => o.maybe_settled.insert(at),
+                        Err(e) => panic!("unexpected settle error: {e}"),
+                    };
+                }
+            }
+        }
+        consumer.close().await;
+    }
+}
+
+/// Notes what `recent` dropped into `spill`.
+fn note_spilled(out: &Mutex<LengthOutcomes>, m: &lotse_client::Message) {
+    assert_eq!(header(m, lotse_record::dead_letter::REASON).as_deref(), Some("max-length"));
+    assert_eq!(header(m, lotse_record::dead_letter::QUEUE).as_deref(), Some("recent"));
+    let offset: u64 = header(m, lotse_record::dead_letter::OFFSET).expect("an offset").parse().unwrap();
+    out.lock().unwrap().spilled.insert(offset, value_of(m));
+}
+
+async fn spill_consumer(rt: SimRuntime, out: Arc<Mutex<LengthOutcomes>>, stop: Arc<AtomicBool>) {
+    let client = Client::new(rt.clone(), client_config());
+    while !stop.load(Ordering::Relaxed) {
+        let mut consumer = match client.subscribe("spill", 5).await {
+            Ok(c) => c,
+            Err(ClientError::GaveUp(..)) => continue,
+            Err(e) => panic!("unexpected subscribe error: {e}"),
+        };
+        for _ in 0..1 + rt.below(20) {
+            match consumer.next(TICK * 10).await {
+                Ok(Some(m)) => {
+                    note_spilled(&out, &m);
+                    let _ = consumer.ack(&m).await;
+                }
+                Ok(None) | Err(ClientError::GaveUp(..)) => {}
+                Err(e) => panic!("unexpected error receiving: {e}"),
+            }
+        }
+        consumer.close().await;
+    }
+}
+
+static REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SPILLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+async fn run_lengths(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+    let out = Arc::new(Mutex::new(LengthOutcomes::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tasks = vec![
+        rt.spawn(length_producer(rt.node("p1"), "p1", out.clone(), stop.clone())),
+        rt.spawn(length_producer(rt.node("p2"), "p2", out.clone(), stop.clone())),
+        rt.spawn(length_consumer(rt.node("k1"), out.clone(), stop.clone())),
+        rt.spawn(spill_consumer(rt.node("s1"), out.clone(), stop.clone())),
+    ];
+    faults(&rt, &mut w, &["p1", "p2", "k1", "s1"], Duration::from_secs(6)).await;
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        t.await;
+    }
+    rt.net().heal();
+    for id in std::mem::take(&mut w.down_until).into_keys() {
+        w.start(id).await;
+    }
+
+    // Drain both, then `spill`, once dropping has settled.
+    let drainer =
+        Client::new(rt.node("drainer"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config() });
+    rt.sleep(Duration::from_secs(1)).await;
+    let bounded = drain(&rt, &drainer, "bounded").await;
+    let recent = drain(&rt, &drainer, "recent").await;
+    let mut consumer = drainer.subscribe("spill", 50).await.expect("the healed cluster takes a subscription");
+    let mut quiet_since = rt.now();
+    while rt.now() - quiet_since < ACK_TIMEOUT * 4 {
+        let Some(m) = consumer.next(TICK * 20).await.expect("the healed cluster delivers") else { continue };
+        quiet_since = rt.now();
+        note_spilled(&out, &m);
+        consumer.ack(&m).await.expect("the healed cluster takes acks");
+    }
+    consumer.close().await;
+
+    // Drained, `bounded` takes exactly `BOUND` again, and `recent` keeps
+    // exactly its newest `BOUND - 2` of ten.
+    let patience = Duration::from_secs(2);
+    let mut taken = 0;
+    for i in 0..BOUND + 3 {
+        taken += u64::from(offer(&rt, &drainer, "bounded", &format!("fill-{i}"), patience).await.is_some());
+    }
+    assert_eq!(taken, BOUND, "an empty bounded queue took {taken} messages; its limit is {BOUND}");
+    for i in 0..10 {
+        drainer.produce("recent", 0, message(&format!("last-{i}"))).await.expect("drop-head never refuses");
+    }
+    rt.sleep(Duration::from_secs(1)).await;
+    let kept: Vec<String> = drain(&rt, &drainer, "recent").await.into_values().collect();
+    let newest: Vec<String> = (12 - BOUND..10).map(|i| format!("last-{i}")).collect();
+    assert_eq!(kept, newest, "recent keeps its newest {}", BOUND - 2);
+
+    let out = std::mem::take(&mut *out.lock().unwrap());
+    // What was refused was not written.
+    for v in &out.refused {
+        assert!(!out.seen.contains(v), "{v} was refused as full, then delivered");
+        assert!(!bounded.values().any(|x| x == v), "{v} was refused as full, and is in the queue");
+    }
+    // Nothing is lost: what `bounded` took is settled or drained; what
+    // `recent` took may also have been dropped into `spill`, for its
+    // length, and nothing else.
+    for (o, v) in &out.produced {
+        let settled = out.settled.contains(o) || out.maybe_settled.contains(o);
+        let drained = match o.0.as_str() {
+            "bounded" => bounded.get(&o.1) == Some(v),
+            _ => recent.get(&o.1) == Some(v),
+        };
+        let spilled = o.0 == "recent" && out.spilled.get(&o.1) == Some(v);
+        assert!(settled || drained || spilled, "message {o:?} ({v}) was produced and lost");
+    }
+    for (offset, v) in &out.spilled {
+        if let Some(p) = out.produced.get(&("recent".to_string(), *offset)) {
+            assert_eq!(v, p, "recent offset {offset} was spilled as {v}, but {p} was produced there");
+        }
+        assert!(!recent.contains_key(offset), "recent offset {offset} was spilled and is still in the queue");
+    }
+    REFUSED.fetch_add(out.refused.len(), Ordering::Relaxed);
+    SPILLED.fetch_add(out.spilled.len(), Ordering::Relaxed);
+    if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+        eprintln!(
+            "stats: produced {} refused {} settled {} spilled {} drained {} + {}",
+            out.produced.len(),
+            out.refused.len(),
+            out.settled.len(),
+            out.spilled.len(),
+            bounded.len(),
+            recent.len()
+        );
+    }
+    drop(drainer);
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn queues_at_their_length_limit_refuse_or_drop_and_lose_nothing_under_faults() {
+    check_seeds(10, |seed| Sim::new(seed).run(run_lengths));
+    // The scenario must fill both queues, or it checks nothing.
+    assert!(REFUSED.load(Ordering::Relaxed) > 0, "nothing was ever refused");
+    assert!(SPILLED.load(Ordering::Relaxed) > 0, "nothing was ever dropped");
+}
+
+/// Messages ready in queue `id`, as its leader reports them.
+async fn ready(rt: &SimRuntime, c: &Client<SimRuntime>, id: u64) -> u64 {
+    loop {
+        if let Ok(nodes) = c.node_metrics().await {
+            let led =
+                nodes.iter().filter_map(|(_, m)| m.as_ref().ok()).flat_map(|m| &m.queues).find(|q| q.resource_id == id);
+            if let Some(q) = led {
+                return q.ready;
+            }
+        }
+        rt.sleep(TICK * 10).await;
+    }
+}
+
+#[test]
+fn produces_arriving_together_do_not_pass_the_limit_between_them() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            let patience = Duration::from_secs(2);
+            for i in 0..BOUND - 1 {
+                assert!(offer(&rt, &c, "bounded", &format!("a{i}"), patience).await.is_some());
+            }
+            // One place left, and four producers at the same moment: one
+            // of them gets it.
+            let at = rt.now() + Duration::from_millis(500);
+            let results = Arc::new(Mutex::new(Vec::new()));
+            let tasks: Vec<_> = (0..4)
+                .map(|i| {
+                    let (host, results) = (rt.node(&format!("q{i}")), results.clone());
+                    rt.spawn(async move {
+                        let cfg = ClientConfig { retry_for: Duration::from_secs(10), ..client_config() };
+                        let c = Client::new(host.clone(), cfg);
+                        c.metadata(&["bounded"]).await.unwrap();
+                        host.sleep(at - host.now()).await;
+                        let r = c.produce("bounded", 0, message(&format!("race{i}"))).await;
+                        results.lock().unwrap().push(r);
+                    })
+                })
+                .collect();
+            for t in tasks {
+                t.await;
+            }
+            let results = std::mem::take(&mut *results.lock().unwrap());
+            let taken = results.iter().filter(|r| r.is_ok()).count();
+            assert!(results.iter().all(|r| r.is_ok() || full(r)), "{results:?}");
+            assert_eq!(taken, 1, "of four arriving together, one fits: {results:?}");
+            assert_eq!(drain(&rt, &c, "bounded").await.len() as u64, BOUND);
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
+#[test]
+fn a_full_dead_letter_queue_takes_no_more_and_its_source_waits() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            for i in 0..5 {
+                c.produce("cut", 0, message(&format!("c{i}"))).await.expect("drop-head never refuses");
+            }
+            // `cut` keeps c4 and owes four to `pit`, which takes two.
+            rt.sleep(Duration::from_secs(1)).await;
+            assert_eq!(ready(&rt, &c, PIT).await, 2, "pit holds what its limit allows");
+            assert_eq!(ready(&rt, &c, CUT).await, 1);
+            // Read, `pit` takes the other two as `cut` sends them again.
+            let mut sub = c.subscribe("pit", 1).await.unwrap();
+            let mut got = BTreeSet::new();
+            while got.len() < 4 {
+                let m = sub.next(Duration::from_secs(5)).await.unwrap().expect("what cut owes arrives");
+                assert_eq!(header(&m, lotse_record::dead_letter::REASON).as_deref(), Some("max-length"));
+                got.insert(value_of(&m));
+                sub.ack(&m).await.unwrap();
+            }
+            assert_eq!(got, (0..4).map(|i| format!("c{i}")).collect());
+            sub.close().await;
             for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
                 handle.stop();
                 let _ = node.join().await;

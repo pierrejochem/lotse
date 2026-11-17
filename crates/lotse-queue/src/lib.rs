@@ -9,16 +9,20 @@
 //! - [`QueueLog`]: the applied state every replica keeps (settled offsets,
 //!   delivery counts, transactional messages waiting for their marker);
 //! - [`Dispatcher`]: the leader's volatile delivery state (subscriptions,
-//!   credits, messages in flight, redelivery, ack timeout).
+//!   credits, messages in flight, redelivery, ack timeout);
+//! - [`Lengths`]: the leader's count of what waits, for a length limit
+//!   ([`LengthLimit`]).
 
 #![warn(missing_docs)]
 
 mod dispatch;
+mod length;
 mod limits;
 mod log;
 mod ranges;
 
 pub use dispatch::{ConnId, Delivery, Dispatcher, SubscriptionId};
+pub use length::{Amount, LengthLimit, Lengths, Overflow, Unread, message_bytes};
 pub use limits::{Limits, exhausted};
 pub use log::{Checkout, Owed, QueueLog};
 pub use ranges::RangeSet;
