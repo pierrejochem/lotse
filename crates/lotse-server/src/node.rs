@@ -106,6 +106,10 @@ pub struct NodeConfig {
     /// before its leader hands the group back to it, longer after recent
     /// elections (ADR 0113; [`crate::DEFAULT_LEADER_SETTLE`] by default).
     pub leader_settle: Duration,
+    /// How long a follower may go without having applied what its leader
+    /// said was committed and still serve `Fetch` and `ListOffsets`
+    /// (ADR 0116; [`crate::DEFAULT_FOLLOWER_MAX_LAG`] by default).
+    pub follower_max_lag: Duration,
     /// How clients authenticate.
     pub auth: AuthConfig,
     /// What streams keep unless they say otherwise (ADR 0046).
@@ -215,6 +219,17 @@ struct Moves {
 const HANDOVER_EVERY_TICKS: u32 = 100;
 /// And asks the same group's preferred leader again only after this.
 const HANDOVER_RETRY_TICKS: u32 = 1_000;
+
+/// Whether a follower may serve reads (ADR 0116): it hears its leader, and
+/// within `max_lag` it had applied everything the leader said was committed.
+fn follower_current(
+    hears_leader: bool,
+    caught_up_at: Option<lotse_rt::Instant>,
+    now: lotse_rt::Instant,
+    max_lag: Duration,
+) -> bool {
+    hears_leader && caught_up_at.is_some_and(|t| now - t <= max_lag)
+}
 
 /// How often a leaving node asks a group's next voter to take over: a
 /// transfer whose target did not campaign is given up after an election
@@ -993,6 +1008,11 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // While leaving (ADR 0114): when the node stops at the latest, and when
     // it last asked each group's voters to take over.
     let mut leave_until: Option<lotse_rt::Instant> = None;
+    // When each group this node follows last had applied what its leader
+    // said was committed, and the groups it must not serve reads of
+    // (ADR 0116).
+    let mut caught_up: BTreeMap<GroupId, lotse_rt::Instant> = BTreeMap::new();
+    let mut lagging: BTreeSet<GroupId> = BTreeSet::new();
     let mut leave_asked: BTreeMap<GroupId, (lotse_rt::Instant, usize)> = BTreeMap::new();
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth, &configured_voters).await? {
@@ -1056,6 +1076,21 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             host = rt.host_stats().await;
             next_host = rt.now() + HOST_EVERY;
         }
+        let now = rt.now();
+        caught_up.retain(|g, _| groups.contains_key(g));
+        lagging.clear();
+        for (&g, replica) in groups.iter() {
+            let raft = replica.raft_ref();
+            if raft.role() == Role::Leader {
+                continue;
+            }
+            if raft.hears_leader() && replica.applied() >= raft.leader_commit() {
+                caught_up.insert(g, now);
+            }
+            if !follower_current(raft.hears_leader(), caught_up.get(&g).copied(), now, cfg.follower_max_lag) {
+                lagging.insert(g);
+            }
+        }
         let view = ClusterView {
             streams: &known.streams,
             queues: &known.queues,
@@ -1081,6 +1116,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             now: rt.now(),
             unix_ms: rt.unix_time().as_millis() as u64,
             access: &known.access,
+            lagging: &lagging,
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {

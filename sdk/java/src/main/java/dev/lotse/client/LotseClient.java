@@ -905,14 +905,22 @@ public final class LotseClient implements AutoCloseable {
 
     private long listOffsetOnce(String stream, int partition, OffsetAt at) {
         Routed routed = route(stream, partition);
+        // Like a fetch, from the replica in this client's zone, which may lag the leader (ADR 0116).
+        Address replica = replicaInZone(stream, partition, routed.route().leader());
+        boolean allowFollower = replica != null;
+        Address addr = allowFollower ? replica : routed.address();
         Request req = new Request.ListOffsets(
                 Messages.Isolation.COMMITTED,
                 List.of(new Messages.ListOffsetsResource(
-                        routed.route().resourceId(), List.of(new Messages.ListOffsetsPartition(partition, at.timestamp())))));
+                        routed.route().resourceId(), List.of(new Messages.ListOffsetsPartition(partition, at.timestamp())))),
+                allowFollower);
         Response resp;
         try {
-            resp = call(routed.address(), req);
+            resp = call(addr, req);
         } catch (CallFailure e) {
+            if (allowFollower) {
+                throw leaveReplica(stream, partition, addr + ": " + e.getMessage());
+            }
             forget(stream, partition);
             throw e.toAttempt();
         }
@@ -924,6 +932,9 @@ public final class LotseClient implements AutoCloseable {
         }
         Messages.ListOffsetsPartitionResponse p = r.resources().get(0).partitions().get(0);
         ErrorCode code = p.error();
+        if (allowFollower && !code.isOk()) {
+            throw leaveReplica(stream, partition, addr + ": " + code);
+        }
         if (code.isOk()) {
             return p.offset();
         }

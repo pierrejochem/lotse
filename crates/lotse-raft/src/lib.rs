@@ -618,6 +618,9 @@ pub struct RaftGroup {
     term: u64,
     vote: Option<NodeId>,
     commit: u64,
+    /// The highest commit index a leader has sent here, which `commit` lags
+    /// while this log does.
+    leader_commit: u64,
     applied: u64,
     leader: Option<NodeId>,
     state: State,
@@ -694,6 +697,7 @@ impl RaftGroup {
             term,
             vote,
             commit,
+            leader_commit: commit,
             applied: restored.applied.max(snap).min(commit),
             leader: None,
             state: State::Follower,
@@ -767,6 +771,20 @@ impl RaftGroup {
     /// Highest committed index known here.
     pub fn commit(&self) -> u64 {
         self.commit
+    }
+    /// The highest commit index a leader has sent to this node. Its own
+    /// [`Raft::commit`] stops at its log, so a follower whose log lags has a
+    /// lower commit than this; one that has applied this far has caught up
+    /// with what it was told (ADR 0116).
+    pub fn leader_commit(&self) -> u64 {
+        self.leader_commit.max(self.commit)
+    }
+    /// Whether this node follows a leader it heard within an election
+    /// timeout: the leader is alive and reaches it (ADR 0116).
+    pub fn hears_leader(&self) -> bool {
+        matches!(self.state, State::Follower)
+            && self.leader.is_some()
+            && self.election_elapsed < self.cfg.election_ticks
     }
     /// Last index in the log, persisted or not.
     pub fn last_index(&self) -> u64 {
@@ -1602,6 +1620,7 @@ impl RaftGroup {
             Message::VoteReply { term, granted, pre } => self.on_vote_reply(from, term, granted, pre),
             Message::Append { term, prev_index, prev_term, entries, commit, seq } => {
                 self.follow(term, from);
+                self.leader_commit = self.leader_commit.max(commit);
                 self.on_append(from, prev_index, prev_term, entries, commit, seq);
             }
             Message::Snapshot { term, meta, offset, data, done, seq } => {

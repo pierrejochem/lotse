@@ -837,20 +837,29 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     private async Task<ulong> ListOffsetOnceAsync(string stream, int partition, OffsetAt at, CancellationToken ct)
     {
         Routed routed = await RouteAsync(stream, partition, ct).ConfigureAwait(false);
+        // Like a fetch, from the replica in this client's zone, which may lag the leader (ADR 0116).
+        Address? replica = ReplicaInZone(stream, partition, routed.Route.Leader);
+        bool allowFollower = replica is not null;
+        Address addr = replica ?? routed.Address;
         var req = new Request.ListOffsets(
             Messages.Isolation.Committed,
             new[]
             {
                 new Messages.ListOffsetsResource(
                     routed.Route.ResourceId, new[] { new Messages.ListOffsetsPartition((uint)partition, at.Timestamp) }),
-            });
+            },
+            allowFollower);
         Response resp;
         try
         {
-            resp = await CallAsync(routed.Address, req, ct).ConfigureAwait(false);
+            resp = await CallAsync(addr, req, ct).ConfigureAwait(false);
         }
         catch (CallFailure e)
         {
+            if (allowFollower)
+            {
+                throw LeaveReplica(stream, partition, addr + ": " + e.Message);
+            }
             Forget(stream, partition);
             throw e.ToAttempt();
         }
@@ -864,6 +873,10 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         }
         Messages.ListOffsetsPartitionResponse p = r.Resources[0].Partitions[0];
         ErrorCode code = p.Error;
+        if (allowFollower && !code.IsOk)
+        {
+            throw LeaveReplica(stream, partition, addr + ": " + code);
+        }
         if (code.IsOk)
         {
             return p.Offset;

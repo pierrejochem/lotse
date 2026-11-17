@@ -4146,6 +4146,10 @@ pub struct ListOffsetsRequest {
     pub isolation: u8,
     /// The partitions, per stream.
     pub resources: Vec<ListOffsetsResource>,
+    /// Tag 0: a follower may answer from what it has committed and applied,
+    /// as for [`FetchRequest::allow_follower`] (ADR 0116). Its end may lag
+    /// the leader's. A follower that lags too far answers `NOT_LEADER`.
+    pub allow_follower: bool,
 }
 
 /// The partitions of one stream to look up.
@@ -4179,7 +4183,11 @@ impl ListOffsetsRequest {
             });
             w.no_tags();
         });
-        w.no_tags();
+        if self.allow_follower {
+            w.tags(&[(TAG_ALLOW_FOLLOWER, Bytes::from_static(&[1]))]);
+        } else {
+            w.no_tags();
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let isolation = r.u8()?;
@@ -4193,8 +4201,17 @@ impl ListOffsetsRequest {
             r.tags()?;
             Ok(ListOffsetsResource { resource_id, partitions })
         })?;
-        r.tags()?;
-        Ok(ListOffsetsRequest { isolation, resources })
+        let mut allow_follower = false;
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_ALLOW_FOLLOWER => allow_follower = v.u8()? != 0,
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
+        Ok(ListOffsetsRequest { isolation, resources, allow_follower })
     }
 }
 

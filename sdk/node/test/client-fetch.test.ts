@@ -301,6 +301,10 @@ describe("fetch and list offsets against scripted brokers", () => {
         return meta;
       }
       const code = node.id === 2 ? followerCode : ErrorCode.NONE;
+      if (request.type === "ListOffsets") {
+        const partition = { partition: 0, error: code, offset: BigInt(node.id * 10), timestamp: -1n, leaderHint: null };
+        return { type: "ListOffsets" as const, resources: [{ resourceId: fx.STREAM_ID, partitions: [partition] }] };
+      }
       const records = code === ErrorCode.NONE ? data(0, 0, false, `from ${node.id}`) : undefined;
       return fx.fetched(fx.STREAM_ID, 0, { code, highWatermark: 1, lastStable: 1, ...(records ? { records } : {}) });
     };
@@ -337,6 +341,25 @@ describe("fetch and list offsets against scripted brokers", () => {
       assert.equal(b.count("Fetch"), before + 1, `asked once, then left: ${code}`);
       await client.close();
     }
+    client = undefined;
+  });
+
+  test("a client in a zone lists offsets at the replica there, and leaves one that lags", async () => {
+    zones(ErrorCode.NONE);
+    client = new LotseClient(fx.config([a], { zone: "b" }));
+    assert.equal(await client.listOffset("s", 0, OffsetAt.LATEST), 20n, "the follower in zone b answers");
+    assert.equal(a.count("ListOffsets"), 0);
+    assert.equal((b.requests("ListOffsets")[0] as Extract<Request, { type: "ListOffsets" }>).allowFollower, true);
+    await client.close();
+    // A follower that lags too far answers NOT_LEADER (ADR 0116): asked once, then left for the leader.
+    zones(ErrorCode.NOT_LEADER);
+    const before = b.count("ListOffsets");
+    client = new LotseClient(fx.config([a], { zone: "b" }));
+    assert.equal(await client.listOffset("s", 0, OffsetAt.LATEST), 10n);
+    assert.equal(await client.listOffset("s", 0, OffsetAt.LATEST), 10n);
+    assert.equal(b.count("ListOffsets"), before + 1);
+    assert.ok(a.requests("ListOffsets").every((r) => (r as Extract<Request, { type: "ListOffsets" }>).allowFollower !== true));
+    await client.close();
     client = undefined;
   });
 
