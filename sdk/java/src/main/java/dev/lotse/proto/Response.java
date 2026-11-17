@@ -616,6 +616,11 @@ public sealed interface Response {
                         .u32(c.inFlight())
                         .u32(c.credit()));
             });
+            List<QueueMetrics> details = queues.stream()
+                    .filter(q -> !q.readyByLevel().isEmpty()
+                            || q.readyLevelUnread() != 0
+                            || q.consumers().stream().anyMatch(c -> c.state() != ConsumerState.SHARED))
+                    .toList();
             w.array(groups, (w1, g) -> {
                 w1.string(g.groupId()).string(g.tenant()).i32(g.epoch());
                 w1.array(g.members(), (w2, m) -> {
@@ -624,7 +629,39 @@ public sealed interface Response {
                 });
                 w1.array(g.offsets(), (w2, o) -> w2.u64(o.resourceId()).u32(o.partition()).u64(o.offset()));
             });
-            w.noTags();
+            if (details.isEmpty()) {
+                w.noTags();
+            } else {
+                Writer v = new Writer();
+                v.array(details, (w1, q) -> {
+                    w1.u64(q.resourceId());
+                    w1.array(q.readyByLevel(), Writer::u64);
+                    w1.u64(q.readyLevelUnread());
+                    w1.array(q.consumers(), (w2, c) -> w2.u32(c.subscriptionId()).u8(c.state().code()));
+                });
+                w.tags(List.of(new Tag(Messages.TAG_QUEUE_DETAILS, ByteString.copyOf(v.toByteArray()))));
+            }
+        }
+
+        /** {@code q} with what tag 3 says of it, if anything. */
+        private static QueueMetrics withDetails(QueueMetrics q, List<QueueMetrics> details) {
+            for (QueueMetrics d : details) {
+                if (d.resourceId() != q.resourceId()) {
+                    continue;
+                }
+                List<ConsumerMetrics> consumers = q.consumers().stream()
+                        .map(c -> d.consumers().stream()
+                                .filter(s -> s.subscriptionId() == c.subscriptionId())
+                                .findFirst()
+                                .map(s -> new ConsumerMetrics(
+                                        c.subscriptionId(), c.peer(), c.inFlight(), c.credit(), s.state()))
+                                .orElse(c))
+                        .toList();
+                return new QueueMetrics(
+                        q.resourceId(), q.ready(), q.inFlight(), q.inOpenTxns(), q.delivered(), q.acked(), consumers,
+                        d.readyByLevel(), d.readyLevelUnread());
+            }
+            return q;
         }
 
         private static void putOptU64(Writer w, Long v) {
@@ -678,9 +715,10 @@ public sealed interface Response {
                     v[i] = r1.u64();
                 }
                 // id, an empty peer, in flight, credit
-                List<ConsumerMetrics> consumers =
-                        r1.array(4 + 2 + 4 + 4, r2 -> new ConsumerMetrics(r2.u32(), r2.string(), r2.u32(), r2.u32()));
-                return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers);
+                List<ConsumerMetrics> consumers = r1.array(
+                        4 + 2 + 4 + 4,
+                        r2 -> new ConsumerMetrics(r2.u32(), r2.string(), r2.u32(), r2.u32(), ConsumerState.SHARED));
+                return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers, List.of(), 0);
             });
             // an empty id and tenant, the epoch, two empty arrays
             List<GroupMetrics> groups = r.array(2 + 2 + 4 + 1 + 1, r1 -> {
@@ -694,7 +732,23 @@ public sealed interface Response {
                         r1.array(8 + 4 + 8, r2 -> new CommittedOffset(r2.u64(), r2.u32(), r2.u64()));
                 return new GroupMetrics(groupId, tenant, epoch, members, offsets);
             });
-            r.tags();
+            for (Tag t : r.tags()) {
+                if (t.tag() != Messages.TAG_QUEUE_DETAILS) {
+                    continue; // between nodes, or from a newer version: skipped
+                }
+                Reader vr = new Reader(t.value().toByteArray());
+                // id, an empty array, unread, an empty array
+                List<QueueMetrics> details = vr.array(8 + 1 + 8 + 1, r1 -> {
+                    long id = r1.u64();
+                    List<Long> levels = r1.array(8, Reader::u64);
+                    long unread = r1.u64();
+                    List<ConsumerMetrics> states = r1.array(
+                            4 + 1, r2 -> new ConsumerMetrics(r2.u32(), "", 0, 0, ConsumerState.fromCode(r2.u8())));
+                    return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
+                });
+                vr.finish();
+                queues = queues.stream().map(q -> withDetails(q, details)).toList();
+            }
             return new DescribeMetrics(
                     error, nodeId, version, uptime, metadataGroup, coordinatorGroup, connections, clientIn,
                     clientOut, peerIn, peerOut, latency, host, partitions, queues, groups);

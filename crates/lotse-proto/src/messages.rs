@@ -37,6 +37,9 @@ const TAG_REMOVED_THROUGH: u64 = 1;
 /// The members each group's leader heard from within an election timeout
 /// (ADR 0117), in a node's `DescribeMetrics` answer.
 const TAG_RESPONSIVE: u64 = 2;
+/// A queue's ready messages per priority level and its subscriptions'
+/// states (ADR 0120), in a node's `DescribeMetrics` answer.
+const TAG_QUEUE_DETAILS: u64 = 3;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -2554,6 +2557,55 @@ pub struct QueueMetrics {
     pub acked: u64,
     /// Subscriptions.
     pub consumers: Vec<ConsumerMetrics>,
+    /// On a queue with priority levels (ADR 0078): ready messages per
+    /// level, level 0 first; empty otherwise (ADR 0120).
+    pub ready_by_level: Vec<u64>,
+    /// On a queue with priority levels: ready messages whose level the
+    /// leader has not read yet. With `ready_by_level` they sum to `ready`.
+    pub ready_level_unread: u64,
+}
+
+/// What a subscription does on its queue (ADR 0120).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConsumerState {
+    /// The queue has no single active consumer: every subscription gets
+    /// messages.
+    #[default]
+    Shared,
+    /// The single active consumer (ADR 0076).
+    Active,
+    /// Waits for its turn as a single active consumer.
+    Standby,
+}
+
+impl ConsumerState {
+    /// The code on the wire.
+    pub fn code(self) -> u8 {
+        match self {
+            ConsumerState::Shared => 0,
+            ConsumerState::Active => 1,
+            ConsumerState::Standby => 2,
+        }
+    }
+
+    /// The state a code stands for; a code from a newer version reads as
+    /// shared.
+    pub fn from_code(code: u8) -> ConsumerState {
+        match code {
+            1 => ConsumerState::Active,
+            2 => ConsumerState::Standby,
+            _ => ConsumerState::Shared,
+        }
+    }
+
+    /// As OpenMetrics and the console name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ConsumerState::Shared => "shared",
+            ConsumerState::Active => "active",
+            ConsumerState::Standby => "standby",
+        }
+    }
 }
 
 /// A queue subscription.
@@ -2567,6 +2619,8 @@ pub struct ConsumerMetrics {
     pub in_flight: u32,
     /// Messages it may still be sent.
     pub credit: u32,
+    /// Shared, active or standby (ADR 0120).
+    pub state: ConsumerState,
 }
 
 /// A consumer group, from the coordinator's leader.
@@ -2704,6 +2758,30 @@ impl DescribeMetricsResponse {
             });
             tags.push((TAG_RESPONSIVE, v.finish()));
         }
+        // Only queues with something to say: priority levels, or a
+        // subscription that is not shared.
+        let details: Vec<&QueueMetrics> = self
+            .queues
+            .iter()
+            .filter(|q| {
+                !q.ready_by_level.is_empty()
+                    || q.ready_level_unread > 0
+                    || q.consumers.iter().any(|c| c.state != ConsumerState::Shared)
+            })
+            .collect();
+        if !details.is_empty() {
+            let mut v = Writer::new();
+            v.array(&details, |w, q| {
+                w.u64(q.resource_id);
+                w.array(&q.ready_by_level, |w, n| w.u64(*n));
+                w.u64(q.ready_level_unread);
+                w.array(&q.consumers, |w, c| {
+                    w.u32(c.subscription_id);
+                    w.u8(c.state.code());
+                });
+            });
+            tags.push((TAG_QUEUE_DETAILS, v.finish()));
+        }
         if tags.is_empty() {
             w.no_tags();
         } else {
@@ -2775,10 +2853,21 @@ impl DescribeMetricsResponse {
                     peer: r.string()?,
                     in_flight: r.u32()?,
                     credit: r.u32()?,
+                    state: ConsumerState::Shared,
                 })
             })?;
             let [resource_id, ready, in_flight, in_open_txns, delivered, acked] = v;
-            Ok(QueueMetrics { resource_id, ready, in_flight, in_open_txns, delivered, acked, consumers })
+            Ok(QueueMetrics {
+                resource_id,
+                ready,
+                in_flight,
+                in_open_txns,
+                delivered,
+                acked,
+                consumers,
+                ready_by_level: Vec::new(),
+                ready_level_unread: 0,
+            })
         })?;
         // an empty id and tenant, the epoch, two empty arrays.
         let groups = r.array(2 + 2 + 4 + 1 + 1, |r| {
@@ -2793,6 +2882,7 @@ impl DescribeMetricsResponse {
         })?;
         let mut removed_through = None;
         let mut responsive = Vec::new();
+        let mut queues = queues;
         for (tag, value) in r.tags()? {
             let mut v = Reader::new(value);
             match tag {
@@ -2802,6 +2892,23 @@ impl DescribeMetricsResponse {
                     responsive = v.array(8 + 8 + 1, |r| {
                         Ok(GroupResponsive { group: r.u64()?, term: r.u64()?, nodes: r.array(4, Reader::u32)? })
                     })?
+                }
+                TAG_QUEUE_DETAILS => {
+                    // id, an empty array, unread, an empty array.
+                    let details = v.array(8 + 1 + 8 + 1, |r| {
+                        let (id, levels, unread) = (r.u64()?, r.array(8, Reader::u64)?, r.u64()?);
+                        let states = r.array(4 + 1, |r| Ok((r.u32()?, ConsumerState::from_code(r.u8()?))))?;
+                        Ok((id, levels, unread, states))
+                    })?;
+                    for (id, levels, unread, states) in details {
+                        let Some(q) = queues.iter_mut().find(|q| q.resource_id == id) else { continue };
+                        (q.ready_by_level, q.ready_level_unread) = (levels, unread);
+                        for (sub, state) in states {
+                            if let Some(c) = q.consumers.iter_mut().find(|c| c.subscription_id == sub) {
+                                c.state = state;
+                            }
+                        }
+                    }
                 }
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,

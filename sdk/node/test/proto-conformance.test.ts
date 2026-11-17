@@ -184,6 +184,23 @@ test("a refusal carries its reason", () => {
   assert.ok(found);
 });
 
+test("tag 3 of a metrics answer is read into its queues (ADR 0120)", () => {
+  let found = false;
+  for (const v of lines("responses.hex")) {
+    const r = decodeResponse(hex(field(v, 2)), Number(field(v, 1))).response;
+    if (r.type === "DescribeMetrics" && r.queues.length > 0) {
+      found = true;
+      const q = r.queues[0]!;
+      assert.deepEqual(q.readyByLevel, [2n, 1n, 1n]);
+      assert.equal(q.readyLevelUnread, 1n);
+      assert.equal(q.consumers[0]!.state, "active");
+      assert.equal(q.consumers[1]!.state, "standby");
+      assert.equal(q.consumers[1]!.peer, "10.0.0.9:40100");
+    }
+  }
+  assert.ok(found);
+});
+
 test("leader hints are read where the tag block is", () => {
   let produce = false;
   let describe = false;

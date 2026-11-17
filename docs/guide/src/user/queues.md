@@ -106,7 +106,7 @@ A delayed message never blocks the queue: others keep flowing, and the delayed o
 
 ## Priorities
 
-With `priority.levels` from 2 to 10, set the header `x-lotse-priority` to a decimal number from 0. Higher goes first. A value above the queue's highest level counts as the highest; anything that is not a number from 0 to 255 is level 0. Within a level, the oldest message goes first. Dead letters and requeued messages are level 0 ([ADR 0078](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0078-queue-priorities.md)).
+With `priority.levels` from 2 to 10, set the header `x-lotse-priority` to a decimal number from 0. Higher goes first. A value above the queue's highest level counts as the highest; anything that is not a number from 0 to 255 is level 0. Within a level, the oldest message goes first. Dead letters and requeued messages are level 0 ([ADR 0078](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0078-queue-priorities.md)). The console's queue page and `DescribeMetrics` show how many messages are ready at each level; after a failover, messages whose level the new leader has not read yet are counted apart until it has. They also show which subscription of a single active consumer queue is active and which ones are standbys ([ADR 0120](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0120-queue-metrics-per-priority-level-and-consumer-state.md)).
 
 ```java
 // Not from the compiled examples.

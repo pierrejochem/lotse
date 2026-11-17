@@ -110,13 +110,44 @@ fn metrics_render_as_openmetrics() {
     metrics.client_in_bytes = 1234;
     metrics.partitions[0].resource_id = 7;
     metrics.partitions[0].replicas = vec![lotse_proto::ReplicaProgress { node_id: 2, log_end: 9 }];
+    // A single active consumer queue with priority levels (ADR 0120).
+    metrics.queues = vec![lotse_proto::QueueMetrics {
+        resource_id: 8,
+        ready: 6,
+        consumers: vec![
+            lotse_proto::ConsumerMetrics {
+                subscription_id: 1,
+                peer: String::new(),
+                in_flight: 0,
+                credit: 1,
+                state: lotse_proto::ConsumerState::Active,
+            },
+            lotse_proto::ConsumerMetrics {
+                subscription_id: 2,
+                peer: String::new(),
+                in_flight: 0,
+                credit: 1,
+                state: lotse_proto::ConsumerState::Standby,
+            },
+            lotse_proto::ConsumerMetrics {
+                subscription_id: 3,
+                peer: String::new(),
+                in_flight: 0,
+                credit: 1,
+                state: lotse_proto::ConsumerState::Standby,
+            },
+        ],
+        ready_by_level: vec![3, 0, 2],
+        ready_level_unread: 1,
+        ..Default::default()
+    }];
     let obs = Observation {
         node_id: 1,
         metrics,
-        resources: BTreeMap::from([(
-            7,
-            ResourceName { kind: "stream", tenant: "acme".into(), name: "orders \"eu\"\\x".into() },
-        )]),
+        resources: BTreeMap::from([
+            (7, ResourceName { kind: "stream", tenant: "acme".into(), name: "orders \"eu\"\\x".into() }),
+            (8, ResourceName { kind: "queue", tenant: "acme".into(), name: "jobs".into() }),
+        ]),
         groups: BTreeMap::from([(10, GroupHealth { membership: voters(&[1, 2, 3]), state: GroupState::Leads })]),
         certificate_requests_pending: Some(3),
         may_scrape: true,
@@ -139,6 +170,14 @@ fn metrics_render_as_openmetrics() {
     assert!(text.contains(&format!("lotse_partition_responsive_voters{{{labels}}} 2\n")));
     assert!(text.contains(&format!("lotse_partition_under_replicated{{{labels}}} 1\n")));
     assert!(text.contains(&format!("lotse_replica_log_end_offset{{{labels},replica=\"2\"}} 9\n")));
+    let q = "node=\"1\",tenant=\"acme\",queue=\"jobs\"";
+    assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"active\"}} 1\n")), "{text}");
+    assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"standby\"}} 2\n")));
+    assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"shared\"}} 0\n")));
+    assert!(text.contains(&format!("lotse_queue_ready_by_level_messages{{{q},level=\"0\"}} 3\n")));
+    assert!(text.contains(&format!("lotse_queue_ready_by_level_messages{{{q},level=\"1\"}} 0\n")));
+    assert!(text.contains(&format!("lotse_queue_ready_by_level_messages{{{q},level=\"2\"}} 2\n")));
+    assert!(text.contains(&format!("lotse_queue_ready_level_unread_messages{{{q}}} 1\n")));
     // Every family is announced once, and its samples follow it before the
     // next family starts.
     let mut seen = BTreeSet::new();

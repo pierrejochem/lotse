@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use lotse_proto::{DescribeMetricsResponse, LATENCY_BUCKETS};
+use lotse_proto::{ConsumerState, DescribeMetricsResponse, LATENCY_BUCKETS};
 use lotse_raft::{Membership, NodeId};
 use lotse_rt::{CertInfo, PeerIdentity};
 
@@ -378,6 +378,45 @@ pub fn render(obs: &Observation) -> String {
         for q in &m.queues {
             out.sample(&sample, &queue_labels(q.resource_id), f(q));
         }
+    }
+    out.family(
+        "lotse_queue_consumers_in_state",
+        "gauge",
+        "Subscriptions to the queue by state: shared, or a single active consumer's active and standby ones.",
+        "",
+    );
+    for q in &m.queues {
+        for state in [ConsumerState::Shared, ConsumerState::Active, ConsumerState::Standby] {
+            let mut l = queue_labels(q.resource_id);
+            l.push(("state", state.name().to_string()));
+            out.sample(
+                "lotse_queue_consumers_in_state",
+                &l,
+                q.consumers.iter().filter(|c| c.state == state).count() as u64,
+            );
+        }
+    }
+    out.family(
+        "lotse_queue_ready_by_level_messages",
+        "gauge",
+        "On a queue with priority levels: messages ready for delivery per level.",
+        "",
+    );
+    for q in &m.queues {
+        for (level, n) in q.ready_by_level.iter().enumerate() {
+            let mut l = queue_labels(q.resource_id);
+            l.push(("level", level.to_string()));
+            out.sample("lotse_queue_ready_by_level_messages", &l, *n);
+        }
+    }
+    out.family(
+        "lotse_queue_ready_level_unread_messages",
+        "gauge",
+        "On a queue with priority levels: messages ready for delivery whose level the leader has not read yet.",
+        "",
+    );
+    for q in m.queues.iter().filter(|q| !q.ready_by_level.is_empty()) {
+        out.sample("lotse_queue_ready_level_unread_messages", &queue_labels(q.resource_id), q.ready_level_unread);
     }
 
     out.family(

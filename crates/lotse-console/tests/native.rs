@@ -211,6 +211,21 @@ async fn the_console_shows_a_real_cluster() {
     let fancy = json!({"name": "vip", "priority_levels": 3, "single_active": true, "create_dlq": false});
     let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(fancy)).await;
     assert_eq!(status, StatusCode::CREATED, "{done}");
+    // Its leader reports each level, highest first, under one leader (ADR 0120).
+    let mut levels = Vec::new();
+    for _ in 0..50 {
+        let (status, q) = get(&app, "/api/v1/clusters/local/queues/vip").await;
+        if status == StatusCode::OK {
+            levels = q["levels"].as_array().cloned().unwrap_or_default();
+            if levels.len() == 3 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let order: Vec<u64> = levels.iter().map(|l| l["level"].as_u64().unwrap()).collect();
+    assert_eq!(order, vec![2, 1, 0], "{levels:?}");
+    assert!(levels.iter().all(|l| l["leader"] == levels[0]["leader"] && l["ready"] == 0), "{levels:?}");
     let too_many = json!({"name": "many", "priority_levels": 11, "single_active": false, "create_dlq": false});
     let (status, err) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(too_many)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
