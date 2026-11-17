@@ -75,6 +75,10 @@ Every node reports the client certificates it accepts, and the cluster keeps the
 
 In the console's *Certificates* tab, *Request certificate* asks the CA holder for a client certificate for a principal. Your browser makes an ECDSA P-256 key and a signing request; the private key is saved as `<principal>.key` once and goes nowhere else, and the console and the cluster hold only the request. The request waits for 7 days.
 
+A cluster admin asks for any principal. Any other signed-in user asks only in their own name and sees only their own requests; asking again replaces their request that is still waiting, so each has at most one. Users' own requests take at most 192 of the 256 places, which leaves room for admins. A certificate signs in without the identity provider's groups, so it grants only the roles bound to the user's name itself; the console says so when none is ([ADR 0119](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0119-users-request-certificates-in-their-own-name.md)).
+
+Every node reports how many requests wait as `lotse_certificate_requests_pending` on its metrics endpoint, and the *Certificates* tab shows the number to cluster admins. An alert on it tells the CA holder when to sign (see [Monitoring](monitoring.md)).
+
 The CA holder, on the machine with the CA key, signs what is waiting:
 
 ```sh

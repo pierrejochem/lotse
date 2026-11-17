@@ -417,8 +417,8 @@ public sealed partial class LotseClient
 
     /// <summary>
     /// Asks for a certificate with a PKCS#10 signing request the requester made; its private key never reaches the
-    /// cluster. The request's id is the SHA-256 of <paramref name="csr"/>, so asking twice is one request. Needs the
-    /// cluster-admin role.
+    /// cluster. The request's id is the SHA-256 of <paramref name="csr"/>, so asking twice is one request. A cluster
+    /// admin asks in any name; anyone else only in their own, and a new request replaces their pending one (ADR 0119).
     /// </summary>
     /// <param name="principal">The principal the certificate will name: its common name.</param>
     /// <param name="csr">The signing request in DER form.</param>
@@ -432,7 +432,8 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
-    /// The certificate requests, newest first, with the answering node's clock. Needs the cluster-admin role.
+    /// The certificate requests, newest first, with the answering node's clock: all of them for a cluster admin, the
+    /// caller's own for anyone else (ADR 0119).
     /// </summary>
     /// <param name="cancellationToken">Stops the call.</param>
     public async Task<Messages.CertificateRequests> DescribeCertificateRequestsAsync(CancellationToken cancellationToken = default)

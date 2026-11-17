@@ -112,6 +112,11 @@ pub(crate) enum Change {
     /// leader's clock: requests that lapsed before it are dropped when this
     /// applies.
     RequestCertificate { id: [u8; 32], principal: String, csr: Vec<u8>, requested_by: String, at_ms: u64 },
+    /// A user asks for a client certificate in their own name (ADR 0119):
+    /// like [`Change::RequestCertificate`] with `principal` as the one who
+    /// asked, and it replaces that user's pending request in their own
+    /// name, so each user has at most one.
+    RequestOwnCertificate { id: [u8; 32], principal: String, csr: Vec<u8>, at_ms: u64 },
     /// The CA holder records the certificate it signed for a request
     /// (ADR 0092); it joins the inventory of [`Change::RecordCertificates`].
     RecordCertificate {
@@ -926,6 +931,16 @@ impl MetadataState {
                     signed: None,
                 });
             }
+            Change::RequestOwnCertificate { id, principal, csr, at_ms } => {
+                self.prune_requests(at_ms);
+                if self.cert_requests.contains_key(&id) {
+                    return Ok(());
+                }
+                // One pending request each: the new one replaces the old.
+                self.cert_requests.retain(|_, r| !(r.signed.is_none() && r.own() && r.principal == principal));
+                let requested_by = principal.clone();
+                self.cert_requests.insert(id, CertRequest { principal, csr, requested_by, at_ms, signed: None });
+            }
             Change::RecordCertificate { id, certificate, cert, not_before_ms, not_after_ms, at_ms } => {
                 self.prune_requests(at_ms);
                 // Only an open request takes a certificate, once.
@@ -1650,6 +1665,13 @@ fn change_bytes(change: &Change) -> Bytes {
             put_bytes(&mut b, csr);
             put_str(&mut b, requested_by);
         }
+        Change::RequestOwnCertificate { id, principal, csr, at_ms } => {
+            b.put_u8(27);
+            b.put_slice(id);
+            b.put_u64_le(*at_ms);
+            put_str(&mut b, principal);
+            put_bytes(&mut b, csr);
+        }
         Change::ForgetDeleted { resource_ids } => {
             b.put_u8(24);
             b.put_u32_le(resource_ids.len() as u32);
@@ -1926,6 +1948,14 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             need(b, 8)?;
             let group = b.get_u64_le();
             Change::Reassign { group, voters: get_nodes(b)? }
+        }
+        27 => {
+            need(b, 40)?;
+            let mut id = [0u8; 32];
+            b.copy_to_slice(&mut id);
+            let at_ms = b.get_u64_le();
+            let principal = get_str(b)?;
+            Change::RequestOwnCertificate { id, principal, csr: get_bytes(b)?.to_vec(), at_ms }
         }
         _ => return Err("unknown metadata change".into()),
     };
@@ -2204,6 +2234,19 @@ pub(crate) struct CertRequest {
     pub(crate) at_ms: u64,
     /// The answer, once the CA holder signed.
     pub(crate) signed: Option<SignedCert>,
+}
+
+impl CertRequest {
+    /// Whether it is in the name of the one who asked (ADR 0119).
+    pub(crate) fn own(&self) -> bool {
+        self.principal == self.requested_by
+    }
+
+    /// Whether it waits for the CA holder at `now_ms`: unsigned and not
+    /// lapsed.
+    pub(crate) fn pending(&self, now_ms: u64) -> bool {
+        self.signed.is_none() && self.at_ms.saturating_add(REQUEST_TTL_MS) >= now_ms
+    }
 }
 
 /// The certificate the CA holder signed for a request.

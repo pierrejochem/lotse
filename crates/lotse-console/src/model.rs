@@ -861,10 +861,23 @@ pub struct CertificateRequestRow {
 /// The certificate requests screen.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CertificateRequestsView {
-    /// Newest first.
+    /// Newest first: every request for a cluster admin, the caller's own
+    /// for everyone else (ADR 0119).
     pub requests: Vec<CertificateRequestRow>,
     /// The cluster's clock when the list was made, ms since the Unix epoch.
     pub now_ms: u64,
+    /// Whether `requests` lists every request: the caller is a cluster
+    /// admin and may ask in any name.
+    pub all: bool,
+    /// Requests in the list that wait for the CA holder.
+    pub pending: u32,
+    /// The name a certificate for the caller carries; empty if the caller
+    /// has none (not signed in as a user).
+    pub principal: String,
+    /// Whether a role is bound to that name itself. A certificate signs in
+    /// without the identity provider's groups, so roles bound only to a
+    /// group do not come with it.
+    pub bound_by_name: bool,
 }
 
 /// A request for a client certificate (ADR 0092). The browser made the key

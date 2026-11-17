@@ -49,14 +49,17 @@ export interface paths {
         };
         /**
          * The requests for client certificates, newest first, with the certificate
-         *     of each that was signed. The broker lets only cluster admins list them.
+         *     of each that was signed: every request for a cluster admin, the caller's
+         *     own for everyone else.
          */
         get: operations["certificate_requests"];
         put?: never;
         /**
-         * Asks the CA holder for a client certificate. The body carries a signing
-         *     request made in the browser: the private key never reaches the console,
-         *     and the CA holder signs with `lotse certs --sign`.
+         * Asks the CA holder for a client certificate: a cluster admin in any name,
+         *     everyone else in their own, where a new request replaces their pending
+         *     one. The body carries a signing request made in the browser: the private
+         *     key never reaches the console, and the CA holder signs with
+         *     `lotse certs --sign`.
          */
         post: operations["request_certificate"];
         delete?: never;
@@ -529,11 +532,35 @@ export interface components {
         /** @description The certificate requests screen. */
         CertificateRequestsView: {
             /**
+             * @description Whether `requests` lists every request: the caller is a cluster
+             *     admin and may ask in any name.
+             */
+            all: boolean;
+            /**
+             * @description Whether a role is bound to that name itself. A certificate signs in
+             *     without the identity provider's groups, so roles bound only to a
+             *     group do not come with it.
+             */
+            bound_by_name: boolean;
+            /**
              * Format: int64
              * @description The cluster's clock when the list was made, ms since the Unix epoch.
              */
             now_ms: number;
-            /** @description Newest first. */
+            /**
+             * Format: int32
+             * @description Requests in the list that wait for the CA holder.
+             */
+            pending: number;
+            /**
+             * @description The name a certificate for the caller carries; empty if the caller
+             *     has none (not signed in as a user).
+             */
+            principal: string;
+            /**
+             * @description Newest first: every request for a cluster admin, the caller's own
+             *     for everyone else (ADR 0119).
+             */
             requests: components["schemas"]["CertificateRequestRow"][];
         };
         /** @description One client certificate the cluster has seen or had revoked (ADR 0091). */
