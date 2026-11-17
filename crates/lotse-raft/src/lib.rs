@@ -567,6 +567,9 @@ struct Progress {
     active: bool,
     /// Highest round it answered.
     acked: u64,
+    /// The tick of its latest answer to this leader; `None` before the
+    /// first.
+    heard_at: Option<u64>,
     /// The first round sent to it as a member: an answer to an earlier one
     /// came from before it (re)joined, from a replica it may no longer have,
     /// and is ignored.
@@ -785,6 +788,20 @@ impl RaftGroup {
         matches!(self.state, State::Follower)
             && self.leader.is_some()
             && self.election_elapsed < self.cfg.election_ticks
+    }
+    /// On a leader: the members, learners included and this node too,
+    /// that answered it within an election timeout; `None` elsewhere. For
+    /// what a node reports (ADR 0117), never for a safety decision.
+    pub fn responsive(&self) -> Option<BTreeSet<NodeId>> {
+        let State::Leader { progress } = &self.state else { return None };
+        let window = u64::from(self.cfg.election_ticks);
+        let mut heard: BTreeSet<NodeId> = progress
+            .iter()
+            .filter(|(_, p)| p.heard_at.is_some_and(|t| self.ticks < t + window))
+            .map(|(id, _)| *id)
+            .collect();
+        heard.insert(self.cfg.id);
+        Some(heard)
     }
     /// Last index in the log, persisted or not.
     pub fn last_index(&self) -> u64 {
@@ -1084,6 +1101,7 @@ impl RaftGroup {
                     inflight_ticks: 0,
                     active: true,
                     acked: 0,
+                    heard_at: None,
                     since: self.seq + 1,
                     snap: None,
                     snap_sent: 0,
@@ -1421,6 +1439,7 @@ impl RaftGroup {
         let mut p = p;
         p.active = true;
         p.acked = p.acked.max(seq);
+        p.heard_at = Some(self.ticks);
         match result {
             AppendResult::Accepted { last } => {
                 // A heartbeat's answer (last < next) says nothing about the

@@ -34,6 +34,9 @@ const TAG_HELD: u64 = 3;
 /// The metadata index through which a node has removed the files of every
 /// deleted resource (ADR 0100), in its `DescribeMetrics` answer.
 const TAG_REMOVED_THROUGH: u64 = 1;
+/// The members each group's leader heard from within an election timeout
+/// (ADR 0117), in a node's `DescribeMetrics` answer.
+const TAG_RESPONSIVE: u64 = 2;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -2457,6 +2460,23 @@ pub struct DescribeMetricsResponse {
     /// every resource deleted by then (ADR 0100); `None` until it has looked
     /// once since it started. A tag: other clients may ignore it.
     pub removed_through: Option<u64>,
+    /// For each group this node leads with a quorum, the members that
+    /// answered it within an election timeout, itself included (ADR 0117):
+    /// what tells a node whether it may stop. A tag between nodes: other
+    /// clients may ignore it.
+    pub responsive: Vec<GroupResponsive>,
+}
+
+/// The members of one group that answered its leader lately (ADR 0117).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupResponsive {
+    /// The group.
+    pub group: u64,
+    /// The leader's term.
+    pub term: u64,
+    /// Its members, learners included, that answered within an election
+    /// timeout.
+    pub nodes: Vec<u32>,
 }
 
 /// The machine a node runs on; `None` where it cannot tell.
@@ -2669,13 +2689,25 @@ impl DescribeMetricsResponse {
                 w.u64(o.offset);
             });
         });
-        match self.removed_through {
-            Some(index) => {
-                let mut v = Writer::new();
-                v.u64(index);
-                w.tags(&[(TAG_REMOVED_THROUGH, v.finish())]);
-            }
-            None => w.no_tags(),
+        let mut tags = Vec::new();
+        if let Some(index) = self.removed_through {
+            let mut v = Writer::new();
+            v.u64(index);
+            tags.push((TAG_REMOVED_THROUGH, v.finish()));
+        }
+        if !self.responsive.is_empty() {
+            let mut v = Writer::new();
+            v.array(&self.responsive, |w, g| {
+                w.u64(g.group);
+                w.u64(g.term);
+                w.array(&g.nodes, |w, n| w.u32(*n));
+            });
+            tags.push((TAG_RESPONSIVE, v.finish()));
+        }
+        if tags.is_empty() {
+            w.no_tags();
+        } else {
+            w.tags(&tags);
         }
     }
 
@@ -2760,10 +2792,17 @@ impl DescribeMetricsResponse {
             Ok(GroupMetrics { group_id, tenant, epoch, members, offsets })
         })?;
         let mut removed_through = None;
+        let mut responsive = Vec::new();
         for (tag, value) in r.tags()? {
             let mut v = Reader::new(value);
             match tag {
                 TAG_REMOVED_THROUGH => removed_through = Some(v.u64()?),
+                // group, term and an empty array.
+                TAG_RESPONSIVE => {
+                    responsive = v.array(8 + 8 + 1, |r| {
+                        Ok(GroupResponsive { group: r.u64()?, term: r.u64()?, nodes: r.array(4, Reader::u32)? })
+                    })?
+                }
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }
@@ -2787,6 +2826,7 @@ impl DescribeMetricsResponse {
             queues,
             groups,
             removed_through,
+            responsive,
         })
     }
 }

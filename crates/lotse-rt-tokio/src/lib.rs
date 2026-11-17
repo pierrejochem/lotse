@@ -38,9 +38,11 @@ use lotse_rt::{Clock, Disk, Host, HostStats, Instant, OpenMode, Rng, SegmentFile
 pub mod dev_certs;
 mod http;
 mod net;
+mod serve;
 mod tls;
 
 pub use net::{TokioConn, TokioListener};
+pub use serve::{HttpListener, HttpRequest, HttpResponse};
 pub use tls::{TlsConfig, TlsError};
 
 /// The production runtime. Cheap to clone; clones share the clock, the disk

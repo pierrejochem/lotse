@@ -119,6 +119,11 @@ pub struct NodeEntry {
     /// the same zone fetch from its replicas (ADR 0104).
     #[serde(default)]
     pub zone: Option<String>,
+    /// Where it serves `/metrics`, `/healthz`, `/readyz` and
+    /// `/safe-to-stop` over HTTP (ADR 0117), if anywhere: plain on a
+    /// loopback address, TLS with the node's certificate elsewhere.
+    #[serde(default)]
+    pub metrics: Option<String>,
 }
 
 /// TLS: the CA and each node's certificate and key. `{id}` in a path
@@ -276,7 +281,7 @@ impl ClusterFile {
             if !ids.insert(n.id) {
                 return invalid(format!("node {} is named twice", n.id));
             }
-            for a in [&n.peer, &n.client] {
+            for a in [&n.peer, &n.client].into_iter().chain(n.metrics.iter()) {
                 if host_of(a).is_none() {
                     return invalid(format!("node {}: {a} is not host:port", n.id));
                 }
@@ -305,7 +310,8 @@ impl ClusterFile {
                 return invalid("[tls] names certificates and plaintext_on_loopback; choose one".into());
             }
             for n in &self.nodes {
-                for a in [&n.peer, &n.client].into_iter().chain(n.peer_bind.iter()).chain(n.client_bind.iter()) {
+                let binds = n.peer_bind.iter().chain(n.client_bind.iter()).chain(n.metrics.iter());
+                for a in [&n.peer, &n.client].into_iter().chain(binds) {
                     if !is_loopback(a) {
                         return invalid(format!(
                             "node {}: {a} is not on loopback; without TLS every address must be",

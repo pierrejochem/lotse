@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lotse_proto::{
-    CommittedOffset, ConsumerMetrics, DescribeMetricsResponse, GroupMemberMetrics, GroupMetrics, HostMetrics,
-    LATENCY_BUCKETS, PartitionMetrics, QueueMetrics, ReplicaProgress, Response, TxnResource,
+    CommittedOffset, ConsumerMetrics, DescribeMetricsResponse, GroupMemberMetrics, GroupMetrics, GroupResponsive,
+    HostMetrics, LATENCY_BUCKETS, PartitionMetrics, QueueMetrics, ReplicaProgress, Response, TxnResource,
 };
 use lotse_raft::NodeId;
 use lotse_rt::{HostStats, Instant, Runtime};
@@ -116,6 +116,47 @@ impl Clients {
         groups: &BTreeMap<GroupId, Replica<R, S>>,
         who: &Principal,
     ) {
+        let mut resp = self.metrics(view, groups);
+        // Who answers its leaders lately is told to other nodes, which
+        // judge from it whether one may stop, and to who sees the whole
+        // cluster (ADR 0117).
+        if !matches!(who, Principal::Node(_)) && !view.access.sees_cluster(who) {
+            resp.responsive.clear();
+        }
+        // Only what `who` may see: resources by their tenant and role, and
+        // a consumer group only if every resource it touches is visible
+        // (one that touches none, only to who sees the whole cluster).
+        // The cluster's own groups (metadata, coordinator) belong to no
+        // resource: only cluster admins and viewers see them.
+        let visible = |r: u64| match view.access.resources.get(&r) {
+            Some((name, tenant)) => view.access.may(who, Operation::Describe, tenant, name),
+            None => view.access.sees_cluster(who),
+        };
+        resp.partitions.retain(|p| visible(p.resource_id));
+        resp.queues.retain(|q| visible(q.resource_id));
+        resp.groups.retain(|g| {
+            // The group itself, by its tenant and id (ADR 0062).
+            if !view.access.may(who, Operation::Describe, &g.tenant, &g.group_id) {
+                return false;
+            }
+            let owned = g.members.iter().flat_map(|m| m.owned.iter().map(|t| t.resource_id));
+            let mut touched = owned.chain(g.offsets.iter().map(|o| o.resource_id)).peekable();
+            if touched.peek().is_none() {
+                return view.access.sees_cluster(who);
+            }
+            touched.all(visible)
+        });
+        outbox.push(id, &Response::DescribeMetrics(Box::new(resp)));
+    }
+
+    /// Everything this node has and counts, unfiltered: `DescribeMetrics`
+    /// shows each principal part of it, the operator's endpoint all of it
+    /// (ADR 0117).
+    pub(crate) fn metrics<R: Runtime, S: StateMachine>(
+        &self,
+        view: &ClusterView<'_>,
+        groups: &BTreeMap<GroupId, Replica<R, S>>,
+    ) -> DescribeMetricsResponse {
         let node = &view.node;
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
         let h = node.host;
@@ -146,6 +187,15 @@ impl Clients {
         };
         for (&g, replica) in groups {
             let raft = replica.raft_ref();
+            if raft.leads_with_quorum()
+                && let Some(heard) = raft.responsive()
+            {
+                resp.responsive.push(GroupResponsive {
+                    group: g,
+                    term: raft.term(),
+                    nodes: heard.into_iter().map(|n| n as u32).collect(),
+                });
+            }
             let (resource_id, partition) = view.resource_of(g).unwrap_or((0, 0));
             let c = self.stats.groups.get(&g).copied().unwrap_or_default();
             // Raft index = offset + 1: a replica holding index i holds offsets below i.
@@ -239,30 +289,47 @@ impl Clients {
                 });
             }
         }
-        // Only what `who` may see: resources by their tenant and role, and
-        // a consumer group only if every resource it touches is visible
-        // (one that touches none, only to who sees the whole cluster).
-        // The cluster's own groups (metadata, coordinator) belong to no
-        // resource: only cluster admins and viewers see them.
-        let visible = |r: u64| match view.access.resources.get(&r) {
-            Some((name, tenant)) => view.access.may(who, Operation::Describe, tenant, name),
-            None => view.access.sees_cluster(who),
+        resp
+    }
+
+    /// What node `me` sees of itself for the operator's endpoint (ADR
+    /// 0117): all its metrics, the names behind them and where each of its
+    /// groups stands. Whether the asker may read the metrics is the
+    /// caller's to fill in.
+    pub(crate) fn observe<R: Runtime, S: StateMachine>(
+        &self,
+        view: &ClusterView<'_>,
+        groups: &BTreeMap<GroupId, Replica<R, S>>,
+    ) -> crate::ops::Observation {
+        use crate::ops::{GroupHealth, GroupState, ResourceName};
+        let mut resources = BTreeMap::new();
+        let named = |id: u64, kind: &'static str| {
+            let (name, tenant) = view.access.resources.get(&id).cloned().unwrap_or_default();
+            ResourceName { kind, tenant, name }
         };
-        resp.partitions.retain(|p| visible(p.resource_id));
-        resp.queues.retain(|q| visible(q.resource_id));
-        resp.groups.retain(|g| {
-            // The group itself, by its tenant and id (ADR 0062).
-            if !view.access.may(who, Operation::Describe, &g.tenant, &g.group_id) {
-                return false;
-            }
-            let owned = g.members.iter().flat_map(|m| m.owned.iter().map(|t| t.resource_id));
-            let mut touched = owned.chain(g.offsets.iter().map(|o| o.resource_id)).peekable();
-            if touched.peek().is_none() {
-                return view.access.sees_cluster(who);
-            }
-            touched.all(visible)
-        });
-        outbox.push(id, &Response::DescribeMetrics(Box::new(resp)));
+        for s in view.streams {
+            resources.insert(s.resource_id, named(s.resource_id, "stream"));
+        }
+        for q in view.queues {
+            resources.insert(q.resource_id, named(q.resource_id, "queue"));
+        }
+        let health = groups
+            .iter()
+            .map(|(&g, replica)| {
+                let raft = replica.raft_ref();
+                let leads = raft.role() == lotse_raft::Role::Leader;
+                let state =
+                    GroupState::of(leads, raft.leads_with_quorum(), raft.hears_leader(), view.lagging.contains(&g));
+                (g, GroupHealth { membership: raft.membership().clone(), state })
+            })
+            .collect();
+        crate::ops::Observation {
+            node_id: view.node.id,
+            metrics: self.metrics(view, groups),
+            resources,
+            groups: health,
+            may_scrape: false,
+        }
     }
 }
 
