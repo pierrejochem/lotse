@@ -145,6 +145,13 @@ pub(super) struct Serving {
 }
 
 impl Serving {
+    /// Ready messages below `limit` per priority level and those whose
+    /// level is not read yet, for `DescribeMetrics` (ADR 0120); `None`
+    /// while the levels this serving reads for are not the queue's.
+    pub(super) fn ready_by_level(&self, q: &lotse_queue::QueueLog, limit: u64, levels: u8) -> Option<(Vec<u64>, u64)> {
+        (levels > 1 && self.levels == levels).then(|| self.dispatcher.ready_by_level(q, limit, self.scanned, levels))
+    }
+
     /// Adopts the log's checkouts once (ADR 0109); the caller has applied
     /// an entry of this term, so every checkout committed before is in the
     /// ack index. Subscriptions there already take theirs back.

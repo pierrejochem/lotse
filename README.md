@@ -196,7 +196,6 @@ None known. Report one as an issue.
 - **Raft:** followers serve `Fetch` and `ListOffsets` in a client's zone and stop when they lag (ADR 0104, ADR 0116); committed offsets and admin reads still go to their leaders, and a reader sent to the leader returns to its zone only at its next metadata refresh.
 - **Certificates and sessions:** renewing a certificate over a connection made with it (a user asks again, ADR 0119); a notice to the CA holder other than the `/metrics` gauge and the console's count; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
-- **`DescribeMetrics`:** which subscription of a single active consumer queue is active, and counts per priority level.
 - **Console:** open sessions cannot be listed, a pinned partition is not shown, and the oldest record's age, open transactions per stream, bytes in flight per consumer, zones and disk limits are not reported. On a phone the navigation sits above the page instead of collapsing into a menu.
 - **Packages:** releases and the image are built only by GitHub Actions; the package targets systemd systems.
 

@@ -517,6 +517,9 @@ pub struct QueueDetail {
     pub dead_lettered: Option<u64>,
     /// Priority levels, highest first.
     pub levels: Vec<PriorityLevel>,
+    /// Ready messages whose level the queue's leader has not read yet: a
+    /// new leader reads the backlog for levels (ADR 0120).
+    pub levels_unread: u64,
     /// Consumers.
     pub consumers: Vec<QueueConsumer>,
     /// Latest dead letters.

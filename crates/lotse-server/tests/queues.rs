@@ -2577,3 +2577,116 @@ fn a_full_dead_letter_queue_takes_no_more_and_its_source_waits() {
         })
     });
 }
+
+// ---------------------------------------------------------------------------
+// What `DescribeMetrics` says of priority levels and single active
+// consumers (ADR 0120).
+
+#[test]
+fn metrics_count_ready_messages_per_level_and_name_the_active_consumer() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut scenario = Scenario::priorities();
+            // The line queue in a group of its own.
+            let line = QueueConfig { group: 3, ..Scenario::single_active().queues.remove(0) };
+            scenario.queues.push(line);
+            scenario.groups.push(3);
+            // Messages stay with their consumer while the test reads the
+            // reports.
+            for q in &mut scenario.queues {
+                q.ack_timeout = Duration::from_secs(60);
+            }
+            let mut w = World::new(rt.clone(), scenario).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            // Level 0: three plain and one whose level does not parse;
+            // level 1: one; level 3 (the highest of 4): one, and one above.
+            for i in 0..3 {
+                c.produce("ranked", 0, message(&format!("low{i}"))).await.unwrap();
+            }
+            c.produce("ranked", 0, ranked("mid", "1")).await.unwrap();
+            c.produce("ranked", 0, ranked("high0", "3")).await.unwrap();
+            c.produce("ranked", 0, ranked("high1", "9")).await.unwrap();
+            c.produce("ranked", 0, ranked("junk", "soon")).await.unwrap();
+            let meta = c.metadata(&["ranked", "line"]).await.unwrap();
+            let id = |name: &str| meta.resources.iter().find(|r| r.name == name).unwrap().resource_id;
+            let (ranked_id, line_id) = (id("ranked"), id("line"));
+
+            // The queue as its leader reports it, once the report says
+            // what `done` asks for.
+            let reported = async |queue: u64, done: &(dyn Fn(&lotse_proto::QueueMetrics) -> bool + Sync)| {
+                let deadline = rt.now() + Duration::from_secs(10);
+                loop {
+                    let answers = c.node_metrics().await.expect("the nodes");
+                    let found: Vec<lotse_proto::QueueMetrics> = answers
+                        .into_iter()
+                        .filter_map(|(_, r)| r.ok())
+                        .flat_map(|m| m.queues)
+                        .filter(|q| q.resource_id == queue)
+                        .collect();
+                    assert!(found.len() <= 1, "two nodes report queue {queue}: {found:?}");
+                    let last = format!("{found:?}");
+                    if let Some(q) = found.into_iter().next().filter(|q| done(q)) {
+                        return q;
+                    }
+                    assert!(rt.now() < deadline, "queue {queue} never reported as expected: {last}");
+                    rt.sleep(TICK).await;
+                }
+            };
+
+            // Nobody subscribed: the leader has read no levels, so every
+            // ready message is unread.
+            let q = reported(ranked_id, &|q| q.ready == 7).await;
+            assert_eq!((q.ready_by_level.clone(), q.ready_level_unread), (vec![0; 4], 7), "{q:?}");
+            assert!(q.consumers.is_empty());
+
+            // What waits per level once the first `taken` messages went
+            // out: they go highest level first.
+            let left = |taken: u64| {
+                let mut levels = vec![4, 1, 0, 2];
+                for l in [3, 3, 1, 0, 0, 0, 0].into_iter().take(taken as usize) {
+                    levels[l] -= 1;
+                }
+                levels
+            };
+            // Subscribed: the leader reads the levels and hands out the
+            // highest levels first (the client renews its credit as
+            // messages come, so maybe more than one); they no longer count.
+            let mut sub = c.subscribe("ranked", 1).await.expect("subscribed");
+            let m = sub.next(Duration::from_secs(10)).await.unwrap().expect("delivered");
+            assert!(value_of(&m).starts_with("high"));
+            let q = reported(ranked_id, &|q| q.in_flight >= 1 && q.ready_level_unread == 0).await;
+            assert_eq!(q.ready_by_level, left(q.in_flight), "{q:?}");
+            assert_eq!(q.ready_by_level.iter().sum::<u64>(), q.ready);
+            let [cm] = &q.consumers[..] else { panic!("one consumer: {q:?}") };
+            assert_eq!(cm.state, lotse_proto::ConsumerState::Shared);
+            // Acked: gone from its level.
+            sub.ack(&m).await.unwrap();
+            let q = reported(ranked_id, &|q| q.acked == 1 && q.ready_level_unread == 0).await;
+            assert_eq!(q.ready + q.in_flight, 6, "{q:?}");
+            assert_eq!(q.ready_by_level.iter().sum::<u64>(), q.ready, "{q:?}");
+            assert_eq!(q.ready_by_level, left(q.in_flight + 1), "{q:?}");
+            sub.close().await;
+
+            // A single active consumer and a standby; the queue has no
+            // levels.
+            let first = c.subscribe("line", 5).await.expect("subscribed");
+            let second = c.subscribe("line", 5).await.expect("subscribed");
+            let q = reported(line_id, &|q| q.consumers.len() == 2).await;
+            let mut states: Vec<_> = q.consumers.iter().map(|c| c.state).collect();
+            states.sort_by_key(|s| s.code());
+            use lotse_proto::ConsumerState::{Active, Standby};
+            assert_eq!(states, vec![Active, Standby], "{q:?}");
+            assert!(q.ready_by_level.is_empty() && q.ready_level_unread == 0);
+            // The first one leaves: the standby takes over.
+            first.close().await;
+            let q = reported(line_id, &|q| q.consumers.len() == 1).await;
+            assert_eq!(q.consumers[0].state, Active, "{q:?}");
+            second.close().await;
+
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}

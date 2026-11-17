@@ -199,6 +199,9 @@ public final class Messages {
     /** The subscription a requeueing {@code Nack} came on (ADR 0106). */
     static final long TAG_NACK_SUBSCRIPTION = 0;
 
+    /** A queue's ready messages per priority level and its subscriptions' states, in a {@code DescribeMetrics} answer (ADR 0120). */
+    static final long TAG_QUEUE_DETAILS = 3;
+
     /** A tag holding one string. */
     static Tag stringTag(long tag, String value) {
         Writer v = new Writer();
@@ -891,8 +894,47 @@ public final class Messages {
      * @param peer the client's address
      * @param inFlight messages delivered to it and not acknowledged, a {@code u32}
      * @param credit messages it may still be sent, a {@code u32}
+     * @param state shared, active or standby (ADR 0120)
      */
-    public record ConsumerMetrics(long subscriptionId, String peer, long inFlight, long credit) {}
+    public record ConsumerMetrics(long subscriptionId, String peer, long inFlight, long credit, ConsumerState state) {
+        /** Creates the structure. */
+        public ConsumerMetrics {
+            java.util.Objects.requireNonNull(state, "state");
+        }
+    }
+
+    /** What a subscription does on its queue (ADR 0120). */
+    public enum ConsumerState {
+        /** The queue has no single active consumer: every subscription gets messages. */
+        SHARED,
+        /** The single active consumer (ADR 0076). */
+        ACTIVE,
+        /** Waits for its turn as a single active consumer. */
+        STANDBY;
+
+        /**
+         * The code on the wire.
+         *
+         * @return 0, 1 or 2
+         */
+        public int code() {
+            return ordinal();
+        }
+
+        /**
+         * The state a code stands for; a code from a newer version reads as shared.
+         *
+         * @param code the code
+         * @return the state
+         */
+        public static ConsumerState fromCode(int code) {
+            return switch (code) {
+                case 1 -> ACTIVE;
+                case 2 -> STANDBY;
+                default -> SHARED;
+            };
+        }
+    }
 
     /**
      * A queue the node leads. All counters are {@code u64}.
@@ -904,6 +946,10 @@ public final class Messages {
      * @param delivered messages delivered, while this node led the queue
      * @param acked messages acknowledged, likewise
      * @param consumers subscriptions
+     * @param readyByLevel on a queue with priority levels: ready messages per level, level 0 first; empty otherwise
+     *     (ADR 0120)
+     * @param readyLevelUnread on a queue with priority levels: ready messages whose level the leader has not read yet;
+     *     with {@code readyByLevel} they sum to {@code ready}
      */
     public record QueueMetrics(
             long resourceId,
@@ -912,10 +958,13 @@ public final class Messages {
             long inOpenTxns,
             long delivered,
             long acked,
-            List<ConsumerMetrics> consumers) {
+            List<ConsumerMetrics> consumers,
+            List<Long> readyByLevel,
+            long readyLevelUnread) {
         /** Creates the structure. */
         public QueueMetrics {
             consumers = List.copyOf(consumers);
+            readyByLevel = List.copyOf(readyByLevel);
         }
     }
 

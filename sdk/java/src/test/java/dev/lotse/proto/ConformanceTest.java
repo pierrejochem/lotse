@@ -176,6 +176,25 @@ class ConformanceTest {
         assertTrue(found);
     }
 
+    /** Tag 3 of a metrics answer: ready messages per priority level and the subscriptions' states (ADR 0120). */
+    @Test
+    void queueDetailsAreReadIntoTheirQueues() {
+        boolean found = false;
+        for (String[] v : Vectors.lines("responses.hex")) {
+            Response r = Frames.decodeResponse(Vectors.hex(v[2]), new ApiKey(Integer.parseInt(v[1]))).response();
+            if (r instanceof Response.DescribeMetrics m && !m.queues().isEmpty()) {
+                found = true;
+                Messages.QueueMetrics q = m.queues().get(0);
+                assertEquals(java.util.List.of(2L, 1L, 1L), q.readyByLevel());
+                assertEquals(1L, q.readyLevelUnread());
+                assertEquals(Messages.ConsumerState.ACTIVE, q.consumers().get(0).state());
+                assertEquals(Messages.ConsumerState.STANDBY, q.consumers().get(1).state());
+                assertEquals("10.0.0.9:40100", q.consumers().get(1).peer());
+            }
+        }
+        assertTrue(found);
+    }
+
     @Test
     void leaderHintsAreDecodedWhereTheyAreTagBlocks() {
         boolean produce = false;

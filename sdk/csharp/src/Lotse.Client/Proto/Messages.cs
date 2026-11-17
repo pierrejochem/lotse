@@ -62,6 +62,9 @@ public static class Messages
     /// <summary>Tag of the subscription a requeueing <c>Nack</c> came on (ADR 0106).</summary>
     internal const long TagNackSubscription = 0;
 
+    /// <summary>Tag of a queue's ready messages per priority level and its subscriptions' states, in a <c>DescribeMetrics</c> answer (ADR 0120).</summary>
+    internal const long TagQueueDetails = 3;
+
     /// <summary>The smallest <see cref="RoleBinding"/>: two flags and three empty strings.</summary>
     internal const int BindingMin = 1 + 2 + 1 + 2 + 2;
 
@@ -683,7 +686,22 @@ public static class Messages
     /// <param name="Peer">The client's address.</param>
     /// <param name="InFlight">Messages delivered to it and not acknowledged.</param>
     /// <param name="Credit">Messages it may still be sent.</param>
-    public sealed record ConsumerMetrics(uint SubscriptionId, string Peer, uint InFlight, uint Credit);
+    /// <param name="State">Shared, active or standby (ADR 0120).</param>
+    public sealed record ConsumerMetrics(
+        uint SubscriptionId, string Peer, uint InFlight, uint Credit, ConsumerState State = ConsumerState.Shared);
+
+    /// <summary>What a subscription does on its queue (ADR 0120). Codes from a newer version read as shared.</summary>
+    public enum ConsumerState : byte
+    {
+        /// <summary>The queue has no single active consumer: every subscription gets messages.</summary>
+        Shared = 0,
+
+        /// <summary>The single active consumer (ADR 0076).</summary>
+        Active = 1,
+
+        /// <summary>Waits for its turn as a single active consumer.</summary>
+        Standby = 2,
+    }
 
     /// <summary>A queue the node leads.</summary>
     /// <param name="ResourceId">The queue.</param>
@@ -693,6 +711,8 @@ public static class Messages
     /// <param name="Delivered">Messages delivered, while this node led the queue.</param>
     /// <param name="Acked">Messages acknowledged, likewise.</param>
     /// <param name="Consumers">Subscriptions.</param>
+    /// <param name="ReadyByLevel">On a queue with priority levels: ready messages per level, level 0 first; empty otherwise (ADR 0120).</param>
+    /// <param name="ReadyLevelUnread">On a queue with priority levels: ready messages whose level the leader has not read yet; with <paramref name="ReadyByLevel"/> they sum to <paramref name="Ready"/>.</param>
     public sealed record QueueMetrics(
         ulong ResourceId,
         ulong Ready,
@@ -700,7 +720,9 @@ public static class Messages
         ulong InOpenTxns,
         ulong Delivered,
         ulong Acked,
-        IReadOnlyList<ConsumerMetrics> Consumers);
+        IReadOnlyList<ConsumerMetrics> Consumers,
+        IReadOnlyList<ulong> ReadyByLevel,
+        ulong ReadyLevelUnread);
 
     /// <summary>A member of a consumer group.</summary>
     /// <param name="MemberId">The member.</param>

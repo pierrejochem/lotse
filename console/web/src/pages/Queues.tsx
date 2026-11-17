@@ -66,6 +66,8 @@ export function QueueDetail() {
   if (q.isError) return <main className="page"><Failed error={q.error} retry={() => q.refetch()} /></main>;
   const d = q.data;
   const maxReady = Math.max(1, ...d.levels.map((l) => l.ready));
+  // One log for every level (ADR 0078): one leader.
+  const leader = d.levels[0]?.leader;
   const levelName = (l: number, n: number) => (n === 1 ? 'Single level' : l === n - 1 ? `Level ${l}, highest` : l === 0 ? 'Level 0, lowest' : `Level ${l}`);
   return (
     <main className="page">
@@ -101,14 +103,22 @@ export function QueueDetail() {
           <div>
             <h2 id="prio-title" className="h3">Priority levels</h2>
             <p className="small muted" style={{ margin: '4px 0 0' }}>Messages carry their level in the x-lotse-priority header. Delivery takes the highest level with ready messages first.</p>
+            {leader !== undefined && (
+              <p className="small muted" style={{ margin: '4px 0 0' }}>
+                All levels share one log, led by <span className="mono">{leader}</span>{' '}
+                <MoveLeaderButton cluster={cluster} resource={d.name} partition={0} leader={leader} replicas={replicasOf(leader)} />
+              </p>
+            )}
           </div>
+          {d.levels_unread > 0 && (
+            <p className="small muted" style={{ margin: 0 }} role="status">
+              {count(d.levels_unread)} ready message{d.levels_unread === 1 ? '' : 's'} not counted per level yet: the leader is still reading their levels from the log.
+            </p>
+          )}
           {d.levels.map((l) => (
             <div key={l.level} className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
               <div className="between">
-                <span style={{ fontWeight: 600 }}>
-                  {levelName(l.level, d.levels.length)} <span className="small muted" style={{ fontWeight: 400 }}>leader <span className="mono">{l.leader}</span></span>{' '}
-                  <MoveLeaderButton cluster={cluster} resource={d.name} partition={l.level} leader={l.leader} replicas={replicasOf(l.leader)} />
-                </span>
+                <span style={{ fontWeight: 600 }}>{levelName(l.level, d.levels.length)}</span>
                 <span className="num" style={{ fontSize: 14 }}>
                   <strong>{count(l.ready)}</strong> ready{l.ready > 0 && ` · oldest ${duration(l.oldest_ms)}`}
                 </span>
