@@ -16,6 +16,7 @@ mod groups;
 mod membership;
 mod metadata;
 mod node;
+pub mod ops;
 mod producers;
 mod replica;
 mod signal;

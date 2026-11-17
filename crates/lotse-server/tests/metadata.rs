@@ -1463,3 +1463,87 @@ fn a_new_binding_counts_for_the_next_publish_at_once() {
         })
     });
 }
+
+/// What the operator's endpoint tells (ADR 0117): every node is ready and
+/// may stop while all three run; with one down, the others stay ready but
+/// none of them may stop, since each of its three-voter groups would be
+/// left with one voter; a node cut off from the others is not ready, and
+/// once healed, all are ready and may stop again.
+#[test]
+fn nodes_say_whether_they_are_ready_and_may_stop() {
+    use lotse_server::ops::Scraper;
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), 3).await;
+            let admin =
+                Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config(3) });
+            admin.create_stream("watched", 1, 3).await.unwrap();
+            let (mut leader, mut voters) = leader_of(&admin, "watched").await;
+            while leader == 0 || voters.len() < 3 {
+                rt.sleep(Duration::from_millis(100)).await;
+                (leader, voters) = leader_of(&admin, "watched").await;
+            }
+            let handle = |w: &World, id: u64| w.running[&id].as_ref().unwrap().1.clone();
+            // Waits until a condition holds, for at most 20 s.
+            macro_rules! until {
+                ($what:expr, $check:expr) => {{
+                    let since = rt.now();
+                    while !$check {
+                        assert!(rt.now() - since < Duration::from_secs(20), "{}", $what);
+                        rt.sleep(Duration::from_millis(100)).await;
+                    }
+                }};
+            }
+            for id in 1..=3 {
+                let h = handle(&w, id);
+                until!(&format!("node {id} is ready"), {
+                    h.observe(Scraper::Local).await.unwrap().not_ready().is_empty()
+                });
+                until!(&format!("node {id} may stop"), h.safe_to_stop().await.unwrap().is_empty());
+                let obs = h.observe(Scraper::Local).await.unwrap();
+                assert!(obs.may_scrape, "on loopback anyone on the machine may");
+                assert!(obs.groups.len() >= 3, "the metadata, coordinator and stream groups: {:?}", obs.groups.keys());
+            }
+            let down = u64::from(leader);
+            w.crash(down, false).await;
+            for id in (1..=3).filter(|id| *id != down) {
+                let h = handle(&w, id);
+                until!(&format!("node {id} stays ready with node {down} down"), {
+                    h.observe(Scraper::Local).await.unwrap().not_ready().is_empty()
+                });
+                let groups: BTreeSet<u64> = h.observe(Scraper::Local).await.unwrap().groups.keys().copied().collect();
+                until!(&format!("node {id} may not stop with node {down} down"), {
+                    let critical: BTreeSet<u64> = h.safe_to_stop().await.unwrap().iter().map(|c| c.group).collect();
+                    critical == groups
+                });
+            }
+            w.start(down).await;
+            let cut = (1..=3).find(|id| *id != down).unwrap();
+            for other in (1..=3).filter(|id| *id != cut) {
+                rt.net().block(&format!("n{cut}"), &format!("n{other}"));
+            }
+            let h = handle(&w, cut);
+            // Once its groups have had time to elect without it, none of
+            // them is ready on it: it leads none with a quorum and hears no
+            // leader.
+            rt.sleep(Duration::from_secs(2)).await;
+            let obs = h.observe(Scraper::Local).await.unwrap();
+            let not_ready: BTreeSet<u64> = obs.not_ready().into_iter().map(|(g, _)| g).collect();
+            assert_eq!(not_ready, obs.groups.keys().copied().collect(), "node {cut}, cut off: {:?}", obs.not_ready());
+            rt.net().heal();
+            for id in 1..=3 {
+                let h = handle(&w, id);
+                until!(&format!("node {id} is ready again"), {
+                    h.observe(Scraper::Local).await.unwrap().not_ready().is_empty()
+                });
+                until!(&format!("node {id} may stop again"), h.safe_to_stop().await.unwrap().is_empty());
+            }
+            for (_, n) in std::mem::take(&mut w.running) {
+                if let Some((node, handle)) = n {
+                    handle.stop();
+                    node.join().await.unwrap();
+                }
+            }
+        });
+    });
+}

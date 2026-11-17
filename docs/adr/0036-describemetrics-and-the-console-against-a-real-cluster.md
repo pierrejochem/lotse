@@ -1,6 +1,6 @@
 # 36. DescribeMetrics and the console against a real cluster
 
-- Status: Accepted
+- Status: Accepted (refined by [ADR 0117](0117-prometheus-metrics-and-health-endpoints-on-every-node.md))
 - Date: 2026-10-28
 
 ## Context

@@ -11,6 +11,7 @@ use bytes::Bytes;
 use lotse_record::Batch;
 use lotse_rt_tokio::TlsConfig;
 use lotse_rt_tokio::TokioRuntime;
+use lotse_rt_tokio::{HttpRequest, HttpResponse};
 use lotse_server::{ClientCas, Node, StateMachine};
 
 use crate::config::{ClusterFile, ConfigError};
@@ -35,6 +36,14 @@ pub enum RunError {
     /// The node itself.
     #[error(transparent)]
     Node(#[from] lotse_server::Error),
+    /// The metrics endpoint could not listen.
+    #[error("metrics at {addr}: {source}")]
+    Metrics {
+        /// Where it should have listened.
+        addr: String,
+        /// Why it did not.
+        source: std::io::Error,
+    },
 }
 
 /// Streams, queues and the metadata and coordinator groups keep their state
@@ -167,8 +176,20 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     // Stops with this function, however it returns.
     let _reload =
         AbortOnDrop(tokio::spawn(reload_tls(rt.clone(), file.clone(), id, cfg.auth.client_cas.clone())).abort_handle());
-    let node = Node::start(rt, cfg, |_| NoStateMachine).await?;
+    let metrics_at = file.node(id)?.metrics.clone();
+    let node = Node::start(rt.clone(), cfg, |_| NoStateMachine).await?;
     let handle = node.handle();
+    // The operator's endpoint (ADR 0117); stops with this function too.
+    let _metrics = match metrics_at {
+        Some(addr) => {
+            let listener =
+                rt.bind_http(&addr).await.map_err(|source| RunError::Metrics { addr: addr.clone(), source })?;
+            tracing::info!(node = id, metrics = %listener.local_addr(), tls = listener.tls(), "serving metrics");
+            let handle = handle.clone();
+            Some(AbortOnDrop(tokio::spawn(listener.serve(move |req| operator(handle.clone(), req))).abort_handle()))
+        }
+        None => None,
+    };
     let stopped = node.join();
     tokio::pin!(stopped);
     tokio::select! {
@@ -195,6 +216,89 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     }
     tracing::info!(node = id, "stopped");
     Ok(())
+}
+
+/// How long the operator's endpoint waits for the node's main loop; a loop
+/// that does not answer in this time is not healthy.
+const OBSERVE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long `/safe-to-stop` waits for the other nodes' answers.
+const JUDGE_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Answers one request to the operator's endpoint (ADR 0117).
+///
+/// - `/metrics`: OpenMetrics text for Prometheus. It names every tenant's
+///   resources: over TLS only for a client certificate whose principal sees
+///   the whole cluster.
+/// - `/healthz`: 200 while the node's main loop answers.
+/// - `/readyz`: 200 once every group on the node has a leader it hears and
+///   keeps up with, or leads with a quorum.
+/// - `/safe-to-stop`: 200 unless stopping the node now would leave a group
+///   without a quorum, as the groups' leaders see it.
+///
+/// The last three carry group ids and node ids, no names, and are open to
+/// probes without a certificate.
+pub async fn operator(handle: lotse_server::NodeHandle, req: HttpRequest) -> HttpResponse {
+    use lotse_server::ops::{self, Scraper};
+    let scraper = match req.tls {
+        false => Scraper::Local,
+        true => Scraper::Tls { identity: req.identity.clone(), cert: req.cert.clone() },
+    };
+    let observe =
+        |scraper| async { tokio::time::timeout(OBSERVE_WITHIN, handle.observe(scraper)).await.ok().flatten() };
+    match req.path.as_str() {
+        "/metrics" => match observe(scraper).await {
+            None => HttpResponse::text(503, "the node does not answer\n"),
+            Some(obs) if !obs.may_scrape => HttpResponse::text(
+                403,
+                "metrics name every tenant's resources: show a client certificate from the cluster CA whose \
+                 principal holds cluster-viewer or cluster-admin\n",
+            ),
+            Some(obs) => HttpResponse {
+                status: 200,
+                content_type: ops::OPENMETRICS_CONTENT_TYPE.into(),
+                body: ops::render(&obs).into_bytes(),
+            },
+        },
+        "/healthz" => match observe(Scraper::Local).await {
+            Some(_) => HttpResponse::text(200, "ok\n"),
+            None => HttpResponse::text(503, "the node's main loop does not answer\n"),
+        },
+        "/readyz" => match observe(Scraper::Local).await {
+            None => HttpResponse::text(503, "the node's main loop does not answer\n"),
+            Some(obs) => {
+                let not_ready = obs.not_ready();
+                if not_ready.is_empty() {
+                    return HttpResponse::text(200, "ready\n");
+                }
+                let mut text = String::from("not ready\n");
+                for (g, why) in not_ready {
+                    text.push_str(&format!("group {g}: {why}\n"));
+                }
+                HttpResponse::text(503, text)
+            }
+        },
+        "/safe-to-stop" => match tokio::time::timeout(JUDGE_WITHIN, handle.safe_to_stop()).await {
+            Err(_) => HttpResponse::text(503, "the other nodes did not answer in time\n"),
+            Ok(Err(e)) => HttpResponse::text(503, format!("cannot tell: {e}\n")),
+            Ok(Ok(critical)) if critical.is_empty() => HttpResponse::text(200, "safe to stop\n"),
+            Ok(Ok(critical)) => {
+                let mut text = String::from("not safe to stop\n");
+                for c in critical {
+                    let voters = c.voters.len();
+                    match c.responsive {
+                        Some(r) => text.push_str(&format!(
+                            "group {}: {} of {voters} voters would remain answering\n",
+                            c.group,
+                            r.len()
+                        )),
+                        None => text.push_str(&format!("group {}: no node reports leading it\n", c.group)),
+                    }
+                }
+                HttpResponse::text(503, text)
+            }
+        },
+        _ => HttpResponse::text(404, "not found: /metrics, /healthz, /readyz, /safe-to-stop\n"),
+    }
 }
 
 /// How long a stopping node may take to hand over the groups it leads.

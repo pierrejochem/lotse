@@ -136,7 +136,16 @@ pub fn node_certs(file: &ClusterFile, days: u32) -> Result<Vec<Outcome>, CertErr
         }
         let uri = format!("{}{}", lotse_rt::PeerIdentity::NODE_URI, node.id);
         let mut sans = vec![SanType::URI(uri.try_into().map_err(|e| cert_err("the node URI", e))?)];
-        let mut hosts: Vec<&str> = [&node.peer, &node.client].iter().filter_map(|a| host_of(a)).collect();
+        // Prometheus checks the metrics endpoint's name too (ADR 0117); a
+        // wildcard bind address names no host.
+        let metrics = node
+            .metrics
+            .iter()
+            .filter_map(|a| host_of(a))
+            .filter(|h| h.parse::<std::net::IpAddr>().map_or(true, |ip| !ip.is_unspecified()));
+        let mut hosts: Vec<&str> =
+            [&node.peer, &node.client].iter().filter_map(|a| host_of(a)).chain(metrics).collect();
+        hosts.sort_unstable();
         hosts.dedup();
         for h in hosts {
             sans.push(san(h)?);
