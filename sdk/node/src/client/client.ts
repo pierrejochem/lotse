@@ -454,12 +454,14 @@ export class LotseClient {
           switch (e.kind) {
             case "FAIL": {
               // A failed login or a refusal now says nothing of an earlier attempt whose answer was lost: that one may
-              // have been carried out. (An answer about the request itself, such as RESOURCE_EXISTS, is the caller's
-              // to read.)
+              // have been carried out. So does a full queue (ADR 0118): an earlier attempt may commit at a leader that
+              // has it in its log. (An answer about the request itself, such as RESOURCE_EXISTS, is the caller's to
+              // read.)
               const err = e.error as ClientError;
               const refusal =
                 err instanceof ClientAuthenticationError ||
-                (err instanceof BrokerResponseError && err.code === ErrorCode.UNAUTHORIZED);
+                (err instanceof BrokerResponseError &&
+                  (err.code === ErrorCode.UNAUTHORIZED || err.code === ErrorCode.QUEUE_FULL));
               if (maybeDone && refusal) {
                 throw new UnknownOutcomeError(`an earlier attempt may have been carried out; then ${err.message}`);
               }

@@ -814,3 +814,56 @@ fn resume_windows_are_set_and_changed_and_survive_a_snapshot() {
     cut.pop();
     assert!(decode_change(&cut).is_err(), "a window promised but cut short");
 }
+
+#[test]
+fn length_limits_are_set_and_changed_and_survive_a_snapshot() {
+    use lotse_queue::{LengthLimit, Overflow};
+    let mut s = MetadataState::default();
+    let length = LengthLimit { max_messages: 1_000, max_bytes: 1 << 20, overflow: Overflow::DropHead };
+    let all =
+        QueueLimits { single_active: true, priority_levels: 4, resume_window_ms: 5_000, length, ..Default::default() };
+    let only = QueueLimits {
+        length: LengthLimit { max_messages: 0, max_bytes: 64, overflow: Overflow::RejectPublish },
+        ..Default::default()
+    };
+    for (i, l) in [all, only].into_iter().enumerate() {
+        let c = queue(&format!("q{i}"), "t", l);
+        assert_eq!(decode_change(&change_bytes(&c)).unwrap(), c);
+    }
+    // A queue without a limit writes what nodes from before read.
+    let plain = queue("p", "t", QueueLimits::default());
+    assert!(!change_bytes(&plain).is_empty());
+    let before = s.encode();
+    s.apply(1, &payload(&queue("q0", "t", all))).unwrap();
+    s.apply(2, &payload(&queue("q1", "t", only))).unwrap();
+    let (q0, q1) = (resource_id(1), resource_id(2));
+    assert_eq!((s.queues[&q0].limits, s.queues[&q1].limits), (all, only));
+    assert_eq!(MetadataState::decode(&before).unwrap(), MetadataState::default(), "without limits as before");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // Each part changes on its own; 0 lifts a limit.
+    let alter = |id, change| Change::AlterQueue { resource_id: id, change };
+    let changes = [
+        QueueChange { max_length: Some(5), ..Default::default() },
+        QueueChange { max_length_bytes: Some(0), ..Default::default() },
+        QueueChange { overflow: Some(Overflow::RejectPublish), resume_window_ms: Some(7), ..Default::default() },
+    ];
+    for (i, c) in changes.into_iter().enumerate() {
+        let a = alter(q0, c);
+        assert_eq!(decode_change(&change_bytes(&a)).unwrap(), a);
+        s.apply(3 + i as u64, &payload(&a)).unwrap();
+    }
+    assert_eq!(
+        s.queues[&q0].limits.length,
+        LengthLimit { max_messages: 5, max_bytes: 0, overflow: Overflow::RejectPublish }
+    );
+    assert_eq!(s.queues[&q0].limits.resume_window_ms, 7);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    let mut cut = change_bytes(&queue("x", "t", only)).to_vec();
+    cut.pop();
+    assert!(decode_change(&cut).is_err(), "a limit promised but cut short");
+    let mut bad = change_bytes(&queue("x", "t", only)).to_vec();
+    *bad.last_mut().unwrap() = 9;
+    assert!(decode_change(&bad).is_err(), "an unknown overflow");
+}

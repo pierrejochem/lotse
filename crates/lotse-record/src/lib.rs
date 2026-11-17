@@ -1152,6 +1152,9 @@ pub mod dead_letter {
         /// An operator moved it from a dead-letter queue back to the queue
         /// it came from (ADR 0064).
         Requeued,
+        /// The queue was over its length limit and dropped its oldest
+        /// waiting messages (`overflow = drop-head`, ADR 0118).
+        MaxLength,
     }
 
     impl Reason {
@@ -1161,6 +1164,7 @@ pub mod dead_letter {
                 Reason::MaxDeliveries => 0,
                 Reason::Expired => 1,
                 Reason::Requeued => 2,
+                Reason::MaxLength => 3,
             }
         }
 
@@ -1170,6 +1174,7 @@ pub mod dead_letter {
                 0 => Some(Reason::MaxDeliveries),
                 1 => Some(Reason::Expired),
                 2 => Some(Reason::Requeued),
+                3 => Some(Reason::MaxLength),
                 _ => None,
             }
         }
@@ -1180,6 +1185,7 @@ pub mod dead_letter {
                 Reason::MaxDeliveries => "max-deliveries",
                 Reason::Expired => "expired",
                 Reason::Requeued => "requeued",
+                Reason::MaxLength => "max-length",
             }
         }
     }

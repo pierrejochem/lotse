@@ -96,6 +96,39 @@ public sealed class QueueOptions
         /// <summary>How long a message may wait in the queue before it is retired (<c>message.ttl.ms</c>).</summary>
         public Builder WithMessageTtl(TimeSpan ttl) => WithSetting("message.ttl.ms", Millis(ttl, nameof(ttl)));
 
+        /// <summary>How many messages may wait for delivery (<c>max.length</c>, ADR 0118); messages out with a consumer do not count.</summary>
+        public Builder WithMaxLength(ulong messages)
+        {
+            if (messages < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(messages), "max.length is a number of messages from 1");
+            }
+            return WithSetting("max.length", messages.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>How many bytes of keys, values and headers may wait for delivery (<c>max.length.bytes</c>, ADR 0118).</summary>
+        public Builder WithMaxLengthBytes(ulong bytes)
+        {
+            if (bytes < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(bytes), "max.length.bytes is a number of bytes from 1");
+            }
+            return WithSetting("max.length.bytes", bytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// What a full queue does (<c>overflow</c>, ADR 0118): <c>reject-publish</c> (the default) refuses with
+        /// QUEUE_FULL, <c>drop-head</c> retires the oldest waiting messages, into the dead-letter queue if there is one.
+        /// </summary>
+        public Builder WithOverflow(string overflow)
+        {
+            if (overflow != "reject-publish" && overflow != "drop-head")
+            {
+                throw new ArgumentOutOfRangeException(nameof(overflow), $"overflow is reject-publish or drop-head, not {overflow}");
+            }
+            return WithSetting("overflow", overflow);
+        }
+
         /// <summary>A queue of the same tenant that receives the messages the limits retire; without one they are dropped.</summary>
         public Builder WithDeadLetterQueue(string name)
         {

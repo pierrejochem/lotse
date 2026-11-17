@@ -6,7 +6,7 @@ import { asI64 } from "../record/unsigned.js";
  * message to a dead-letter queue. They describe the latest move.
  */
 export interface DeadLetter {
-  /** Why: `max-deliveries` or `expired`. */
+  /** Why: `max-deliveries`, `expired`, `requeued` or `max-length` (ADR 0118). */
   readonly reason: string;
   /** The name of the queue the message came from. */
   readonly queue: string;

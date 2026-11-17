@@ -47,6 +47,15 @@ export interface QueueOptions {
   readonly singleActiveConsumer?: boolean;
   /** Priority levels, 2 to 10 (`priority.levels`, ADR 0078); 1 means none, the default. */
   readonly priorityLevels?: number;
+  /** How many messages may wait for delivery (`max.length`, ADR 0118); messages out with a consumer do not count. */
+  readonly maxLength?: number;
+  /** How many bytes of keys, values and headers may wait for delivery (`max.length.bytes`, ADR 0118). */
+  readonly maxLengthBytes?: number;
+  /**
+   * What a full queue does (`overflow`, ADR 0118): `reject-publish` (the default) refuses with QUEUE_FULL, `drop-head`
+   * retires the oldest waiting messages, into the dead-letter queue if there is one.
+   */
+  readonly overflow?: "reject-publish" | "drop-head";
   /** Any other queue settings, by key. A key that a field above also sets is a `RangeError`. */
   readonly settings?: Readonly<Record<string, string>>;
 }
@@ -82,6 +91,18 @@ export function queueConfigs(o: QueueOptions): { replication: number; configs: C
   }
   if (o.priorityLevels !== undefined) {
     set("priority.levels", String(whole("priorityLevels", o.priorityLevels, 1, 10)));
+  }
+  if (o.maxLength !== undefined) {
+    set("max.length", String(whole("maxLength", o.maxLength, 1, Number.MAX_SAFE_INTEGER)));
+  }
+  if (o.maxLengthBytes !== undefined) {
+    set("max.length.bytes", String(whole("maxLengthBytes", o.maxLengthBytes, 1, Number.MAX_SAFE_INTEGER)));
+  }
+  if (o.overflow !== undefined) {
+    if (o.overflow !== "reject-publish" && o.overflow !== "drop-head") {
+      throw new RangeError(`overflow must be reject-publish or drop-head, not ${String(o.overflow)}`);
+    }
+    set("overflow", o.overflow);
   }
   // Explicit fields were set first, so a clash with `settings` shows as a duplicate.
   const explicit = new Set(map.keys());

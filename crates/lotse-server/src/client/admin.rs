@@ -181,6 +181,10 @@ const DEAD_LETTER: &str = "dead.letter.queue";
 const SINGLE_ACTIVE: &str = "single.active.consumer";
 const PRIORITY_LEVELS: &str = "priority.levels";
 const RESUME_WINDOW: &str = "resume.window.ms";
+/// A queue's length limit (ADR 0118).
+const MAX_LENGTH: &str = "max.length";
+const MAX_LENGTH_BYTES: &str = "max.length.bytes";
+const OVERFLOW: &str = "overflow";
 /// The most priority levels a queue may have.
 const MAX_PRIORITY_LEVELS: u8 = 10;
 /// The most deliveries a limit may name: a delivery count is 16 bits.
@@ -316,13 +320,28 @@ fn set_queue(
         RESUME_WINDOW if change.resume_window_ms.is_none() => {
             change.resume_window_ms = Some(number("a number of milliseconds above 0", u64::MAX)?);
         }
-        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER | SINGLE_ACTIVE | PRIORITY_LEVELS | RESUME_WINDOW => {
+        MAX_LENGTH if change.max_length.is_none() => {
+            change.max_length = Some(number("a number of messages above 0", u64::MAX)?);
+        }
+        MAX_LENGTH_BYTES if change.max_length_bytes.is_none() => {
+            change.max_length_bytes = Some(number("a number of bytes above 0", u64::MAX)?);
+        }
+        OVERFLOW if change.overflow.is_none() => {
+            change.overflow = Some(match value {
+                None => lotse_queue::Overflow::default(),
+                Some(v) => lotse_queue::Overflow::parse(v)
+                    .ok_or_else(|| format!("{key} = {v}: reject-publish or drop-head"))?,
+            });
+        }
+        ACK_TIMEOUT | MAX_DELIVERIES | MESSAGE_TTL | DEAD_LETTER | SINGLE_ACTIVE | PRIORITY_LEVELS | RESUME_WINDOW
+        | MAX_LENGTH | MAX_LENGTH_BYTES | OVERFLOW => {
             return Err(twice());
         }
         _ => {
             return Err(format!(
                 "queues have no setting {key}; {ACK_TIMEOUT}, {MAX_DELIVERIES}, {MESSAGE_TTL}, {DEAD_LETTER}, \
-                 {SINGLE_ACTIVE}, {PRIORITY_LEVELS} and {RESUME_WINDOW} can be set"
+                 {SINGLE_ACTIVE}, {PRIORITY_LEVELS}, {RESUME_WINDOW}, {MAX_LENGTH}, {MAX_LENGTH_BYTES} and \
+                 {OVERFLOW} can be set"
             ));
         }
     }
@@ -1081,7 +1100,14 @@ impl Clients {
         let entry = |ms: u64, source| ConfigEntry { key: ACK_TIMEOUT.into(), value: ms.to_string(), source };
         // A queue's limits: 0 (off) and no dead-letter queue are the defaults.
         let window_default = super::QueueConfig::DEFAULT_RESUME_WINDOW.as_millis() as u64;
-        let limit_entries = |max: u32, ttl: u64, dlq: u64, single: bool, levels: u8, window: u64, source| {
+        let limit_entries = |max: u32,
+                             ttl: u64,
+                             dlq: u64,
+                             single: bool,
+                             levels: u8,
+                             window: u64,
+                             length: lotse_queue::LengthLimit,
+                             source| {
             let on = |set: bool| if set { source } else { config_source::DEFAULT };
             let dlq_name = view.queues.iter().find(|q| q.resource_id == dlq).map_or(String::new(), |q| q.name.clone());
             vec![
@@ -1094,6 +1120,21 @@ impl Clients {
                     key: RESUME_WINDOW.into(),
                     value: if window == 0 { window_default } else { window }.to_string(),
                     source: on(window != 0),
+                },
+                ConfigEntry {
+                    key: MAX_LENGTH.into(),
+                    value: length.max_messages.to_string(),
+                    source: on(length.max_messages != 0),
+                },
+                ConfigEntry {
+                    key: MAX_LENGTH_BYTES.into(),
+                    value: length.max_bytes.to_string(),
+                    source: on(length.max_bytes != 0),
+                },
+                ConfigEntry {
+                    key: OVERFLOW.into(),
+                    value: length.overflow.name().into(),
+                    source: on(length.overflow != lotse_queue::Overflow::default()),
                 },
             ]
         };
@@ -1127,6 +1168,7 @@ impl Clients {
                         l.single_active,
                         l.priority_levels,
                         l.resume_window_ms,
+                        l.length,
                         config_source::DYNAMIC,
                     ));
                     all.push(replication(resource_id, q.voters.len()));
@@ -1155,6 +1197,7 @@ impl Clients {
                         } else {
                             q.resume_window.as_millis() as u64
                         },
+                        q.length,
                         config_source::STATIC,
                     ));
                     Some(all)

@@ -4,7 +4,7 @@ package dev.lotse.client;
  * Where a dead-lettered message came from, read from the {@code x-lotse-dead-letter-*} headers the broker adds
  * when it moves a message to a dead-letter queue. They describe the latest move.
  *
- * @param reason why: {@code max-deliveries} or {@code expired}
+ * @param reason why: {@code max-deliveries}, {@code expired}, {@code requeued} or {@code max-length} (ADR 0118)
  * @param queue the name of the queue the message came from
  * @param queueId that queue's resource id, a {@code u64}
  * @param offset the message's offset there, a {@code u64}

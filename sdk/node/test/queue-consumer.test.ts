@@ -1008,6 +1008,9 @@ describe("a queue consumer against scripted brokers", () => {
         deadLetterQueue: "dead",
         singleActiveConsumer: true,
         priorityLevels: 4,
+        maxLength: 1000,
+        maxLengthBytes: 65536,
+        overflow: "drop-head",
         settings: { "x.other": "1" },
       });
       assert.equal(id, 77n);
@@ -1022,7 +1025,10 @@ describe("a queue consumer against scripted brokers", () => {
       assert.deepEqual(req.configs, [
         { key: "ack.timeout.ms", value: "700" },
         { key: "max.deliveries", value: "3" },
+        { key: "max.length", value: "1000" },
+        { key: "max.length.bytes", value: "65536" },
         { key: "message.ttl.ms", value: "60000" },
+        { key: "overflow", value: "drop-head" },
         { key: "priority.levels", value: "4" },
         { key: "single.active.consumer", value: "true" },
         { key: "x.other", value: "1" },
@@ -1058,6 +1064,9 @@ describe("a queue consumer against scripted brokers", () => {
       await assert.rejects(lotse.createQueue("q", { priorityLevels: 0 }), RangeError);
       await assert.rejects(lotse.createQueue("q", { maxDeliveries: -1 }), RangeError);
       await assert.rejects(lotse.createQueue("q", { ackTimeoutMs: 1.5 }), RangeError);
+      await assert.rejects(lotse.createQueue("q", { maxLength: 0 }), RangeError);
+      await assert.rejects(lotse.createQueue("q", { maxLengthBytes: 0 }), RangeError);
+      await assert.rejects(lotse.createQueue("q", { overflow: "reject-publish-dlx" as never }), RangeError);
       await assert.rejects(lotse.createQueue("q", { maxDeliveries: 2, settings: { "max.deliveries": "3" } }), RangeError);
       assert.equal(a.requests().length, 0);
     });

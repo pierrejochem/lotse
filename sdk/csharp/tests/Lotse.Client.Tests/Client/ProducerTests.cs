@@ -202,6 +202,31 @@ public sealed class ProducerTests : IDisposable
     }
 
     [Fact]
+    public async Task AFullQueueRefusesAtOnceAndTheSequenceStaysFree()
+    {
+        // ADR 0118: nothing was written, and the caller decides whether to try again.
+        Serve(n => n == 2 ? Fx.Produced(StreamId, 0, ErrorCode.QueueFull, 0) : Ok());
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        var e = await Assert.ThrowsAsync<BrokerErrorException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        Assert.Equal(ErrorCode.QueueFull, e.Code);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        List<Request.Produce> sent = _node.Requests<Request.Produce>();
+        Assert.Equal(3, sent.Count); // not asked again
+        Assert.Equal(1, Fx.BatchOf(sent[2]).BaseSequence); // the sequence of a batch that was not written is free
+    }
+
+    [Fact]
+    public async Task AFullQueueAfterALostAttemptIsReportedAsUnknown()
+    {
+        // The lost attempt may still commit at a leader that has it in its log.
+        Serve(n => n == 1 ? throw new FakeNode.Drop() : Fx.Produced(StreamId, 0, ErrorCode.QueueFull, 0));
+        LotseClient lotse = Client(true);
+        var e = await Assert.ThrowsAsync<OutcomeUnknownException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        Assert.Contains("may have been carried out", e.Message);
+    }
+
+    [Fact]
     public async Task AnOutcomeStillUnknownWhenTimeRunsOutIsReportedAndTheNextProduceGetsANewProducerId()
     {
         int phase = 0;
