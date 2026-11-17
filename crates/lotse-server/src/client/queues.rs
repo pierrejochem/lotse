@@ -89,6 +89,9 @@ pub struct QueueConfig {
     /// Priority levels (ADR 0078): messages of a higher level go first;
     /// 0 or 1 for none.
     pub priority_levels: u8,
+    /// How many messages, and bytes of them, may wait, and what happens
+    /// beyond (ADR 0118); none by default.
+    pub length: lotse_queue::LengthLimit,
 }
 
 impl QueueConfig {
@@ -110,6 +113,7 @@ impl QueueConfig {
             dead_letter: None,
             single_active: false,
             priority_levels: 0,
+            length: lotse_queue::LengthLimit::default(),
         }
     }
 }
@@ -771,8 +775,11 @@ impl Clients {
             self.stop_serving(g, ErrorCode::UNKNOWN_RESOURCE, None);
         }
         self.retiring.retain(|g, _| groups.contains_key(g));
+        self.lengths.retain(|g, _| groups.contains_key(g));
         for qc in view.queues {
             let Some(replica) = groups.get_mut(&qc.group) else { continue };
+            // What waits, before anything is retired for it (ADR 0118).
+            self.count(qc, replica).await?;
             let (g, raft) = (qc.group, replica.raft_ref());
             if raft.role() != Role::Leader {
                 self.retiring.remove(&g);

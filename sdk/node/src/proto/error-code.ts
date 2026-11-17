@@ -34,6 +34,8 @@ export const ErrorCode = {
   MESSAGE_NOT_HELD: 31,
   UNROUTABLE: 32,
   PRODUCER_LIMIT: 33,
+  /** The queue holds as many messages, or bytes, as its length limit admits and refuses more (ADR 0118); nothing was written. */
+  QUEUE_FULL: 34,
 } as const;
 
 /** An error code as it travels: a `u16`. Known codes are the values of `ErrorCode`. */

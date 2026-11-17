@@ -253,6 +253,16 @@ impl QueueLog {
         self.held.iter().find(|(_, (_, offsets))| offsets.contains(offset)).map(|(p, _)| *p)
     }
 
+    /// The unsettled messages open transactions hold, by producer.
+    pub fn held_offsets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.held.values().flat_map(|(_, o)| o.iter()).flat_map(|(f, t)| f..t).filter(|o| !self.settled.contains(*o))
+    }
+
+    /// The settled ranges that reach `from` or lie above it, in order.
+    pub fn settled_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.settled.iter().filter(move |(_, t)| *t > from)
+    }
+
     /// How many messages open transactions hold.
     pub fn held(&self) -> u64 {
         self.held.values().flat_map(|(_, o)| o.iter()).map(|(f, t)| t - f - self.settled.count_in(f, t)).sum()

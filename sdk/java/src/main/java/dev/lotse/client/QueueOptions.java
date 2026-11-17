@@ -17,6 +17,9 @@ public final class QueueOptions {
     private final Long maxDeliveries;
     private final Duration messageTtl;
     private final String deadLetterQueue;
+    private final Long maxLength;
+    private final Long maxLengthBytes;
+    private final String overflow;
 
     private QueueOptions(Builder b) {
         this.replication = b.replication;
@@ -24,6 +27,9 @@ public final class QueueOptions {
         this.maxDeliveries = b.maxDeliveries;
         this.messageTtl = b.messageTtl;
         this.deadLetterQueue = b.deadLetterQueue;
+        this.maxLength = b.maxLength;
+        this.maxLengthBytes = b.maxLengthBytes;
+        this.overflow = b.overflow;
     }
 
     /** A builder; the queue is replicated on 3 nodes unless told otherwise. */
@@ -57,6 +63,15 @@ public final class QueueOptions {
         if (messageTtl != null) {
             out.add(new Config("message.ttl.ms", Long.toString(messageTtl.toMillis())));
         }
+        if (maxLength != null) {
+            out.add(new Config("max.length", Long.toString(maxLength)));
+        }
+        if (maxLengthBytes != null) {
+            out.add(new Config("max.length.bytes", Long.toString(maxLengthBytes)));
+        }
+        if (overflow != null) {
+            out.add(new Config("overflow", overflow));
+        }
         return out;
     }
 
@@ -67,6 +82,9 @@ public final class QueueOptions {
         private Long maxDeliveries;
         private Duration messageTtl;
         private String deadLetterQueue;
+        private Long maxLength;
+        private Long maxLengthBytes;
+        private String overflow;
 
         private Builder() {}
 
@@ -94,6 +112,39 @@ public final class QueueOptions {
         /** How long a message may wait in the queue before it is retired ({@code message.ttl.ms}). */
         public Builder messageTtl(Duration ttl) {
             this.messageTtl = ttl;
+            return this;
+        }
+
+        /**
+         * How many messages may wait for delivery ({@code max.length}, ADR 0118); messages out with a consumer do not
+         * count.
+         */
+        public Builder maxLength(long messages) {
+            if (messages < 1) {
+                throw new IllegalArgumentException("max.length is a number of messages from 1");
+            }
+            this.maxLength = messages;
+            return this;
+        }
+
+        /** How many bytes of keys, values and headers may wait for delivery ({@code max.length.bytes}, ADR 0118). */
+        public Builder maxLengthBytes(long bytes) {
+            if (bytes < 1) {
+                throw new IllegalArgumentException("max.length.bytes is a number of bytes from 1");
+            }
+            this.maxLengthBytes = bytes;
+            return this;
+        }
+
+        /**
+         * What a full queue does ({@code overflow}, ADR 0118): {@code reject-publish} (the default) refuses with
+         * QUEUE_FULL, {@code drop-head} retires the oldest waiting messages, into the dead-letter queue if there is one.
+         */
+        public Builder overflow(String overflow) {
+            if (!"reject-publish".equals(overflow) && !"drop-head".equals(overflow)) {
+                throw new IllegalArgumentException("overflow is reject-publish or drop-head, not " + overflow);
+            }
+            this.overflow = overflow;
             return this;
         }
 

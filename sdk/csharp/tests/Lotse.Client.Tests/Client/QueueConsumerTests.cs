@@ -1111,6 +1111,9 @@ public sealed class QueueConsumerTests : IDisposable
             .WithDeadLetterQueue("dead")
             .WithSingleActiveConsumer()
             .WithPriorityLevels(3)
+            .WithMaxLength(1000)
+            .WithMaxLengthBytes(65536)
+            .WithOverflow("drop-head")
             .WithSetting("x.other", "1")
             .Build();
         Assert.Equal(77UL, await Client.CreateQueueAsync("jobs", options));
@@ -1122,8 +1125,20 @@ public sealed class QueueConsumerTests : IDisposable
         Assert.True(q.SingleActive);
         Assert.Equal((byte)3, q.PriorityLevels);
         Assert.Equal(
-            new[] { ("ack.timeout.ms", "700"), ("max.deliveries", "4"), ("message.ttl.ms", "2000"), ("x.other", "1") },
+            new[]
+            {
+                ("ack.timeout.ms", "700"), ("max.deliveries", "4"), ("max.length", "1000"),
+                ("max.length.bytes", "65536"), ("message.ttl.ms", "2000"), ("overflow", "drop-head"), ("x.other", "1"),
+            },
             q.Configs.Select(c => (c.Key, c.Value)));
+    }
+
+    [Fact]
+    public void ALengthLimitOutOfRangeIsRefusedBeforeAnythingIsSent()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => QueueOptions.CreateBuilder().WithMaxLength(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => QueueOptions.CreateBuilder().WithMaxLengthBytes(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => QueueOptions.CreateBuilder().WithOverflow("reject-publish-dlx"));
     }
 
     [Fact]

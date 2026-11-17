@@ -987,3 +987,122 @@ fn a_message_an_earlier_leader_handed_out_does_not_move_the_cursor_past_new_ones
     let c = d.candidates(&q, 4, 3, &BTreeSet::new());
     assert_eq!(c, vec![0, 1, 2], "the messages before it are still to come");
 }
+
+/// Reads every message of `batch` into `l`, as a leader's scan does.
+fn read_all(l: &mut Lengths, q: &QueueLog, batch: &Batch) {
+    for r in batch.records().unwrap() {
+        if !q.is_settled(r.offset) {
+            l.read(r.offset, message_bytes(&r));
+        }
+    }
+    l.read_to(batch.next_offset());
+}
+
+#[test]
+fn a_length_limit_admits_up_to_its_messages_and_bytes() {
+    let none = LengthLimit::default();
+    assert!(!none.is_set());
+    assert!(none.admits(Amount { messages: u64::MAX / 2, bytes: u64::MAX / 2 }, Amount { messages: 1, bytes: 1 }));
+    let l = LengthLimit { max_messages: 3, max_bytes: 0, overflow: Overflow::RejectPublish };
+    assert!(l.admits(Amount { messages: 2, bytes: 9 }, Amount { messages: 1, bytes: 9 }));
+    assert!(!l.admits(Amount { messages: 2, bytes: 9 }, Amount { messages: 2, bytes: 9 }));
+    assert!(!l.exceeded(Amount { messages: 3, bytes: 0 }) && l.exceeded(Amount { messages: 4, bytes: 0 }));
+    let b = LengthLimit { max_messages: 0, max_bytes: 10, overflow: Overflow::DropHead };
+    assert!(b.admits(Amount { messages: 100, bytes: 6 }, Amount { messages: 1, bytes: 4 }));
+    assert!(!b.admits(Amount { messages: 0, bytes: 6 }, Amount { messages: 1, bytes: 5 }));
+    for o in [Overflow::RejectPublish, Overflow::DropHead] {
+        assert_eq!(Overflow::parse(o.name()), Some(o));
+        assert_eq!(Overflow::from_code(o.code()), Some(o));
+    }
+    assert_eq!(Overflow::parse("reject-publish-dlx"), None);
+}
+
+#[test]
+fn a_message_counts_its_key_value_and_headers() {
+    let mut b = BatchBuilder::new(BatchOptions::default());
+    b.push(0, Some(b"key"), Some(b"value"), &[(b"h", Some(b"vv")), (b"n", None)]);
+    b.push(0, None, None, &[]);
+    let raw = b.finish().unwrap();
+    let records = Batch::parse(&raw).unwrap().0.records().unwrap();
+    assert_eq!(message_bytes(&records[0]), 3 + 5 + 1 + 2 + 1);
+    assert_eq!(message_bytes(&records[1]), 0);
+}
+
+#[test]
+fn what_waits_leaves_out_settled_messages_and_those_with_a_consumer() {
+    let mut q = QueueLog::new();
+    let first = data(0, 10, None);
+    q.apply(&first).unwrap();
+    let mut l = Lengths::new(q.floor());
+    read_all(&mut l, &q, &first);
+    let nothing = Unread::default();
+    assert_eq!(l.waiting(&q, None, nothing), Amount { messages: 10, bytes: 10 });
+
+    // Three acknowledged, one in the middle: forgotten.
+    q.apply(&ack(10, &[(0, 2), (5, 6)])).unwrap();
+    l.settle(&q);
+    assert_eq!(l.waiting(&q, None, nothing), Amount { messages: 7, bytes: 7 });
+
+    // Two handed to a consumer: they do not count, as in RabbitMQ.
+    let mut d = Dispatcher::new(&q);
+    d.adopt(&q, at(0), 0);
+    d.subscribe(1, 1, 1, 2, u32::MAX);
+    let c = d.candidates(&q, 10, 100, &BTreeSet::new());
+    let got = d.assign(&q, &c, 100, at(0));
+    assert_eq!(got.iter().map(|(_, x)| x.len()).sum::<usize>(), 2);
+    assert_eq!(l.waiting(&q, Some(&d), nothing), Amount { messages: 5, bytes: 5 });
+    // Before a new leader adopts the checkouts, the log says who has them.
+    check_out(&mut q, &got, 11);
+    assert_eq!(l.waiting(&q, None, nothing), Amount { messages: 5, bytes: 5 });
+
+    // A transaction of four, appended and not committed: it counts.
+    let txn = data(12, 4, Some(7));
+    read_all(&mut l, &q, &txn);
+    assert_eq!(l.waiting(&q, None, nothing).messages, 9);
+    // Aborted once applied: settled, forgotten.
+    q.apply(&txn).unwrap();
+    q.apply(&marker(16, 7, false)).unwrap();
+    l.settle(&q);
+    assert_eq!(l.waiting(&q, None, nothing).messages, 5);
+
+    // A write taken counts until the scan reaches it; what is unread counts
+    // as the caller bounds it.
+    l.take(20, Amount { messages: 3, bytes: 30 });
+    assert_eq!(l.waiting(&q, None, nothing), Amount { messages: 8, bytes: 35 });
+    l.read_to(19);
+    assert_eq!(l.waiting(&q, None, nothing).messages, 8, "not reached yet");
+    l.read_to(20);
+    assert_eq!(l.waiting(&q, None, nothing).messages, 5);
+    assert_eq!(l.waiting(&q, None, Unread { messages: 2, bytes: 100 }), Amount { messages: 7, bytes: 105 });
+    assert!(l.complete(20) && !l.complete(21));
+}
+
+#[test]
+fn drop_head_takes_the_oldest_waiting_messages_until_the_queue_fits() {
+    let mut q = QueueLog::new();
+    let batch = data(0, 6, None);
+    q.apply(&batch).unwrap();
+    let mut l = Lengths::new(0);
+    read_all(&mut l, &q, &batch);
+    let max = LengthLimit { max_messages: 3, max_bytes: 0, overflow: Overflow::DropHead };
+    let mut d = Dispatcher::new(&q);
+    d.adopt(&q, at(0), 0);
+    d.subscribe(1, 1, 1, 1, u32::MAX);
+    let c = d.candidates(&q, 6, 100, &BTreeSet::new());
+    assert_eq!(d.assign(&q, &c, 100, at(0))[0].1[0].offset, 0, "message 0 is out with a consumer");
+    let waiting = l.waiting(&q, Some(&d), Unread::default());
+    assert_eq!(waiting.messages, 5);
+    // Two too many: the oldest two that wait, passing over what a consumer
+    // has and what is being claimed already.
+    // One being retired already no longer counts: one more goes.
+    let skip = BTreeSet::from([1]);
+    assert_eq!(l.heads(&q, Some(&d), max, 6, &skip, 100), vec![2]);
+    // Not past what may be delivered, and not more than asked.
+    assert_eq!(l.heads(&q, Some(&d), max, 3, &BTreeSet::new(), 100), vec![1, 2]);
+    assert_eq!(l.heads(&q, Some(&d), max, 6, &BTreeSet::new(), 1), vec![1]);
+    // Within the limit: nothing. By bytes as by messages.
+    let roomy = LengthLimit { max_messages: 5, ..max };
+    assert!(l.heads(&q, Some(&d), roomy, 6, &BTreeSet::new(), 100).is_empty());
+    let bytes = LengthLimit { max_messages: 0, max_bytes: 4, overflow: Overflow::DropHead };
+    assert_eq!(l.heads(&q, Some(&d), bytes, 6, &BTreeSet::new(), 100), vec![1]);
+}

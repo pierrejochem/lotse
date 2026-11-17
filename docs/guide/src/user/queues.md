@@ -32,6 +32,9 @@ Set at creation with `QueueOptions`, or later with `alterConfigs(name, set, rese
 | `dead.letter.queue` | Where retired messages go | Name of a queue in the same tenant | `deadLetterQueue` |
 | `single.active.consumer` | Only one subscription gets messages | `true` or `false` | `alterConfigs` |
 | `priority.levels` | Number of priority levels | 1 to 10; 1 means none | `alterConfigs` |
+| `max.length` | Messages that may wait for delivery | Messages above 0 | `maxLength` |
+| `max.length.bytes` | Bytes of keys, values and headers that may wait for delivery | Bytes above 0 | `maxLengthBytes` |
+| `overflow` | What a full queue does | `reject-publish` (default) or `drop-head` | `overflow` |
 
 `resume.window.ms` and the last two are set with `alterConfigs` in the Java SDK:
 
@@ -52,7 +55,7 @@ The move happens once, also across failovers. The copy keeps key, value and head
 
 | Header | Content |
 | --- | --- |
-| `x-lotse-dead-letter-reason` | `max-deliveries`, `expired` or `requeued` |
+| `x-lotse-dead-letter-reason` | `max-deliveries`, `expired`, `requeued` or `max-length` |
 | `x-lotse-dead-letter-queue` | The queue it came from |
 | `x-lotse-dead-letter-queue-id` | That queue's id |
 | `x-lotse-dead-letter-offset` | Its offset there |
@@ -60,6 +63,25 @@ The move happens once, also across failovers. The copy keeps key, value and head
 | `x-lotse-dead-letter-floor` | The source queue's retention floor when it moved |
 
 A queue cannot be its own dead-letter queue, a chain of dead-letter queues that leads back is refused, and a queue that is someone's dead-letter queue cannot be deleted. Delivery counts are kept in the queue's log, so they go on across failovers ([ADR 0109](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0109-deliveries-are-written-to-the-log.md)). See [ADR 0055](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0055-dead-letter-queues-and-message-ttl.md).
+
+## Length limits
+
+A queue may limit what waits for delivery ([ADR 0118](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0118-queue-length-limits.md)): `max.length` messages, `max.length.bytes` bytes of keys, values and headers, or both. Every message a consumer could still get counts, also one not yet committed or in an open transaction. A message out with a consumer does not count, as in RabbitMQ, so a consumer with a large credit lets the queue hold more.
+
+What a full queue does is its `overflow`:
+
+- `reject-publish`, the default: a produce, a publish or a transaction's write that would pass the limit fails with `QUEUE_FULL`, and nothing is written. The client does not retry it; try again once consumers have made room. A dead letter for a full queue waits in its source queue until there is room.
+- `drop-head`: the queue takes every write and retires its oldest waiting messages until it fits, into its dead-letter queue with the reason `max-length` if it has one. **Without one, they are dropped.**
+
+If the answer to an earlier attempt was lost, `QUEUE_FULL` does not say whether that attempt was written. The client then reports the outcome as unknown.
+
+The limits can change at any time with `alterConfigs`; a queue already over a new limit refuses, or drops down to it. After a leader change, the new leader reads the queue's backlog first and may refuse while it does.
+
+```java
+// Not from the compiled examples.
+client.createQueue("orders", QueueOptions.builder().maxLength(100_000).maxLengthBytes(1L << 30).build());
+client.alterConfigs("orders", Map.of("overflow", "drop-head"), List.of());
+```
 
 ## Purge and requeue
 

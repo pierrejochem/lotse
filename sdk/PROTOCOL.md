@@ -70,7 +70,7 @@ Elements of arrays carry their own empty block in most requests (`TxnResource`, 
 
 ## Error codes
 
-Codes 0 to 33, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`, `PRODUCER_LIMIT`. `PRODUCER_LIMIT` (ADR 0110) refuses a produce from a producer the partition does not know while it holds as many as it admits: nothing was written, so send the same batch again, with the same sequence, after a backoff. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
+Codes 0 to 34, with names and retry classes, are in `ErrorCode.java` and in `conformance/error-codes.txt`. Retriable: `NOT_LEADER`, `FENCED_LEADER_TERM`, `NOT_ENOUGH_REPLICAS`, `REQUEST_TIMED_OUT`, `COORDINATOR_NOT_AVAILABLE`, `CONCURRENT_TRANSACTIONS`, `UNSTABLE_OFFSET_COMMIT`, `CONCURRENT_GROUP_CHANGE`, `PRODUCER_LIMIT`. `PRODUCER_LIMIT` (ADR 0110) refuses a produce from a producer the partition does not know while it holds as many as it admits: nothing was written, so send the same batch again, with the same sequence, after a backoff. `QUEUE_FULL` (34, ADR 0118) refuses a write to a queue at its length limit with `overflow = reject-publish`: nothing was written, it is not retried, and the caller decides; after an attempt whose answer was lost it says nothing about that attempt, so report the outcome as unknown and start a new producer, as after `UNAUTHORIZED` then. `REQUEST_TIMED_OUT` means the outcome is unknown: retry only what is idempotent. A code a client does not know is kept as it came and named `UNKNOWN`.
 
 ## The record batch
 
@@ -273,7 +273,7 @@ If the answer is not `NONE` (the node no longer knows the subscription, a lost a
 
 ### Dead letters
 
-A queue with limits (`max.deliveries`, `message.ttl.ms`) and a `dead.letter.queue` moves a message there as a one-record batch with the original key, value, headers and timestamp, and these headers (UTF-8 text, decimal numbers; they describe the latest move and replace those a message arrived with): `x-lotse-dead-letter-reason` (`max-deliveries` or `expired`), `-queue` (source queue name), `-queue-id`, `-offset`, `-deliveries` and `-floor` (the source's ack floor when it was sent). A client reads them like any header; the Java client offers them typed as `Delivery.deadLetter()`.
+A queue with limits (`max.deliveries`, `message.ttl.ms`) and a `dead.letter.queue` moves a message there as a one-record batch with the original key, value, headers and timestamp, and these headers (UTF-8 text, decimal numbers; they describe the latest move and replace those a message arrived with): `x-lotse-dead-letter-reason` (`max-deliveries`, `expired`, `requeued` or `max-length`, ADR 0118), `-queue` (source queue name), `-queue-id`, `-offset`, `-deliveries` and `-floor` (the source's ack floor when it was sent). A client reads them like any header; the Java client offers them typed as `Delivery.deadLetter()`.
 
 ## Client behaviour: transactions
 

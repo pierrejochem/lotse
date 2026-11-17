@@ -1806,6 +1806,7 @@ impl Known {
                 dead_letter: Some(q.limits.dead_letter).filter(|d| *d != 0),
                 single_active: q.limits.single_active,
                 priority_levels: q.limits.priority_levels,
+                length: q.limits.length,
                 resume_window: match q.limits.resume_window_ms {
                     0 => QueueConfig::DEFAULT_RESUME_WINDOW,
                     ms => Duration::from_millis(ms),

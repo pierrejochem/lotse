@@ -137,8 +137,13 @@ impl Clients {
                         out.error_msg = Some(refusal(error).into());
                     }
                     Some(replica) => {
-                        let w = propose_one(replica, key.group, h.batch, h.bytes, out, (h.resource, h.partition));
+                        let qc = view.queues.iter().find(|q| q.group == key.group);
+                        let gate = qc.and_then(|qc| self.gate(qc, replica));
+                        let at = (h.resource, h.partition);
+                        let batch = h.batch.clone();
+                        let (w, end) = propose_one(replica, key.group, h.batch, h.bytes, out, at, gate.as_ref());
                         p.waiting.extend(w);
+                        self.took_batch(key.group, end, &batch);
                     }
                 }
             }
