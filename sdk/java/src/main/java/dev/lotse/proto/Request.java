@@ -1372,6 +1372,27 @@ public sealed interface Request {
     }
 
     /**
+     * {@code DescribeSessions} (59): the open client sessions of the node it is sent to (ADR 0121). Cluster admins and
+     * cluster viewers get every session; anyone else the sessions made with their own name.
+     */
+    record DescribeSessions() implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_SESSIONS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.noTags();
+        }
+
+        static DescribeSessions read(Reader r) {
+            r.tags();
+            return new DescribeSessions();
+        }
+    }
+
+    /**
      * {@code RequestCertificate} (55): asks the CA holder for a client certificate (cluster admin, ADR 0092). The
      * request's id is the SHA-256 of {@code csr}, so the same request twice is one request. Answered with
      * {@link Response.Admin}.

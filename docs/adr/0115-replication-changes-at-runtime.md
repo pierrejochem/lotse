@@ -32,7 +32,7 @@ Rejected options:
 - An operator raises or lowers replication at runtime. Each move copies the partition to its new voters through Raft, four groups at a time.
 - A placed partition stays where it was put, so rebalancing has less to work with. Nodes may stay further apart than one replica when only placed or full-width groups could even them out.
 - Queue length limits still cannot change after creation.
-- Clients: `Client::reassign_partition` in Rust, `reassignPartition` in Java, Kotlin and Node.js, `ReassignPartitionAsync` in C#. `replication.factor` goes through each client's `alterConfigs`. The console shows neither yet.
+- Clients: `Client::reassign_partition` in Rust, `reassignPartition` in Java, Kotlin and Node.js, `ReassignPartitionAsync` in C#. `replication.factor` goes through each client's `alterConfigs`. The console shows neither yet; ADR 0121 adds both.
 - Tests:
   - Planner unit tests check that partitions move to their factor a few at a time, up and down and capped at the active nodes. They check that a placed partition stays put through the factor and rebalancing but not through a drain, and is managed again once released. They also check that a placement drops a pin on a node it leaves, and that factors and placements survive a snapshot and go with a delete.
   - The membership simulation, under crashes and partitions, sets s1's factor to 2 or 4 and places s2/0 on three named nodes after a drain. It then requires those voters, the other partitions at three, and every acknowledged write kept.

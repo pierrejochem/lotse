@@ -125,6 +125,8 @@ public record ApiKey(int id) {
     public static final ApiKey RECORD_CERTIFICATE = new ApiKey(57);
     /** Places a partition's replicas on named nodes (cluster admin, ADR 0115). */
     public static final ApiKey REASSIGN_PARTITION = new ApiKey(58);
+    /** Lists the open client sessions of the node asked (ADR 0121). */
+    public static final ApiKey DESCRIBE_SESSIONS = new ApiKey(59);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -155,7 +157,7 @@ public record ApiKey(int id) {
             range(DESCRIBE_NODES), range(PURGE_QUEUE), range(REQUEUE), range(MOVE_LEADER), range(REVOKE_SESSIONS),
             range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(DESCRIBE_CERTIFICATES),
             range(RECORD_CERTIFICATES), range(REQUEST_CERTIFICATE), range(DESCRIBE_CERTIFICATE_REQUESTS),
-            range(RECORD_CERTIFICATE), range(REASSIGN_PARTITION), range(PUBLISH));
+            range(RECORD_CERTIFICATE), range(REASSIGN_PARTITION), range(DESCRIBE_SESSIONS), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

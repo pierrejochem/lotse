@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router-dom';
-import { useNodes, useQueue, useQueues } from '../api/queries';
-import { MoveLeaderButton, PurgeButton, RequeueButton } from '../components/Actions';
+import { useQueue, useQueues } from '../api/queries';
+import { MoveLeaderButton, PlaceButton, PurgeButton, ReplicationButton, RequeueButton } from '../components/Actions';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
 import { Bar, Chip, Failed, Loading, Stats } from '../components/ui';
 import { NONE, bytes, clock, count, duration } from '../format';
@@ -49,19 +49,9 @@ export function QueueList() {
   );
 }
 
-/** The nodes a queue level may be led by: the queue's detail names only the leader, so every node of the cluster. */
-function useReplicas(cluster: string) {
-  const nodes = useNodes(cluster);
-  return (leader: string) => {
-    const names = nodes.data?.nodes.map((n) => n.id) ?? [];
-    return names.includes(leader) ? names : [leader, ...names];
-  };
-}
-
 export function QueueDetail() {
   const { cluster = '', name = '' } = useParams();
   const q = useQueue(cluster, name);
-  const replicasOf = useReplicas(cluster);
   if (q.isPending) return <main className="page"><Loading /></main>;
   if (q.isError) return <main className="page"><Failed error={q.error} retry={() => q.refetch()} /></main>;
   const d = q.data;
@@ -75,7 +65,10 @@ export function QueueDetail() {
         <span className="label">Queue{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
         <div className="between">
           <h1 className="h1 mono">{d.name}</h1>
-          <PurgeButton cluster={cluster} queue={d.name} ready={d.ready} />
+          <div className="row" style={{ gap: 8 }}>
+            <ReplicationButton cluster={cluster} resource={d.name} current={d.replicas.length} />
+            <PurgeButton cluster={cluster} queue={d.name} ready={d.ready} />
+          </div>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <span className="tag">{d.levels.length} priority level{d.levels.length === 1 ? '' : 's'}</span>
@@ -84,6 +77,12 @@ export function QueueDetail() {
           <span className="tag">TTL {d.ttl_ms ? duration(d.ttl_ms) : 'none'}</span>
           {d.binding && <span className="tag">Bound to <code style={{ fontSize: 12 }}>{d.binding}</code></span>}
         </div>
+        <p className="small muted" style={{ margin: 0 }}>
+          Replicas on <span className="mono">{d.replicas.length > 0 ? d.replicas.join(', ') : 'no node yet'}</span>
+          {d.placed && ', placed there by a cluster admin: rebalancing and the replication factor leave it alone'}
+          {d.pinned && <>; leader pinned to <span className="mono">{d.pinned}</span></>}.{' '}
+          <PlaceButton cluster={cluster} resource={d.name} partition={0} replicas={d.replicas} placed={d.placed} />
+        </p>
       </div>
 
       <Stats
@@ -106,7 +105,7 @@ export function QueueDetail() {
             {leader !== undefined && (
               <p className="small muted" style={{ margin: '4px 0 0' }}>
                 All levels share one log, led by <span className="mono">{leader}</span>{' '}
-                <MoveLeaderButton cluster={cluster} resource={d.name} partition={0} leader={leader} replicas={replicasOf(leader)} />
+                <MoveLeaderButton cluster={cluster} resource={d.name} partition={0} leader={leader} replicas={d.replicas.includes(leader) ? d.replicas : [leader, ...d.replicas]} />
               </p>
             )}
           </div>

@@ -162,6 +162,17 @@ export interface DescribeCertificatesResponse {
   readonly nowMs: bigint;
   readonly certificates: readonly m.CertificateEntry[];
 }
+/** `DescribeSessions` (key 59): a node's open client sessions, oldest first (ADR 0121). */
+export interface DescribeSessionsResponse {
+  readonly type: "DescribeSessions";
+  readonly error: ErrorCodeValue;
+  /** The answering node. */
+  readonly nodeId: number;
+  /** The answering node's clock, ms since the Unix epoch. */
+  readonly nowMs: bigint;
+  /** The sessions the asker may see. */
+  readonly sessions: readonly m.SessionEntry[];
+}
 export interface DescribeCertificateRequestsResponse {
   readonly type: "DescribeCertificateRequests";
   readonly error: ErrorCodeValue;
@@ -243,6 +254,7 @@ export type Response =
   | SaslAuthenticateResponse
   | DescribeUsersResponse
   | DescribeCertificatesResponse
+  | DescribeSessionsResponse
   | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
   | DescribeRoleBindingsResponse
@@ -289,7 +301,14 @@ export function writeResponse(w: Writer, res: Response): void {
         w1.array(x.partitions, (w2, p) => {
           w2.u32(p.partition).u32(p.leader).u64(p.leaderTerm);
           w2.array(p.voters, (w3, v) => w3.u32(v));
-          w2.noTags();
+          const tags: { tag: number; value: Uint8Array }[] = [];
+          if ((p.pinnedLeader ?? 0) !== 0) {
+            tags.push({ tag: m.TAG_PINNED_LEADER, value: new Writer().u32(p.pinnedLeader ?? 0).toBytes() });
+          }
+          if (p.placed === true) {
+            tags.push({ tag: m.TAG_PLACED, value: new Uint8Array(0) });
+          }
+          w2.tags(tags);
         });
         w1.bool(x.exchange !== null);
         if (x.exchange !== null) {
@@ -463,6 +482,17 @@ export function writeResponse(w: Writer, res: Response): void {
           .u64(c.signedAtMs),
       );
       return;
+    case "DescribeSessions":
+      w.u16(res.error).u32(res.nodeId).u64(res.nowMs);
+      w.array(res.sessions, (w1, s) => {
+        w1.u8(s.principalKind).string(s.name);
+        w1.array(s.groups, (w2, g) => w2.string(g));
+        w1.u8(s.mechanism).string(s.peer);
+        w1.u64(s.connectedMs).u64(s.credentialMs).u64(s.expiresMs);
+        w1.noTags();
+      });
+      w.noTags();
+      return;
     case "DescribeCertificates":
       w.u16(res.error);
       m.putHint(w, res.leaderHint);
@@ -584,8 +614,18 @@ export function readResponse(apiKey: number, r: Reader): Response {
             leaderTerm: r2.u64(),
             voters: r2.array(4, (r3) => r3.u32()),
           };
-          r2.tags();
-          return p;
+          let pinnedLeader = 0;
+          let placed = false;
+          for (const t of r2.tags()) {
+            if (t.tag === m.TAG_PINNED_LEADER) {
+              const v = new Reader(t.value);
+              pinnedLeader = v.u32();
+              v.finish();
+            } else if (t.tag === m.TAG_PLACED) {
+              placed = true;
+            }
+          }
+          return { ...p, pinnedLeader, placed };
         });
         let exchange: m.ExchangeMetadata | null = null;
         if (r1.bool()) {
@@ -758,6 +798,28 @@ export function readResponse(apiKey: number, r: Reader): Response {
         signedAtMs: r1.u64(),
       }));
       return { type: "DescribeCertificateRequests", error, leaderHint, nowMs, requests };
+    }
+    case ApiKey.DESCRIBE_SESSIONS: {
+      const error = r.u16();
+      const nodeId = r.u32();
+      const nowMs = r.u64();
+      // kind, name, no groups, mechanism, peer, three u64, no tags.
+      const sessions = r.array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, (r1) => {
+        const s = {
+          principalKind: r1.u8(),
+          name: r1.string(),
+          groups: r1.array(2, (r2) => r2.string()),
+          mechanism: r1.u8(),
+          peer: r1.string(),
+          connectedMs: r1.u64(),
+          credentialMs: r1.u64(),
+          expiresMs: r1.u64(),
+        };
+        r1.tags();
+        return s;
+      });
+      r.tags();
+      return { type: "DescribeSessions", error, nodeId, nowMs, sessions };
     }
     case ApiKey.DESCRIBE_CERTIFICATES: {
       const error = r.u16();

@@ -163,6 +163,8 @@ impl ApiKey {
     /// Places a partition's replicas on named nodes (cluster admin,
     /// ADR 0115).
     pub const REASSIGN_PARTITION: ApiKey = ApiKey(58);
+    /// Lists the open client sessions of the node asked (ADR 0121).
+    pub const DESCRIBE_SESSIONS: ApiKey = ApiKey(59);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -187,7 +189,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 58] = [
+    pub const SUPPORTED: [ApiVersionRange; 59] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -245,6 +247,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::DESCRIBE_CERTIFICATE_REQUESTS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::RECORD_CERTIFICATE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REASSIGN_PARTITION, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_SESSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -559,6 +562,8 @@ pub enum Request {
     RecordCertificate(RecordCertificateRequest),
     /// [`ApiKey::REASSIGN_PARTITION`].
     ReassignPartition(ReassignPartitionRequest),
+    /// [`ApiKey::DESCRIBE_SESSIONS`].
+    DescribeSessions(DescribeSessionsRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -624,6 +629,7 @@ impl Request {
             Request::DescribeCertificateRequests(_) => ApiKey::DESCRIBE_CERTIFICATE_REQUESTS,
             Request::RecordCertificate(_) => ApiKey::RECORD_CERTIFICATE,
             Request::ReassignPartition(_) => ApiKey::REASSIGN_PARTITION,
+            Request::DescribeSessions(_) => ApiKey::DESCRIBE_SESSIONS,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -676,6 +682,8 @@ pub enum Response {
     DescribeUsers(DescribeUsersResponse),
     /// Answer to [`Request::DescribeCertificates`].
     DescribeCertificates(DescribeCertificatesResponse),
+    /// Answer to [`Request::DescribeSessions`].
+    DescribeSessions(DescribeSessionsResponse),
     /// Answer to [`Request::DescribeCertificateRequests`].
     DescribeCertificateRequests(DescribeCertificateRequestsResponse),
     /// To [`Request::DescribeTenants`].
@@ -773,6 +781,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::DescribeCertificateRequests(r) => r.put(&mut w),
         Request::RecordCertificate(r) => r.put(&mut w),
         Request::ReassignPartition(r) => r.put(&mut w),
+        Request::DescribeSessions(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -853,6 +862,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         }
         ApiKey::RECORD_CERTIFICATE => Request::RecordCertificate(RecordCertificateRequest::get(&mut r)?),
         ApiKey::REASSIGN_PARTITION => Request::ReassignPartition(ReassignPartitionRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_SESSIONS => Request::DescribeSessions(DescribeSessionsRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -888,6 +898,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::SaslAuthenticate(r) => r.put(&mut w),
         Response::DescribeUsers(r) => r.put(&mut w),
         Response::DescribeCertificates(r) => r.put(&mut w),
+        Response::DescribeSessions(r) => r.put(&mut w),
         Response::DescribeCertificateRequests(r) => r.put(&mut w),
         Response::DescribeTenants(r) => r.put(&mut w),
         Response::DescribeRoleBindings(r) => r.put(&mut w),
@@ -1013,6 +1024,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::SASL_AUTHENTICATE => Response::SaslAuthenticate(SaslAuthenticateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_USERS => Response::DescribeUsers(DescribeUsersResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATES => Response::DescribeCertificates(DescribeCertificatesResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_SESSIONS => Response::DescribeSessions(DescribeSessionsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATE_REQUESTS => {
             Response::DescribeCertificateRequests(DescribeCertificateRequestsResponse::get(&mut r)?)
         }

@@ -17,9 +17,9 @@ use lotse_proto::{
     AddNodeRequest, AlterConfigsRequest, AlterRoleBindingsRequest, AlterUserRequest, BindRequest, ConfigEntry,
     CreateQueueRequest, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest,
     DeleteTenantRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeNodesRequest,
-    DescribeRoleBindingsRequest, DescribeTenantsRequest, DescribeUsersRequest, ErrorCode, LeaderHint, NodeEntry,
-    RemoveNodeRequest, Request, Response, RoleBindingData, ScramCredentialData, SettleVotersRequest, TenantEntry,
-    UserEntry, WhoAmIRequest, WhoAmIResponse,
+    DescribeRoleBindingsRequest, DescribeSessionsRequest, DescribeSessionsResponse, DescribeTenantsRequest,
+    DescribeUsersRequest, ErrorCode, LeaderHint, NodeEntry, RemoveNodeRequest, Request, Response, RoleBindingData,
+    ScramCredentialData, SettleVotersRequest, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
@@ -636,6 +636,29 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             let res = match self.call(&addr, &Request::DescribeMetrics(DescribeMetricsRequest)).await {
                 Ok(Response::DescribeMetrics(r)) if r.error == ErrorCode::NONE => Ok(*r),
                 Ok(Response::DescribeMetrics(r)) => Err(ClientError::Broker { code: r.error, message: None }),
+                Ok(Response::Error(code)) => Err(ClientError::Broker { code, message: None }),
+                Ok(other) => Err(ClientError::NoAnswer(b.node_id, format!("unexpected response {other:?}"))),
+                Err(e) => Err(ClientError::NoAnswer(b.node_id, format!("{addr}: {e}"))),
+            };
+            out.push((b.node_id, res));
+        }
+        Ok(out)
+    }
+
+    /// Every node's open client sessions, asked of each node directly, for
+    /// every node the cluster's metadata names: each with its answer, or why
+    /// there is none (ADR 0121). A cluster admin or viewer gets every
+    /// session, anyone else those made with their own name.
+    pub async fn node_sessions(
+        &self,
+    ) -> Result<Vec<(u32, Result<DescribeSessionsResponse, ClientError>)>, ClientError> {
+        let m = self.metadata(&[]).await?;
+        let mut out = Vec::with_capacity(m.brokers.len());
+        for b in &m.brokers {
+            let addr = format!("{}:{}", b.host, b.port);
+            let res = match self.call(&addr, &Request::DescribeSessions(DescribeSessionsRequest)).await {
+                Ok(Response::DescribeSessions(r)) if r.error == ErrorCode::NONE => Ok(r),
+                Ok(Response::DescribeSessions(r)) => Err(ClientError::Broker { code: r.error, message: None }),
                 Ok(Response::Error(code)) => Err(ClientError::Broker { code, message: None }),
                 Ok(other) => Err(ClientError::NoAnswer(b.node_id, format!("unexpected response {other:?}"))),
                 Err(e) => Err(ClientError::NoAnswer(b.node_id, format!("{addr}: {e}"))),

@@ -86,6 +86,12 @@ Every node then closes the connections of revoked sessions and refuses logins an
 
 Revocation is per user or group, not per token.
 
+## See open sessions
+
+Every node lists the client sessions it holds with `DescribeSessions` (`node_sessions` in `lotse-client`, `nodeSessions` in the SDKs, which ask every node): who, signed in how (certificate, SCRAM-SHA-512 or OAUTHBEARER), from which address, since when, when the credential dates from and when the session ends unless renewed ([ADR 0121](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0121-the-console-places-partitions-and-lists-open-sessions.md)). Cluster admins and cluster viewers see every session; anyone else sees only the sessions made with their own name. The console shows the list on the *Sessions* tab of *Users and access*, with a revoke per user for those who see everyone.
+
+A client connected to several nodes appears once per node.
+
 ## Where to do it
 
-`lotse node add`, `remove` and `list` are the only admin requests the `lotse` command line sends. Users, tenants, role bindings, settings, pins and session revocation go through a client: `lotse-client`, the Java and Kotlin SDKs, or the console, which manages users, role bindings and session revocation on its *Users and access* page as the signed-in user: the browser derives a password's SCRAM credential, so the console never sees the password ([ADR 0089](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0089-console-users-and-access.md)). The console signs users in with OpenID Connect and acts as the signed-in user ([ADR 0040](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0040-console-sign-in.md)).
+`lotse node add`, `remove` and `list` are the only admin requests the `lotse` command line sends. Users, tenants, role bindings, settings, pins and session revocation go through a client: `lotse-client`, the Java and Kotlin SDKs, or the console, which manages users, role bindings, open sessions and their revocation on its *Users and access* page as the signed-in user: the browser derives a password's SCRAM credential, so the console never sees the password ([ADR 0089](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0089-console-users-and-access.md)). The console signs users in with OpenID Connect and acts as the signed-in user ([ADR 0040](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0040-console-sign-in.md)).

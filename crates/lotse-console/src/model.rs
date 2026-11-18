@@ -341,6 +341,11 @@ pub struct Partition {
     pub last_stable: u64,
     /// Bytes on one replica.
     pub size_bytes: u64,
+    /// The node a cluster admin pinned its leader to (ADR 0065).
+    pub pinned: Option<String>,
+    /// Placed on named nodes by a cluster admin (ADR 0115): rebalancing
+    /// and the replication factor leave it alone.
+    pub placed: bool,
 }
 
 /// A consumer group reading a stream.
@@ -520,6 +525,12 @@ pub struct QueueDetail {
     /// Ready messages whose level the queue's leader has not read yet: a
     /// new leader reads the backlog for levels (ADR 0120).
     pub levels_unread: u64,
+    /// The nodes that hold the queue's replicas.
+    pub replicas: Vec<String>,
+    /// The node a cluster admin pinned its leader to (ADR 0065).
+    pub pinned: Option<String>,
+    /// Placed on named nodes by a cluster admin (ADR 0115).
+    pub placed: bool,
     /// Consumers.
     pub consumers: Vec<QueueConsumer>,
     /// Latest dead letters.
@@ -568,6 +579,66 @@ pub struct MoveLeader {
     /// The node to lead it, as the console names nodes; `None` unpins it so
     /// that leaders spread by themselves again.
     pub node: Option<String>,
+}
+
+/// Request to give every partition of a stream or queue a number of
+/// replicas (`replication.factor`, ADR 0115). Releases its placed
+/// partitions.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetReplication {
+    /// The stream or queue.
+    pub resource: String,
+    /// Replicas per partition, from 1 to the active nodes.
+    pub factor: u32,
+}
+
+/// Request to place a partition's replicas on named nodes, or to release
+/// it to the planner with no nodes (ADR 0115).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct PlacePartition {
+    /// The stream or queue.
+    pub resource: String,
+    /// The partition; 0 for a queue.
+    pub partition: u32,
+    /// The nodes, as the console names them; empty releases the partition.
+    pub nodes: Vec<String>,
+}
+
+/// One open client session on a node (ADR 0121).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SessionRow {
+    /// The node that holds the connection.
+    pub node: String,
+    /// Who it acts as: a user's name, a node's name, or `anonymous`.
+    pub principal: String,
+    /// `user`, `node` or `anonymous`.
+    pub kind: String,
+    /// How it signed in: `certificate`, `SCRAM-SHA-512`, `OAUTHBEARER` or `none`.
+    pub mechanism: String,
+    /// Groups at the identity provider (OAUTHBEARER only).
+    pub groups: Vec<String>,
+    /// The other end's address as the node sees it.
+    pub peer: String,
+    /// When the connection was made, ms since the Unix epoch.
+    pub connected_ms: u64,
+    /// When its credential dates from, ms since the Unix epoch; a session
+    /// revocation after it ends the session.
+    pub credential_ms: u64,
+    /// When it ends unless renewed, ms since the Unix epoch; none for one
+    /// that lasts as long as its connection.
+    pub expires_ms: Option<u64>,
+}
+
+/// The open client sessions the signed-in user may see: every session for
+/// a cluster admin or viewer, their own otherwise (ADR 0121).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SessionsView {
+    /// The sessions, by node and then oldest first.
+    pub sessions: Vec<SessionRow>,
+    /// Nodes that did not answer.
+    pub unreachable: Vec<String>,
+    /// Whether the user sees every session or only their own.
+    pub everyone: bool,
 }
 
 /// Result of a write, with the CLI command that does the same.

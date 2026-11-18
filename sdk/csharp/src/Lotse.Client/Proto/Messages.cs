@@ -411,7 +411,16 @@ public static class Messages
     /// <param name="Leader">Leader node; <c>0</c> if none is known.</param>
     /// <param name="LeaderTerm">The leader's term.</param>
     /// <param name="Voters">Voters of the partition's Raft group.</param>
-    public sealed record PartitionMetadata(uint Partition, uint Leader, ulong LeaderTerm, IReadOnlyList<uint> Voters);
+    /// <param name="PinnedLeader">The node a cluster admin pinned its leader to; 0 for none (tag 0, ADR 0121).</param>
+    /// <param name="Placed">Whether a cluster admin placed it on named nodes (tag 1, ADR 0121).</param>
+    public sealed record PartitionMetadata(
+        uint Partition, uint Leader, ulong LeaderTerm, IReadOnlyList<uint> Voters, uint PinnedLeader = 0, bool Placed = false);
+
+    /// <summary>Tag of a partition's pinned leader in a <c>Metadata</c> answer (ADR 0121).</summary>
+    internal const long TagPinnedLeader = 0;
+
+    /// <summary>Tag of a placed partition in a <c>Metadata</c> answer: present, empty, when it is placed (ADR 0121).</summary>
+    internal const long TagPlaced = 1;
 
     /// <summary>A queue bound to an exchange.</summary>
     /// <param name="QueueId">The queue.</param>
@@ -775,6 +784,54 @@ public static class Messages
         /// <summary>Revoked by a cluster admin (<c>RevokeCertificate</c>).</summary>
         public const byte Revoked = 3;
     }
+
+    /// <summary>Who a session acts as, in <see cref="SessionEntry.PrincipalKind"/> (ADR 0121).</summary>
+    public static class SessionPrincipal
+    {
+        /// <summary>Nobody in particular: the node requires no authentication.</summary>
+        public const byte Anonymous = 0;
+
+        /// <summary>A user or service, by name.</summary>
+        public const byte User = 1;
+
+        /// <summary>A broker node, by its certificate; the name is its id.</summary>
+        public const byte Node = 2;
+    }
+
+    /// <summary>How a session signed in, in <see cref="SessionEntry.Mechanism"/> (ADR 0121).</summary>
+    public static class SessionMechanism
+    {
+        /// <summary>It did not: the node requires no authentication.</summary>
+        public const byte None = 0;
+
+        /// <summary>With its TLS client certificate.</summary>
+        public const byte Certificate = 1;
+
+        /// <summary>SASL SCRAM-SHA-512.</summary>
+        public const byte ScramSha512 = 2;
+
+        /// <summary>SASL OAUTHBEARER.</summary>
+        public const byte OAuthBearer = 3;
+    }
+
+    /// <summary>One open client session on a node (ADR 0121).</summary>
+    /// <param name="PrincipalKind">See <see cref="SessionPrincipal"/>.</param>
+    /// <param name="Name">The user's name, or the node's id; empty for anonymous.</param>
+    /// <param name="Groups">Groups at the identity provider (OAUTHBEARER only).</param>
+    /// <param name="Mechanism">See <see cref="SessionMechanism"/>.</param>
+    /// <param name="Peer">The other end's address as the node sees it.</param>
+    /// <param name="ConnectedMs">When the connection was made, in milliseconds since the epoch.</param>
+    /// <param name="CredentialMs">When its credential dates from: a token's issue time (0 without one), the SCRAM login, or the connection; a session revocation after it ends the session.</param>
+    /// <param name="ExpiresMs">When the session ends unless renewed; 0 for one that lasts the connection.</param>
+    public sealed record SessionEntry(
+        byte PrincipalKind,
+        string Name,
+        IReadOnlyList<string> Groups,
+        byte Mechanism,
+        string Peer,
+        ulong ConnectedMs,
+        ulong CredentialMs,
+        ulong ExpiresMs);
 
     /// <summary>One client certificate in the cluster's inventory.</summary>
     /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>

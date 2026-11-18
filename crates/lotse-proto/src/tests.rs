@@ -34,6 +34,44 @@ fn every_response_round_trips() {
 }
 
 #[test]
+fn a_partition_without_a_pin_or_placement_is_written_as_before() {
+    // ADR 0121: the tags appear only when set, so an earlier reader sees
+    // the same bytes.
+    let partition = |pinned_leader, placed| PartitionMetadata {
+        partition: 0,
+        leader: 1,
+        leader_term: 2,
+        voters: vec![1, 2],
+        pinned_leader,
+        placed,
+    };
+    let answer = |p: PartitionMetadata| {
+        Response::Metadata(MetadataResponse {
+            brokers: Vec::new(),
+            resources: vec![ResourceMetadata {
+                error: ErrorCode::NONE,
+                name: "s".into(),
+                tenant: "t".into(),
+                resource_id: 9,
+                kind: kind::STREAM,
+                partitions: vec![p],
+                exchange: None,
+            }],
+        })
+    };
+    let plain = encode_response(1, &answer(partition(0, false)));
+    let pinned = encode_response(1, &answer(partition(3, false)));
+    let placed = encode_response(1, &answer(partition(0, true)));
+    // One tag each: its number (a varint) and its value's length (4 bytes),
+    // then a u32 for the pin and nothing for the placement.
+    assert_eq!(pinned.len(), plain.len() + 1 + 4 + 4);
+    assert_eq!(placed.len(), plain.len() + 1 + 4);
+    for (frame, p) in [(plain, partition(0, false)), (pinned, partition(3, false)), (placed, partition(0, true))] {
+        assert_eq!(decode_response(frame, ApiKey::METADATA).unwrap().1, answer(p));
+    }
+}
+
+#[test]
 fn records_are_not_copied_on_decode() {
     let records = Bytes::from(vec![9u8; 4096]);
     let resp = Response::Fetch(FetchResponse {
