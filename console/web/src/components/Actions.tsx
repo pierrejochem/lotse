@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../api/client';
-import { useMoveLeader, usePurgeQueue, useRequeue } from '../api/queries';
+import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetReplication } from '../api/queries';
 import { useToast } from './toast';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
@@ -158,6 +158,137 @@ export function MoveLeaderButton({
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action className="btn dark" disabled={!to} onClick={() => run(to)}>
               Pin to {to || '…'}
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  );
+}
+
+/** Sets how many replicas every partition of a stream or queue has (`replication.factor`, ADR 0115). */
+export function ReplicationButton({ cluster, resource, current }: { cluster: string; resource: string; current: number }) {
+  const set = useSetReplication(cluster);
+  const nodes = useNodes(cluster);
+  const toast = useToast();
+  const [factor, setFactor] = useState(current);
+  const active = nodes.data?.nodes.length ?? 0;
+  const valid = Number.isInteger(factor) && factor >= 1 && (active === 0 || factor <= active);
+  return (
+    <AlertDialog.Root onOpenChange={(open) => open && setFactor(current)}>
+      <AlertDialog.Trigger className="btn">Change replication</AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="overlay" />
+        <AlertDialog.Content className="dialog" style={narrow}>
+          <div className="dialog-head">
+            <div>
+              <AlertDialog.Title className="h2">Replication of {resource}</AlertDialog.Title>
+              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
+                Every partition gets this many replicas. Partitions move four at a time, each as a full copy, and partitions placed on
+                named nodes are released. Now {current} replica{current === 1 ? '' : 's'}.
+              </AlertDialog.Description>
+            </div>
+          </div>
+          <div className="field" style={{ padding: '4px 24px 8px' }}>
+            <label htmlFor="replication-factor">Replicas per partition{active > 0 ? `, 1 to ${active}` : ''}</label>
+            <input
+              id="replication-factor"
+              className="input mono"
+              type="number"
+              min={1}
+              max={active > 0 ? active : undefined}
+              value={Number.isNaN(factor) ? '' : factor}
+              onChange={(e) => setFactor(e.target.valueAsNumber)}
+            />
+          </div>
+          <div className="dialog-foot">
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
+            <AlertDialog.Action
+              className="btn dark"
+              disabled={!valid || factor === current || set.isPending}
+              onClick={() =>
+                set.mutate(
+                  { resource, factor },
+                  {
+                    onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+                    onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the replication.', error: true }),
+                  },
+                )
+              }
+            >
+              Set {valid ? factor : '…'} replicas
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  );
+}
+
+/** Places a partition on nodes the user names, or releases it to the planner (ADR 0115). */
+export function PlaceButton({
+  cluster,
+  resource,
+  partition,
+  replicas,
+  placed,
+}: {
+  cluster: string;
+  resource: string;
+  partition: number;
+  replicas: string[];
+  placed: boolean;
+}) {
+  const place = usePlacePartition(cluster);
+  const nodes = useNodes(cluster);
+  const toast = useToast();
+  const [chosen, setChosen] = useState<string[]>(replicas);
+  const all = nodes.data?.nodes.map((n) => n.id) ?? replicas;
+  const toggle = (n: string) => setChosen((c) => (c.includes(n) ? c.filter((x) => x !== n) : [...c, n]));
+  const run = (to: string[]) =>
+    place.mutate(
+      { resource, partition, nodes: to },
+      {
+        onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not place the partition.', error: true }),
+      },
+    );
+  const same = chosen.length === replicas.length && chosen.every((n) => replicas.includes(n));
+  return (
+    <AlertDialog.Root onOpenChange={(open) => open && setChosen(replicas)}>
+      <AlertDialog.Trigger className="btn small" aria-label={`Place partition ${partition} on nodes`}>
+        Place
+      </AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="overlay" />
+        <AlertDialog.Content className="dialog" style={narrow}>
+          <div className="dialog-head">
+            <div>
+              <AlertDialog.Title className="h2">Place partition {partition} of {resource}</AlertDialog.Title>
+              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
+                Its replicas move to the nodes you choose, as a full copy, and stay there: rebalancing and the replication factor leave a
+                placed partition alone, and only draining a node moves it. A pinned leader on a node it leaves is unpinned.
+              </AlertDialog.Description>
+            </div>
+          </div>
+          <fieldset className="field" style={{ padding: '4px 24px 8px', border: 0, margin: 0 }}>
+            <legend className="small muted" style={{ padding: 0, margin: '8px 0 6px' }}>Nodes</legend>
+            {all.map((n) => (
+              <label key={n} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={chosen.includes(n)} onChange={() => toggle(n)} />
+                <span className="mono">{n}</span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="dialog-foot">
+            {placed && (
+              <AlertDialog.Action className="btn" onClick={() => run([])}>
+                Release
+              </AlertDialog.Action>
+            )}
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
+            <AlertDialog.Action className="btn dark" disabled={chosen.length === 0 || (placed && same) || place.isPending} onClick={() => run(chosen)}>
+              Place on {chosen.length} node{chosen.length === 1 ? '' : 's'}
             </AlertDialog.Action>
           </div>
         </AlertDialog.Content>

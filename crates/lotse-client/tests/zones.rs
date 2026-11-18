@@ -41,6 +41,8 @@ async fn broker(rt: SimRuntime, id: u32, seen: Seen, follower_error: Option<Erro
                                 leader: 1,
                                 leader_term: 1,
                                 voters: vec![1, 2],
+                                pinned_leader: 0,
+                                placed: false,
                             }],
                             exchange: None,
                         }],

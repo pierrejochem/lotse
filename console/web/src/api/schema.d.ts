@@ -181,6 +181,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/placements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Places a partition's replicas on named nodes, or releases it to the
+         *     planner with no nodes (ADR 0115).
+         */
+        post: operations["place_partition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/queues": {
         parameters: {
             query?: never;
@@ -250,6 +270,46 @@ export interface paths {
          *     came from, each once.
          */
         post: operations["requeue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/replication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Gives every partition of a stream or queue a number of replicas. Moves
+         *     four partitions at a time and releases placed partitions (ADR 0115).
+         */
+        post: operations["set_replication"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The open client sessions on every node: all of them for a cluster admin
+         *     or viewer, the signed-in user's own otherwise (ADR 0121).
+         */
+        get: operations["sessions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -971,6 +1031,13 @@ export interface components {
              * @description First offset still stored.
              */
             log_start: number;
+            /** @description The node a cluster admin pinned its leader to (ADR 0065). */
+            pinned?: string | null;
+            /**
+             * @description Placed on named nodes by a cluster admin (ADR 0115): rebalancing
+             *     and the replication factor leave it alone.
+             */
+            placed: boolean;
             /** @description Replicas. */
             replicas: components["schemas"]["Replica"][];
             /**
@@ -989,6 +1056,21 @@ export interface components {
          * @enum {string}
          */
         PhaseState: "done" | "running" | "pending";
+        /**
+         * @description Request to place a partition's replicas on named nodes, or to release
+         *     it to the planner with no nodes (ADR 0115).
+         */
+        PlacePartition: {
+            /** @description The nodes, as the console names them; empty releases the partition. */
+            nodes: string[];
+            /**
+             * Format: int32
+             * @description The partition; 0 for a queue.
+             */
+            partition: number;
+            /** @description The stream or queue. */
+            resource: string;
+        };
         /** @description One point of a time series. */
         Point: {
             /**
@@ -1113,6 +1195,10 @@ export interface components {
             max_deliveries?: number | null;
             /** @description Queue name. */
             name: string;
+            /** @description The node a cluster admin pinned its leader to (ADR 0065). */
+            pinned?: string | null;
+            /** @description Placed on named nodes by a cluster admin (ADR 0115). */
+            placed: boolean;
             /**
              * Format: double
              * @description Publish rate, messages/s.
@@ -1123,6 +1209,8 @@ export interface components {
              * @description Ready, all levels.
              */
             ready: number;
+            /** @description The nodes that hold the queue's replicas. */
+            replicas: string[];
             /** @description Single active consumer. */
             single_active: boolean;
             /** @description Tenant. */
@@ -1313,6 +1401,64 @@ export interface components {
             points: components["schemas"]["Point"][];
             /** @description Unit of `v`. */
             unit: string;
+        };
+        /** @description One open client session on a node (ADR 0121). */
+        SessionRow: {
+            /**
+             * Format: int64
+             * @description When the connection was made, ms since the Unix epoch.
+             */
+            connected_ms: number;
+            /**
+             * Format: int64
+             * @description When its credential dates from, ms since the Unix epoch; a session
+             *     revocation after it ends the session.
+             */
+            credential_ms: number;
+            /**
+             * Format: int64
+             * @description When it ends unless renewed, ms since the Unix epoch; none for one
+             *     that lasts as long as its connection.
+             */
+            expires_ms?: number | null;
+            /** @description Groups at the identity provider (OAUTHBEARER only). */
+            groups: string[];
+            /** @description `user`, `node` or `anonymous`. */
+            kind: string;
+            /** @description How it signed in: `certificate`, `SCRAM-SHA-512`, `OAUTHBEARER` or `none`. */
+            mechanism: string;
+            /** @description The node that holds the connection. */
+            node: string;
+            /** @description The other end's address as the node sees it. */
+            peer: string;
+            /** @description Who it acts as: a user's name, a node's name, or `anonymous`. */
+            principal: string;
+        };
+        /**
+         * @description The open client sessions the signed-in user may see: every session for
+         *     a cluster admin or viewer, their own otherwise (ADR 0121).
+         */
+        SessionsView: {
+            /** @description Whether the user sees every session or only their own. */
+            everyone: boolean;
+            /** @description The sessions, by node and then oldest first. */
+            sessions: components["schemas"]["SessionRow"][];
+            /** @description Nodes that did not answer. */
+            unreachable: string[];
+        };
+        /**
+         * @description Request to give every partition of a stream or queue a number of
+         *     replicas (`replication.factor`, ADR 0115). Releases its placed
+         *     partitions.
+         */
+        SetReplication: {
+            /**
+             * Format: int32
+             * @description Replicas per partition, from 1 to the active nodes.
+             */
+            factor: number;
+            /** @description The stream or queue. */
+            resource: string;
         };
         /** @description The stream detail screen. */
         StreamDetail: {
@@ -2030,6 +2176,60 @@ export interface operations {
             };
         };
     };
+    place_partition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacePartition"];
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is not valid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such cluster or resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     queues: {
         parameters: {
             query?: never;
@@ -2230,6 +2430,92 @@ export interface operations {
                 };
             };
             /** @description No such cluster or resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_replication: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetReplication"];
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is not valid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such cluster or resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionsView"];
+                };
+            };
+            /** @description No such cluster. */
             404: {
                 headers: {
                     [name: string]: unknown;

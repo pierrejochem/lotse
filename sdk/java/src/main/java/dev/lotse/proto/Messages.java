@@ -439,13 +439,34 @@ public final class Messages {
      * @param leader leader node, a {@code u32}; {@code 0} if none is known
      * @param leaderTerm the leader's term, a {@code u64}
      * @param voters voters of the partition's Raft group, each a {@code u32}
+     * @param pinnedLeader the node a cluster admin pinned its leader to, a {@code u32}; 0 for none (tag 0, ADR 0121)
+     * @param placed whether a cluster admin placed it on named nodes (tag 1, ADR 0121)
      */
-    public record PartitionMetadata(long partition, long leader, long leaderTerm, List<Long> voters) {
+    public record PartitionMetadata(
+            long partition, long leader, long leaderTerm, List<Long> voters, long pinnedLeader, boolean placed) {
         /** Creates the structure. */
         public PartitionMetadata {
             voters = List.copyOf(voters);
         }
+
+        /**
+         * A partition without a pin or a placement.
+         *
+         * @param partition partition number
+         * @param leader leader node; 0 if none is known
+         * @param leaderTerm the leader's term
+         * @param voters voters of the partition's Raft group
+         */
+        public PartitionMetadata(long partition, long leader, long leaderTerm, List<Long> voters) {
+            this(partition, leader, leaderTerm, voters, 0, false);
+        }
     }
+
+    /** Tag of a partition's pinned leader in a {@code Metadata} answer (ADR 0121). */
+    static final long TAG_PINNED_LEADER = 0;
+
+    /** Tag of a placed partition in a {@code Metadata} answer: present, empty, when it is placed (ADR 0121). */
+    static final long TAG_PLACED = 1;
 
     /**
      * A queue bound to an exchange.
@@ -1042,6 +1063,60 @@ public final class Messages {
         public static final int REVOKED = 3;
 
         private CertificateState() {}
+    }
+
+    /**
+     * One open client session on a node (ADR 0121).
+     *
+     * @param principalKind see {@link SessionPrincipal}
+     * @param name the user's name, or the node's id; empty for anonymous
+     * @param groups groups at the identity provider (OAUTHBEARER only)
+     * @param mechanism see {@link SessionMechanism}
+     * @param peer the other end's address as the node sees it
+     * @param connectedMs when the connection was made, milliseconds since the Unix epoch, a {@code u64}
+     * @param credentialMs when its credential dates from, a {@code u64}: a token's issue time (0 without one), the
+     *     SCRAM login, or the connection; a session revocation after it ends the session
+     * @param expiresMs when the session ends unless renewed, a {@code u64}; 0 for one that lasts the connection
+     */
+    public record SessionEntry(
+            int principalKind,
+            String name,
+            List<String> groups,
+            int mechanism,
+            String peer,
+            long connectedMs,
+            long credentialMs,
+            long expiresMs) {
+        /** Creates the structure. */
+        public SessionEntry {
+            groups = List.copyOf(groups);
+        }
+    }
+
+    /** Who a session acts as, in {@link SessionEntry#principalKind()} (ADR 0121). */
+    public static final class SessionPrincipal {
+        /** Nobody in particular: the node requires no authentication. */
+        public static final int ANONYMOUS = 0;
+        /** A user or service, by name. */
+        public static final int USER = 1;
+        /** A broker node, by its certificate; the name is its id. */
+        public static final int NODE = 2;
+
+        private SessionPrincipal() {}
+    }
+
+    /** How a session signed in, in {@link SessionEntry#mechanism()} (ADR 0121). */
+    public static final class SessionMechanism {
+        /** It did not: the node requires no authentication. */
+        public static final int NONE = 0;
+        /** With its TLS client certificate. */
+        public static final int CERTIFICATE = 1;
+        /** SASL SCRAM-SHA-512. */
+        public static final int SCRAM_SHA_512 = 2;
+        /** SASL OAUTHBEARER. */
+        public static final int OAUTHBEARER = 3;
+
+        private SessionMechanism() {}
     }
 
     /**

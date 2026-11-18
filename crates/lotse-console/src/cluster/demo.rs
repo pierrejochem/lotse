@@ -48,6 +48,10 @@ struct State {
     requeued: BTreeSet<String>,
     /// Partitions pinned to a node, by resource and partition.
     pins: BTreeMap<(String, u32), String>,
+    /// Partitions placed on named nodes, by resource and partition.
+    placements: BTreeMap<(String, u32), Vec<String>>,
+    /// Replication factors set here, by resource.
+    factors: BTreeMap<String, u32>,
     /// Users created or changed here, by name, with their iterations; the
     /// demo's sample users are `SAMPLE_USERS`. Deleted names are in `gone`.
     users: BTreeMap<String, u32>,
@@ -153,10 +157,21 @@ impl DemoCluster {
         if d.dlq.as_ref().is_some_and(|q| st.requeued.contains(q)) {
             d.dead_letters.clear();
         }
-        for l in &mut d.levels {
-            if let Some(n) = st.pins.get(&(d.name.clone(), u32::from(l.level))) {
+        // One log for every level (ADR 0078): a pin and a placement are the
+        // queue's, partition 0.
+        let key = (d.name.clone(), 0);
+        if let Some(n) = st.pins.get(&key) {
+            for l in &mut d.levels {
                 l.leader = n.clone();
             }
+            d.pinned = Some(n.clone());
+        }
+        if let Some(f) = st.factors.get(&d.name) {
+            d.replicas.truncate(*f as usize);
+        }
+        if let Some(nodes) = st.placements.get(&key) {
+            d.replicas.clone_from(nodes);
+            d.placed = true;
         }
     }
 
@@ -167,12 +182,52 @@ impl DemoCluster {
         }
     }
 
+    /// The replicas of a stream's partition or a queue (partition 0), or why
+    /// there is no such partition.
+    async fn replicas_of(&self, who: &Identity, resource: &str, partition: u32) -> ApiResult<Vec<String>> {
+        match self.stream(who, resource).await {
+            Ok(s) => s
+                .partitions
+                .iter()
+                .find(|p| p.id == partition)
+                .map(|p| p.replicas.iter().map(|r| r.node.clone()).collect())
+                .ok_or_else(|| ApiError::NotFound(format!("{resource} has no partition {partition}."))),
+            Err(ApiError::NotFound(_)) => {
+                let q = self.queue(who, resource).await?;
+                if partition != 0 {
+                    return Err(ApiError::NotFound(format!(
+                        "A queue has only partition 0; {resource} has no partition {partition}."
+                    )));
+                }
+                Ok(q.replicas)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Where pins put a stream's leaders.
     fn overlay_stream(&self, d: &mut StreamDetail) {
         let st = self.lock();
+        if let Some(f) = st.factors.get(&d.name) {
+            d.replication = *f;
+        }
         for p in &mut d.partitions {
-            if let Some(n) = st.pins.get(&(d.name.clone(), p.id)) {
+            let key = (d.name.clone(), p.id);
+            if let Some(n) = st.pins.get(&key) {
                 p.leader = n.clone();
+                p.pinned = Some(n.clone());
+            }
+            if let Some(f) = st.factors.get(&d.name) {
+                p.replicas.truncate(*f as usize);
+            }
+            if let Some(nodes) = st.placements.get(&key) {
+                p.replicas.retain(|r| nodes.contains(&r.node));
+                let missing: Vec<String> =
+                    nodes.iter().filter(|n| !p.replicas.iter().any(|r| r.node == **n)).cloned().collect();
+                for node in missing {
+                    p.replicas.push(Replica { node, state: ReplicaState::CatchingUp, behind: 0 });
+                }
+                p.placed = true;
             }
         }
     }
@@ -567,6 +622,8 @@ impl Cluster for DemoCluster {
                     high_watermark: hw,
                     last_stable: hw - open_tx(p) * 37,
                     size_bytes: row.stored_bytes / 3 / u64::from(row.partitions),
+                    pinned: None,
+                    placed: false,
                 }
             })
             .collect();
@@ -701,6 +758,9 @@ impl Cluster for DemoCluster {
                         .map(|l| PriorityLevel { level: l, leader: "broker-1".into(), ready: 0, oldest_ms: Some(0) })
                         .collect(),
                     levels_unread: 0,
+                    replicas: DEMO_NODES.map(String::from).to_vec(),
+                    pinned: None,
+                    placed: false,
                     consumers: vec![],
                     dead_letters: vec![],
                     handover: vec![HandoverEvent { at: rfc3339(now_ms()), text: format!("Created by {by}.") }],
@@ -734,6 +794,9 @@ impl Cluster for DemoCluster {
                         oldest_ms: Some(45_000),
                     }],
                     levels_unread: 0,
+                    replicas: DEMO_NODES.map(String::from).to_vec(),
+                    pinned: None,
+                    placed: false,
                     consumers: vec![],
                     dead_letters: vec![],
                     handover: vec![],
@@ -779,6 +842,9 @@ impl Cluster for DemoCluster {
                     PriorityLevel { level: 0, leader: "broker-2".into(), ready: 50, oldest_ms: Some(581_000) },
                 ],
                 levels_unread: 0,
+                replicas: DEMO_NODES.map(String::from).to_vec(),
+                pinned: None,
+                placed: false,
                 consumers: vec![
                     consumer("capture-worker-1", "10.4.6.21 → broker-2", true),
                     consumer("capture-worker-2", "10.4.6.22 → broker-2", false),
@@ -962,10 +1028,13 @@ impl Cluster for DemoCluster {
             }
             Err(ApiError::NotFound(_)) => {
                 let q = self.queue(who, &req.resource).await?;
-                if !q.levels.iter().any(|l| u32::from(l.level) == req.partition) {
-                    return Err(ApiError::NotFound(format!("{} has no level {}.", req.resource, req.partition)));
+                if req.partition != 0 {
+                    return Err(ApiError::NotFound(format!(
+                        "A queue has only partition 0; {} has no partition {}.",
+                        req.resource, req.partition
+                    )));
                 }
-                ["broker-1", "broker-2", "broker-3"].map(String::from).to_vec()
+                q.replicas
             }
             Err(e) => return Err(e),
         };
@@ -987,6 +1056,79 @@ impl Cluster for DemoCluster {
             }
         }
     }
+    async fn set_replication(&self, who: &Identity, req: &SetReplication) -> ApiResult<()> {
+        self.replicas_of(who, &req.resource, 0).await?;
+        if req.factor == 0 || req.factor as usize > DEMO_NODES.len() {
+            return Err(ApiError::BadRequest(format!(
+                "The cluster refused the change: replication.factor is a number of replicas from 1 to the {} active nodes.",
+                DEMO_NODES.len()
+            )));
+        }
+        let mut st = self.lock();
+        st.factors.insert(req.resource.clone(), req.factor);
+        // The factor is about every partition (ADR 0115).
+        st.placements.retain(|(r, _), _| *r != req.resource);
+        Ok(())
+    }
+
+    async fn place_partition(&self, who: &Identity, req: &PlacePartition) -> ApiResult<()> {
+        self.replicas_of(who, &req.resource, req.partition).await?;
+        if let Some(n) = req.nodes.iter().find(|n| !DEMO_NODES.contains(&n.as_str())) {
+            return Err(ApiError::BadRequest(format!(
+                "There is no node \"{n}\" in {}; choose from {}.",
+                self.id,
+                DEMO_NODES.join(", ")
+            )));
+        }
+        let key = (req.resource.clone(), req.partition);
+        let mut st = self.lock();
+        if req.nodes.is_empty() {
+            st.placements.remove(&key);
+        } else {
+            // A pin on a node the placement leaves goes (ADR 0115).
+            if st.pins.get(&key).is_some_and(|n| !req.nodes.contains(n)) {
+                st.pins.remove(&key);
+            }
+            st.placements.insert(key, req.nodes.clone());
+        }
+        Ok(())
+    }
+
+    async fn sessions(&self, who: &Identity) -> ApiResult<SessionsView> {
+        let now = crate::time::now_ms();
+        let st = self.lock();
+        let row = |node: &str,
+                   principal: &str,
+                   mechanism: &str,
+                   groups: &[&str],
+                   peer: &str,
+                   age_s: u64,
+                   left_s: Option<u64>| SessionRow {
+            node: node.into(),
+            principal: principal.into(),
+            kind: "user".into(),
+            mechanism: mechanism.into(),
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            peer: peer.into(),
+            connected_ms: now - age_s * 1000,
+            credential_ms: now - age_s.min(600) * 1000,
+            expires_ms: left_s.map(|s| now + s * 1000),
+        };
+        let mut sessions = vec![
+            row("broker-1", &who.principal, "SCRAM-SHA-512", &[], "10.0.4.20:52114", 95, Some(3_505)),
+            row("broker-1", "ingest-service", "certificate", &[], "10.0.7.11:40122", 86_400, None),
+            row("broker-2", "ingest-service", "certificate", &[], "10.0.7.12:40088", 86_100, None),
+            row("broker-2", "billing-reader", "OAUTHBEARER", &["billing"], "10.0.9.3:58001", 1_250, Some(2_350)),
+            row("broker-3", "billing-reader", "OAUTHBEARER", &["billing"], "10.0.9.3:58002", 1_249, Some(2_351)),
+        ];
+        // A revoked user's or group's sessions are gone.
+        sessions.retain(|s| {
+            !st.revoked.contains(&(false, s.principal.clone()))
+                && !s.groups.iter().any(|g| st.revoked.contains(&(true, g.clone())))
+        });
+        Ok(SessionsView { sessions, unreachable: Vec::new(), everyone: true })
+    }
+
     async fn users(&self, _who: &Identity) -> ApiResult<UsersView> {
         let st = self.lock();
         let bindings = self.bindings_of(&st);
@@ -1232,6 +1374,9 @@ impl Cluster for DemoCluster {
         Ok(())
     }
 }
+
+/// The demo cluster's nodes.
+const DEMO_NODES: [&str; 3] = ["broker-1", "broker-2", "broker-3"];
 
 const DISK_LIMITS: DiskLimits = DiskLimits { soft_free: 0.20, hard_free: 0.10 };
 

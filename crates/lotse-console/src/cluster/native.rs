@@ -238,6 +238,45 @@ fn node_name(id: u32) -> String {
     format!("node-{id}")
 }
 
+/// The node a partition's leader is pinned to, if any (ADR 0121).
+fn pinned(p: &lotse_proto::PartitionMetadata) -> Option<String> {
+    (p.pinned_leader != 0).then(|| node_name(p.pinned_leader))
+}
+
+/// A node id from the console's name for it.
+fn node_id(cluster: &str, name: &str) -> ApiResult<u64> {
+    name.strip_prefix("node-")
+        .and_then(|id| id.parse::<u64>().ok())
+        .ok_or_else(|| ApiError::BadRequest(format!("There is no node \"{name}\" in {cluster}.")))
+}
+
+/// A session as the console lists it (ADR 0121).
+fn session_row(node: u32, e: &lotse_proto::SessionEntry) -> SessionRow {
+    use lotse_proto::{session_mechanism, session_principal};
+    let (kind, principal) = match e.principal_kind {
+        session_principal::USER => ("user", e.name.clone()),
+        session_principal::NODE => ("node", e.name.parse::<u32>().map_or_else(|_| e.name.clone(), node_name)),
+        _ => ("anonymous", "anonymous".to_string()),
+    };
+    let mechanism = match e.mechanism {
+        session_mechanism::CERTIFICATE => "certificate",
+        session_mechanism::SCRAM_SHA_512 => "SCRAM-SHA-512",
+        session_mechanism::OAUTHBEARER => "OAUTHBEARER",
+        _ => "none",
+    };
+    SessionRow {
+        node: node_name(node),
+        principal,
+        kind: kind.into(),
+        mechanism: mechanism.into(),
+        groups: e.groups.clone(),
+        peer: e.peer.clone(),
+        connected_ms: e.connected_ms,
+        credential_ms: e.credential_ms,
+        expires_ms: (e.expires_ms != 0).then_some(e.expires_ms),
+    }
+}
+
 fn chip(tone: Tone, text: &str) -> Chip {
     Chip { tone, text: text.into() }
 }
@@ -621,6 +660,8 @@ impl Cluster for NativeCluster {
                     high_watermark: p.high_watermark,
                     last_stable: p.last_stable,
                     size_bytes: p.size_bytes,
+                    pinned: pinned(pm),
+                    placed: pm.placed,
                 },
                 None => Partition {
                     id: pm.partition,
@@ -635,6 +676,8 @@ impl Cluster for NativeCluster {
                     high_watermark: 0,
                     last_stable: 0,
                     size_bytes: 0,
+                    pinned: pinned(pm),
+                    placed: pm.placed,
                 },
             })
             .collect();
@@ -789,6 +832,9 @@ impl Cluster for NativeCluster {
             dead_lettered: None,
             levels,
             levels_unread: q.map_or(0, |q| q.ready_level_unread),
+            replicas: r.partitions.first().map_or_else(Vec::new, |p| p.voters.iter().map(|v| node_name(*v)).collect()),
+            pinned: r.partitions.first().and_then(pinned),
+            placed: r.partitions.first().is_some_and(|p| p.placed),
             consumers,
             dead_letters: Vec::new(),
             handover: Vec::new(),
@@ -843,13 +889,38 @@ impl Cluster for NativeCluster {
     async fn move_leader(&self, who: &Identity, req: &MoveLeader) -> ApiResult<()> {
         let node = match &req.node {
             None => None,
-            Some(n) => Some(
-                n.strip_prefix("node-")
-                    .and_then(|id| id.parse::<u64>().ok())
-                    .ok_or_else(|| ApiError::BadRequest(format!("There is no node \"{n}\" in {}.", self.id)))?,
-            ),
+            Some(n) => Some(node_id(&self.id, n)?),
         };
         self.seat(who).client.move_leader(&req.resource, req.partition, node).await.map_err(|e| refused("the move", e))
+    }
+
+    async fn set_replication(&self, who: &Identity, req: &SetReplication) -> ApiResult<()> {
+        let factor = req.factor.to_string();
+        let set = [("replication.factor", factor.as_str())];
+        self.seat(who).client.alter_configs(&req.resource, &set, &[]).await.map_err(|e| refused("the change", e))
+    }
+
+    async fn place_partition(&self, who: &Identity, req: &PlacePartition) -> ApiResult<()> {
+        let nodes = req.nodes.iter().map(|n| node_id(&self.id, n)).collect::<ApiResult<Vec<u64>>>()?;
+        let seat = self.seat(who);
+        seat.client
+            .reassign_partition(&req.resource, req.partition, &nodes)
+            .await
+            .map_err(|e| refused("the placement", e))
+    }
+
+    async fn sessions(&self, who: &Identity) -> ApiResult<SessionsView> {
+        let seat = self.seat(who);
+        let answers = seat.client.node_sessions().await.map_err(failed)?;
+        let mut sessions = Vec::new();
+        let mut unreachable = Vec::new();
+        for (node, answer) in answers {
+            match answer {
+                Ok(r) => sessions.extend(r.sessions.iter().map(|e| session_row(node, e))),
+                Err(_) => unreachable.push(node_name(node)),
+            }
+        }
+        Ok(SessionsView { sessions, unreachable, everyone: seat.sees_cluster().await? })
     }
 
     async fn read(

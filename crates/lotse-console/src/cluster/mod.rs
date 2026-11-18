@@ -17,8 +17,8 @@ use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
     BindingRow, BindingsView, CertificateRequestsView, CertificatesView, ClusterRef, CreateQueue, Credential,
-    Isolation, MoveLeader, NodesView, Overview, QueueDetail, QueueRow, RecordView, StreamDetail, StreamRow,
-    TenantsView, UsersView,
+    Isolation, MoveLeader, NodesView, Overview, PlacePartition, QueueDetail, QueueRow, RecordView, SessionsView,
+    SetReplication, StreamDetail, StreamRow, TenantsView, UsersView,
 };
 
 /// One managed cluster.
@@ -60,6 +60,15 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Pins a partition's leader, or unpins it (ADR 0065).
     async fn move_leader(&self, who: &Identity, req: &MoveLeader) -> ApiResult<()>;
+
+    /// Sets a resource's `replication.factor` (ADR 0115).
+    async fn set_replication(&self, who: &Identity, req: &SetReplication) -> ApiResult<()>;
+
+    /// Places a partition on named nodes, or releases it (ADR 0115).
+    async fn place_partition(&self, who: &Identity, req: &PlacePartition) -> ApiResult<()>;
+
+    /// The open client sessions `who` may see on every node (ADR 0121).
+    async fn sessions(&self, who: &Identity) -> ApiResult<SessionsView>;
 
     /// Reads records without a consumer group.
     async fn read(

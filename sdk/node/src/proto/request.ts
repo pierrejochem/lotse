@@ -254,6 +254,13 @@ export interface RevokeCertificateRequest {
 export interface DescribeCertificatesRequest {
   readonly type: "DescribeCertificates";
 }
+/**
+ * `DescribeSessions` (key 59): the open client sessions of the node it is sent to (ADR 0121). Cluster admins and
+ * cluster viewers get every session; anyone else the sessions made with their own name.
+ */
+export interface DescribeSessionsRequest {
+  readonly type: "DescribeSessions";
+}
 /** `RequestCertificate` (key 55): asks for a certificate with a signing request (ADR 0092). Cluster admin. */
 export interface RequestCertificateRequest {
   readonly type: "RequestCertificate";
@@ -390,6 +397,7 @@ export type Request =
   | RevokeSessionsRequest
   | RevokeCertificateRequest
   | DescribeCertificatesRequest
+  | DescribeSessionsRequest
   | RecordCertificatesRequest
   | RequestCertificateRequest
   | DescribeCertificateRequestsRequest
@@ -444,6 +452,7 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   RevokeSessions: ApiKey.REVOKE_SESSIONS,
   RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
   DescribeCertificates: ApiKey.DESCRIBE_CERTIFICATES,
+  DescribeSessions: ApiKey.DESCRIBE_SESSIONS,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
   DescribeCertificateRequests: ApiKey.DESCRIBE_CERTIFICATE_REQUESTS,
@@ -503,6 +512,7 @@ export function writeRequest(w: Writer, req: Request): void {
     case "DescribeMetrics":
     case "DescribeUsers":
     case "DescribeCertificates":
+    case "DescribeSessions":
     case "DescribeCertificateRequests":
     case "DescribeTenants":
     case "DescribeRoleBindings":
@@ -1200,6 +1210,9 @@ export function readRequest(apiKey: number, r: Reader): Request {
     case ApiKey.DESCRIBE_CERTIFICATES:
       r.tags();
       return { type: "DescribeCertificates" };
+    case ApiKey.DESCRIBE_SESSIONS:
+      r.tags();
+      return { type: "DescribeSessions" };
     case ApiKey.DESCRIBE_CERTIFICATE_REQUESTS:
       r.tags();
       return { type: "DescribeCertificateRequests" };

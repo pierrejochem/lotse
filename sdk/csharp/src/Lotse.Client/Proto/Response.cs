@@ -62,7 +62,16 @@ public abstract record Response
                 {
                     w2.U32(p.Partition).U32(p.Leader).U64(p.LeaderTerm);
                     w2.Array(p.Voters, (w3, v) => w3.U32(v));
-                    w2.NoTags();
+                    var tags = new List<Tag>();
+                    if (p.PinnedLeader != 0)
+                    {
+                        tags.Add(new Tag(TagPinnedLeader, ByteString.CopyOf(new Writer().U32(p.PinnedLeader).ToByteArray())));
+                    }
+                    if (p.Placed)
+                    {
+                        tags.Add(new Tag(TagPlaced, ByteString.CopyOf(new byte[0])));
+                    }
+                    w2.Tags(tags);
                 });
                 w1.Bool(res.Exchange is not null);
                 if (res.Exchange is not null)
@@ -100,9 +109,26 @@ public abstract record Response
                 byte kind = r1.U8();
                 List<PartitionMetadata> partitions = r1.Array(18, r2 =>
                 {
-                    var p = new PartitionMetadata(r2.U32(), r2.U32(), r2.U64(), r2.Array(4, r3 => r3.U32()));
-                    r2.Tags();
-                    return p;
+                    uint partition = r2.U32();
+                    uint leader = r2.U32();
+                    ulong term = r2.U64();
+                    List<uint> voters = r2.Array(4, r3 => r3.U32());
+                    uint pinned = 0;
+                    bool placed = false;
+                    foreach (Tag t in r2.Tags())
+                    {
+                        if (t.Number == TagPinnedLeader)
+                        {
+                            var v = new Reader(t.Value.ToByteArray());
+                            pinned = v.U32();
+                            v.Finish();
+                        }
+                        else if (t.Number == TagPlaced)
+                        {
+                            placed = true;
+                        }
+                    }
+                    return new PartitionMetadata(partition, leader, term, voters, pinned, placed);
                 });
                 ExchangeMetadata? exchange = null;
                 if (r1.Bool())
@@ -782,6 +808,47 @@ public abstract record Response
                 r1 => new CertificateRequestEntry(
                     r1.Bytes(), r1.String(), r1.Bytes(), r1.String(), r1.U64(), r1.U64(), r1.U8(), r1.Bytes(), r1.U64()));
             return new DescribeCertificateRequests(error, hint, now, requests);
+        }
+    }
+
+    /// <summary>A node's open client sessions, oldest first (ADR 0121).</summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="NodeId">The answering node.</param>
+    /// <param name="NowMs">The answering node's clock in milliseconds since the epoch.</param>
+    /// <param name="Sessions">The sessions the asker may see.</param>
+    public sealed record DescribeSessions(ErrorCode Error, uint NodeId, ulong NowMs, IReadOnlyList<SessionEntry> Sessions)
+        : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code).U32(NodeId).U64(NowMs);
+            w.Array(Sessions, (w1, s) =>
+            {
+                w1.U8(s.PrincipalKind).String(s.Name);
+                w1.Array(s.Groups, (w2, g) => w2.String(g));
+                w1.U8(s.Mechanism).String(s.Peer);
+                w1.U64(s.ConnectedMs).U64(s.CredentialMs).U64(s.ExpiresMs);
+                w1.NoTags();
+            });
+            w.NoTags();
+        }
+
+        internal static DescribeSessions Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            uint nodeId = r.U32();
+            ulong now = r.U64();
+            // kind, name, no groups, mechanism, peer, three u64, no tags
+            List<SessionEntry> sessions = r.Array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, r1 =>
+            {
+                var s = new SessionEntry(
+                    r1.U8(), r1.String(), r1.Array(2, r2 => r2.String()), r1.U8(), r1.String(), r1.U64(), r1.U64(), r1.U64());
+                r1.Tags();
+                return s;
+            });
+            r.Tags();
+            return new DescribeSessions(error, nodeId, now, sessions);
         }
     }
 

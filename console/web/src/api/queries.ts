@@ -18,6 +18,7 @@ export const keys = {
   bindings: (c: string) => ['bindings', c] as const,
   certificates: (c: string) => ['certificates', c] as const,
   certificateRequests: (c: string) => ['certificate-requests', c] as const,
+  sessions: (c: string) => ['sessions', c] as const,
   metrics: (c: string, s: string, r: Range) => ['metrics', c, s, r] as const,
 };
 
@@ -167,6 +168,40 @@ export function useMoveLeader(cluster: string) {
   });
 }
 
+/** Sets a stream's or queue's replicas per partition; releases its placed partitions (ADR 0115). */
+export function useSetReplication(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: S['SetReplication']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/replication', { ...path(cluster), body })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stream', cluster] });
+      void qc.invalidateQueries({ queryKey: ['queue', cluster] });
+    },
+  });
+}
+
+/** Places a partition on named nodes, or releases it with none (ADR 0115). */
+export function usePlacePartition(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: S['PlacePartition']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/placements', { ...path(cluster), body })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stream', cluster] });
+      void qc.invalidateQueries({ queryKey: ['queue', cluster] });
+    },
+  });
+}
+
+/** Open client sessions on every node: all for a cluster admin or viewer, one's own otherwise (ADR 0121). */
+export const useSessions = (cluster: string) =>
+  useQuery({
+    queryKey: keys.sessions(cluster),
+    queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/sessions', path(cluster))),
+    refetchInterval: 15_000,
+  });
+
 /** SCRAM users; only a cluster admin gets the list (403 for everyone else). */
 export const useUsers = (cluster: string) =>
   useQuery({
@@ -264,8 +299,10 @@ export function useRevokeCertificate(cluster: string) {
 
 /** Revokes the sessions of a user or an IdP group; `confirm` is the name typed again (ADR 0070). */
 export function useRevokeSessions(cluster: string) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: S['RevokeSessions']) =>
       unwrap(api.POST('/api/v1/clusters/{cluster}/sessions/revoke', { ...path(cluster), body })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.sessions(cluster) }),
   });
 }

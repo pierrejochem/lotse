@@ -184,6 +184,25 @@ test("a refusal carries its reason", () => {
   assert.ok(found);
 });
 
+test("tags 0 and 1 of a partition carry its pinned leader and placement (ADR 0121)", () => {
+  let found = false;
+  for (const v of lines("responses.hex")) {
+    const r = decodeResponse(hex(field(v, 2)), Number(field(v, 1))).response;
+    if (r.type === "Metadata") {
+      for (const res of r.resources) {
+        for (const p of res.partitions) {
+          // Only partition 0 of "orders" has a pin (node 2) and a placement.
+          const set = res.name === "orders" && p.partition === 0;
+          found ||= set;
+          assert.equal(p.pinnedLeader, set ? 2 : 0);
+          assert.equal(p.placed, set);
+        }
+      }
+    }
+  }
+  assert.ok(found);
+});
+
 test("tag 3 of a metrics answer is read into its queues (ADR 0120)", () => {
   let found = false;
   for (const v of lines("responses.hex")) {

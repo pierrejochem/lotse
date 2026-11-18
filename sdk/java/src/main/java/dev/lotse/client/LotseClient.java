@@ -1781,6 +1781,35 @@ public final class LotseClient implements AutoCloseable {
         return out;
     }
 
+    /**
+     * Every node's open client sessions, asked of each node directly, for every node the cluster's metadata names:
+     * each with its answer, or why there is none (ADR 0121). A cluster admin or viewer gets every session, anyone
+     * else those made with their own name.
+     */
+    public List<NodeSessions> nodeSessions() {
+        checkOpen();
+        Response.Metadata m = metadata();
+        List<NodeSessions> out = new ArrayList<>();
+        for (Messages.Broker b : m.brokers()) {
+            Address addr = new Address(b.host(), b.port());
+            try {
+                Response r = call(addr, new Request.DescribeSessions());
+                if (r instanceof Response.DescribeSessions d && d.error().isOk()) {
+                    out.add(new NodeSessions(b.nodeId(), d, null));
+                } else if (r instanceof Response.DescribeSessions d) {
+                    out.add(new NodeSessions(b.nodeId(), null, new ClientException.Broker(d.error(), null)));
+                } else {
+                    out.add(new NodeSessions(
+                            b.nodeId(), null, new ClientException.NoAnswer(b.nodeId(), "unexpected response " + r)));
+                }
+            } catch (CallFailure e) {
+                out.add(new NodeSessions(
+                        b.nodeId(), null, new ClientException.NoAnswer(b.nodeId(), addr + ": " + e.describe())));
+            }
+        }
+        return out;
+    }
+
     /** The id of the resource called {@code name}, asking every broker before calling it unknown. */
     private long resourceId(String name) {
         ResourceMetadata r = find(metadataFromAll(name), name);

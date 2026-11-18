@@ -1086,6 +1086,21 @@ async fn leader_of(admin: &Client<SimRuntime>, name: &str) -> (u32, Vec<u32>) {
     }
 }
 
+/// Waits until `Metadata` says partition 0 of `name` is pinned to `pin`
+/// (0: none) and placed or not (ADR 0121), for up to a minute.
+async fn reported(rt: &SimRuntime, admin: &Client<SimRuntime>, name: &str, pin: u32, placed: bool) -> bool {
+    for _ in 0..600 {
+        if let Ok(m) = admin.metadata(&[name]).await
+            && let Some(p) = m.resources.iter().find(|r| r.name == name).and_then(|r| r.partitions.first())
+            && (p.pinned_leader, p.placed) == (pin, placed)
+        {
+            return true;
+        }
+        rt.sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
 /// Waits until partition 0 of `name` is led by `node`, for up to a minute.
 async fn led_by(rt: &SimRuntime, admin: &Client<SimRuntime>, name: &str, node: u32) -> bool {
     for _ in 0..600 {
@@ -1116,8 +1131,10 @@ fn a_pinned_leader_stays_where_it_is_put() {
             assert_eq!(voters.len(), 3);
             let to = *voters.iter().find(|v| **v != before).unwrap();
 
+            assert!(reported(&rt, &admin, "s", 0, false).await, "no pin before one is set");
             admin.move_leader("s", 0, Some(u64::from(to))).await.unwrap();
             assert!(led_by(&rt, &admin, "s", to).await, "the leader moves to node {to}");
+            assert!(reported(&rt, &admin, "s", to, false).await, "Metadata names the pin");
             rt.sleep(Duration::from_secs(60)).await;
             assert_eq!(leader_of(&admin, "s").await.0, to, "and stays: the spreading leaves a pin alone");
 
@@ -1137,6 +1154,14 @@ fn a_pinned_leader_stays_where_it_is_put() {
             let no_partition = admin.move_leader("s", 4, Some(u64::from(to))).await;
             assert!(matches!(no_partition, Err(ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, .. })));
             admin.move_leader("s", 0, None).await.expect("unpinned");
+            assert!(reported(&rt, &admin, "s", 0, false).await, "and no pin once unpinned");
+
+            // A placement shows too, until `replication.factor` releases it
+            // (ADR 0115).
+            admin.reassign_partition("s", 0, &[1, 2, 3]).await.expect("placed");
+            assert!(reported(&rt, &admin, "s", 0, true).await, "Metadata says it is placed");
+            admin.alter_configs("s", &[("replication.factor", "3")], &[]).await.expect("factor");
+            assert!(reported(&rt, &admin, "s", 0, false).await, "the factor releases the placement");
 
             for (_, n) in std::mem::take(&mut w.running) {
                 if let Some((node, handle)) = n {

@@ -332,6 +332,33 @@ class AdminTest {
         assertTrue(got.get(1).error() instanceof ClientException.NoAnswer);
     }
 
+    @Test
+    void everyNodeIsAskedForItsSessionsAndOneThatIsDownIsReported() {
+        Response.DescribeSessions sessions = new Response.DescribeSessions(
+                ErrorCode.NONE,
+                1,
+                1_750_000_000_000L,
+                List.of(new Messages.SessionEntry(
+                        Messages.SessionPrincipal.USER,
+                        "alice",
+                        List.of("ops"),
+                        Messages.SessionMechanism.OAUTHBEARER,
+                        "10.0.0.7:5000",
+                        1,
+                        2,
+                        3)));
+        a.on((n, r) -> r instanceof Request.Metadata ? metadata() : sessions);
+        client = new LotseClient(Fx.config(a).build());
+        client.metadata();
+        b.close();
+        List<NodeSessions> got = client.nodeSessions();
+        assertEquals(2, got.size());
+        assertEquals(sessions, got.get(0).sessions());
+        assertTrue(a.requests(Request.DescribeSessions.class).size() == 1);
+        assertNull(got.get(1).sessions());
+        assertTrue(got.get(1).error() instanceof ClientException.NoAnswer);
+    }
+
     /**
      * A leader this client has no address for is looked up with every broker, not only the first that answers: here
      * that one lags and lists neither the leader nor the node that names it (seed 4638 of the membership simulation).

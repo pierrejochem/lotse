@@ -35,6 +35,8 @@ async fn broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                                 leader: 1,
                                 leader_term: 1,
                                 voters: vec![1],
+                                pinned_leader: 0,
+                                placed: false,
                             }],
                             exchange: None,
                         }],
@@ -174,7 +176,14 @@ async fn fanout_broker_refusing(
                     tenant: "default".into(),
                     resource_id: id,
                     kind: kind::QUEUE,
-                    partitions: vec![PartitionMetadata { partition: 0, leader: 1, leader_term: 1, voters: vec![1] }],
+                    partitions: vec![PartitionMetadata {
+                        partition: 0,
+                        leader: 1,
+                        leader_term: 1,
+                        voters: vec![1],
+                        pinned_leader: 0,
+                        placed: false,
+                    }],
                     exchange: None,
                 };
                 let resp = match req {
@@ -421,6 +430,8 @@ async fn noting_broker(rt: SimRuntime, seen: Arc<std::sync::Mutex<Vec<(u64, i32)
                                 leader: 1,
                                 leader_term: 1,
                                 voters: vec![1],
+                                pinned_leader: 0,
+                                placed: false,
                             }],
                             exchange: None,
                         }],
