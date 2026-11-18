@@ -203,9 +203,15 @@ export function download(name: string, text: string) {
  * the signing request; the private key is offered as a file once and is not
  * kept, and the console passes on only the request (ADR 0092).
  */
-export function RequestCertificateDialog({ cluster }: { cluster: string }) {
+/**
+ * Asks for a client certificate. A cluster admin names any principal; with
+ * `own`, a user asks in their own name only, and a new request replaces
+ * their pending one (ADR 0119).
+ */
+export function RequestCertificateDialog({ cluster, own, pending }: { cluster: string; own?: string; pending?: boolean }) {
   const [open, setOpen] = useState(false);
-  const [principal, setPrincipal] = useState('');
+  const [typed, setPrincipal] = useState('');
+  const principal = own ?? typed;
   const [error, setError] = useState<string | null>(null);
   const [made, setMade] = useState<{ principal: string; key: string; fingerprint: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -265,7 +271,9 @@ export function RequestCertificateDialog({ cluster }: { cluster: string }) {
                 <Dialog.Description id="rc-desc" className="sub" style={{ margin: '4px 0 0' }}>
                   {made
                     ? 'The private key was saved as a file. Nothing else has it, and the console cannot give it again.'
-                    : 'This browser makes a key and a signing request. The private key never leaves it; the CA holder signs the request with lotse certs --sign.'}
+                    : own !== undefined
+                      ? 'A certificate in your own name. This browser makes a key and a signing request; the private key never leaves it, and the CA holder signs the request with lotse certs --sign.'
+                      : 'This browser makes a key and a signing request. The private key never leaves it; the CA holder signs the request with lotse certs --sign.'}
                 </Dialog.Description>
               </div>
               <Dialog.Close className="btn icon" aria-label="Close">
@@ -281,6 +289,11 @@ export function RequestCertificateDialog({ cluster }: { cluster: string }) {
               {error && (
                 <p role="alert" className="error-text" style={{ margin: 0, padding: '10px 12px', borderRadius: 4, background: 'var(--crit-bg)' }}>
                   {error}
+                </p>
+              )}
+              {!made && own !== undefined && pending && (
+                <p className="muted" style={{ margin: 0 }}>
+                  This replaces your request that waits for the CA holder. Its key file will not match a certificate signed from now on.
                 </p>
               )}
               {made ? (
@@ -304,9 +317,16 @@ export function RequestCertificateDialog({ cluster }: { cluster: string }) {
                     autoComplete="off"
                     spellCheck={false}
                     aria-invalid={invalid ? true : undefined}
-                    autoFocus
+                    readOnly={own !== undefined}
+                    autoFocus={own === undefined}
                   />
-                  {invalid ? <span className="error-text">{invalid}</span> : <span className="muted small">The name a node takes as the principal, such as a service or an admin.</span>}
+                  {invalid ? (
+                    <span className="error-text">{invalid}</span>
+                  ) : own !== undefined ? (
+                    <span className="muted small">Your name as the cluster knows it. A cluster admin asks for other names.</span>
+                  ) : (
+                    <span className="muted small">The name a node takes as the principal, such as a service or an admin.</span>
+                  )}
                 </div>
               )}
             </div>

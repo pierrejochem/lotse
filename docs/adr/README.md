@@ -122,5 +122,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0116 | [Followers answer ListOffsets and stop serving when they lag](0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md) | Accepted |
 | 0117 | [Prometheus metrics and health endpoints on every node](0117-prometheus-metrics-and-health-endpoints-on-every-node.md) | Accepted |
 | 0118 | [Queue length limits](0118-queue-length-limits.md) | Accepted |
+| 0119 | [Users request certificates in their own name](0119-users-request-certificates-in-their-own-name.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

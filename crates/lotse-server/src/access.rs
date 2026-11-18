@@ -273,9 +273,25 @@ impl Access {
             | Request::RevokeSessions(_)
             | Request::RevokeCertificate(_)
             | Request::DescribeCertificates(_)
-            | Request::RequestCertificate(_)
-            | Request::DescribeCertificateRequests(_)
             | Request::RecordCertificate(_) => admin(),
+            // A user asks in their own name and sees their own requests; a
+            // cluster admin asks for anyone and sees all (ADR 0119).
+            Request::RequestCertificate(r) => match p {
+                Principal::User { name, .. } if !self.cluster_admin(p) => {
+                    if r.principal == *name {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{p} may ask for a certificate only in their own name, {name:?}; a cluster admin asks for others"
+                        ))
+                    }
+                }
+                _ => admin(),
+            },
+            Request::DescribeCertificateRequests(_) => match p {
+                Principal::User { .. } => Ok(()),
+                _ => admin(),
+            },
             Request::DescribeNodes(_) => {
                 if self.sees_cluster(p) {
                     Ok(())

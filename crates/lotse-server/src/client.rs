@@ -502,7 +502,9 @@ impl Clients {
             Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, view, groups),
             Request::RecordCertificates(req) => self.record_certificates(outbox, id, req, view, groups),
             Request::RequestCertificate(req) => self.request_certificate(outbox, id, req, &principal, view, groups),
-            Request::DescribeCertificateRequests(_) => self.describe_certificate_requests(outbox, id, view, groups),
+            Request::DescribeCertificateRequests(_) => {
+                self.describe_certificate_requests(outbox, id, &principal, view, groups)
+            }
             Request::RecordCertificate(req) => self.record_certificate(outbox, id, req, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),

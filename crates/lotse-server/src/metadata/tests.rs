@@ -593,6 +593,64 @@ fn certificate_requests_are_signed_once_lapse_and_survive_a_snapshot() {
 }
 
 #[test]
+fn a_users_request_in_their_own_name_replaces_their_pending_one() {
+    use crate::metadata::REQUEST_TTL_MS;
+    let day = 24 * 3_600_000;
+    let own = |id: u8, who: &str, at_ms: u64| Change::RequestOwnCertificate {
+        id: [id; 32],
+        principal: who.into(),
+        csr: vec![id; 8],
+        at_ms,
+    };
+    let by_admin = Change::RequestCertificate {
+        id: [5; 32],
+        principal: "alice".into(),
+        csr: vec![5; 8],
+        requested_by: "admin".into(),
+        at_ms: day,
+    };
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&by_admin)).unwrap();
+    s.apply(2, &payload(&own(1, "alice", day))).unwrap();
+    s.apply(3, &payload(&own(2, "bob", day))).unwrap();
+    assert_eq!(s.cert_requests[&[1; 32]].requested_by, "alice", "asked by herself");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    let bytes = change_bytes(&own(1, "alice", day));
+    assert_eq!(decode_change(&bytes).unwrap(), own(1, "alice", day));
+
+    // Asking again replaces her pending request, and only hers: Bob's and
+    // the one an admin asked for in her name stay.
+    s.apply(4, &payload(&own(3, "alice", 2 * day))).unwrap();
+    let ids: Vec<u8> = s.cert_requests.keys().map(|k| k[0]).collect();
+    assert_eq!(ids, vec![2, 3, 5]);
+    // The same request again is still one, and replaces nothing.
+    s.apply(5, &payload(&own(3, "alice", 2 * day))).unwrap();
+    assert_eq!(s.cert_requests.len(), 3);
+
+    // A signed request is not replaced: its certificate stays to fetch.
+    let sign = Change::RecordCertificate {
+        id: [3; 32],
+        certificate: vec![7; 4],
+        cert: crate::metadata::CertKey { issuer: [1; 32], serial: vec![1] },
+        not_before_ms: 0,
+        not_after_ms: 400 * day,
+        at_ms: 3 * day,
+    };
+    s.apply(6, &payload(&sign)).unwrap();
+    // Waiting for the CA holder: unsigned and within its seven days.
+    assert!(!s.cert_requests[&[3; 32]].pending(3 * day), "signed");
+    assert!(s.cert_requests[&[2; 32]].pending(day + REQUEST_TTL_MS));
+    assert!(!s.cert_requests[&[2; 32]].pending(day + REQUEST_TTL_MS + 1), "lapsed");
+    s.apply(7, &payload(&own(4, "alice", 4 * day))).unwrap();
+    assert!(s.cert_requests[&[3; 32]].signed.is_some());
+    assert!(s.cert_requests.contains_key(&[4; 32]));
+    // Lapsed requests go as before.
+    s.apply(8, &payload(&own(6, "carol", 4 * day + REQUEST_TTL_MS + 1))).unwrap();
+    assert!(!s.cert_requests.contains_key(&[2; 32]));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+}
+
+#[test]
 fn added_partitions_keep_the_streams_index_so_a_delete_finds_them() {
     let mut s = MetadataState::default();
     let create = Change::CreateStream {

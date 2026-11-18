@@ -642,6 +642,12 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&admin_app, "GET", "/api/v1/clusters/local/bindings", None, None).await;
     assert!(!listed(&r), "{r:?}");
 
+    // Carol signs in again, with her new password: what follows is refused
+    // or allowed by her roles, not by a failed sign-in.
+    let carol_app = dev_with("carol", "new-pw", store());
+    let r = call(&carol_app, "GET", "/api/v1/clusters/local/streams", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+
     // A certificate is revoked by issuer and serial, by a cluster admin only.
     let ends = lotse_console::time::now_ms() + 86_400_000;
     let cert =
@@ -664,14 +670,24 @@ async fn the_console_acts_as_whoever_signed_in() {
     let r = call(&carol_app, "GET", "/api/v1/clusters/local/certificates", None, None).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
 
-    // A certificate is asked for with a request the browser made, by a
-    // cluster admin only; it waits for the CA holder.
+    // A certificate is asked for with a request the browser made; it waits
+    // for the CA holder. A cluster admin asks in any name, a user in their
+    // own and sees only theirs (ADR 0119).
     let csr = "MIHKMHICAQAwEDEOMAwGA1UEAwwFYWxpY2UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARnKUSI4DRkymlj6IpyYHjl9g4fkO/KxbIv1mwPnPz6Uzzgu6zhq+BZCN0Ag5wvdlBj3SbgAATmU4mbaITAsGl6oAAwCgYIKoZIzj0EAwIDSAAwRQIgQKvHGNTyKosN+lfdcw26mTmMr9BK5y34EAESHttDA1kCIQCFfhWHtobQFEY8SXm5AquJHSijZHVx/Xps8gbif2hQvQ==";
     let ask = json!({"principal": "alice", "csr": csr});
     let r = call(&carol_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(ask.clone())).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN, "only cluster admins ask: {r:?}");
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "a user asks only in their own name: {r:?}");
+    let own = json!({"principal": "carol", "csr": "Y2Fyb2wtY3Ny"});
+    let r = call(&carol_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(own)).await;
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
     let r = call(&carol_app, "GET", "/api/v1/clusters/local/certificate-requests", None, None).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN, "{r:?}");
+    assert_eq!(r.status, StatusCode::OK, "{r:?}");
+    assert_eq!(r.json["all"], false, "{r:?}");
+    assert_eq!(r.json["principal"], "carol", "{r:?}");
+    assert_eq!(r.json["bound_by_name"], false, "no role is bound to carol now: {r:?}");
+    let theirs: Vec<&str> =
+        r.json["requests"].as_array().unwrap().iter().map(|q| q["requested_by"].as_str().unwrap()).collect();
+    assert_eq!(theirs, vec!["carol"], "{r:?}");
     let bad = json!({"principal": "../alice", "csr": csr});
     let r = call(&admin_app, "POST", "/api/v1/clusters/local/certificate-requests", None, Some(bad)).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "a name the CA holder could not sign: {r:?}");
@@ -686,6 +702,7 @@ async fn the_console_acts_as_whoever_signed_in() {
             && q["certificate"] == ""
     });
     assert!(waiting, "the request waits for the CA holder: {r:?}");
+    assert_eq!((r.json["all"].as_bool(), r.json["pending"].as_u64()), (Some(true), Some(2)), "{r:?}");
 
     // Revoking and deleting name the subject again.
     let revoke = |confirm: &str| json!({"subject": "carol", "group": false, "confirm": confirm});

@@ -441,7 +441,8 @@ pub async fn certificates(
 }
 
 /// The requests for client certificates, newest first, with the certificate
-/// of each that was signed. The broker lets only cluster admins list them.
+/// of each that was signed: every request for a cluster admin, the caller's
+/// own for everyone else.
 #[utoipa::path(get, path = "/api/v1/clusters/{cluster}/certificate-requests",
     params(("cluster" = String, Path, description = "Cluster ID")),
     responses((status = 200, description = "Success.", body = CertificateRequestsView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
@@ -453,9 +454,11 @@ pub async fn certificate_requests(
     Ok(Json(cluster(&st, &id)?.certificate_requests(&who).await?))
 }
 
-/// Asks the CA holder for a client certificate. The body carries a signing
-/// request made in the browser: the private key never reaches the console,
-/// and the CA holder signs with `lotse certs --sign`.
+/// Asks the CA holder for a client certificate: a cluster admin in any name,
+/// everyone else in their own, where a new request replaces their pending
+/// one. The body carries a signing request made in the browser: the private
+/// key never reaches the console, and the CA holder signs with
+/// `lotse certs --sign`.
 #[utoipa::path(post, path = "/api/v1/clusters/{cluster}/certificate-requests",
     params(("cluster" = String, Path, description = "Cluster ID")),
     request_body = RequestCertificate,
