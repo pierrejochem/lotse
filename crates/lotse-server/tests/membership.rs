@@ -102,6 +102,7 @@ fn config(id: NodeId, log: LogConfig, pre_vote: bool) -> NodeConfig {
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
         leader_settle: LEADER_SETTLE,
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
+        disk_free_limit: lotse_server::FreeLimit::default(),
         retention: lotse_server::RetentionConfig::keep(),
         join: id > 3,
         auth: lotse_server::AuthConfig::none(),

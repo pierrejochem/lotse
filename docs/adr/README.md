@@ -15,7 +15,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0008 | [Snapshots as state plus segment references](0008-snapshots-as-state-plus-segment-references.md) | Accepted |
 | 0009 | [Own sans-I/O Raft core where the partition log is the Raft log](0009-own-sans-i-o-raft-core-where-the-partition-log-is-the-raft-log.md) | Accepted |
 | 0010 | [Deterministic simulation and mutation checking](0010-deterministic-simulation-and-mutation-checking.md) | Accepted; seed count amended by 0027 |
-| 0011 | [Flow control: throttle, never drop](0011-flow-control-throttle-never-drop.md) | Accepted |
+| 0011 | [Flow control: throttle, never drop](0011-flow-control-throttle-never-drop.md) | Accepted, in part superseded by [0122](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) |
 | 0012 | [Priorities as sub-logs; single active consumer on the leader](0012-priorities-as-sub-logs-single-active-consumer-on-the-leader.md) | Accepted |
 | 0013 | [Cooperative, broker-side consumer group rebalancing](0013-cooperative-broker-side-consumer-group-rebalancing.md) | Accepted; coordinator placement amended by 0033 |
 | 0014 | [Permissions per queue and stream, never per record](0014-permissions-per-queue-and-stream-never-per-record.md) | Accepted |
@@ -125,5 +125,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0119 | [Users request certificates in their own name](0119-users-request-certificates-in-their-own-name.md) | Accepted |
 | 0120 | [Queue metrics per priority level and consumer state](0120-queue-metrics-per-priority-level-and-consumer-state.md) | Accepted |
 | 0121 | [The console places partitions and lists open sessions](0121-the-console-places-partitions-and-lists-open-sessions.md) | Accepted |
+| 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

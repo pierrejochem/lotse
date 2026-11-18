@@ -551,6 +551,7 @@ describe("admin calls against scripted brokers", () => {
       partitions: [],
       queues: [],
       groups: [],
+      disk: null,
     };
     a.on((_n, r) => (r.type === "Metadata" ? metadata() : m));
     b.on((_n, r) => (r.type === "Metadata" ? metadata() : { ...m, error: ErrorCode.UNAUTHORIZED, nodeId: 2 }));

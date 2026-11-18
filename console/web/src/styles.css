@@ -277,6 +277,10 @@ pre.value { margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: var(
 .nav a .ico { display: flex; color: var(--nav-muted); }
 .nav a.active { background: var(--nav-active-bg); color: #fff; font-weight: 600; }
 .nav a.active .ico { color: var(--nav-icon-active); }
+.nav-console { margin-left: auto; font-size: 12px; color: var(--nav-muted); }
+.nav-toggle { display: none; align-items: center; gap: 6px; min-height: 40px; padding: 8px 12px; border-radius: var(--radius-md); border: 1px solid rgb(255 255 255 / 0.16); background: transparent; color: #fff; font: inherit; font-size: 14px; cursor: pointer; }
+.nav-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.nav-pages { display: flex; flex-direction: column; gap: 24px; flex: 1 1 auto; }
 .nav-foot { margin-top: auto; padding: 12px; border-top: 1px solid rgb(255 255 255 / 0.12); font-size: 12px; line-height: 16px; color: var(--nav-muted); }
 .dot { width: 8px; height: 8px; border-radius: 4px; flex: 0 0 auto; }
 
@@ -289,6 +293,15 @@ pre.value { margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: var(
 @media (max-width: 640px) {
   .page { padding: 20px 16px; }
   .topbar { padding: 12px 16px; }
+  /* On a phone the navigation is a bar: the pages open from the menu button. */
+  .app-nav { flex-basis: 100%; }
+  .nav { min-height: 0; padding: 12px 16px; gap: 12px; }
+  .nav-console { display: none; }
+  .nav-brand { padding: 0; }
+  .nav-toggle { display: inline-flex; margin-left: auto; }
+  .nav-pages { display: none; }
+  .nav.open .nav-pages { display: flex; }
+  .nav-foot { display: none; }
 }
 .warn-icon { color: var(--warn); flex: 0 0 auto; }
 .crit-icon { color: var(--crit-text); flex: 0 0 auto; }

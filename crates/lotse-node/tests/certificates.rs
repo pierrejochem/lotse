@@ -43,7 +43,7 @@ fn setup(name: &str) -> (PathBuf, PathBuf, ClusterFile) {
     let text = format!(
         "[cluster]\ndata_dir = \"{r}/data/node-{{id}}\"\n\n[tls]\nca = \"{r}/tls/ca.pem\"\n\
          cert = \"{r}/tls/node-{{id}}.pem\"\nkey = \"{r}/tls/node-{{id}}.key\"\ncrl = \"{r}/tls/crl.pem\"\n\n\
-         [auth]\nadmins = [\"alice\"]\n\n[[node]]\nid = 1\npeer = \"127.0.0.1:{}\"\nclient = \"127.0.0.1:{}\"\n",
+         [disk]\nfree_limit = 0\n\n[auth]\nadmins = [\"alice\"]\n\n[[node]]\nid = 1\npeer = \"127.0.0.1:{}\"\nclient = \"127.0.0.1:{}\"\n",
         free_port(),
         free_port()
     );

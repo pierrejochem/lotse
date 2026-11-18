@@ -355,6 +355,9 @@ enum Attempt {
     RetryMaybeDone(String),
     /// Give up with this error.
     Fail(ClientError),
+    /// Refused for now, nothing written: try again, and if time runs out,
+    /// give up with the refusal (ADR 0122).
+    Refused(ErrorCode, String),
 }
 
 /// Ends the session of `producer_id` when dropped while armed: a produce
@@ -584,6 +587,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let start = self.rt.now();
         let mut maybe_done = false;
         loop {
+            let mut refused = None;
             let why = match attempt().await {
                 Ok(v) => return Ok(v),
                 // A failed login or a refusal now says nothing of an earlier
@@ -606,6 +610,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                     maybe_done = true;
                     why
                 }
+                Err(Attempt::Refused(code, why)) => {
+                    refused = Some(code);
+                    why
+                }
             };
             // A connection that could not authenticate: the same credentials
             // will not do better on the next try.
@@ -617,10 +625,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 });
             }
             if self.rt.now() - start >= self.cfg.retry_for {
-                return Err(if maybe_done {
-                    ClientError::Unknown(format!("still unknown after {:?}: {why}", self.cfg.retry_for))
-                } else {
-                    ClientError::GaveUp(self.cfg.retry_for, why)
+                return Err(match (maybe_done, refused) {
+                    (true, _) => ClientError::Unknown(format!("still unknown after {:?}: {why}", self.cfg.retry_for)),
+                    (false, Some(code)) => ClientError::Broker { code, message: Some(why) },
+                    (false, None) => ClientError::GaveUp(self.cfg.retry_for, why),
                 });
             }
             self.rt.sleep(self.cfg.backoff).await;
@@ -880,9 +888,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 Err(Attempt::Retry(format!("{}", p.error)))
             }
             // Not written either: the partition takes a new producer once it
-            // has forgotten an idle one (ADR 0110).
+            // has forgotten an idle one (ADR 0110), and new data once its
+            // voters have room again (ADR 0122).
             ErrorCode::PRODUCER_LIMIT => {
                 Err(Attempt::Retry(p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
+            }
+            ErrorCode::STORAGE_FULL => {
+                Err(Attempt::Refused(p.error, p.error_msg.clone().unwrap_or_else(|| p.error.to_string())))
             }
             ErrorCode::REQUEST_TIMED_OUT => {
                 self.forget(stream, partition);

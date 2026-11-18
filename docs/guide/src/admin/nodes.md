@@ -69,6 +69,17 @@ A cluster admin can pin a partition's leader to one of its voters with `MoveLead
 
 The console can move leaders as the signed-in user ([ADR 0066](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0066-console-actions.md)) and marks a pinned partition with its node; `Metadata` carries the pin (ADR 0121).
 
+## A node low on disk
+
+Each node keeps free space on its data volume: `[disk] free_limit` in the [cluster file](cluster-file.md#disk), by default the larger of 1 GiB and 5 % ([ADR 0122](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0122-a-node-low-on-disk-stops-new-data-in-its-groups.md)). A node below it is low.
+
+- **What stops:** every group with a replica on the node takes no new data. Produces, publishes and dead letters are refused with `STORAGE_FULL`; clients retry with the same bytes and give up with that refusal when their time runs out. On a cluster where every group has a replica on every node, that is every group.
+- **What goes on:** reads, acks and nacks, so consumers drain queues; transaction markers; metadata changes, such as creating or deleting a resource or changing `replication.factor`; moving replicas.
+- **How it shows:** `lotse_disk_low` is 1 on the node's `/metrics`, `DescribeMetrics` says so, and the console marks the node "Low on disk" with an alert.
+- **How it ends:** free space on the volume, delete data (a stream's retention, or a resource you no longer need), or move replicas off the node by draining it or placing partitions elsewhere. New data is taken again once free space is a tenth above the limit, so a volume that hovers at the limit does not switch on and off.
+
+Other nodes hear that a node is low through the metadata group, within about 15 s; the node refuses at once for the groups it leads. The default margin of 5 % leaves room for that and for snapshots.
+
 ## Limits
 
 - Four groups move at a time.

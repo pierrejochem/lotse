@@ -148,6 +148,29 @@ class ProducerTest {
     }
 
     @Test
+    void aVoterLowOnDiskIsAskedAgainUntilItHasRoom() {
+        // ADR 0122: nothing was written, and the partition takes new data once its voters have room.
+        serve(n -> n <= 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.STORAGE_FULL, 0, null) : ok());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(2));
+        List<Request.Produce> sent = node.requests(Request.Produce.class);
+        assertEquals(3, sent.size());
+        assertEquals(Fx.bytesOf(sent.get(0)), Fx.bytesOf(sent.get(2)), "the same bytes again");
+    }
+
+    @Test
+    void aVoterLowOnDiskForTooLongEndsWithTheRefusalAndTheSequenceStaysFree() {
+        serve(n -> n == 1 ? ok() : n < 100 ? Fx.produced(STREAM_ID, 0, ErrorCode.STORAGE_FULL, 0, null) : ok());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(1));
+        ClientException.Broker e = assertThrows(ClientException.Broker.class, () -> lotse.produce("s", 0, messages(1)));
+        assertEquals(ErrorCode.STORAGE_FULL, e.code(), "the refusal, not a timeout");
+        List<Request.Produce> sent = node.requests(Request.Produce.class);
+        assertEquals(1, Fx.batchOf(sent.get(sent.size() - 1)).baseSequence(), "the sequence of a batch not written");
+        assertEquals(1, node.count(Request.InitProducer.class), "the producer id stayed");
+    }
+
+    @Test
     void aFullQueueRefusesAtOnceAndTheSequenceStaysFree() {
         // ADR 0118: nothing was written, and the caller decides whether to try again.
         serve(n -> n == 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.QUEUE_FULL, 0, null) : ok());

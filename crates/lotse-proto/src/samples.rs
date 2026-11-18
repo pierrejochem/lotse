@@ -1196,6 +1196,9 @@ pub fn metrics() -> DescribeMetricsResponse {
             produce_records: 30,
             fetch_bytes: 9000,
             replicas: vec![ReplicaProgress { node_id: 1, log_end: 101 }, ReplicaProgress { node_id: 2, log_end: 90 }],
+            // Tag 4 (ADR 0122).
+            oldest_timestamp_ms: Some(1_763_000_000_000),
+            open_transactions: 1,
         }],
         queues: vec![QueueMetrics {
             resource_id: 8,
@@ -1211,6 +1214,8 @@ pub fn metrics() -> DescribeMetricsResponse {
                     in_flight: 2,
                     credit: 8,
                     state: ConsumerState::Active,
+                    // Tag 5 (ADR 0122).
+                    in_flight_bytes: 2048,
                 },
                 ConsumerMetrics {
                     subscription_id: 2,
@@ -1218,6 +1223,7 @@ pub fn metrics() -> DescribeMetricsResponse {
                     in_flight: 0,
                     credit: 8,
                     state: ConsumerState::Standby,
+                    in_flight_bytes: 0,
                 },
             ],
             // Tag 3 (ADR 0120): two at level 0, one at 1, one at 2, one
@@ -1239,6 +1245,8 @@ pub fn metrics() -> DescribeMetricsResponse {
         // ADR 0117).
         removed_through: None,
         responsive: Vec::new(),
+        // Tag 6 (ADR 0122).
+        disk: Some(DiskMetrics { free_limit_bytes: 1 << 30, low: true }),
     }
 }
 

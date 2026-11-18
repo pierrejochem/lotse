@@ -99,7 +99,7 @@ export function Overview() {
                   <td className="r">{count(n.leads)} / {count(n.replicas)}</td>
                   <td>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <DiskBar node={n} limits={o.disk_limits} />
+                      <DiskBar node={n} />
                       {percent(fraction(n.disk_free_bytes, n.disk_total_bytes))}
                     </span>
                   </td>
@@ -111,9 +111,9 @@ export function Overview() {
             </tbody>
           </table>
         </div>
-        {o.disk_limits && (
+        {o.nodes.some((n) => n.disk_free_limit_bytes) && (
           <p className="small muted" style={{ margin: 0 }}>
-            Ticks on the disk bar: soft limit at {percent(o.disk_limits.soft_free)} free (producers throttled), hard limit at {percent(o.disk_limits.hard_free)} free (writes rejected).
+            The tick on the disk bar marks each node's free space limit. Below it, streams and queues with a replica on the node take no new data; reads and acks go on.
           </p>
         )}
       </section>

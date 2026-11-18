@@ -75,16 +75,20 @@ Every name starts with `lotse_`; every sample has the label `node`. Partition me
 | `lotse_peer_received_bytes_total`, `lotse_peer_sent_bytes_total` | counter | Traffic with other nodes. |
 | `lotse_commit_latency_seconds` | histogram | Produces by time to acknowledgement, at the leader; buckets at powers of two in ms. |
 | `lotse_host_cpu_ratio`, `lotse_host_memory_bytes`, `lotse_host_memory_limit_bytes`, `lotse_host_disk_free_bytes`, `lotse_host_disk_total_bytes` | gauge | The host, read every 5 s; absent where the node cannot tell. |
+| `lotse_disk_free_limit_bytes`, `lotse_disk_low` | gauge | The node's free space limit, 0 for none, and 1 while the node is below it: then the groups it votes in take no new data ([ADR 0122](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0122-a-node-low-on-disk-stops-new-data-in-its-groups.md)). |
 | `lotse_partition_leader` | gauge | 1 while this node leads the group with a quorum. |
 | `lotse_partition_term` | gauge | The Raft term here. |
 | `lotse_partition_high_watermark`, `lotse_partition_last_stable_offset`, `lotse_partition_log_start_offset`, `lotse_partition_log_end_offset` | gauge | Offsets, as in `DescribeMetrics`. |
 | `lotse_partition_size_bytes` | gauge | Bytes of the log on this node. |
+| `lotse_partition_oldest_record_timestamp_seconds` | gauge | When the oldest record stored here was written, seconds since the epoch: the producer's timestamp, on a queue the leader's append time. Absent for an empty log and the cluster's own groups. |
+| `lotse_partition_open_transactions` | gauge | Transactions open on the partition. |
 | `lotse_partition_produced_bytes_total`, `lotse_partition_produced_records_total`, `lotse_partition_fetched_bytes_total` | counter | While this node led. |
 | `lotse_partition_voters` | gauge | Voters of the group. |
 | `lotse_partition_responsive_voters` | gauge | On the leader: voters that answered within an election timeout. |
 | `lotse_partition_under_replicated` | gauge | On the leader: 1 while a voter has not. |
 | `lotse_replica_log_end_offset{replica}` | gauge | On the leader: what each replica holds. |
 | `lotse_queue_ready_messages`, `lotse_queue_in_flight_messages`, `lotse_queue_in_open_transactions_messages`, `lotse_queue_consumers` | gauge | On the queue's leader; labels `tenant`, `queue`. |
+| `lotse_queue_in_flight_bytes` | gauge | Bytes of the messages delivered and not yet acknowledged, each its share of its batch. |
 | `lotse_queue_delivered_messages_total`, `lotse_queue_acked_messages_total` | counter | While this node led the queue. |
 | `lotse_queue_consumers_in_state{state}` | gauge | Subscriptions by state: `shared`, or a single active consumer's `active` and `standby` ones (ADR 0120). |
 | `lotse_queue_ready_by_level_messages{level}`, `lotse_queue_ready_level_unread_messages` | gauge | On a queue with priority levels: ready messages per level, and those whose level a new leader has not read yet; together they make `lotse_queue_ready_messages`. |
@@ -108,6 +112,7 @@ Counters run since the node started and only grow. A rate is the difference of t
 | `host.cpu_permille` | per mille | CPU use over the last 5 s. |
 | `host.memory_bytes`, `host.memory_limit_bytes` | bytes | Memory the node uses, and what is available to it. |
 | `host.disk_free_bytes`, `host.disk_total_bytes` | bytes | Free and total space of the data volume. |
+| `disk.free_limit_bytes`, `disk.low` | bytes, flag | The node's free space limit and whether it is below it (tag 6). |
 
 Host numbers are read every 5 s, not per request. A value is absent where the node cannot tell.
 
@@ -121,8 +126,9 @@ For every Raft group the node hosts (`partitions`):
 | `size_bytes` | Bytes of the log on this node. |
 | `produce_bytes`, `produce_records`, `fetch_bytes` | Counters, growing only while this node leads the group. Summing over all nodes counts each produce once. |
 | `replicas` | On the leader: the last offset each replica holds, plus one. |
+| `oldest_timestamp_ms`, `open_transactions` | When the oldest data record stored here was written (ms since the epoch), and the transactions open on the partition (tag 4). Each replica looks at its oldest record once a second. |
 
-For each queue the node leads (`queues`): `ready`, `in_flight`, `in_open_txns`, the counters `delivered` and `acked`, and per subscription its `in_flight` and `credit`. On the coordinator's leader, `groups` lists consumer groups with their members, the partitions they own and the committed offsets.
+For each queue the node leads (`queues`): `ready`, `in_flight`, `in_open_txns`, the counters `delivered` and `acked`, and per subscription its `in_flight`, `credit`, `state` and `in_flight_bytes`; with priority levels, the ready messages per level. On the coordinator's leader, `groups` lists consumer groups with their members, the partitions they own and the committed offsets.
 
 ### The console
 
@@ -130,14 +136,14 @@ The console (`kind = "native"`) asks every node and turns counters into rates. I
 
 The console shows each user what their roles allow, and its metrics sampler signs in with client credentials. Charts sum only what the sampler may see; give it the `cluster-viewer` role so that one binding covers all tenants, also those created later ([ADR 0043](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0043-cluster-viewer-role.md), [ADR 0041](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0041-console-sessions-sampler-sign-in-and-charts-per-user.md)).
 
-What a real cluster does not report shows as a dash: zones, disk limits, quotas. Not reported at all: the age of the oldest record, open transactions per stream, bytes in flight per consumer, which subscription of a single-active-consumer queue is active, and per-level counts of a priority queue.
+What a real cluster does not report shows as a dash: quotas, a consumer's credit in bytes and acks per second, and the age of a priority level's oldest message. Zones come from the nodes' `zone` settings; a stream's oldest record is the oldest its partitions' leaders report, and its open transactions are summed over partitions, so a transaction that writes to two partitions counts in each.
 
 ## What to alert on
 
 The repository ships no alert rules. These follow from the metrics above; the thresholds are yours to choose.
 
 - A node whose scrape fails (`up == 0`), or `lotse_node_ready == 0` for longer than a restart takes.
-- `lotse_host_disk_free_bytes` falling toward 0 on a data volume.
+- `lotse_disk_low == 1`: the groups the node votes in take no new data. Before that, `lotse_host_disk_free_bytes` approaching `lotse_disk_free_limit_bytes`.
 - `lotse_partition_under_replicated == 1` for longer than a minute.
 - A group with no `lotse_partition_leader == 1` on any node, or with `lotse_partition_term` rising fast.
 - A replica whose `lotse_replica_log_end_offset` lags the leader's `lotse_partition_log_end_offset` for long.

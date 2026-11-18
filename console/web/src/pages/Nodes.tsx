@@ -141,7 +141,14 @@ export function Nodes() {
                   <span>Disk</span>
                   <span><strong>{percent(fraction(n.disk_free_bytes, n.disk_total_bytes))}</strong> free of {bytes(n.disk_total_bytes)}</span>
                 </div>
-                <DiskBar node={n} limits={v.disk_limits} width={undefined} />
+                <DiskBar node={n} width={undefined} />
+                {n.disk_free_limit_bytes ? (
+                  <p className="small muted" style={{ margin: 0 }}>
+                    {n.disk_low ? 'Below its free space limit of ' : 'Free space limit '}
+                    {bytes(n.disk_free_limit_bytes)}
+                    {n.disk_low ? ': streams and queues with a replica here take no new data.' : ''}
+                  </p>
+                ) : null}
               </div>
               <dl className="two" style={{ margin: 0, gap: '10px 16px', fontSize: 14 }}>
                 {[

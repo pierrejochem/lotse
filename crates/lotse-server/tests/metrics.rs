@@ -84,6 +84,7 @@ fn config(id: NodeId) -> NodeConfig {
         producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
+        disk_free_limit: lotse_server::FreeLimit::default(),
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth: lotse_server::AuthConfig::none(),
@@ -142,7 +143,8 @@ async fn run(rt: SimRuntime) {
     member.commit().await.expect("commits");
     let committed = member.positions()[&("s".to_string(), 0)];
 
-    rt.sleep(TICK * 20).await;
+    // Replicas look at their oldest record once a second (ADR 0122).
+    rt.sleep(Duration::from_secs(2)).await;
     let answers = client.node_metrics().await.expect("metadata");
     assert_eq!(answers.len(), 3);
     let all: Vec<DescribeMetricsResponse> =
@@ -181,6 +183,8 @@ async fn run(rt: SimRuntime) {
     assert!(q.delivered >= 4 && q.in_flight >= 2, "{q:?}");
     let [c] = &q.consumers[..] else { panic!("one consumer: {q:?}") };
     assert!(c.in_flight as u64 == q.in_flight && !c.peer.is_empty(), "{c:?}");
+    // Each held message's share of its batch: one record each (ADR 0122).
+    assert!(c.in_flight_bytes >= u64::from(c.in_flight) * smallest_job, "{c:?}");
 
     // The consumer group, from the coordinator's leader.
     let groups: Vec<&lotse_proto::GroupMetrics> = all.iter().flat_map(|m| &m.groups).collect();
@@ -196,6 +200,21 @@ async fn run(rt: SimRuntime) {
         assert_eq!(m.host.cpu_permille, Some(250));
         assert_eq!((m.host.disk_free_bytes, m.host.disk_total_bytes), (Some(3 << 40), Some(4 << 40)));
         assert_eq!(m.partitions.len(), 4, "node {} hosts every group", m.node_id);
+        // ADR 0122: the oldest record of every replica, as its producer
+        // stamped it (the batches here say 0) or, on a queue, its leader;
+        // none for the node's own groups; no transactions open; the
+        // default disk limit.
+        for p in &m.partitions {
+            let oldest = p.oldest_timestamp_ms;
+            match p.resource_id {
+                STREAM => assert_eq!(oldest, Some(0), "node {}: {p:?}", m.node_id),
+                QUEUE => assert!(oldest.is_some_and(|t| t > 0), "node {}: {p:?}", m.node_id),
+                _ => assert_eq!(oldest, None, "node {}: {p:?}", m.node_id),
+            }
+            assert_eq!(p.open_transactions, 0);
+        }
+        let limit = lotse_server::FreeLimit::default().of(4 << 40);
+        assert_eq!(m.disk, Some(lotse_proto::DiskMetrics { free_limit_bytes: limit, low: false }));
         assert_eq!((m.metadata_group, m.coordinator_group), (1, 2));
     }
     assert!(all.iter().any(|m| m.connections >= 1 && m.client_in_bytes > bytes && m.client_out_bytes > 0));

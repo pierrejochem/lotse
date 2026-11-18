@@ -211,6 +211,13 @@ class ConformanceTest {
                 assertEquals(Messages.ConsumerState.ACTIVE, q.consumers().get(0).state());
                 assertEquals(Messages.ConsumerState.STANDBY, q.consumers().get(1).state());
                 assertEquals("10.0.0.9:40100", q.consumers().get(1).peer());
+                // Tags 4 to 6 (ADR 0122).
+                Messages.PartitionMetrics p = m.partitions().get(0);
+                assertEquals(Long.valueOf(1_763_000_000_000L), p.oldestTimestampMs());
+                assertEquals(1L, p.openTransactions());
+                assertEquals(2048L, q.consumers().get(0).inFlightBytes());
+                assertEquals(0L, q.consumers().get(1).inFlightBytes());
+                assertEquals(new Messages.DiskMetrics(1L << 30, true), m.disk());
             }
         }
         assertTrue(found);

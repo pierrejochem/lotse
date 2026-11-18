@@ -305,6 +305,25 @@ pub(crate) struct ClusterView<'a> {
 }
 
 impl ClusterView<'_> {
+    /// Why a group with `membership` takes no new data now, if it does
+    /// not: one of its voters is low on disk (ADR 0122). Leaders ask only
+    /// about batches new to them; what keeps the log moving (acks,
+    /// markers, checkouts, the cluster's own groups) is never refused.
+    pub(crate) fn storage_full(&self, membership: &lotse_raft::Membership) -> Option<String> {
+        let low: Vec<String> = membership
+            .all_voters()
+            .into_iter()
+            .filter(|n| self.node.disk_low.contains(n))
+            .map(|n| n.to_string())
+            .collect();
+        let who = match low.len() {
+            0 => return None,
+            1 => format!("node {} has", low[0]),
+            _ => format!("nodes {} have", low.join(", ")),
+        };
+        Some(format!("{who} less free disk space than the limit; nothing was written, try again later"))
+    }
+
     /// The stream or queue partition a group serves.
     fn resource_of(&self, g: GroupId) -> Option<(u64, u32)> {
         if let Some(q) = self.queues.iter().find(|q| q.group == g) {
@@ -586,7 +605,8 @@ impl Clients {
                                 let qc = view.queues.iter().find(|q| q.group == g);
                                 let gate = qc.and_then(|qc| self.gate(qc, replica));
                                 let at = (ri, pi);
-                                let (w, end) = propose_one(replica, g, batch, bytes, &mut out, at, gate.as_ref());
+                                let admission = Admission::of(view, replica, gate.as_ref());
+                                let (w, end) = propose_one(replica, g, batch, bytes, &mut out, at, admission);
                                 waiting.extend(w);
                                 self.took_batch(g, end, &p.batch);
                             }
@@ -856,10 +876,38 @@ fn settle<R: Runtime, S: StateMachine>(
     Some(p)
 }
 
+/// What a batch new to a partition must pass before it is written.
+struct Admission<'a> {
+    /// Why the group takes no new data now: a voter low on disk (ADR 0122).
+    full: Option<String>,
+    /// A queue's length limit (ADR 0118).
+    gate: Option<&'a length::Gate>,
+}
+
+impl<'a> Admission<'a> {
+    /// What a new batch to `replica` must pass, with `gate` for a queue's
+    /// length limit.
+    fn of<R: Runtime, S: StateMachine>(
+        view: &ClusterView<'_>,
+        replica: &Replica<R, S>,
+        gate: Option<&'a length::Gate>,
+    ) -> Self {
+        Admission { full: view.storage_full(replica.raft_ref().membership()), gate }
+    }
+
+    fn check(&self, b: &Batch) -> Result<(), ProposeError> {
+        if let Some(why) = &self.full {
+            return Err(ProposeError::StorageFull(why.clone()));
+        }
+        self.gate.map_or(Ok(()), |gate| gate.check(length::amount_of(b))).map_err(ProposeError::QueueFull)
+    }
+}
+
 /// Proposes one partition's batch and fills in its answer: a [`Waiting`]
-/// for a batch whose commit decides, `None` for one answered now. A queue
-/// with a length limit passes its [`length::Gate`] (ADR 0118); the second
-/// value is where a batch new here ends, for the queue's count.
+/// for a batch whose commit decides, `None` for one answered now. A batch
+/// new here passes its [`Admission`]: disk space (ADR 0122) and a queue's
+/// length limit (ADR 0118); the second value is where a batch new here
+/// ends, for the queue's count.
 fn propose_one<R: Runtime, S: StateMachine>(
     replica: &mut Replica<R, S>,
     g: GroupId,
@@ -867,12 +915,11 @@ fn propose_one<R: Runtime, S: StateMachine>(
     bytes: u64,
     out: &mut ProducePartitionResponse,
     (ri, pi): (usize, usize),
-    gate: Option<&length::Gate>,
+    admission: Admission<'_>,
 ) -> (Option<Waiting>, Option<u64>) {
     let parsed = Batch::parse(&batch).ok().map(|(b, _)| b);
     let records = parsed.as_ref().map_or(0, |b| b.record_count() as u64);
-    let admit = |b: &Batch| gate.map_or(Ok(()), |gate| gate.check(length::amount_of(b)));
-    match replica.propose_admitted(batch, admit) {
+    match replica.propose_admitted(batch, |b| admission.check(b)) {
         Ok(Proposed { first, last, term, duplicate }) => {
             out.base_offset = first - 1;
             // A duplicate of an applied batch is written; anything else (new,
@@ -906,6 +953,10 @@ fn propose_one<R: Runtime, S: StateMachine>(
         }
         Err(ProposeError::QueueFull(why)) => {
             out.error = ErrorCode::QUEUE_FULL;
+            out.error_msg = Some(why);
+        }
+        Err(ProposeError::StorageFull(why)) => {
+            out.error = ErrorCode::STORAGE_FULL;
             out.error_msg = Some(why);
         }
         Err(e) => {

@@ -215,6 +215,13 @@ test("tag 3 of a metrics answer is read into its queues (ADR 0120)", () => {
       assert.equal(q.consumers[0]!.state, "active");
       assert.equal(q.consumers[1]!.state, "standby");
       assert.equal(q.consumers[1]!.peer, "10.0.0.9:40100");
+      // Tags 4 to 6 (ADR 0122).
+      const p = r.partitions[0]!;
+      assert.equal(p.oldestTimestampMs, 1_763_000_000_000n);
+      assert.equal(p.openTransactions, 1);
+      assert.equal(q.consumers[0]!.inFlightBytes, 2048n);
+      assert.equal(q.consumers[1]!.inFlightBytes, 0n);
+      assert.deepEqual(r.disk, { freeLimitBytes: 1n << 30n, low: true });
     }
   }
   assert.ok(found);

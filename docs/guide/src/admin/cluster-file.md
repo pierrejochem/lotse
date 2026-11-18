@@ -104,6 +104,16 @@ How compacted streams are compacted; see [Retention and compaction](retention-an
 | --- | --- | --- | --- |
 | `map_bytes` | integer, bytes | 67108864 (64 MiB) | Memory the key map of the node's one compaction sweep may take, 48 bytes per key. |
 
+## `[disk]`
+
+How much free space each node keeps on its data volume ([ADR 0122](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0122-a-node-low-on-disk-stops-new-data-in-its-groups.md)).
+
+| Key | Type, unit | Default | Meaning |
+| --- | --- | --- | --- |
+| `free_limit` | bytes or a share | the larger of 1 GiB and 5 % | Below this much free space a node takes no new data in the groups it votes in. Bytes as a number (`2147483648`) or text with a unit (`"2GiB"`, `"500MB"`; KB, MB, GB, TB, KiB, MiB, GiB, TiB), a share of the volume (`"5%"`, `"2.5%"`), or `0` for no limit. |
+
+A node reads its volume every 5 s. Below the limit it is low: the leaders of every group with a replica on it refuse produces, publishes and dead letters with `STORAGE_FULL`, which clients retry; reads, acks and metadata changes go on. It is no longer low once its free space is a tenth above the limit. Other nodes learn of it through the metadata group within about 15 s; the node itself refuses at once for the groups it leads. See [Nodes](nodes.md#a-node-low-on-disk).
+
 ## `[producers]`
 
 How each partition keeps idempotent producers ([ADR 0110](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md)). Use the same values on every node.
