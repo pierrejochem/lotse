@@ -23,7 +23,7 @@ use bytes::Bytes;
 use lotse_proto::{ErrorCode, OutcomeResponse, Response, VerifyTxnRequest};
 use lotse_rt::Runtime;
 
-use super::{Clients, ClusterView, Outbox, propose_one, settle};
+use super::{Admission, Clients, ClusterView, Outbox, propose_one, settle};
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
 
@@ -141,7 +141,8 @@ impl Clients {
                         let gate = qc.and_then(|qc| self.gate(qc, replica));
                         let at = (h.resource, h.partition);
                         let batch = h.batch.clone();
-                        let (w, end) = propose_one(replica, key.group, h.batch, h.bytes, out, at, gate.as_ref());
+                        let admission = Admission::of(view, replica, gate.as_ref());
+                        let (w, end) = propose_one(replica, key.group, h.batch, h.bytes, out, at, admission);
                         p.waiting.extend(w);
                         self.took_batch(key.group, end, &batch);
                     }

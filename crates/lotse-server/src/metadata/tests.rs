@@ -925,3 +925,34 @@ fn length_limits_are_set_and_changed_and_survive_a_snapshot() {
     *bad.last_mut().unwrap() = 9;
     assert!(decode_change(&bad).is_err(), "an unknown overflow");
 }
+
+#[test]
+fn nodes_low_on_disk_are_recorded_cleared_and_survive_a_snapshot() {
+    let mut s = MetadataState::default();
+    let before = s.encode();
+    let low = |node, low| Change::DiskLow { node, low };
+    for c in [low(3, true), low(1 << 40, false)] {
+        assert_eq!(decode_change(&change_bytes(&c)).unwrap(), c);
+    }
+    let mut cut = change_bytes(&low(3, true)).to_vec();
+    cut.pop();
+    assert!(decode_change(&cut).is_err(), "cut short");
+    s.apply(1, &payload(&low(3, true))).unwrap();
+    s.apply(2, &payload(&low(4, true))).unwrap();
+    s.apply(3, &payload(&low(3, true))).unwrap();
+    assert_eq!(s.disk_low, BTreeSet::from([3, 4]));
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    assert_ne!(s.encode(), before, "a section of its own");
+    s.apply(4, &payload(&low(3, false))).unwrap();
+    assert_eq!(s.disk_low, BTreeSet::from([4]));
+    // A node that is forgotten is no longer low, and cannot become so.
+    s.apply(5, &payload(&Change::ForgetNode { id: 4 })).unwrap();
+    assert!(s.disk_low.is_empty());
+    s.apply(6, &payload(&low(4, true))).unwrap();
+    assert!(s.disk_low.is_empty(), "a forgotten node");
+    // Without anyone low, the state is written as before.
+    let mut empty = MetadataState::default();
+    empty.apply(1, &payload(&low(2, true))).unwrap();
+    empty.apply(2, &payload(&low(2, false))).unwrap();
+    assert_eq!(empty.encode(), before);
+}

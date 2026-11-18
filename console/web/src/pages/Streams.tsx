@@ -256,7 +256,7 @@ export function StreamDetail() {
           { label: 'Out', value: rate(d.out_bytes_per_sec), note: `${d.groups.length} groups` },
           { label: 'Stored', value: bytes(d.stored_bytes), note: `all ${d.replication} replicas` },
           { label: 'Oldest record', value: duration(d.oldest_record_age_ms), note: d.retention?.ms ? `retention ${duration(d.retention.ms)}` : d.retention ? 'no limit by age' : 'retention unknown' },
-          { label: 'Open transactions', value: count(d.open_transactions), note: 'touching this stream' },
+          { label: 'Open transactions', value: count(d.open_transactions), note: 'summed over partitions' },
         ]}
       />
 

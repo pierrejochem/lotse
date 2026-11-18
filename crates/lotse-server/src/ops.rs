@@ -248,6 +248,20 @@ pub fn render(obs: &Observation) -> String {
             out.sample_f(name, &node, v);
         }
     }
+    // The free space limit (ADR 0122): 0 for none.
+    out.family(
+        "lotse_disk_free_limit_bytes",
+        "gauge",
+        "Below this much free space on its data volume the node takes no new data in the groups it votes in.",
+        "bytes",
+    );
+    if let Some(d) = m.disk {
+        out.sample("lotse_disk_free_limit_bytes", &node, d.free_limit_bytes);
+    }
+    out.family("lotse_disk_low", "gauge", "1 while the node is below its free space limit.", "");
+    if let Some(d) = m.disk {
+        out.sample("lotse_disk_low", &node, u64::from(d.low));
+    }
 
     let labels = |group: GroupId, resource_id: u64, partition: u32| -> Vec<(&'static str, String)> {
         let r = obs.resources.get(&resource_id);
@@ -300,6 +314,31 @@ pub fn render(obs: &Observation) -> String {
         out.family(name, "counter", help, unit);
         for p in &m.partitions {
             out.sample(&format!("{name}_total"), &labels(p.group, p.resource_id, p.partition), f(p));
+        }
+    }
+    out.family(
+        "lotse_partition_open_transactions",
+        "gauge",
+        "Transactions open on the partition, as this node has applied them.",
+        "",
+    );
+    for p in &m.partitions {
+        out.sample(
+            "lotse_partition_open_transactions",
+            &labels(p.group, p.resource_id, p.partition),
+            u64::from(p.open_transactions),
+        );
+    }
+    out.family(
+        "lotse_partition_oldest_record_timestamp_seconds",
+        "gauge",
+        "When the oldest record stored on this node was written, seconds since the epoch.",
+        "seconds",
+    );
+    for p in &m.partitions {
+        if let Some(ms) = p.oldest_timestamp_ms {
+            let l = labels(p.group, p.resource_id, p.partition);
+            out.sample_f("lotse_partition_oldest_record_timestamp_seconds", &l, ms as f64 / 1000.0);
         }
     }
     out.family("lotse_partition_voters", "gauge", "Voters of the group, as this node knows them.", "");
@@ -378,6 +417,16 @@ pub fn render(obs: &Observation) -> String {
         for q in &m.queues {
             out.sample(&sample, &queue_labels(q.resource_id), f(q));
         }
+    }
+    out.family(
+        "lotse_queue_in_flight_bytes",
+        "gauge",
+        "Bytes of the messages delivered and not yet acknowledged, each its share of its batch.",
+        "bytes",
+    );
+    for q in &m.queues {
+        let bytes = q.consumers.iter().map(|c| c.in_flight_bytes).sum();
+        out.sample("lotse_queue_in_flight_bytes", &queue_labels(q.resource_id), bytes);
     }
     out.family(
         "lotse_queue_consumers_in_state",

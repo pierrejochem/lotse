@@ -202,6 +202,15 @@ public final class Messages {
     /** A queue's ready messages per priority level and its subscriptions' states, in a {@code DescribeMetrics} answer (ADR 0120). */
     static final long TAG_QUEUE_DETAILS = 3;
 
+    /** Each partition's oldest record and open transactions, in a {@code DescribeMetrics} answer (ADR 0122). */
+    static final long TAG_PARTITION_DETAILS = 4;
+
+    /** The bytes each queue consumer holds, in a {@code DescribeMetrics} answer (ADR 0122). */
+    static final long TAG_IN_FLIGHT_BYTES = 5;
+
+    /** The node's free disk limit, in a {@code DescribeMetrics} answer (ADR 0122). */
+    static final long TAG_DISK = 6;
+
     /** A tag holding one string. */
     static Tag stringTag(long tag, String value) {
         Writer v = new Writer();
@@ -862,6 +871,16 @@ public final class Messages {
             Integer cpuPermille, Long memoryBytes, Long memoryLimitBytes, Long diskFreeBytes, Long diskTotalBytes) {}
 
     /**
+     * A node's free space limit (ADR 0122).
+     *
+     * @param freeLimitBytes the leaders of the groups it votes in take no new data while its data volume has fewer
+     *     free bytes than this; 0 for no limit, a {@code u64}
+     * @param low whether it is below the limit now: it goes below when free space falls under the limit and back once
+     *     it is a tenth above it
+     */
+    public record DiskMetrics(long freeLimitBytes, boolean low) {}
+
+    /**
      * How far a replica is.
      *
      * @param nodeId the replica's node, a {@code u32}
@@ -886,6 +905,10 @@ public final class Messages {
      * @param produceRecords acknowledged produce records, likewise
      * @param fetchBytes bytes fetched, or for a queue delivered, likewise
      * @param replicas on the leader: the last offset each replica holds (plus one)
+     * @param oldestTimestampMs when the oldest data record still stored was written, ms since the epoch, or {@code
+     *     null} for an empty log or a node's own groups (ADR 0122)
+     * @param openTransactions transactions open on this partition, as this replica knows them (ADR 0122), a {@code
+     *     u32}
      */
     public record PartitionMetrics(
             long group,
@@ -901,7 +924,9 @@ public final class Messages {
             long produceBytes,
             long produceRecords,
             long fetchBytes,
-            List<ReplicaProgress> replicas) {
+            List<ReplicaProgress> replicas,
+            Long oldestTimestampMs,
+            long openTransactions) {
         /** Creates the structure. */
         public PartitionMetrics {
             replicas = List.copyOf(replicas);
@@ -916,8 +941,11 @@ public final class Messages {
      * @param inFlight messages delivered to it and not acknowledged, a {@code u32}
      * @param credit messages it may still be sent, a {@code u32}
      * @param state shared, active or standby (ADR 0120)
+     * @param inFlightBytes bytes of the messages it holds, each message's share of its batch as stored (ADR 0122), a
+     *     {@code u64}
      */
-    public record ConsumerMetrics(long subscriptionId, String peer, long inFlight, long credit, ConsumerState state) {
+    public record ConsumerMetrics(
+            long subscriptionId, String peer, long inFlight, long credit, ConsumerState state, long inFlightBytes) {
         /** Creates the structure. */
         public ConsumerMetrics {
             java.util.Objects.requireNonNull(state, "state");

@@ -60,6 +60,7 @@ export function isRetriable(code: ErrorCodeValue): boolean {
     case ErrorCode.UNSTABLE_OFFSET_COMMIT:
     case ErrorCode.CONCURRENT_GROUP_CHANGE:
     case ErrorCode.PRODUCER_LIMIT:
+    case ErrorCode.STORAGE_FULL:
       return true;
     default:
       return false;

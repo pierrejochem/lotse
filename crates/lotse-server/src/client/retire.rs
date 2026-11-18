@@ -394,6 +394,11 @@ impl Clients {
         if items.is_empty() {
             return refuse(ErrorCode::NONE, None);
         }
+        // Nor while a voter of the queue is low on disk (ADR 0122): the
+        // letters stay owed in their source.
+        if view.storage_full(replica.raft_ref().membership()).is_some() {
+            return refuse(ErrorCode::STORAGE_FULL, None);
+        }
         // A full queue with `reject-publish` takes no dead letters either:
         // they stay owed in their source queue, which sends them again
         // later (ADR 0118).

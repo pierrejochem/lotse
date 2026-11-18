@@ -441,6 +441,7 @@ export class LotseClient {
       for (;;) {
         this.checkOpen();
         let why: string;
+        let refused: ErrorCodeValue | null = null;
         try {
           if (signal?.aborted === true) {
             throw ABORTED;
@@ -483,6 +484,10 @@ export class LotseClient {
               maybeDone = true;
               why = e.message;
               break;
+            case "REFUSED":
+              refused = e.code;
+              why = e.message;
+              break;
           }
         }
         // A connection that could not authenticate: the same credentials will not do better on the next try.
@@ -494,9 +499,10 @@ export class LotseClient {
             : failedLogin;
         }
         if (nowMs() - start >= this.cfg.retryForMs) {
-          throw maybeDone
-            ? new UnknownOutcomeError(`still unknown after ${this.cfg.retryForMs} ms: ${why}`)
-            : new GaveUpError(this.cfg.retryForMs, why);
+          if (maybeDone) {
+            throw new UnknownOutcomeError(`still unknown after ${this.cfg.retryForMs} ms: ${why}`);
+          }
+          throw refused !== null ? new BrokerResponseError(refused, why) : new GaveUpError(this.cfg.retryForMs, why);
         }
         if (!(await this.pause(signal))) {
           throw maybeDone
@@ -718,6 +724,10 @@ export class LotseClient {
     if (code === ErrorCode.PRODUCER_LIMIT) {
       // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
       throw Attempt.retry(first.errorMsg ?? describeError(code));
+    }
+    if (code === ErrorCode.STORAGE_FULL) {
+      // Not written: the partition takes new data once its voters have room again (ADR 0122).
+      throw Attempt.refused(code, first.errorMsg ?? describeError(code));
     }
     if (code === ErrorCode.REQUEST_TIMED_OUT) {
       this.forget(stream, partition);

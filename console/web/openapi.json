@@ -2235,26 +2235,6 @@
           }
         }
       },
-      "DiskLimits": {
-        "type": "object",
-        "description": "Disk thresholds, as fractions of free space.",
-        "required": [
-          "soft_free",
-          "hard_free"
-        ],
-        "properties": {
-          "hard_free": {
-            "type": "number",
-            "format": "double",
-            "description": "Writes are rejected below this free fraction."
-          },
-          "soft_free": {
-            "type": "number",
-            "format": "double",
-            "description": "Producers are throttled below this free fraction."
-          }
-        }
-      },
       "Done": {
         "type": "object",
         "description": "Result of a write, with the CLI command that does the same.",
@@ -2487,6 +2467,22 @@
             "description": "Free bytes on the log volume.",
             "minimum": 0
           },
+          "disk_free_limit_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Below this much free space the groups the node votes in take no new\ndata (ADR 0122); 0 for no limit, `None` when the node did not say.",
+            "minimum": 0
+          },
+          "disk_low": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the node is below its limit now; it is again above it only\nonce its free space is a tenth above the limit."
+          },
           "disk_total_bytes": {
             "type": [
               "integer",
@@ -2589,17 +2585,6 @@
           "events"
         ],
         "properties": {
-          "disk_limits": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/DiskLimits",
-                "description": "Disk thresholds, if the cluster has them."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "events": {
             "type": "array",
             "items": {
@@ -2692,17 +2677,6 @@
           "cluster": {
             "type": "string",
             "description": "Cluster ID."
-          },
-          "disk_limits": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/DiskLimits",
-                "description": "Disk thresholds for the bars, if the cluster has them."
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "health": {
             "type": "array",
@@ -3706,7 +3680,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Open transactions touching this stream.",
+            "description": "Open transactions, summed over the stream's partitions: a\ntransaction that writes to two partitions counts in each.",
             "minimum": 0
           },
           "out_bytes_per_sec": {

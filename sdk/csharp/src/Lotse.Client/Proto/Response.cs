@@ -519,6 +519,7 @@ public abstract record Response
     }
 
     /// <summary>One node's metrics.</summary>
+    /// <remarks><c>Disk</c> is the node's free space limit and whether it is below it, <c>null</c> while it cannot tell (ADR 0122).</remarks>
     public sealed record DescribeMetrics(
         ErrorCode Error,
         uint NodeId,
@@ -535,7 +536,8 @@ public abstract record Response
         HostMetrics Host,
         IReadOnlyList<PartitionMetrics> Partitions,
         IReadOnlyList<QueueMetrics> Queues,
-        IReadOnlyList<GroupMetrics> Groups) : Response
+        IReadOnlyList<GroupMetrics> Groups,
+        DiskMetrics? Disk = null) : Response
     {
         /// <inheritdoc/>
         public override void Write(Writer w)
@@ -581,11 +583,8 @@ public abstract record Response
                 });
                 w1.Array(g.Offsets, (w2, o) => w2.U64(o.ResourceId).U32(o.Partition).U64(o.Offset));
             });
-            if (details.Count == 0)
-            {
-                w.NoTags();
-            }
-            else
+            var tags = new List<Tag>();
+            if (details.Count > 0)
             {
                 var v = new Writer();
                 v.Array(details, (w1, q) =>
@@ -595,7 +594,39 @@ public abstract record Response
                     w1.U64(q.ReadyLevelUnread);
                     w1.Array(q.Consumers, (w2, c) => w2.U32(c.SubscriptionId).U8((byte)c.State));
                 });
-                w.Tags(new List<Tag> { new Tag(TagQueueDetails, ByteString.CopyOf(v.ToByteArray())) });
+                tags.Add(new Tag(TagQueueDetails, ByteString.CopyOf(v.ToByteArray())));
+            }
+            var parts = Partitions.Where(p => p.OldestTimestampMs is not null || p.OpenTransactions != 0).ToList();
+            if (parts.Count > 0)
+            {
+                var v = new Writer();
+                v.Array(parts, (w1, p) => w1.U64(p.Group).I64(p.OldestTimestampMs ?? -1).U32(p.OpenTransactions));
+                tags.Add(new Tag(TagPartitionDetails, ByteString.CopyOf(v.ToByteArray())));
+            }
+            var holding = Queues.Where(q => q.Consumers.Any(c => c.InFlightBytes != 0)).ToList();
+            if (holding.Count > 0)
+            {
+                var v = new Writer();
+                v.Array(holding, (w1, q) =>
+                {
+                    w1.U64(q.ResourceId);
+                    w1.Array(q.Consumers, (w2, c) => w2.U32(c.SubscriptionId).U64(c.InFlightBytes));
+                });
+                tags.Add(new Tag(TagInFlightBytes, ByteString.CopyOf(v.ToByteArray())));
+            }
+            if (Disk is not null)
+            {
+                var v = new Writer();
+                v.U64(Disk.FreeLimitBytes).Bool(Disk.Low);
+                tags.Add(new Tag(TagDisk, ByteString.CopyOf(v.ToByteArray())));
+            }
+            if (tags.Count == 0)
+            {
+                w.NoTags();
+            }
+            else
+            {
+                w.Tags(tags);
             }
         }
 
@@ -619,6 +650,25 @@ public abstract record Response
                     ReadyByLevel = d.ReadyByLevel,
                     ReadyLevelUnread = d.ReadyLevelUnread,
                 };
+            }
+            return q;
+        }
+
+        /// <summary><paramref name="q"/> with what tag 5 says of its consumers, if anything.</summary>
+        private static QueueMetrics WithBytes(QueueMetrics q, List<QueueMetrics> held)
+        {
+            foreach (QueueMetrics h in held)
+            {
+                if (h.ResourceId != q.ResourceId)
+                {
+                    continue;
+                }
+                var consumers = q.Consumers
+                    .Select(c => h.Consumers.FirstOrDefault(x => x.SubscriptionId == c.SubscriptionId) is { } found
+                        ? c with { InFlightBytes = found.InFlightBytes }
+                        : c)
+                    .ToList();
+                return q with { Consumers = consumers };
             }
             return q;
         }
@@ -703,29 +753,66 @@ public abstract record Response
                     r1.Array(8 + 4 + 8, r2 => new CommittedOffset(r2.U64(), r2.U32(), r2.U64()));
                 return new GroupMetrics(groupId, tenant, epoch, members, offsets);
             });
+            DiskMetrics? disk = null;
             foreach (Tag t in r.Tags())
             {
-                if (t.Number != TagQueueDetails)
+                var vr = new Reader(t.Value.ToByteArray());
+                if (t.Number == TagQueueDetails)
+                {
+                    // id, an empty array, unread, an empty array
+                    List<QueueMetrics> details = vr.Array(8 + 1 + 8 + 1, r1 =>
+                    {
+                        ulong id = r1.U64();
+                        List<ulong> levels = r1.Array(8, r2 => r2.U64());
+                        ulong unread = r1.U64();
+                        List<ConsumerMetrics> states =
+                            r1.Array(4 + 1, r2 => new ConsumerMetrics(r2.U32(), "", 0, 0, StateOf(r2.U8())));
+                        return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
+                    });
+                    queues = queues.Select(q => WithDetails(q, details)).ToList();
+                }
+                else if (t.Number == TagPartitionDetails)
+                {
+                    // group, oldest, open transactions
+                    var details = vr.Array(8 + 8 + 4, r1 => (Group: r1.U64(), Oldest: r1.I64(), Open: r1.U32()));
+                    partitions = partitions.Select(p =>
+                    {
+                        foreach (var d in details)
+                        {
+                            if (d.Group == p.Group)
+                            {
+                                long? oldest = d.Oldest >= 0 ? d.Oldest : null;
+                                return p with { OldestTimestampMs = oldest, OpenTransactions = d.Open };
+                            }
+                        }
+                        return p;
+                    }).ToList();
+                }
+                else if (t.Number == TagInFlightBytes)
+                {
+                    // id and an empty array
+                    List<QueueMetrics> held = vr.Array(8 + 1, r1 =>
+                    {
+                        ulong id = r1.U64();
+                        List<ConsumerMetrics> bytes =
+                            r1.Array(4 + 8, r2 => new ConsumerMetrics(r2.U32(), "", 0, 0, ConsumerState.Shared, r2.U64()));
+                        return new QueueMetrics(id, 0, 0, 0, 0, 0, bytes, System.Array.Empty<ulong>(), 0);
+                    });
+                    queues = queues.Select(q => WithBytes(q, held)).ToList();
+                }
+                else if (t.Number == TagDisk)
+                {
+                    disk = new DiskMetrics(vr.U64(), vr.Bool());
+                }
+                else
                 {
                     continue; // between nodes, or from a newer version: skipped
                 }
-                var vr = new Reader(t.Value.ToByteArray());
-                // id, an empty array, unread, an empty array
-                List<QueueMetrics> details = vr.Array(8 + 1 + 8 + 1, r1 =>
-                {
-                    ulong id = r1.U64();
-                    List<ulong> levels = r1.Array(8, r2 => r2.U64());
-                    ulong unread = r1.U64();
-                    List<ConsumerMetrics> states =
-                        r1.Array(4 + 1, r2 => new ConsumerMetrics(r2.U32(), "", 0, 0, StateOf(r2.U8())));
-                    return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
-                });
                 vr.Finish();
-                queues = queues.Select(q => WithDetails(q, details)).ToList();
             }
             return new DescribeMetrics(
                 error, nodeId, version, uptime, metadataGroup, coordinatorGroup, connections, clientIn, clientOut,
-                peerIn, peerOut, latency, host, partitions, queues, groups);
+                peerIn, peerOut, latency, host, partitions, queues, groups, disk);
         }
     }
 

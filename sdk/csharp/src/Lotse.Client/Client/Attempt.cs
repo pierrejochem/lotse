@@ -6,7 +6,8 @@ namespace Lotse.Client;
 /// <summary>
 /// Why one attempt failed, thrown inside the retry loop only. <c>Retry</c> may be tried again at once, after metadata
 /// is refreshed; <c>RetryMaybeDone</c> may be tried again, but the request may have been carried out, so only an
-/// idempotent produce does; <c>Fail</c> ends the call with an error.
+/// idempotent produce does; <c>Refused</c> may be tried again, nothing was written, and if time runs out the call
+/// ends with the refusal (ADR 0122); <c>Fail</c> ends the call with an error.
 /// </summary>
 internal sealed class Attempt : Exception
 {
@@ -14,25 +15,32 @@ internal sealed class Attempt : Exception
     {
         Retry,
         RetryMaybeDone,
+        Refused,
         Fail,
     }
 
-    private Attempt(Kind kind, string why, ClientException? error)
+    private Attempt(Kind kind, string why, ClientException? error, ErrorCode? code = null)
         : base(why)
     {
         Outcome = kind;
         Error = error;
+        Code = code;
     }
 
     internal Kind Outcome { get; }
 
     internal ClientException? Error { get; }
 
+    /// <summary>The refusal of a <c>Refused</c> attempt.</summary>
+    internal ErrorCode? Code { get; }
+
     internal static Attempt Retry(string why) => new(Kind.Retry, why, null);
 
     internal static Attempt RetryMaybeDone(string why) => new(Kind.RetryMaybeDone, why, null);
 
     internal static Attempt Fail(ClientException error) => new(Kind.Fail, error.Message, error);
+
+    internal static Attempt Refused(ErrorCode code, string why) => new(Kind.Refused, why, null, code);
 }
 
 /// <summary>Why a request got no response.</summary>
