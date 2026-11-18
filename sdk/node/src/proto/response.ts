@@ -135,6 +135,8 @@ export interface DescribeMetricsResponse {
   readonly partitions: readonly m.PartitionMetrics[];
   readonly queues: readonly m.QueueMetrics[];
   readonly groups: readonly m.GroupMetrics[];
+  /** The node's free space limit and whether it is below it; `null` while it cannot tell (ADR 0122). */
+  readonly disk: m.DiskMetrics | null;
 }
 export interface SaslHandshakeResponse {
   readonly type: "SaslHandshake";
@@ -440,9 +442,8 @@ export function writeResponse(w: Writer, res: Response): void {
         const details = res.queues.filter(
           (q) => q.readyByLevel.length > 0 || q.readyLevelUnread !== 0n || q.consumers.some((c) => c.state !== "shared"),
         );
-        if (details.length === 0) {
-          w.noTags();
-        } else {
+        const tags: { tag: number; value: Uint8Array }[] = [];
+        if (details.length > 0) {
           const v = new Writer();
           v.array(details, (w1, q) => {
             w1.u64(q.resourceId);
@@ -450,7 +451,32 @@ export function writeResponse(w: Writer, res: Response): void {
             w1.u64(q.readyLevelUnread);
             w1.array(q.consumers, (w2, c) => w2.u32(c.subscriptionId).u8(m.consumerStateCode(c.state)));
           });
-          w.tags([{ tag: m.TAG_QUEUE_DETAILS, value: v.toBytes() }]);
+          tags.push({ tag: m.TAG_QUEUE_DETAILS, value: v.toBytes() });
+        }
+        const parts = res.partitions.filter((p) => p.oldestTimestampMs !== null || p.openTransactions !== 0);
+        if (parts.length > 0) {
+          const v = new Writer();
+          v.array(parts, (w1, p) => w1.u64(p.group).i64(p.oldestTimestampMs ?? -1n).u32(p.openTransactions));
+          tags.push({ tag: m.TAG_PARTITION_DETAILS, value: v.toBytes() });
+        }
+        const holding = res.queues.filter((q) => q.consumers.some((c) => c.inFlightBytes !== 0n));
+        if (holding.length > 0) {
+          const v = new Writer();
+          v.array(holding, (w1, q) => {
+            w1.u64(q.resourceId);
+            w1.array(q.consumers, (w2, c) => w2.u32(c.subscriptionId).u64(c.inFlightBytes));
+          });
+          tags.push({ tag: m.TAG_IN_FLIGHT_BYTES, value: v.toBytes() });
+        }
+        if (res.disk !== null) {
+          const v = new Writer();
+          v.u64(res.disk.freeLimitBytes).bool(res.disk.low);
+          tags.push({ tag: m.TAG_DISK, value: v.toBytes() });
+        }
+        if (tags.length === 0) {
+          w.noTags();
+        } else {
+          w.tags(tags);
         }
       }
       return;
@@ -1036,6 +1062,8 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
       produceRecords,
       fetchBytes,
       replicas,
+      oldestTimestampMs: null as bigint | null,
+      openTransactions: 0,
     };
   });
   const queues = r.array(6 * 8 + 1, (r1) => {
@@ -1051,6 +1079,7 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
       inFlight: r2.u32(),
       credit: r2.u32(),
       state: "shared" as m.ConsumerState,
+      inFlightBytes: 0n,
     }));
     return {
       resourceId,
@@ -1073,11 +1102,48 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
     return { groupId, tenant, epoch, members, offsets };
   });
   let withDetails: m.QueueMetrics[] = queues;
+  let withPartitions: m.PartitionMetrics[] = partitions;
+  let disk: m.DiskMetrics | null = null;
   for (const t of r.tags()) {
+    const vr = new Reader(t.value);
+    if (t.tag === m.TAG_PARTITION_DETAILS) {
+      // group, oldest, open transactions
+      const details = vr.array(8 + 8 + 4, (r1) => ({ group: r1.u64(), oldest: r1.i64(), open: r1.u32() }));
+      vr.finish();
+      withPartitions = withPartitions.map((p) => {
+        const d = details.find((x) => x.group === p.group);
+        return d === undefined ? p : { ...p, oldestTimestampMs: d.oldest >= 0n ? d.oldest : null, openTransactions: d.open };
+      });
+      continue;
+    }
+    if (t.tag === m.TAG_IN_FLIGHT_BYTES) {
+      // id and an empty array
+      const held = vr.array(8 + 1, (r1) => ({
+        resourceId: r1.u64(),
+        bytes: r1.array(4 + 8, (r2) => ({ subscriptionId: r2.u32(), inFlightBytes: r2.u64() })),
+      }));
+      vr.finish();
+      withDetails = withDetails.map((q) => {
+        const h = held.find((x) => x.resourceId === q.resourceId);
+        if (h === undefined) {
+          return q;
+        }
+        const consumers = q.consumers.map((c) => {
+          const b = h.bytes.find((x) => x.subscriptionId === c.subscriptionId);
+          return b === undefined ? c : { ...c, inFlightBytes: b.inFlightBytes };
+        });
+        return { ...q, consumers };
+      });
+      continue;
+    }
+    if (t.tag === m.TAG_DISK) {
+      disk = { freeLimitBytes: vr.u64(), low: vr.bool() };
+      vr.finish();
+      continue;
+    }
     if (t.tag !== m.TAG_QUEUE_DETAILS) {
       continue; // between nodes, or from a newer version: skipped
     }
-    const vr = new Reader(t.value);
     // id, an empty array, unread, an empty array
     const details = vr.array(8 + 1 + 8 + 1, (r1) => ({
       resourceId: r1.u64(),
@@ -1113,8 +1179,9 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
     peerOutBytes,
     commitLatency,
     host,
-    partitions,
+    partitions: withPartitions,
     queues: withDetails,
     groups,
+    disk,
   };
 }

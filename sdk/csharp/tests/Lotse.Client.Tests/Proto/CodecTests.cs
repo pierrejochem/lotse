@@ -161,6 +161,6 @@ public class CodecTests
                 retriable++;
             }
         }
-        Assert.Equal(8, retriable);
+        Assert.Equal(9, retriable);
     }
 }

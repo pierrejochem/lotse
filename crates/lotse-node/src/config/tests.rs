@@ -74,6 +74,27 @@ fn the_compaction_map_has_a_default_and_may_be_set() {
 }
 
 #[test]
+fn the_disk_limit_has_a_default_and_takes_bytes_or_a_share() {
+    use lotse_server::FreeLimit;
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.disk_free_limit, FreeLimit::default());
+    let limit = |v: &str| {
+        let f = ClusterFile::parse(&format!("{THREE}\n[disk]\nfree_limit = {v}\n"), "t")?;
+        Ok::<_, ConfigError>(f.node_config(1)?.disk_free_limit)
+    };
+    let bytes = |b| FreeLimit { bytes: b, permille: 0 };
+    assert_eq!(limit("2147483648").unwrap(), bytes(2 << 30));
+    assert_eq!(limit("\"2GiB\"").unwrap(), bytes(2 << 30));
+    assert_eq!(limit("\"500 MB\"").unwrap(), bytes(500_000_000));
+    assert_eq!(limit("\"5%\"").unwrap(), FreeLimit { bytes: 0, permille: 50 });
+    assert_eq!(limit("\"2.5 %\"").unwrap(), FreeLimit { bytes: 0, permille: 25 });
+    assert_eq!(limit("0").unwrap(), FreeLimit::OFF);
+    for bad in ["\"5 apples\"", "\"101%\"", "\"2.55%\"", "\"-1GB\"", "\"99999999999TB\"", "-1"] {
+        assert!(limit(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn producers_have_defaults_and_may_be_set() {
     let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
     assert_eq!(c.max_producers, lotse_server::DEFAULT_MAX_PRODUCERS);

@@ -110,6 +110,10 @@ fn metrics_render_as_openmetrics() {
     metrics.client_in_bytes = 1234;
     metrics.partitions[0].resource_id = 7;
     metrics.partitions[0].replicas = vec![lotse_proto::ReplicaProgress { node_id: 2, log_end: 9 }];
+    // ADR 0122.
+    metrics.partitions[0].oldest_timestamp_ms = Some(1_700_000_000_500);
+    metrics.partitions[0].open_transactions = 2;
+    metrics.disk = Some(lotse_proto::DiskMetrics { free_limit_bytes: 1 << 30, low: true });
     // A single active consumer queue with priority levels (ADR 0120).
     metrics.queues = vec![lotse_proto::QueueMetrics {
         resource_id: 8,
@@ -121,6 +125,7 @@ fn metrics_render_as_openmetrics() {
                 in_flight: 0,
                 credit: 1,
                 state: lotse_proto::ConsumerState::Active,
+                in_flight_bytes: 300,
             },
             lotse_proto::ConsumerMetrics {
                 subscription_id: 2,
@@ -128,6 +133,7 @@ fn metrics_render_as_openmetrics() {
                 in_flight: 0,
                 credit: 1,
                 state: lotse_proto::ConsumerState::Standby,
+                in_flight_bytes: 0,
             },
             lotse_proto::ConsumerMetrics {
                 subscription_id: 3,
@@ -135,6 +141,7 @@ fn metrics_render_as_openmetrics() {
                 in_flight: 0,
                 credit: 1,
                 state: lotse_proto::ConsumerState::Standby,
+                in_flight_bytes: 0,
             },
         ],
         ready_by_level: vec![3, 0, 2],
@@ -170,7 +177,12 @@ fn metrics_render_as_openmetrics() {
     assert!(text.contains(&format!("lotse_partition_responsive_voters{{{labels}}} 2\n")));
     assert!(text.contains(&format!("lotse_partition_under_replicated{{{labels}}} 1\n")));
     assert!(text.contains(&format!("lotse_replica_log_end_offset{{{labels},replica=\"2\"}} 9\n")));
+    assert!(text.contains(&format!("lotse_partition_open_transactions{{{labels}}} 2\n")));
+    assert!(text.contains(&format!("lotse_partition_oldest_record_timestamp_seconds{{{labels}}} 1700000000.5\n")));
+    assert!(text.contains("lotse_disk_free_limit_bytes{node=\"1\"} 1073741824\n"));
+    assert!(text.contains("lotse_disk_low{node=\"1\"} 1\n"));
     let q = "node=\"1\",tenant=\"acme\",queue=\"jobs\"";
+    assert!(text.contains(&format!("lotse_queue_in_flight_bytes{{{q}}} 300\n")));
     assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"active\"}} 1\n")), "{text}");
     assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"standby\"}} 2\n")));
     assert!(text.contains(&format!("lotse_queue_consumers_in_state{{{q},state=\"shared\"}} 0\n")));

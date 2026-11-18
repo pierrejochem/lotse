@@ -31,7 +31,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_rt::{Clock, Instant, Rng, Spawn};
 
-pub use disk::{CrashReport, SimDisk, SimFile};
+pub use disk::{CrashReport, SIM_DISK_TOTAL, SimDisk, SimFile};
 pub use executor::JoinHandle;
 pub use net::{SimConn, SimListener, SimNet};
 
@@ -238,14 +238,16 @@ impl lotse_rt::Disk for SimRuntime {
 }
 
 impl lotse_rt::Host for SimRuntime {
-    /// A fixed machine: what a simulation checks must not depend on it.
+    /// A fixed machine, but for the free space a test may set on the node's
+    /// disk ([`SimDisk::set_free_bytes`]): what a simulation checks must not
+    /// depend on anything else of it.
     fn host_stats(&self) -> impl Future<Output = lotse_rt::HostStats> + Send {
         std::future::ready(lotse_rt::HostStats {
             cpu: Some(0.25),
             memory_bytes: Some(1 << 30),
             memory_limit_bytes: Some(4 << 30),
-            disk_free_bytes: Some(3 << 40),
-            disk_total_bytes: Some(4 << 40),
+            disk_free_bytes: Some(self.disk.free_bytes()),
+            disk_total_bytes: Some(disk::SIM_DISK_TOTAL),
         })
     }
 }

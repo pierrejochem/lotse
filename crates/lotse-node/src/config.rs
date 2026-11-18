@@ -58,6 +58,9 @@ pub struct ClusterFile {
     /// How partitions keep idempotent producers.
     #[serde(default)]
     pub producers: Producers,
+    /// How much free space nodes keep on their data volume.
+    #[serde(default)]
+    pub disk: DiskSection,
     /// How clients authenticate.
     #[serde(default)]
     pub auth: Auth,
@@ -171,6 +174,73 @@ pub struct Compaction {
     /// (default 64 MiB, about 1.4 million keys).
     #[serde(default)]
     pub map_bytes: Option<u64>,
+}
+
+/// How much free space nodes keep on their data volume (ADR 0122).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskSection {
+    /// Below this much free space on its data volume a node takes no new
+    /// data in the groups it votes in: bytes (`2147483648`, `"2GiB"`,
+    /// `"500MB"`), a share of the volume (`"5%"`), or `0` for none. Default:
+    /// the larger of 1 GiB and 5 %.
+    #[serde(default)]
+    pub free_limit: Option<SizeOrShare>,
+}
+
+/// A number of bytes, or text with a unit or a percent sign.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum SizeOrShare {
+    /// Bytes.
+    Bytes(u64),
+    /// `"2GiB"`, `"500MB"`, `"5%"`.
+    Text(String),
+}
+
+impl SizeOrShare {
+    /// The limit it names.
+    pub fn free_limit(&self) -> Result<lotse_server::FreeLimit, String> {
+        match self {
+            SizeOrShare::Bytes(b) => Ok(lotse_server::FreeLimit { bytes: *b, permille: 0 }),
+            SizeOrShare::Text(t) => parse_free_limit(t),
+        }
+    }
+}
+
+/// `"2GiB"`, `"500 MB"`, `"1073741824"` or `"5%"`, `"2.5%"`.
+fn parse_free_limit(text: &str) -> Result<lotse_server::FreeLimit, String> {
+    let t = text.trim();
+    let bad = || format!("disk.free_limit: {text:?} is neither bytes (\"2GiB\", \"500MB\") nor a share (\"5%\")");
+    if let Some(share) = t.strip_suffix('%') {
+        let share = share.trim();
+        let (whole, tenth) = match share.split_once('.') {
+            Some((w, f)) if f.len() == 1 => (w, f),
+            Some(_) => return Err(format!("disk.free_limit: {text:?} has more than one decimal")),
+            None => (share, "0"),
+        };
+        let (Ok(whole), Ok(tenth)) = (whole.parse::<u32>(), tenth.parse::<u32>()) else { return Err(bad()) };
+        let permille = whole.checked_mul(10).and_then(|p| p.checked_add(tenth)).filter(|p| *p <= 1000);
+        let Some(permille) = permille else { return Err(format!("disk.free_limit: {text:?} is more than 100 %")) };
+        return Ok(lotse_server::FreeLimit { bytes: 0, permille });
+    }
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (number, unit) = t.split_at(split);
+    let number: u64 = number.parse().map_err(|_| bad())?;
+    let factor: u64 = match unit.trim() {
+        "" | "B" => 1,
+        "KB" => 1_000,
+        "MB" => 1_000_000,
+        "GB" => 1_000_000_000,
+        "TB" => 1_000_000_000_000,
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        _ => return Err(bad()),
+    };
+    let bytes = number.checked_mul(factor).ok_or_else(|| format!("disk.free_limit: {text:?} is too large"))?;
+    Ok(lotse_server::FreeLimit { bytes, permille: 0 })
 }
 
 /// How partitions keep idempotent producers (ADR 0110).
@@ -295,6 +365,9 @@ impl ClusterFile {
         }
         if self.cluster.segment_bytes < 4096 {
             return invalid("cluster.segment_bytes must be at least 4096".into());
+        }
+        if let Some(l) = &self.disk.free_limit {
+            l.free_limit().map_err(ConfigError::Invalid)?;
         }
         if self.producers.max == Some(0) {
             return invalid("producers.max must be at least 1".into());
@@ -428,6 +501,10 @@ impl ClusterFile {
                 .cluster
                 .follower_max_lag_ms
                 .map_or(lotse_server::DEFAULT_FOLLOWER_MAX_LAG, Duration::from_millis),
+            disk_free_limit: match &self.disk.free_limit {
+                Some(l) => l.free_limit().map_err(ConfigError::Invalid)?,
+                None => lotse_server::FreeLimit::default(),
+            },
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

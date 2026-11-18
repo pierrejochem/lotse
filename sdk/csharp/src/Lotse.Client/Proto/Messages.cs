@@ -65,6 +65,15 @@ public static class Messages
     /// <summary>Tag of a queue's ready messages per priority level and its subscriptions' states, in a <c>DescribeMetrics</c> answer (ADR 0120).</summary>
     internal const long TagQueueDetails = 3;
 
+    /// <summary>Tag of each partition's oldest record and open transactions, in a <c>DescribeMetrics</c> answer (ADR 0122).</summary>
+    internal const long TagPartitionDetails = 4;
+
+    /// <summary>Tag of the bytes each queue consumer holds, in a <c>DescribeMetrics</c> answer (ADR 0122).</summary>
+    internal const long TagInFlightBytes = 5;
+
+    /// <summary>Tag of the node's free disk limit, in a <c>DescribeMetrics</c> answer (ADR 0122).</summary>
+    internal const long TagDisk = 6;
+
     /// <summary>The smallest <see cref="RoleBinding"/>: two flags and three empty strings.</summary>
     internal const int BindingMin = 1 + 2 + 1 + 2 + 2;
 
@@ -654,6 +663,11 @@ public static class Messages
     public sealed record HostMetrics(
         ushort? CpuPermille, ulong? MemoryBytes, ulong? MemoryLimitBytes, ulong? DiskFreeBytes, ulong? DiskTotalBytes);
 
+    /// <summary>A node's free space limit (ADR 0122).</summary>
+    /// <param name="FreeLimitBytes">The leaders of the groups it votes in take no new data while its data volume has fewer free bytes than this; 0 for no limit.</param>
+    /// <param name="Low">Whether it is below the limit now: it goes below when free space falls under the limit and back once it is a tenth above it.</param>
+    public sealed record DiskMetrics(ulong FreeLimitBytes, bool Low);
+
     /// <summary>How far a replica is.</summary>
     /// <param name="NodeId">The replica's node.</param>
     /// <param name="LogEnd">Offset after the last one it holds.</param>
@@ -674,6 +688,8 @@ public static class Messages
     /// <param name="ProduceRecords">Acknowledged produce records, likewise.</param>
     /// <param name="FetchBytes">Bytes fetched, or for a queue delivered, likewise.</param>
     /// <param name="Replicas">On the leader: the last offset each replica holds (plus one).</param>
+    /// <param name="OldestTimestampMs">When the oldest data record still stored was written, ms since the epoch; <c>null</c> for an empty log or a node's own groups (ADR 0122).</param>
+    /// <param name="OpenTransactions">Transactions open on this partition, as this replica knows them (ADR 0122).</param>
     public sealed record PartitionMetrics(
         ulong Group,
         ulong ResourceId,
@@ -688,7 +704,9 @@ public static class Messages
         ulong ProduceBytes,
         ulong ProduceRecords,
         ulong FetchBytes,
-        IReadOnlyList<ReplicaProgress> Replicas);
+        IReadOnlyList<ReplicaProgress> Replicas,
+        long? OldestTimestampMs = null,
+        uint OpenTransactions = 0);
 
     /// <summary>A queue subscription.</summary>
     /// <param name="SubscriptionId">The subscription.</param>
@@ -696,8 +714,14 @@ public static class Messages
     /// <param name="InFlight">Messages delivered to it and not acknowledged.</param>
     /// <param name="Credit">Messages it may still be sent.</param>
     /// <param name="State">Shared, active or standby (ADR 0120).</param>
+    /// <param name="InFlightBytes">Bytes of the messages it holds, each message's share of its batch as stored (ADR 0122).</param>
     public sealed record ConsumerMetrics(
-        uint SubscriptionId, string Peer, uint InFlight, uint Credit, ConsumerState State = ConsumerState.Shared);
+        uint SubscriptionId,
+        string Peer,
+        uint InFlight,
+        uint Credit,
+        ConsumerState State = ConsumerState.Shared,
+        ulong InFlightBytes = 0);
 
     /// <summary>What a subscription does on its queue (ADR 0120). Codes from a newer version read as shared.</summary>
     public enum ConsumerState : byte

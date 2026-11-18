@@ -139,6 +139,6 @@ class CodecTest {
                 retriable++;
             }
         }
-        assertEquals(8, retriable);
+        assertEquals(9, retriable);
     }
 }

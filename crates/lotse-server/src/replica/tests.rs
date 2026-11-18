@@ -406,6 +406,7 @@ fn retention_stops_at_an_open_transaction() {
         lotse_record::set_producer(&mut txn, 9, 0, 0).unwrap();
         lotse_record::set_transactional(&mut txn, true).unwrap();
         let open = commit(&mut r, txn.freeze()).await;
+        assert_eq!(r.open_transactions(), 1, "ADR 0122");
         for i in 0..30 {
             commit(&mut r, batch(1, &format!("after-{i:02}"))).await;
         }
@@ -420,6 +421,7 @@ fn retention_stops_at_an_open_transaction() {
         r.process().await.unwrap();
         r.retain(0).await.unwrap().expect("now it goes");
         assert!(r.log().start_offset() > open.first - 1);
+        assert_eq!(r.open_transactions(), 0);
     });
 }
 
@@ -1082,7 +1084,7 @@ fn a_full_queue_refuses_only_a_batch_that_is_new_here() {
         let cfg = Config::new(1, vec![1]);
         let mut r = Replica::open(rt.clone(), "g", cfg, Recorder::default(), LogConfig::default()).await.unwrap();
         elect(&mut r).await;
-        let full = |_: &lotse_record::Batch| Err("full".to_string());
+        let full = |_: &lotse_record::Batch| Err(ProposeError::QueueFull("full".to_string()));
         // Taken while there was room, in flight or committed: a retry is
         // answered as the original, never refused (ADR 0118).
         let a = r.propose(from_producer(7, 0, "a")).unwrap();
@@ -1101,5 +1103,31 @@ fn a_full_queue_refuses_only_a_batch_that_is_new_here() {
         ));
         // With room, the refused batch's sequence is free.
         assert!(!r.propose(from_producer(7, 1, "b")).unwrap().duplicate);
+    });
+}
+
+#[test]
+fn the_oldest_record_is_the_first_data_batch_at_the_log_start() {
+    Sim::new(8).run(|rt| async move {
+        let cfg = Config::new(1, vec![1]);
+        let mut r = Replica::open(rt.clone(), "g", cfg, Recorder::default(), LogConfig::default()).await.unwrap();
+        r.look_at_oldest().await.unwrap();
+        assert_eq!(r.oldest_timestamp_ms(), None, "an empty log");
+        elect(&mut r).await;
+        r.look_at_oldest().await.unwrap();
+        assert_eq!(r.oldest_timestamp_ms(), None, "nothing but the leader's own entries");
+        let mut stamped = BytesMut::from(&batch(2, "a")[..]);
+        lotse_record::set_base_timestamp(&mut stamped, 1_000).unwrap();
+        r.propose(stamped.freeze()).unwrap();
+        let mut later = BytesMut::from(&batch(1, "b")[..]);
+        lotse_record::set_base_timestamp(&mut later, 2_000).unwrap();
+        r.propose(later.freeze()).unwrap();
+        r.process().await.unwrap();
+        r.process().await.unwrap();
+        r.look_at_oldest().await.unwrap();
+        assert_eq!(r.oldest_timestamp_ms(), Some(1_000), "the first data batch");
+        // Looked at again only when the log changes, then from its start.
+        r.look_at_oldest().await.unwrap();
+        assert_eq!(r.oldest_timestamp_ms(), Some(1_000));
     });
 }

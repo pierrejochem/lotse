@@ -4,15 +4,17 @@ import { BrokerResponseError, ClientAuthenticationError, type ClientError } from
 /**
  * Why one attempt failed, thrown inside the retry loop only. `RETRY` may be tried again at once, after metadata is
  * refreshed; `RETRY_MAYBE_DONE` may be tried again, but the request may have been carried out, so only an idempotent
- * produce does; `FAIL` ends the call with an error.
+ * produce does; `REFUSED` may be tried again, nothing was written, and if time runs out the call ends with the
+ * refusal (ADR 0122); `FAIL` ends the call with an error.
  */
-export type AttemptKind = "RETRY" | "RETRY_MAYBE_DONE" | "FAIL";
+export type AttemptKind = "RETRY" | "RETRY_MAYBE_DONE" | "REFUSED" | "FAIL";
 
 export class Attempt extends Error {
   private constructor(
     readonly kind: AttemptKind,
     why: string,
     readonly error: ClientError | null,
+    readonly code: ErrorCodeValue | null = null,
   ) {
     super(why);
     this.name = "Attempt";
@@ -28,6 +30,10 @@ export class Attempt extends Error {
 
   static fail(error: ClientError): Attempt {
     return new Attempt("FAIL", error.message, error);
+  }
+
+  static refused(code: ErrorCodeValue, why: string): Attempt {
+    return new Attempt("REFUSED", why, null, code);
   }
 }
 

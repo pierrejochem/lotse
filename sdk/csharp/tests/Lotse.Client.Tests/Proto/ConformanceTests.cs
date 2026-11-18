@@ -236,6 +236,13 @@ public class ConformanceTests
                 Assert.Equal(Messages.ConsumerState.Active, q.Consumers[0].State);
                 Assert.Equal(Messages.ConsumerState.Standby, q.Consumers[1].State);
                 Assert.Equal("10.0.0.9:40100", q.Consumers[1].Peer);
+                // Tags 4 to 6 (ADR 0122).
+                Messages.PartitionMetrics p = m.Partitions[0];
+                Assert.Equal(1_763_000_000_000L, p.OldestTimestampMs);
+                Assert.Equal(1U, p.OpenTransactions);
+                Assert.Equal(2048UL, q.Consumers[0].InFlightBytes);
+                Assert.Equal(0UL, q.Consumers[1].InFlightBytes);
+                Assert.Equal(new Messages.DiskMetrics(1UL << 30, true), m.Disk);
             }
         }
         Assert.True(found);
