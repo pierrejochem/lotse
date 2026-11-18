@@ -3,7 +3,8 @@
 //!
 //! It serves the scene from the mockups: a rolling upgrade from 0.4.0 to
 //! 0.4.1 is under way, broker-3 is catching up after its restart, broker-2
-//! is past its soft disk limit, and tenant `analytics` has hit its quota.
+//! is close to its free space limit, and tenant `analytics` has hit its
+//! quota.
 //! Rates drift over time and broker-3 finishes catching up after about nine
 //! minutes, so live updates have something to show. Queues created through
 //! the API are kept in memory.
@@ -258,7 +259,8 @@ impl DemoCluster {
         let b1_leads = 634 - b3_leads / 2;
         let b2_leads = RAFT_GROUPS - b1_leads - b3_leads;
         let share = |leads: u32| total_in * f64::from(leads) / f64::from(RAFT_GROUPS);
-        let b2_free = (0.19 - s * 0.000_002).max(0.11);
+        let b2_free = (0.068 - s * 0.000_002).max(0.056);
+        let limit = Some(DISK_FREE_LIMIT);
         vec![
             Node {
                 id: "broker-1".into(),
@@ -269,6 +271,8 @@ impl DemoCluster {
                 replicas: RAFT_GROUPS,
                 disk_free_bytes: Some((4.0 * TIB as f64 * 0.61) as u64),
                 disk_total_bytes: Some(4 * TIB),
+                disk_free_limit_bytes: limit,
+                disk_low: Some(false),
                 produce_bytes_per_sec: Some(share(b1_leads)),
                 net_in_bytes_per_sec: Some(share(b1_leads) + total_in * 0.5),
                 net_out_bytes_per_sec: Some(share(b1_leads) * 2.76),
@@ -288,6 +292,8 @@ impl DemoCluster {
                 replicas: RAFT_GROUPS,
                 disk_free_bytes: Some((4.0 * TIB as f64 * b2_free) as u64),
                 disk_total_bytes: Some(4 * TIB),
+                disk_free_limit_bytes: limit,
+                disk_low: Some(false),
                 produce_bytes_per_sec: Some(share(b2_leads)),
                 net_in_bytes_per_sec: Some(share(b2_leads) + total_in * 0.5),
                 net_out_bytes_per_sec: Some(share(b2_leads) * 2.71),
@@ -296,7 +302,7 @@ impl DemoCluster {
                 memory_bytes: Some((21.8 * GIB as f64) as u64),
                 memory_limit_bytes: Some(32 * GIB),
                 version: "0.4.0".into(),
-                status: chip(Tone::Warn, "Soft disk limit"),
+                status: chip(Tone::Warn, "Close to its disk limit"),
             },
             Node {
                 id: "broker-3".into(),
@@ -307,6 +313,8 @@ impl DemoCluster {
                 replicas: RAFT_GROUPS,
                 disk_free_bytes: Some((4.0 * TIB as f64 * 0.58) as u64),
                 disk_total_bytes: Some(4 * TIB),
+                disk_free_limit_bytes: limit,
+                disk_low: Some(false),
                 produce_bytes_per_sec: Some(share(b3_leads)),
                 net_in_bytes_per_sec: if catching > 0 {
                     Some(61.5 * MIB)
@@ -379,7 +387,8 @@ impl DemoCluster {
                     note: if paused {
                         "The upgrade stops after broker-3. Resume it to continue with broker-2.".into()
                     } else {
-                        "Starts when broker-3 has caught up. Soft disk limit reached; the upgrade does not change that."
+                        "Starts when broker-3 has caught up. broker-2 is close to its disk limit; the upgrade does not \
+                         change that."
                             .into()
                     },
                 },
@@ -438,14 +447,12 @@ impl Cluster for DemoCluster {
             metadata_leader: "broker-1".into(),
             metadata_term: 18,
             alerts: vec![Alert {
-                id: "disk-soft-broker-2".into(),
+                id: "disk-close-broker-2".into(),
                 tone: Tone::Warn,
-                title: format!("Soft disk limit on broker-2: {:.0} % free", b2_free * 100.0),
-                detail: format!(
-                    "Producers writing to the {} partitions and queues it leads are throttled, throttle_ms up to 180. \
-                     Writes stop at 10 % free. Move leaders away or free space.",
-                    b2.leads
-                ),
+                title: format!("broker-2 is close to its free space limit: {:.1} % free", b2_free * 100.0),
+                detail: "Below 5 % free (205 GiB), streams and queues with a replica on it take no new data until \
+                         it has room again. Free space, or move replicas off the node."
+                    .into(),
                 node: Some("broker-2".into()),
             }],
             throughput: Throughput {
@@ -474,10 +481,10 @@ impl Cluster for DemoCluster {
                     chip: Some(chip(Tone::Info, if self.lock().paused { "Pausing" } else { "Running" })),
                 },
                 HealthItem {
-                    label: "Throttled producers".into(),
-                    value: "23".into(),
-                    detail: "soft disk limit on broker-2".into(),
-                    chip: Some(chip(Tone::Warn, "Throttled")),
+                    label: "Nodes below their disk limit".into(),
+                    value: "0".into(),
+                    detail: format!("broker-2 at {:.1} % free, the limit is 5 %", b2_free * 100.0),
+                    chip: Some(chip(Tone::Warn, "One close")),
                 },
                 HealthItem {
                     label: "Open transactions".into(),
@@ -499,7 +506,6 @@ impl Cluster for DemoCluster {
                 },
             ],
             nodes,
-            disk_limits: Some(DISK_LIMITS),
             busiest_streams: streams,
             attention_queues: queues,
             stream_count: 214,
@@ -526,7 +532,7 @@ impl Cluster for DemoCluster {
             OperatorEvent {
                 at: ago(self.secs() as u64 + 12 * 60 + 27),
                 node: "broker-2".into(),
-                text: "Soft disk limit: 19 % free. throttle_ms now applied to producers on its leaders.".into(),
+                text: "Free space below 7 %, close to its limit of 5 % (205 GiB).".into(),
             },
             OperatorEvent {
                 at: ago(self.secs() as u64 + 16 * 60 + 39),
@@ -546,7 +552,7 @@ impl Cluster for DemoCluster {
                 ),
             },
         );
-        Ok(NodesView { nodes: self.node_list(), disk_limits: Some(DISK_LIMITS), upgrade: Some(self.upgrade()), events })
+        Ok(NodesView { nodes: self.node_list(), upgrade: Some(self.upgrade()), events })
     }
 
     async fn streams(&self, _who: &Identity) -> ApiResult<Vec<StreamRow>> {
@@ -1378,7 +1384,8 @@ impl Cluster for DemoCluster {
 /// The demo cluster's nodes.
 const DEMO_NODES: [&str; 3] = ["broker-1", "broker-2", "broker-3"];
 
-const DISK_LIMITS: DiskLimits = DiskLimits { soft_free: 0.20, hard_free: 0.10 };
+/// Every demo node's free space limit: the default, 5 % of 4 TiB.
+const DISK_FREE_LIMIT: u64 = 4 * TIB / 20;
 
 fn chip(tone: Tone, text: &str) -> Chip {
     Chip { tone, text: text.into() }

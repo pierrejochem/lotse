@@ -6,7 +6,7 @@
 //! which only learn of it through the metadata group, refuse new data with
 //! STORAGE_FULL; reads, acks and metadata changes go on; the node stays low
 //! until its volume is a tenth above the limit, and then produces pass
-//! again.
+//! again. A scenario: its value does not grow with seeds (`check_few_seeds`).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use lotse_raft::NodeId;
 use lotse_record::{Batch, BatchBuilder, BatchOptions};
 use lotse_rt::{Clock, Rng};
 use lotse_server::{Node, NodeConfig, QueueConfig, StateMachine, StreamConfig};
-use lotse_sim::{SIM_DISK_TOTAL, Sim, SimRuntime, check_seeds};
+use lotse_sim::{SIM_DISK_TOTAL, Sim, SimRuntime, check_few_seeds};
 
 #[derive(Debug, Default)]
 struct Nothing;
@@ -181,5 +181,5 @@ async fn run(rt: SimRuntime) {
 
 #[test]
 fn a_node_low_on_disk_stops_new_data_in_its_groups_until_it_has_room() {
-    check_seeds(10, |seed| Sim::new(seed).run(run));
+    check_few_seeds(6, |seed| Sim::new(seed).run(run));
 }

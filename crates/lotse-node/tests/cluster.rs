@@ -115,7 +115,7 @@ async fn a_cluster_from_one_file() {
     let mut text = format!(
         "[cluster]\ndata_dir = \"{r}/data/node-{{id}}\"\n\n[tls]\nca = \"{r}/tls/ca.pem\"\n\
          cert = \"{r}/tls/node-{{id}}.pem\"\nkey = \"{r}/tls/node-{{id}}.key\"\n\n\
-         [retention]\nms = -1\n\n[auth]\nadmins = [\"alice\"]\n"
+         [retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\nadmins = [\"alice\"]\n"
     );
     for id in 1..=3 {
         text.push_str(&format!(

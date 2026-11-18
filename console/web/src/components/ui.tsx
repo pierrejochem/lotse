@@ -36,13 +36,15 @@ export function Bar({
   );
 }
 
-/** Disk use, against the soft and hard limits where the cluster has them;
- * ticks mark where they start. Nothing if the node does not report its disk. */
-export function DiskBar({ node, limits, width = 120 }: { node: S['Node']; limits?: S['DiskLimits'] | null; width?: number }) {
+/** Disk use, against the node's free space limit where it has one (ADR 0122):
+ * a tick marks where the limit starts. Critical while the node is below it,
+ * a warning within twice the limit. Nothing if the node does not report its disk. */
+export function DiskBar({ node, width = 120 }: { node: S['Node']; width?: number }) {
   const free = fraction(node.disk_free_bytes, node.disk_total_bytes);
   if (free === null) return null;
-  const tone = !limits ? undefined : free <= limits.hard_free ? 'critical' : free <= limits.soft_free ? 'warn' : undefined;
-  const ticks = limits ? [1 - limits.soft_free, 1 - limits.hard_free] : [];
+  const limit = node.disk_free_limit_bytes ? fraction(node.disk_free_limit_bytes, node.disk_total_bytes) : null;
+  const tone = node.disk_low ? 'critical' : limit !== null && free <= 2 * limit ? 'warn' : undefined;
+  const ticks = limit !== null ? [1 - limit] : [];
   return <Bar value={1 - free} tone={tone} ticks={ticks} width={width} />;
 }
 
@@ -108,6 +110,7 @@ const ICONS: Record<string, ReactNode> = {
   tenants: <path d="M3 14V3h7v11M10 7h3v7M1.5 14h13M5.5 5.5h2M5.5 8.5h2M5.5 11.5h2" />,
   chevron: <path d="m5 6 3 3 3-3" />,
   close: <path d="M4 4l8 8M12 4l-8 8" />,
+  menu: <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />,
   warn: (
     <>
       <path d="M8 2 14.5 13.5h-13z" />

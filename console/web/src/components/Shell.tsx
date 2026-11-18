@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Link, NavLink, Outlet, useMatches, useNavigate, useParams, type UIMatch } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useMatches, useNavigate, useParams, type UIMatch } from 'react-router-dom';
 import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useClusters, useMe } from '../api/queries';
 import { signOut } from '../api/client';
@@ -38,9 +38,14 @@ function useTheme(): [Theme, (t: Theme) => void] {
 
 const toneColor: Record<string, string> = { ok: '#5CC28F', warn: '#E0A84A', critical: '#F0645A', info: '#9DB0BE' };
 
+/** The main navigation. On a phone only the brand, the cluster switch and a
+ * menu button show; the button opens the rest, and choosing a page closes it. */
 function Nav({ cluster }: { cluster: string }) {
   const clusters = useClusters();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [open, setOpen] = useState(false);
+  useEffect(() => setOpen(false), [location.pathname]);
   const current = clusters.data?.find((c) => c.id === cluster);
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   const item = (to: string, icon: Parameters<typeof Icon>[0]['name'], label: string, end = false) => (
@@ -52,11 +57,21 @@ function Nav({ cluster }: { cluster: string }) {
     </NavLink>
   );
   return (
-    <nav className="nav" aria-label="Main">
+    <nav className={`nav${open ? ' open' : ''}`} aria-label="Main">
       <div className="nav-brand">
         <Mark />
         <strong>Lotse</strong>
-        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--nav-muted)' }}>Console</span>
+        <span className="nav-console">Console</span>
+        <button
+          type="button"
+          className="nav-toggle"
+          aria-expanded={open}
+          aria-controls="nav-pages"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <Icon name={open ? 'close' : 'menu'} />
+          {open ? 'Close' : 'Menu'}
+        </button>
       </div>
 
       <Menu.Root>
@@ -86,6 +101,7 @@ function Nav({ cluster }: { cluster: string }) {
         </Menu.Portal>
       </Menu.Root>
 
+      <div className="nav-pages" id="nav-pages">
       <div className="nav-group">
         <span className="label">Cluster</span>
         {item(base, 'overview', 'Overview', true)}
@@ -105,6 +121,7 @@ function Nav({ cluster }: { cluster: string }) {
         </div>
       )}
       <div className="nav-foot">lotse-console 0.0.1</div>
+      </div>
     </nav>
   );
 }

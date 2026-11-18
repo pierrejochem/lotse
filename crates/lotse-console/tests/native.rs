@@ -2,7 +2,7 @@
 //! TCP, the local disk), a client writing to them, and the console's HTTP
 //! API reading what they report.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,7 +96,7 @@ async fn the_console_shows_a_real_cluster() {
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),
             client_addrs: clients.clone(),
-            zones: Default::default(),
+            zones: (1..=3).map(|i| (i, format!("zone-{i}"))).collect(),
             streams: vec![StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![3] }],
             queues: vec![QueueConfig {
                 name: "jobs".into(),
@@ -119,7 +119,8 @@ async fn the_console_shows_a_real_cluster() {
             producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
             leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
             follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
-            disk_free_limit: lotse_server::FreeLimit::default(),
+            // One byte: whatever the machine's disk, never low (ADR 0122).
+            disk_free_limit: lotse_server::FreeLimit { bytes: 1, permille: 0 },
             retention: lotse_server::RetentionConfig::keep(),
             join: false,
             auth: lotse_server::AuthConfig::none(),
@@ -162,7 +163,10 @@ async fn the_console_shows_a_real_cluster() {
     assert!(o["alerts"].as_array().unwrap().is_empty(), "{o}");
     let node = &o["nodes"][0];
     assert!(node["disk_total_bytes"].as_u64().unwrap() > 0 && node["memory_bytes"].as_u64().unwrap() > 0, "{node}");
-    assert!(node["zone"].is_null() && o["disk_limits"].is_null());
+    // Zones from `Metadata` (ADR 0104), the free space limit (ADR 0122).
+    let zones: BTreeSet<&str> = o["nodes"].as_array().unwrap().iter().map(|n| n["zone"].as_str().unwrap()).collect();
+    assert_eq!(zones, BTreeSet::from(["zone-1", "zone-2", "zone-3"]), "{o}");
+    assert_eq!((node["disk_free_limit_bytes"].as_u64(), node["disk_low"].as_bool()), (Some(1), Some(false)), "{node}");
     assert_eq!(o["attention_queues"][0]["name"], "jobs", "ready messages and nobody consuming: {o}");
 
     // Traffic, then a second look after the rate window: rates appear.
@@ -184,6 +188,9 @@ async fn the_console_shows_a_real_cluster() {
     assert_eq!(s["replication"], 3);
     assert_eq!(s["tenant"], "default");
     assert_eq!(s["retention"], serde_json::json!({ "ms": null, "bytes": null }), "the nodes keep everything");
+    // ADR 0122: replicas look at their oldest record once a second.
+    assert_eq!(s["open_transactions"].as_u64(), Some(0), "{s}");
+    assert!(s["oldest_record_age_ms"].is_u64(), "{s}");
     let (status, page) = get(&app, "/api/v1/clusters/local/streams/orders/records?partition=0&offset=3&count=5").await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let records = page["records"].as_array().unwrap();
