@@ -94,6 +94,25 @@ pub fn move_leader(req: &crate::model::MoveLeader) -> String {
     }
 }
 
+/// `lotse-cli replication set …` for a replication factor.
+pub fn set_replication(req: &crate::model::SetReplication) -> String {
+    format!("lotse-cli replication set {} --factor {}", req.resource, req.factor)
+}
+
+/// `lotse-cli partition place …` for a placement, or its release.
+pub fn place_partition(req: &crate::model::PlacePartition) -> String {
+    if req.nodes.is_empty() {
+        format!("lotse-cli partition release {} --partition {}", req.resource, req.partition)
+    } else {
+        format!(
+            "lotse-cli partition place {} --partition {} --nodes {}",
+            req.resource,
+            req.partition,
+            req.nodes.join(",")
+        )
+    }
+}
+
 /// `lotse-cli read …` for a browser read.
 pub fn read(stream: &str, partition: u32, offset: u64, count: u32, isolation: Isolation) -> String {
     let iso = match isolation {

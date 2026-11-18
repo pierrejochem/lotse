@@ -76,6 +76,7 @@ pub(crate) use nodes::{managed_groups, moving};
 mod queues;
 mod retire;
 mod session;
+mod sessions;
 mod stats;
 mod verify;
 
@@ -144,7 +145,7 @@ pub(crate) async fn serve<R: Runtime>(
     auth: Arc<Auth<R>>,
 ) {
     let now_ms = u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX);
-    let mut session = Session::new(auth, conn.peer_identity(), conn.peer_cert(), now_ms);
+    let mut session = Session::new(auth, conn.peer_identity(), conn.peer_cert(), peer.clone(), now_ms);
     // The inventory learns of the certificate now, and again every so often
     // while the connection lives (ADR 0091).
     session.note_cert(now_ms);
@@ -500,6 +501,7 @@ impl Clients {
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
             Request::RevokeCertificate(req) => self.revoke_certificate(outbox, id, req, view, groups),
             Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, view, groups),
+            Request::DescribeSessions(_) => self.describe_sessions(&outbox, id, view, &principal),
             Request::RecordCertificates(req) => self.record_certificates(outbox, id, req, view, groups),
             Request::RequestCertificate(req) => self.request_certificate(outbox, id, req, &principal, view, groups),
             Request::DescribeCertificateRequests(_) => {
@@ -1114,6 +1116,11 @@ fn metadata<R: Runtime, S: StateMachine>(
         })
         .collect();
     let tenant_of = |id: u64| view.access.resources.get(&id).map(|(_, t)| t.clone()).unwrap_or_default();
+    // Pins and placements as this node applied the metadata group, like the
+    // voters of runtime groups (ADR 0121).
+    let state = view.admin.metadata.and_then(|g| groups.get(&g)).map(|r| r.metadata());
+    let pinned = |g: &GroupId| state.and_then(|s| s.pins.get(g)).map_or(0, |n| *n as u32);
+    let placed = |g: &GroupId| state.is_some_and(|s| s.placed.contains(g));
     let describe = |s: &StreamConfig| ResourceMetadata {
         error: ErrorCode::NONE,
         name: s.name.clone(),
@@ -1137,7 +1144,14 @@ fn metadata<R: Runtime, S: StateMachine>(
                         (0, 0, voters.unwrap_or_default())
                     }
                 };
-                PartitionMetadata { partition: i as u32, leader, leader_term, voters }
+                PartitionMetadata {
+                    partition: i as u32,
+                    leader,
+                    leader_term,
+                    voters,
+                    pinned_leader: pinned(g),
+                    placed: placed(g),
+                }
             })
             .collect(),
         exchange: None,

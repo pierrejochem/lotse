@@ -261,7 +261,16 @@ export interface PartitionMetadata {
   readonly leader: number;
   readonly leaderTerm: bigint;
   readonly voters: readonly number[];
+  /** The node a cluster admin pinned its leader to; 0 or absent for none (tag 0, ADR 0121). */
+  readonly pinnedLeader?: number;
+  /** Whether a cluster admin placed it on named nodes (tag 1, ADR 0121). */
+  readonly placed?: boolean;
 }
+
+/** Tag of a partition's pinned leader in a `Metadata` answer (ADR 0121). */
+export const TAG_PINNED_LEADER = 0;
+/** Tag of a placed partition in a `Metadata` answer: present, empty, when it is placed (ADR 0121). */
+export const TAG_PLACED = 1;
 
 export interface BindingMetadata {
   readonly queueId: bigint;
@@ -488,6 +497,48 @@ export const CertificateState = {
   /** Revoked by a cluster admin (`RevokeCertificate`). */
   REVOKED: 3,
 } as const;
+
+/** Who a session acts as, in {@link SessionEntry.principalKind} (ADR 0121). */
+export const SessionPrincipal = {
+  /** Nobody in particular: the node requires no authentication. */
+  ANONYMOUS: 0,
+  /** A user or service, by name. */
+  USER: 1,
+  /** A broker node, by its certificate; the name is its id. */
+  NODE: 2,
+} as const;
+
+/** How a session signed in, in {@link SessionEntry.mechanism} (ADR 0121). */
+export const SessionMechanism = {
+  /** It did not: the node requires no authentication. */
+  NONE: 0,
+  /** With its TLS client certificate. */
+  CERTIFICATE: 1,
+  /** SASL SCRAM-SHA-512. */
+  SCRAM_SHA_512: 2,
+  /** SASL OAUTHBEARER. */
+  OAUTHBEARER: 3,
+} as const;
+
+/** One open client session on a node (`DescribeSessions`, ADR 0121). */
+export interface SessionEntry {
+  /** See {@link SessionPrincipal}. */
+  readonly principalKind: number;
+  /** The user's name, or the node's id; empty for anonymous. */
+  readonly name: string;
+  /** Groups at the identity provider (OAUTHBEARER only). */
+  readonly groups: readonly string[];
+  /** See {@link SessionMechanism}. */
+  readonly mechanism: number;
+  /** The other end's address as the node sees it. */
+  readonly peer: string;
+  /** When the connection was made, ms since the Unix epoch. */
+  readonly connectedMs: bigint;
+  /** When its credential dates from: a token's issue time (0 without one), the SCRAM login, or the connection. */
+  readonly credentialMs: bigint;
+  /** When the session ends unless renewed; 0 for one that lasts the connection. */
+  readonly expiresMs: bigint;
+}
 
 /** One client certificate in the inventory (`DescribeCertificates`). */
 export interface CertificateEntry {

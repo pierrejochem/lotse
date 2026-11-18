@@ -59,6 +59,8 @@ export const ApiKey = {
   DESCRIBE_CERTIFICATE_REQUESTS: 56,
   RECORD_CERTIFICATE: 57,
   REASSIGN_PARTITION: 58,
+  /** The open client sessions of the node asked (ADR 0121). */
+  DESCRIBE_SESSIONS: 59,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -118,6 +120,7 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.DESCRIBE_CERTIFICATE_REQUESTS,
   ApiKey.RECORD_CERTIFICATE,
   ApiKey.REASSIGN_PARTITION,
+  ApiKey.DESCRIBE_SESSIONS,
   ApiKey.PUBLISH,
 ];
 

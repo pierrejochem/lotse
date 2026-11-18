@@ -5,6 +5,7 @@ import dev.lotse.client.Fetched
 import dev.lotse.client.GroupConfig
 import dev.lotse.client.LotseClient
 import dev.lotse.client.NodeMetrics
+import dev.lotse.client.NodeSessions
 import dev.lotse.client.OffsetAt
 import dev.lotse.client.OutMessage
 import dev.lotse.client.ProduceResult
@@ -283,4 +284,7 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
 
     /** Every node's metrics, or why a node gave none. */
     public suspend fun nodeMetrics(): List<NodeMetrics> = io { java.nodeMetrics() }
+
+    /** Every node's open client sessions (ADR 0121); see [LotseClient.nodeSessions]. */
+    public suspend fun nodeSessions(): List<NodeSessions> = io { java.nodeSessions() }
 }

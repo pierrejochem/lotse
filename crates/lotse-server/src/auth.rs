@@ -197,7 +197,64 @@ pub(crate) struct Auth<R> {
     /// Client certificates this node accepted since the last report (ADR
     /// 0091), for the main loop to send to the metadata leader.
     seen: Mutex<BTreeMap<CertKey, SeenCert>>,
+    /// The node's open client sessions, for `DescribeSessions` (ADR 0121).
+    pub(crate) sessions: OpenSessions,
     oidc: Option<Oidc<R>>,
+}
+
+/// One open client session, as its connection last told it (ADR 0121).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenSession {
+    /// Who it acts as; `None` before it authenticated.
+    pub(crate) principal: Option<Principal>,
+    /// [`lotse_proto::session_mechanism`].
+    pub(crate) mechanism: u8,
+    /// The other end's address.
+    pub(crate) peer: String,
+    /// When the connection was made, ms since the Unix epoch.
+    pub(crate) connected_ms: u64,
+    /// When its credential dates from (ADR 0070), ms since the Unix epoch.
+    pub(crate) credential_ms: u64,
+    /// When it ends unless renewed, ms since the Unix epoch; 0 for never.
+    pub(crate) expires_ms: u64,
+}
+
+/// A node's open client sessions, each under the number its connection
+/// got: connection tasks write, the main loop reads.
+#[derive(Debug, Default)]
+pub(crate) struct OpenSessions(Mutex<(u64, BTreeMap<u64, OpenSession>)>);
+
+impl OpenSessions {
+    /// An empty registry, usable in a `static`.
+    pub(crate) const fn new() -> OpenSessions {
+        OpenSessions(Mutex::new((0, BTreeMap::new())))
+    }
+
+    /// A new connection's session; its number.
+    pub(crate) fn open(&self, session: OpenSession) -> u64 {
+        let mut s = self.0.lock().expect("sessions lock");
+        s.0 += 1;
+        let n = s.0;
+        s.1.insert(n, session);
+        n
+    }
+
+    /// What session `n` is now.
+    pub(crate) fn update(&self, n: u64, session: OpenSession) {
+        if let Some(s) = self.0.lock().expect("sessions lock").1.get_mut(&n) {
+            *s = session;
+        }
+    }
+
+    /// Session `n` ended with its connection.
+    pub(crate) fn close(&self, n: u64) {
+        self.0.lock().expect("sessions lock").1.remove(&n);
+    }
+
+    /// Every open session, oldest first.
+    pub(crate) fn list(&self) -> Vec<OpenSession> {
+        self.0.lock().expect("sessions lock").1.values().cloned().collect()
+    }
 }
 
 impl<R: Clock + Http + Clone> Auth<R> {
@@ -209,6 +266,7 @@ impl<R: Clock + Http + Clone> Auth<R> {
             revocations: Mutex::new((BTreeMap::new(), Signal::default())),
             certs: Mutex::new(BTreeSet::new()),
             seen: Mutex::new(BTreeMap::new()),
+            sessions: OpenSessions::new(),
             oidc,
         })
     }

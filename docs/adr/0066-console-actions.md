@@ -28,7 +28,7 @@ The native console now creates queues with a dead-letter queue (creating it firs
 ## Consequences
 
 - Operators can do the three actions from the console. The demo cluster plays them out in memory: purged queues show no ready messages, requeued dead letters go, pinned leaders show where they were put.
-- The console does not show whether a partition is pinned, because the broker does not report pins yet; the leader it shows is the effect.
+- The console does not show whether a partition is pinned, because the broker does not report pins yet; the leader it shows is the effect. ADR 0121 reports them and the console shows them.
 - A queue page offers Purge even to a user whose roles do not allow it; the broker refuses, and the console shows why.
 - Tests:
   - the console against three real nodes: creating a queue with a dead-letter queue and seeing its settings; a purge refused without the right name and then emptying the queue; a message dead-lettered and requeued; a leader pinned to another node, moving there, and unpinned; a node that does not exist refused;

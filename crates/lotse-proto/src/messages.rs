@@ -185,7 +185,19 @@ pub struct PartitionMetadata {
     pub leader_term: u64,
     /// Voters of the partition's Raft group.
     pub voters: Vec<u32>,
+    /// The node a cluster admin pinned its leader to (ADR 0065), 0 for
+    /// none; tag 0 (ADR 0121).
+    pub pinned_leader: u32,
+    /// Whether a cluster admin placed it on named nodes (ADR 0115), so
+    /// rebalancing and `replication.factor` leave it alone; tag 1.
+    pub placed: bool,
 }
+
+/// Tag of a partition's pinned leader in a `Metadata` answer (ADR 0121).
+const TAG_PINNED_LEADER: u64 = 0;
+/// Tag of a placed partition in a `Metadata` answer: present, empty, when
+/// it is placed (ADR 0121).
+const TAG_PLACED: u64 = 1;
 
 /// A resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +281,16 @@ impl MetadataResponse {
                 w.u32(p.leader);
                 w.u64(p.leader_term);
                 w.array(&p.voters, |w, v| w.u32(*v));
-                w.no_tags();
+                let mut tags = Vec::new();
+                if p.pinned_leader != 0 {
+                    let mut v = Writer::new();
+                    v.u32(p.pinned_leader);
+                    tags.push((TAG_PINNED_LEADER, v.finish()));
+                }
+                if p.placed {
+                    tags.push((TAG_PLACED, Bytes::new()));
+                }
+                w.tags(&tags);
             });
             w.u8(u8::from(res.exchange.is_some()));
             if let Some(x) = &res.exchange {
@@ -303,13 +324,25 @@ impl MetadataResponse {
             let (error, name, tenant) = (ErrorCode(r.u16()?), r.string()?, r.string()?);
             let (resource_id, kind) = (r.u64()?, r.u8()?);
             let partitions = r.array(18, |r| {
-                let p = PartitionMetadata {
+                let mut p = PartitionMetadata {
                     partition: r.u32()?,
                     leader: r.u32()?,
                     leader_term: r.u64()?,
                     voters: r.array(4, Reader::u32)?,
+                    pinned_leader: 0,
+                    placed: false,
                 };
-                r.tags()?;
+                for (tag, value) in r.tags()? {
+                    match tag {
+                        TAG_PINNED_LEADER => {
+                            let mut v = Reader::new(value);
+                            p.pinned_leader = v.u32()?;
+                            v.finish()?;
+                        }
+                        TAG_PLACED => p.placed = true,
+                        _ => {}
+                    }
+                }
                 Ok(p)
             })?;
             let exchange = match r.u8()? {
@@ -3926,6 +3959,121 @@ impl DescribeCertificatesResponse {
                 })
             })?,
         })
+    }
+}
+
+/// Lists the open client sessions of the node it is sent to (ADR 0121).
+/// Cluster admins and cluster viewers get every session; anyone else the
+/// sessions made with their own name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeSessionsRequest;
+
+impl DescribeSessionsRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeSessionsRequest)
+    }
+}
+
+/// Who a session acts as, in [`SessionEntry`].
+pub mod session_principal {
+    /// Nobody in particular: the node requires no authentication.
+    pub const ANONYMOUS: u8 = 0;
+    /// A user or service, by name.
+    pub const USER: u8 = 1;
+    /// A broker node, by its certificate; the name is its id.
+    pub const NODE: u8 = 2;
+}
+
+/// How a session signed in, in [`SessionEntry`].
+pub mod session_mechanism {
+    /// It did not: the node requires no authentication.
+    pub const NONE: u8 = 0;
+    /// With its TLS client certificate.
+    pub const CERTIFICATE: u8 = 1;
+    /// SASL SCRAM-SHA-512.
+    pub const SCRAM_SHA_512: u8 = 2;
+    /// SASL OAUTHBEARER.
+    pub const OAUTHBEARER: u8 = 3;
+}
+
+/// One open client session on a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    /// [`session_principal`].
+    pub principal_kind: u8,
+    /// The user's name, or the node's id; empty for anonymous.
+    pub name: String,
+    /// Groups at the identity provider (OAUTHBEARER only).
+    pub groups: Vec<String>,
+    /// [`session_mechanism`].
+    pub mechanism: u8,
+    /// The other end's address as the node sees it.
+    pub peer: String,
+    /// When the connection was made, ms since the Unix epoch.
+    pub connected_ms: u64,
+    /// When its credential dates from, ms since the Unix epoch: a token's
+    /// issue time (0 without one), the SCRAM login, or the connection. A
+    /// session revocation (ADR 0070) after it ends the session.
+    pub credential_ms: u64,
+    /// When the session ends unless renewed, ms since the Unix epoch; 0 for
+    /// one that lasts as long as the connection.
+    pub expires_ms: u64,
+}
+
+/// A node's open client sessions, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeSessionsResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The answering node.
+    pub node_id: u32,
+    /// The answering node's clock, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// The sessions the asker may see.
+    pub sessions: Vec<SessionEntry>,
+}
+
+impl DescribeSessionsResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.u32(self.node_id);
+        w.u64(self.now_ms);
+        w.array(&self.sessions, |w, s| {
+            w.u8(s.principal_kind);
+            w.string(&s.name);
+            w.array(&s.groups, |w, g| w.string(g));
+            w.u8(s.mechanism);
+            w.string(&s.peer);
+            w.u64(s.connected_ms);
+            w.u64(s.credential_ms);
+            w.u64(s.expires_ms);
+            w.no_tags();
+        });
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let (error, node_id, now_ms) = (ErrorCode(r.u16()?), r.u32()?, r.u64()?);
+        // kind, name, no groups, mechanism, peer, three times, no tags.
+        let sessions = r.array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, |r| {
+            let s = SessionEntry {
+                principal_kind: r.u8()?,
+                name: r.string()?,
+                groups: r.array(2, Reader::string)?,
+                mechanism: r.u8()?,
+                peer: r.string()?,
+                connected_ms: r.u64()?,
+                credential_ms: r.u64()?,
+                expires_ms: r.u64()?,
+            };
+            r.tags()?;
+            Ok(s)
+        })?;
+        r.tags()?;
+        Ok(DescribeSessionsResponse { error, node_id, now_ms, sessions })
     }
 }
 

@@ -10,6 +10,7 @@ import {
   useDeleteUser,
   useRevokeCertificate,
   useRevokeSessions,
+  useSessions,
   useUsers,
 } from '../api/queries';
 import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
@@ -185,7 +186,109 @@ function Bindings({ cluster }: { cluster: string }) {
   );
 }
 
+/** How long ago, or how long from now, in words. */
+function ago(ms: number, now: number): string {
+  const s = Math.max(0, Math.round(Math.abs(now - ms) / 1000));
+  if (s < 90) return `${s} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  if (s < 2 * 86_400) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86_400)} days`;
+}
+
+/** The open client sessions on every node (ADR 0121): all for a cluster admin or viewer, one's own otherwise. */
+function OpenSessions({ cluster }: { cluster: string }) {
+  const q = useSessions(cluster);
+  const revoke = useRevokeSessions(cluster);
+  const toast = useToast();
+  if (q.isPending) return <Loading />;
+  if (q.isError) return <Failed error={q.error} retry={() => q.refetch()} />;
+  const now = Date.now();
+  const v = q.data;
+  return (
+    <section className="stack" aria-labelledby="open-sessions">
+      <div>
+        <h2 id="open-sessions" className="h3">Open sessions</h2>
+        <p className="small muted" style={{ margin: '4px 0 0' }}>
+          {v.everyone ? 'Every client connection the nodes hold now.' : 'Your own connections; cluster admins and viewers see everyone.'}
+          {v.unreachable.length > 0 && ` Not answering: ${v.unreachable.join(', ')}.`}
+        </p>
+      </div>
+      {v.sessions.length === 0 ? (
+        <p className="empty">No open sessions.</p>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Principal</th>
+                <th scope="col">Signed in with</th>
+                <th scope="col">Node</th>
+                <th scope="col">From</th>
+                <th scope="col" className="r">Connected</th>
+                <th scope="col" className="r">Ends</th>
+                {v.everyone && <th scope="col"><span className="sr-only">Actions</span></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {v.sessions.map((x, i) => (
+                <tr key={`${x.node}-${x.peer}-${i}`}>
+                  <th scope="row">
+                    <span className="mono">{x.principal}</span>
+                    {x.groups.length > 0 && <span className="small muted"> · {x.groups.join(', ')}</span>}
+                  </th>
+                  <td>{x.mechanism}</td>
+                  <td className="mono">{x.node}</td>
+                  <td className="mono">{x.peer}</td>
+                  <td className="r">{ago(x.connected_ms, now)} ago</td>
+                  <td className="r">{x.expires_ms ? `in ${ago(x.expires_ms, now)}` : 'with the connection'}</td>
+                  {v.everyone && (
+                    <td>
+                      {x.kind === 'user' && (
+                        <TypedConfirmButton
+                          trigger="Revoke"
+                          title={`Revoke the sessions of ${x.principal}?`}
+                          body="Every session of this user that began before now ends, on every node, and older tokens are refused. This cannot be undone."
+                          name={x.principal}
+                          prompt="Type the user's name to revoke its sessions"
+                          action="Revoke sessions"
+                          keep="Keep the sessions"
+                          pending={revoke.isPending}
+                          onConfirm={(confirm) =>
+                            revoke.mutate(
+                              { subject: x.principal, group: false, confirm },
+                              {
+                                onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+                                onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
+                              },
+                            )
+                          }
+                        />
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Sessions({ cluster }: { cluster: string }) {
+  return (
+    <div className="stack" style={{ gap: 32 }}>
+      <OpenSessions cluster={cluster} />
+      <details>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke the sessions of a user or group by name</summary>
+        <div style={{ paddingTop: 16 }}><RevokeByName cluster={cluster} /></div>
+      </details>
+    </div>
+  );
+}
+
+function RevokeByName({ cluster }: { cluster: string }) {
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
   const [kind, setKind] = useState('user');

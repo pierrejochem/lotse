@@ -604,6 +604,76 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/placements": {
+      "post": {
+        "tags": [],
+        "summary": "Places a partition's replicas on named nodes, or releases it to the\nplanner with no nodes (ADR 0115).",
+        "operationId": "place_partition",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlacePartition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster or resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/queues": {
       "get": {
         "tags": [],
@@ -881,6 +951,116 @@
           },
           "404": {
             "description": "No such cluster or resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/replication": {
+      "post": {
+        "tags": [],
+        "summary": "Gives every partition of a stream or queue a number of replicas. Moves\nfour partitions at a time and releases placed partitions (ADR 0115).",
+        "operationId": "set_replication",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetReplication"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster or resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/sessions": {
+      "get": {
+        "tags": [],
+        "summary": "The open client sessions on every node: all of them for a cluster admin\nor viewer, the signed-in user's own otherwise (ADR 0121).",
+        "operationId": "sessions",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2583,7 +2763,8 @@
           "log_start",
           "high_watermark",
           "last_stable",
-          "size_bytes"
+          "size_bytes",
+          "placed"
         ],
         "properties": {
           "high_watermark": {
@@ -2614,6 +2795,17 @@
             "description": "First offset still stored.",
             "minimum": 0
           },
+          "pinned": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node a cluster admin pinned its leader to (ADR 0065)."
+          },
+          "placed": {
+            "type": "boolean",
+            "description": "Placed on named nodes by a cluster admin (ADR 0115): rebalancing\nand the replication factor leave it alone."
+          },
           "replicas": {
             "type": "array",
             "items": {
@@ -2643,6 +2835,34 @@
           "running",
           "pending"
         ]
+      },
+      "PlacePartition": {
+        "type": "object",
+        "description": "Request to place a partition's replicas on named nodes, or to release\nit to the planner with no nodes (ADR 0115).",
+        "required": [
+          "resource",
+          "partition",
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The nodes, as the console names them; empty releases the partition."
+          },
+          "partition": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The partition; 0 for a queue.",
+            "minimum": 0
+          },
+          "resource": {
+            "type": "string",
+            "description": "The stream or queue."
+          }
+        }
       },
       "Point": {
         "type": "object",
@@ -2795,6 +3015,8 @@
           "in_open_txns",
           "levels",
           "levels_unread",
+          "replicas",
+          "placed",
           "consumers",
           "dead_letters",
           "handover"
@@ -2890,6 +3112,17 @@
             "type": "string",
             "description": "Queue name."
           },
+          "pinned": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node a cluster admin pinned its leader to (ADR 0065)."
+          },
+          "placed": {
+            "type": "boolean",
+            "description": "Placed on named nodes by a cluster admin (ADR 0115)."
+          },
           "publish_per_sec": {
             "type": [
               "number",
@@ -2903,6 +3136,13 @@
             "format": "int64",
             "description": "Ready, all levels.",
             "minimum": 0
+          },
+          "replicas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The nodes that hold the queue's replicas."
           },
           "single_active": {
             "type": "boolean",
@@ -3289,6 +3529,119 @@
           "unit": {
             "type": "string",
             "description": "Unit of `v`."
+          }
+        }
+      },
+      "SessionRow": {
+        "type": "object",
+        "description": "One open client session on a node (ADR 0121).",
+        "required": [
+          "node",
+          "principal",
+          "kind",
+          "mechanism",
+          "groups",
+          "peer",
+          "connected_ms",
+          "credential_ms"
+        ],
+        "properties": {
+          "connected_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the connection was made, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "credential_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When its credential dates from, ms since the Unix epoch; a session\nrevocation after it ends the session.",
+            "minimum": 0
+          },
+          "expires_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it ends unless renewed, ms since the Unix epoch; none for one\nthat lasts as long as its connection.",
+            "minimum": 0
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups at the identity provider (OAUTHBEARER only)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`user`, `node` or `anonymous`."
+          },
+          "mechanism": {
+            "type": "string",
+            "description": "How it signed in: `certificate`, `SCRAM-SHA-512`, `OAUTHBEARER` or `none`."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node that holds the connection."
+          },
+          "peer": {
+            "type": "string",
+            "description": "The other end's address as the node sees it."
+          },
+          "principal": {
+            "type": "string",
+            "description": "Who it acts as: a user's name, a node's name, or `anonymous`."
+          }
+        }
+      },
+      "SessionsView": {
+        "type": "object",
+        "description": "The open client sessions the signed-in user may see: every session for\na cluster admin or viewer, their own otherwise (ADR 0121).",
+        "required": [
+          "sessions",
+          "unreachable",
+          "everyone"
+        ],
+        "properties": {
+          "everyone": {
+            "type": "boolean",
+            "description": "Whether the user sees every session or only their own."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionRow"
+            },
+            "description": "The sessions, by node and then oldest first."
+          },
+          "unreachable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nodes that did not answer."
+          }
+        }
+      },
+      "SetReplication": {
+        "type": "object",
+        "description": "Request to give every partition of a stream or queue a number of\nreplicas (`replication.factor`, ADR 0115). Releases its placed\npartitions.",
+        "required": [
+          "resource",
+          "factor"
+        ],
+        "properties": {
+          "factor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Replicas per partition, from 1 to the active nodes.",
+            "minimum": 0
+          },
+          "resource": {
+            "type": "string",
+            "description": "The stream or queue."
           }
         }
       },
