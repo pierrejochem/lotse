@@ -53,7 +53,11 @@ pub(crate) struct NodeView<'a> {
     pub(crate) net: &'a NetStats,
     /// The host as last read (every few seconds).
     pub(crate) host: HostStats,
+    /// The node's open client sessions (ADR 0121).
+    pub(crate) sessions: &'a crate::auth::OpenSessions,
 }
+
+static NO_SESSIONS: crate::auth::OpenSessions = crate::auth::OpenSessions::new();
 
 static NO_NET: NetStats = NetStats {
     client_in: AtomicU64::new(0),
@@ -65,7 +69,7 @@ static NO_NET: NetStats = NetStats {
 
 impl Default for NodeView<'_> {
     fn default() -> Self {
-        NodeView { id: 0, started: Instant::ZERO, net: &NO_NET, host: HostStats::default() }
+        NodeView { id: 0, started: Instant::ZERO, net: &NO_NET, host: HostStats::default(), sessions: &NO_SESSIONS }
     }
 }
 

@@ -653,6 +653,44 @@ public sealed partial class LotseClient
         return output;
     }
 
+    /// <summary>
+    /// Every node's open client sessions, asked of each node directly, for every node the cluster's metadata names:
+    /// each with its answer, or why there is none (ADR 0121). A cluster admin or viewer gets every session, anyone
+    /// else those made with their own name.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<IReadOnlyList<NodeSessions>> NodeSessionsAsync(CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        Response.Metadata m = await MetadataAsync(null, cancellationToken).ConfigureAwait(false);
+        var output = new List<NodeSessions>();
+        foreach (Messages.Broker b in m.Brokers)
+        {
+            var addr = new Address(b.Host, b.Port);
+            try
+            {
+                Response r = await CallAsync(addr, new Request.DescribeSessions(), cancellationToken).ConfigureAwait(false);
+                if (r is Response.DescribeSessions d && d.Error.IsOk)
+                {
+                    output.Add(new NodeSessions(b.NodeId, d, null));
+                }
+                else if (r is Response.DescribeSessions refused)
+                {
+                    output.Add(new NodeSessions(b.NodeId, null, new BrokerErrorException(refused.Error, null)));
+                }
+                else
+                {
+                    output.Add(new NodeSessions(b.NodeId, null, new NoAnswerException(b.NodeId, "unexpected response " + r)));
+                }
+            }
+            catch (CallFailure e)
+            {
+                output.Add(new NodeSessions(b.NodeId, null, new NoAnswerException(b.NodeId, addr + ": " + e.Describe())));
+            }
+        }
+        return output;
+    }
+
     // ---- shared ----
 
     /// <summary>The id of the resource called <paramref name="name"/>, asking every broker before calling it unknown.</summary>

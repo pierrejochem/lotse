@@ -50,6 +50,8 @@ async fn broker(rt: SimRuntime, script: Arc<Script>) {
                                 leader: 1,
                                 leader_term: 1,
                                 voters: vec![1],
+                                pinned_leader: 0,
+                                placed: false,
                             }],
                             exchange: None,
                         }],

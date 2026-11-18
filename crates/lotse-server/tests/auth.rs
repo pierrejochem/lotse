@@ -1065,3 +1065,70 @@ fn a_member_instance_takes_over_and_the_old_one_stays_out() {
         });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Open sessions (ADR 0121).
+
+/// Every session the nodes report to `c`, with the node that has it.
+async fn sessions_seen(c: &Client<SimRuntime>) -> Vec<(u32, lotse_proto::SessionEntry)> {
+    let answers = c.node_sessions().await.expect("the nodes");
+    answers
+        .into_iter()
+        .filter_map(|(n, r)| r.ok().map(|r| (n, r)))
+        .flat_map(|(n, r)| r.sessions.into_iter().map(move |s| (n, s)))
+        .collect()
+}
+
+#[test]
+fn open_sessions_are_listed_to_admins_and_to_their_own_user() {
+    use lotse_proto::{session_mechanism, session_principal};
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let idp = issuer("k1");
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let bob = client(&rt, "c2", bearer(token(&rt, &idp, "bob", 600)));
+            let carol = client(&rt, "c3", bearer(token(&rt, &idp, "carol", 600)));
+            bob.produce("s", 0, batch("from bob")).await.expect("bob writes");
+            carol.metadata(&[]).await.expect("carol connects");
+
+            // A cluster admin sees everyone: bob with his token's groups and
+            // end, carol, and itself with SCRAM.
+            let all = sessions_seen(&admin).await;
+            let bobs: Vec<_> = all.iter().filter(|(_, s)| s.name == "bob").collect();
+            assert!(!bobs.is_empty(), "{all:?}");
+            for (_, s) in &bobs {
+                assert_eq!((s.principal_kind, s.mechanism), (session_principal::USER, session_mechanism::OAUTHBEARER));
+                assert_eq!(s.groups, vec!["ops".to_string()]);
+                assert!(s.expires_ms > s.connected_ms && s.peer.starts_with("c2"), "{s:?}");
+            }
+            assert!(all.iter().any(|(_, s)| s.name == "carol"), "{all:?}");
+            assert!(all.iter().any(|(_, s)| s.name == "admin" && s.mechanism == session_mechanism::SCRAM_SHA_512));
+
+            // Anyone else sees only their own, on every node.
+            let mine = sessions_seen(&bob).await;
+            assert!(!mine.is_empty() && mine.iter().all(|(_, s)| s.name == "bob"), "{mine:?}");
+            let mine = sessions_seen(&carol).await;
+            assert!(!mine.is_empty() && mine.iter().all(|(_, s)| s.name == "carol"), "{mine:?}");
+
+            // A connection that closes leaves the list.
+            let conn = raw(&rt, "r9").await;
+            login(&rt, &conn, "admin", "admin-pw").await.expect("logged in");
+            let on_r9 =
+                |all: &[(u32, lotse_proto::SessionEntry)]| all.iter().any(|(n, s)| *n == 1 && s.peer.starts_with("r9"));
+            assert!(on_r9(&sessions_seen(&admin).await), "the raw connection is listed");
+            drop(conn);
+            let mut gone = false;
+            // Well before the session would end by itself (MAX_SESSION).
+            for _ in 0..20 {
+                rt.sleep(TICK * 10).await;
+                if !on_r9(&sessions_seen(&admin).await) {
+                    gone = true;
+                    break;
+                }
+            }
+            assert!(gone, "a closed connection's session is no longer listed");
+            stop(nodes).await;
+        });
+    });
+}

@@ -2,7 +2,7 @@ import * as Tabs from '@radix-ui/react-tabs';
 import { Link, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
-import { MoveLeaderButton } from '../components/Actions';
+import { MoveLeaderButton, PlaceButton, ReplicationButton } from '../components/Actions';
 import { Chip, Failed, Hint, Loading, Sparkline, Stats } from '../components/ui';
 import { NONE, bytes, count, duration, rate } from '../format';
 
@@ -85,6 +85,11 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
                   <th scope="row" className="mono">P{p.id}</th>
                   <td>
                     <span className="mono">{p.leader}</span> <span className="muted">· term {p.term}</span>{' '}
+                    {p.pinned && (
+                      <Hint text={`Pinned to ${p.pinned}: the leader stays there until it is unpinned or the node leaves.`}>
+                        <span tabIndex={0} className="tag" style={{ padding: '0 6px', fontSize: 12 }}>pinned {p.pinned}</span>
+                      </Hint>
+                    )}{' '}
                     <MoveLeaderButton cluster={cluster} resource={d.name} partition={p.id} leader={p.leader} replicas={p.replicas.map((r) => r.node)} />
                   </td>
                   <td>
@@ -94,7 +99,13 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
                           <span tabIndex={0} style={replicaStyle(r)} aria-label={replicaLabel(r)}>{r.node.slice(-1)}</span>
                         </Hint>
                       ))}
-                    </span>
+                    </span>{' '}
+                    {p.placed && (
+                      <Hint text="Placed on these nodes by a cluster admin: rebalancing and the replication factor leave it there.">
+                        <span tabIndex={0} className="tag" style={{ padding: '0 6px', fontSize: 12 }}>placed</span>
+                      </Hint>
+                    )}{' '}
+                    <PlaceButton cluster={cluster} resource={d.name} partition={p.id} replicas={p.replicas.map((r) => r.node)} placed={p.placed} />
                   </td>
                   <td className="r mono">{count(p.log_start)}</td>
                   <td className="r mono">{count(p.high_watermark)}</td>
@@ -114,7 +125,8 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
         </table>
       </div>
       <p className="small muted" style={{ margin: 0 }}>
-        Replica squares show the broker number: filled = leader, outlined = in sync, amber = catching up. Last stable sits below the high
+        Replica squares show the broker number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
+        node; a placed partition stays on the nodes it was placed on. Last stable sits below the high
         watermark while a transaction is open; <code>read_committed</code> consumers stop there.
       </p>
     </section>
@@ -232,7 +244,10 @@ export function StreamDetail() {
             <span className="tag">Compaction {d.compaction ? 'on' : 'off'}</span>
           </div>
         </div>
-        <Link className="btn" to={`${base}/messages?stream=${encodeURIComponent(d.name)}`}>Browse records</Link>
+        <div className="row" style={{ gap: 8 }}>
+          <ReplicationButton cluster={cluster} resource={d.name} current={d.replication} />
+          <Link className="btn" to={`${base}/messages?stream=${encodeURIComponent(d.name)}`}>Browse records</Link>
+        </div>
       </div>
 
       <Stats

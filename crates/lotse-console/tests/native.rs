@@ -359,10 +359,64 @@ async fn the_console_shows_a_real_cluster() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(moved, "the leader moves to {to}");
+    // The queue says where it is pinned (ADR 0121).
+    let (_, q) = get(&app, "/api/v1/clusters/local/queues/work").await;
+    assert_eq!(q["pinned"], to, "{q}");
     let unpin = json!({"resource": "work", "partition": 0, "node": null});
     let (status, done) = call(&app, "POST", "/api/v1/clusters/local/leaders", Some(unpin)).await;
     assert_eq!(status, StatusCode::OK, "{done}");
     assert_eq!(done["cli"], "lotse-cli leader unpin work --partition 0");
+
+    // Placing the queue on named nodes, and the replication factor that
+    // releases it (ADR 0115, ADR 0121).
+    let (_, q) = get(&app, "/api/v1/clusters/local/queues/work").await;
+    let replicas: Vec<Value> = q["replicas"].as_array().unwrap().clone();
+    assert!(!replicas.is_empty(), "{q}");
+    let twice = json!({"resource": "work", "partition": 0, "nodes": ["node-1", "node-1"]});
+    let (status, err) = call(&app, "POST", "/api/v1/clusters/local/placements", Some(twice)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let unknown = json!({"resource": "work", "partition": 0, "nodes": ["nine"]});
+    let (status, err) = call(&app, "POST", "/api/v1/clusters/local/placements", Some(unknown)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let place = json!({"resource": "work", "partition": 0, "nodes": replicas});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/placements", Some(place)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert!(
+        done["cli"].as_str().unwrap().starts_with("lotse-cli partition place work --partition 0 --nodes "),
+        "{done}"
+    );
+    let placed = |want: bool| {
+        let app = app.clone();
+        async move {
+            for _ in 0..100 {
+                let (_, q) = get(&app, "/api/v1/clusters/local/queues/work").await;
+                if q["placed"] == want {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+    };
+    assert!(placed(true).await, "the queue shows as placed");
+    let factor = json!({"resource": "work", "factor": replicas.len()});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/replication", Some(factor)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["cli"], format!("lotse-cli replication set work --factor {}", replicas.len()));
+    assert!(placed(false).await, "the factor releases the placement");
+    let (status, err) =
+        call(&app, "POST", "/api/v1/clusters/local/replication", Some(json!({"resource": "work", "factor": 0}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    // Open sessions (ADR 0121): the console's own connections, and, on a
+    // cluster without authentication, everyone's.
+    let (status, v) = get(&app, "/api/v1/clusters/local/sessions").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["everyone"], true, "{v}");
+    let sessions = v["sessions"].as_array().unwrap();
+    assert!(!sessions.is_empty(), "{v}");
+    assert!(sessions.iter().all(|s| s["kind"] == "anonymous" && s["mechanism"] == "none"), "{v}");
+    assert!(sessions.iter().all(|s| s["node"].as_str().unwrap().starts_with("node-")), "{v}");
 
     // A node that stops shows as not answering.
     nodes[2].handle().stop();

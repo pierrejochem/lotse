@@ -193,6 +193,32 @@ public class ConformanceTests
         Assert.True(found);
     }
 
+    /// <summary>Tags 0 and 1 of a partition in a metadata answer: its pinned leader and placement (ADR 0121).</summary>
+    [Fact]
+    public void PinsAndPlacementsAreReadFromTheirPartitions()
+    {
+        bool found = false;
+        foreach (string[] v in Vectors.Lines("responses.hex"))
+        {
+            Response r = Frames.DecodeResponse(Vectors.Hex(v[2]), new ApiKey(ushort.Parse(v[1]))).Response;
+            if (r is Response.Metadata m)
+            {
+                foreach (Messages.ResourceMetadata res in m.Resources)
+                {
+                    foreach (Messages.PartitionMetadata p in res.Partitions)
+                    {
+                        // Only partition 0 of "orders" has a pin (node 2) and a placement.
+                        bool set = res.Name == "orders" && p.Partition == 0;
+                        found |= set;
+                        Assert.Equal(set ? 2u : 0u, p.PinnedLeader);
+                        Assert.Equal(set, p.Placed);
+                    }
+                }
+            }
+        }
+        Assert.True(found);
+    }
+
     /// <summary>Tag 3 of a metrics answer: ready messages per priority level and the subscriptions' states (ADR 0120).</summary>
     [Fact]
     public void QueueDetailsAreReadIntoTheirQueues()

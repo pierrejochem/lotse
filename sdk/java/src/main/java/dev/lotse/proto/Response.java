@@ -2,6 +2,7 @@ package dev.lotse.proto;
 
 import dev.lotse.proto.Messages.*;
 import dev.lotse.record.ByteString;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -70,7 +71,16 @@ public sealed interface Response {
                 w1.array(res.partitions(), (w2, p) -> {
                     w2.u32(p.partition()).u32(p.leader()).u64(p.leaderTerm());
                     w2.array(p.voters(), Writer::u32);
-                    w2.noTags();
+                    List<Tag> tags = new ArrayList<>();
+                    if (p.pinnedLeader() != 0) {
+                        tags.add(new Tag(
+                                Messages.TAG_PINNED_LEADER,
+                                ByteString.copyOf(new Writer().u32(p.pinnedLeader()).toByteArray())));
+                    }
+                    if (p.placed()) {
+                        tags.add(new Tag(Messages.TAG_PLACED, ByteString.copyOf(new byte[0])));
+                    }
+                    w2.tags(tags);
                 });
                 w1.bool(res.exchange() != null);
                 if (res.exchange() != null) {
@@ -102,9 +112,22 @@ public sealed interface Response {
                 long id = r1.u64();
                 int kind = r1.u8();
                 List<PartitionMetadata> partitions = r1.array(18, r2 -> {
-                    PartitionMetadata p = new PartitionMetadata(r2.u32(), r2.u32(), r2.u64(), r2.array(4, Reader::u32));
-                    r2.tags();
-                    return p;
+                    long partition = r2.u32();
+                    long leader = r2.u32();
+                    long term = r2.u64();
+                    List<Long> voters = r2.array(4, Reader::u32);
+                    long pinned = 0;
+                    boolean placed = false;
+                    for (Tag t : r2.tags()) {
+                        if (t.tag() == Messages.TAG_PINNED_LEADER) {
+                            Reader v = new Reader(t.value().toByteArray());
+                            pinned = v.u32();
+                            v.finish();
+                        } else if (t.tag() == Messages.TAG_PLACED) {
+                            placed = true;
+                        }
+                    }
+                    return new PartitionMetadata(partition, leader, term, voters, pinned, placed);
                 });
                 ExchangeMetadata exchange = null;
                 if (r1.bool()) {
@@ -829,6 +852,57 @@ public sealed interface Response {
             // name, mechanism, iterations, source: 2 + 2 + 4 + 1 bytes
             return new DescribeUsers(
                     error, hint, r.array(9, r1 -> new UserEntry(r1.string(), r1.string(), r1.u32(), r1.u8())));
+        }
+    }
+
+    /**
+     * {@code DescribeSessions} (59): a node's open client sessions, oldest first (ADR 0121).
+     *
+     * @param error the outcome
+     * @param nodeId the answering node, a {@code u32}
+     * @param nowMs the answering node's clock, milliseconds since the Unix epoch, a {@code u64}
+     * @param sessions the sessions the asker may see
+     */
+    record DescribeSessions(ErrorCode error, long nodeId, long nowMs, List<SessionEntry> sessions)
+            implements Response {
+        /** Creates the response. */
+        public DescribeSessions {
+            sessions = List.copyOf(sessions);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code()).u32(nodeId).u64(nowMs);
+            w.array(sessions, (w1, s) -> {
+                w1.u8(s.principalKind()).string(s.name());
+                w1.array(s.groups(), Writer::string);
+                w1.u8(s.mechanism()).string(s.peer());
+                w1.u64(s.connectedMs()).u64(s.credentialMs()).u64(s.expiresMs());
+                w1.noTags();
+            });
+            w.noTags();
+        }
+
+        static DescribeSessions read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            long nodeId = r.u32();
+            long nowMs = r.u64();
+            // kind, name, no groups, mechanism, peer, three u64, no tags
+            List<SessionEntry> sessions = r.array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, r1 -> {
+                SessionEntry s = new SessionEntry(
+                        r1.u8(),
+                        r1.string(),
+                        r1.array(2, Reader::string),
+                        r1.u8(),
+                        r1.string(),
+                        r1.u64(),
+                        r1.u64(),
+                        r1.u64());
+                r1.tags();
+                return s;
+            });
+            r.tags();
+            return new DescribeSessions(error, nodeId, nowMs, sessions);
         }
     }
 

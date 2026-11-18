@@ -176,6 +176,27 @@ class ConformanceTest {
         assertTrue(found);
     }
 
+    /** Tags 0 and 1 of a partition in a metadata answer: its pinned leader and placement (ADR 0121). */
+    @Test
+    void pinsAndPlacementsAreReadFromTheirPartitions() {
+        boolean found = false;
+        for (String[] v : Vectors.lines("responses.hex")) {
+            Response r = Frames.decodeResponse(Vectors.hex(v[2]), new ApiKey(Integer.parseInt(v[1]))).response();
+            if (r instanceof Response.Metadata m) {
+                for (Messages.ResourceMetadata res : m.resources()) {
+                    for (Messages.PartitionMetadata p : res.partitions()) {
+                        // Only partition 0 of "orders" has a pin (node 2) and a placement.
+                        boolean set = res.name().equals("orders") && p.partition() == 0;
+                        found |= set;
+                        assertEquals(set ? 2L : 0L, p.pinnedLeader());
+                        assertEquals(set, p.placed());
+                    }
+                }
+            }
+        }
+        assertTrue(found);
+    }
+
     /** Tag 3 of a metrics answer: ready messages per priority level and the subscriptions' states (ADR 0120). */
     @Test
     void queueDetailsAreReadIntoTheirQueues() {

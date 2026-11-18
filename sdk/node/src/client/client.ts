@@ -27,7 +27,7 @@ import {
   ResourceKind,
 } from "../proto/messages.js";
 import type { Request } from "../proto/request.js";
-import type { DescribeMetricsResponse, Response, WhoAmIResponse } from "../proto/response.js";
+import type { DescribeMetricsResponse, DescribeSessionsResponse, Response, WhoAmIResponse } from "../proto/response.js";
 import { Batch } from "../record/batch.js";
 import { RecordFormatError } from "../record/errors.js";
 import type { BatchRecord, Header } from "../record/types.js";
@@ -95,6 +95,15 @@ export interface NodeMetrics {
   readonly nodeId: number;
   /** What it answered, or `null`. */
   readonly metrics: DescribeMetricsResponse | null;
+  /** Why it did not answer, or `null`: `NoAnswerError` for a node that could not be reached. */
+  readonly error: ClientError | null;
+}
+
+/** One node's answer to `DescribeSessions`, from `LotseClient.nodeSessions`: its open sessions, or why there are none (ADR 0121). */
+export interface NodeSessions {
+  readonly nodeId: number;
+  /** What it answered, or `null`. */
+  readonly sessions: DescribeSessionsResponse | null;
   /** Why it did not answer, or `null`: `NoAnswerError` for a node that could not be reached. */
   readonly error: ClientError | null;
 }
@@ -2142,6 +2151,39 @@ export class LotseClient {
           throw e;
         }
         out.push({ nodeId: b.nodeId, metrics: null, error: new NoAnswerError(b.nodeId, `${formatAddress(addr)}: ${e.describe()}`) });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Every node's open client sessions, asked of each node directly, for every node the cluster's metadata names: each
+   * with its answer, or why there is none (ADR 0121). A cluster admin or viewer gets every session, anyone else those
+   * made with their own name. A node that does not answer is reported, not thrown.
+   */
+  async nodeSessions(options: CallOptions = {}): Promise<NodeSessions[]> {
+    this.checkOpen();
+    const m = await this.metadataWith(options.signal, []);
+    const out: NodeSessions[] = [];
+    for (const b of m.brokers) {
+      if (options.signal?.aborted === true) {
+        throw new GaveUpError(0, "aborted");
+      }
+      const addr: Address = { host: b.host, port: b.port };
+      try {
+        const r = await this.call(addr, { type: "DescribeSessions" });
+        if (r.type !== "DescribeSessions") {
+          out.push({ nodeId: b.nodeId, sessions: null, error: new NoAnswerError(b.nodeId, `unexpected response ${r.type}`) });
+        } else if (r.error === ErrorCode.NONE) {
+          out.push({ nodeId: b.nodeId, sessions: r, error: null });
+        } else {
+          out.push({ nodeId: b.nodeId, sessions: null, error: new BrokerResponseError(r.error, null) });
+        }
+      } catch (e) {
+        if (!(e instanceof CallFailure)) {
+          throw e;
+        }
+        out.push({ nodeId: b.nodeId, sessions: null, error: new NoAnswerError(b.nodeId, `${formatAddress(addr)}: ${e.describe()}`) });
       }
     }
     return out;

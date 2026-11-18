@@ -40,6 +40,9 @@ use crate::model::*;
         purge_queue,
         requeue,
         move_leader,
+        set_replication,
+        place_partition,
+        sessions,
         users,
         create_user,
         set_credential,
@@ -264,6 +267,76 @@ pub async fn move_leader(
         None => format!("Partition {} of {} is unpinned. Leaders spread by themselves.", req.partition, req.resource),
     };
     Ok(Json(Done { message, cli: cli::move_leader(&req) }))
+}
+
+/// Gives every partition of a stream or queue a number of replicas. Moves
+/// four partitions at a time and releases placed partitions (ADR 0115).
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/replication",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = SetReplication,
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
+pub async fn set_replication(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<SetReplication>,
+) -> ApiResult<Json<Done>> {
+    if req.factor == 0 {
+        return Err(ApiError::BadRequest("A partition needs at least 1 replica.".into()));
+    }
+    cluster(&st, &id)?.set_replication(&who, &req).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, resource = %req.resource, factor = req.factor, "replication factor set");
+    let message = format!(
+        "{} goes to {} replica{} per partition, four partitions at a time. Placed partitions are released.",
+        req.resource,
+        req.factor,
+        if req.factor == 1 { "" } else { "s" }
+    );
+    Ok(Json(Done { message, cli: cli::set_replication(&req) }))
+}
+
+/// Places a partition's replicas on named nodes, or releases it to the
+/// planner with no nodes (ADR 0115).
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/placements",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = PlacePartition,
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or resource.", body = ErrorBody)))]
+pub async fn place_partition(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<PlacePartition>,
+) -> ApiResult<Json<Done>> {
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(twice) = req.nodes.iter().find(|n| !seen.insert(n.as_str())) {
+        return Err(ApiError::BadRequest(format!("{twice} is named twice; name each node once.")));
+    }
+    cluster(&st, &id)?.place_partition(&who, &req).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, resource = %req.resource, partition = req.partition, nodes = ?req.nodes, "partition placed");
+    let message = if req.nodes.is_empty() {
+        format!("Partition {} of {} is released. The planner places it again.", req.partition, req.resource)
+    } else {
+        format!(
+            "Partition {} of {} moves to {}. Rebalancing and the replication factor leave it there.",
+            req.partition,
+            req.resource,
+            req.nodes.join(", ")
+        )
+    };
+    Ok(Json(Done { message, cli: cli::place_partition(&req) }))
+}
+
+/// The open client sessions on every node: all of them for a cluster admin
+/// or viewer, the signed-in user's own otherwise (ADR 0121).
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/sessions",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, description = "Success.", body = SessionsView), (status = 404, description = "No such cluster.", body = ErrorBody)))]
+pub async fn sessions(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<SessionsView>> {
+    Ok(Json(cluster(&st, &id)?.sessions(&who).await?))
 }
 
 /// SCRAM users. The broker lets only cluster admins list them.

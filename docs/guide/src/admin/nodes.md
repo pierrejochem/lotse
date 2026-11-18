@@ -57,6 +57,7 @@ Every partition of a stream or queue created at runtime keeps the replica count 
 - **For all partitions:** set `replication.factor` with `AlterConfigs`, on its own in the request, from 1 to the number of active nodes. The planner adds the least loaded nodes or removes the busiest ones, four groups at a time; each new replica is a full copy through Raft. Resetting the key leaves the partitions as they are. `DescribeConfigs` shows the factor, or the first partition's count.
 - **For one partition, on nodes you choose:** a cluster admin sends `ReassignPartition` (`reassign_partition` in `lotse-client`, `reassignPartition` in the SDKs) with the partition's voters, as with Kafka's partition reassignment. Rebalancing and the factor then leave the partition where you put it; only a drain moves a replica off it. An empty list hands it back to the planner. A placement is refused while the partition is still moving: ask again once it has settled.
 - Setting `replication.factor` releases the placed partitions of that resource.
+- **In the console:** a stream's and a queue's page have *Change replication*, and each partition a *Place* button with the cluster's nodes to choose from; a placed partition can be released there too. `Metadata` says which partitions are placed and which leaders are pinned, and the console marks them ([ADR 0121](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0121-the-console-places-partitions-and-lists-open-sessions.md)).
 
 ## Pin a leader
 
@@ -66,7 +67,7 @@ A cluster admin can pin a partition's leader to one of its voters with `MoveLead
 - The handover waits until the target has every entry and is paced like the automatic one, but skips the minute's wait: you asked for it.
 - A pin to a node that is no longer a voter counts for nothing, so a drain or rebalance is never blocked by it. A pin is dropped when its resource is deleted or its node leaves the cluster.
 
-The console can move leaders as the signed-in user ([ADR 0066](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0066-console-actions.md)). It does not show whether a partition is pinned.
+The console can move leaders as the signed-in user ([ADR 0066](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0066-console-actions.md)) and marks a pinned partition with its node; `Metadata` carries the pin (ADR 0121).
 
 ## Limits
 

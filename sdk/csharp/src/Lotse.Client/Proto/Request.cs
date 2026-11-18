@@ -1127,6 +1127,25 @@ public abstract record Request
         }
     }
 
+    /// <summary>
+    /// <c>DescribeSessions</c> (59): the open client sessions of the node it is sent to (ADR 0121). Cluster admins and
+    /// cluster viewers get every session; anyone else the sessions made with their own name.
+    /// </summary>
+    public sealed record DescribeSessions : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeSessions;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.NoTags();
+
+        internal static DescribeSessions Read(Reader r)
+        {
+            r.Tags();
+            return new DescribeSessions();
+        }
+    }
+
     /// <summary>Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091).</summary>
     public sealed record DescribeCertificates : Request
     {

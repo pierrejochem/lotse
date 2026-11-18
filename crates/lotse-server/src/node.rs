@@ -1173,7 +1173,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             client_addrs: &known.client_addrs,
             zones: &known.zones,
             coordinator: cfg.coordinator,
-            node: NodeView { id: cfg.id, started, net: &shared.net, host },
+            node: NodeView { id: cfg.id, started, net: &shared.net, host, sessions: &auth.sessions },
             now: rt.now(),
             unix_ms: rt.unix_time().as_millis() as u64,
             access: &known.access,

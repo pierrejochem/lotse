@@ -18,6 +18,7 @@ import {
   Role,
   type RoleBinding,
   scramCredentials,
+  SessionMechanism,
   SubjectKind,
   type TlsConfig,
   UnknownStreamError,
@@ -600,6 +601,17 @@ describe("admin calls against a node that requires authentication", { skip }, ()
     await until("the login to be refused", async () => {
       await assert.rejects(Connection.open(certs.address, { tls: anonymousTls, credentials: scramCredentials("rita", "ritas password") }), AuthenticationError);
     });
+  });
+
+  test("the admin sees its own session, signed in with its certificate (ADR 0121)", async () => {
+    const [n] = await alice.nodeSessions();
+    assert.equal(n?.nodeId, 1);
+    assert.equal(n?.error, null);
+    const mine = (n?.sessions?.sessions ?? []).filter((s) => s.mechanism === SessionMechanism.CERTIFICATE);
+    assert.ok(mine.length > 0, JSON.stringify(n?.sessions, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v)));
+    for (const s of mine) {
+      assert.ok(s.name.length > 0 && s.connectedMs > 0n && s.expiresMs === 0n);
+    }
   });
 
   test("a node that requires authentication reports the admin's node metrics", async () => {

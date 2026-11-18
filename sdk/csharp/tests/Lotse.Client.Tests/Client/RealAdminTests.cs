@@ -401,6 +401,22 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
     }
 
     [LotseFact]
+    public async Task EveryNodeListsItsOpenSessionsAndThisClientIsAmongThem()
+    {
+        // ADR 0121. The client has a connection to at least one node now, and sees at least its own session there.
+        await Client.MetadataAsync(null);
+        IReadOnlyList<NodeSessions> all = await Client.NodeSessionsAsync();
+        Assert.Equal(new uint[] { 1, 2, 3 }, all.Select(n => n.NodeId).OrderBy(i => i).ToArray());
+        foreach (NodeSessions n in all)
+        {
+            Assert.Null(n.Error);
+            Assert.Equal(n.NodeId, n.Sessions!.NodeId);
+            Assert.All(n.Sessions.Sessions, s => Assert.NotEqual(0UL, s.ConnectedMs));
+        }
+        Assert.Contains(all, n => n.Sessions!.Sessions.Count > 0);
+    }
+
+    [LotseFact]
     public async Task EveryNodeAnswersForItsOwnMetrics()
     {
         // The id from the answer: a node asked for metadata right after may not know the queue yet.

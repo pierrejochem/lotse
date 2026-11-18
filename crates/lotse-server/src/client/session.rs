@@ -13,10 +13,11 @@ use lotse_auth::oauth;
 use lotse_auth::scram::{self, ScramServer};
 use lotse_proto::{
     ErrorCode, SaslAuthenticateRequest, SaslAuthenticateResponse, SaslHandshakeRequest, SaslHandshakeResponse,
+    session_mechanism,
 };
 use lotse_rt::{CertInfo, Clock, Http, Instant, PeerIdentity, Rng};
 
-use crate::auth::{Auth, Principal};
+use crate::auth::{Auth, OpenSession, Principal};
 
 enum Sasl {
     /// No exchange under way.
@@ -47,6 +48,22 @@ pub(super) struct Session<R> {
     /// (ADR 0070).
     since_ms: u64,
     sasl: Sasl,
+    /// Its number among the node's open sessions (ADR 0121).
+    slot: u64,
+    /// How it signed in, [`lotse_proto::session_mechanism`].
+    mechanism: u8,
+    /// The other end's address.
+    peer: String,
+    /// When the connection was made, ms since the Unix epoch.
+    connected_ms: u64,
+    /// When the session ends, ms since the Unix epoch; 0 for never.
+    expires_ms: u64,
+}
+
+impl<R> Drop for Session<R> {
+    fn drop(&mut self) {
+        self.auth.sessions.close(self.slot);
+    }
 }
 
 /// What became of one `SaslAuthenticate` step.
@@ -62,6 +79,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         auth: Arc<Auth<R>>,
         identity: Option<PeerIdentity>,
         cert: Option<CertInfo>,
+        peer: String,
         now_ms: u64,
     ) -> Session<R> {
         // Node certificates are revoked in the CRL file only (ADR 0090).
@@ -76,7 +94,39 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             _ if !auth.cfg.required => Some(Principal::Anonymous),
             _ => None,
         };
-        Session { auth, principal, cert, cert_name, until: None, sasl_name: None, since_ms: now_ms, sasl: Sasl::Idle }
+        let mechanism = match principal {
+            Some(Principal::Node(_) | Principal::User { .. }) => session_mechanism::CERTIFICATE,
+            _ => session_mechanism::NONE,
+        };
+        let mut session = Session {
+            auth,
+            principal,
+            cert,
+            cert_name,
+            until: None,
+            sasl_name: None,
+            since_ms: now_ms,
+            sasl: Sasl::Idle,
+            slot: 0,
+            mechanism,
+            peer,
+            connected_ms: now_ms,
+            expires_ms: 0,
+        };
+        session.slot = session.auth.sessions.open(session.open());
+        session
+    }
+
+    /// The session as `DescribeSessions` lists it (ADR 0121).
+    fn open(&self) -> OpenSession {
+        OpenSession {
+            principal: self.principal.clone(),
+            mechanism: self.mechanism,
+            peer: self.peer.clone(),
+            connected_ms: self.connected_ms,
+            credential_ms: self.since_ms,
+            expires_ms: self.expires_ms,
+        }
     }
 
     /// Who the connection acts as at `now`; `None` before authenticating or
@@ -144,7 +194,10 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
                 }
             }
             Sasl::Scram(mut server) => match server.last(&req.auth_bytes) {
-                Ok((name, last)) => self.established(rt, name, Vec::new(), None, unix_ms(rt), last.into()),
+                Ok((name, last)) => {
+                    let since = unix_ms(rt);
+                    self.established(rt, session_mechanism::SCRAM_SHA_512, name, Vec::new(), None, since, last.into())
+                }
                 Err(_) => failed("authentication failed"),
             },
             Sasl::Chosen(_) => {
@@ -158,7 +211,8 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
                         // Without `iat` a token counts as issued at time 0:
                         // any revocation of its principal covers it.
                         let issued = v.issued_at.unwrap_or(0).saturating_mul(1000);
-                        self.established(rt, v.principal, v.groups, Some(left), issued, Bytes::new())
+                        let how = session_mechanism::OAUTHBEARER;
+                        self.established(rt, how, v.principal, v.groups, Some(left), issued, Bytes::new())
                     }
                     Err(e) => failed(&e.to_string()),
                 }
@@ -168,9 +222,11 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
 
     /// A SASL login succeeded for `name`: the session runs until
     /// `max_session`, or until `left` if that is sooner.
+    #[allow(clippy::too_many_arguments)]
     fn established(
         &mut self,
         rt: &R,
+        mechanism: u8,
         name: String,
         groups: Vec<String>,
         left: Option<Duration>,
@@ -195,6 +251,9 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         self.since_ms = since_ms;
         self.principal = Some(principal);
         let ms = u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX);
+        self.mechanism = mechanism;
+        self.expires_ms = unix_ms(rt).saturating_add(ms);
+        self.auth.sessions.update(self.slot, self.open());
         Step { response: answer(ErrorCode::NONE, None, bytes, ms), close: false }
     }
 }
