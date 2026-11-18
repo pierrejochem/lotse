@@ -776,19 +776,6 @@ export interface components {
             /** @description The user's name, typed again. */
             confirm: string;
         };
-        /** @description Disk thresholds, as fractions of free space. */
-        DiskLimits: {
-            /**
-             * Format: double
-             * @description Writes are rejected below this free fraction.
-             */
-            hard_free: number;
-            /**
-             * Format: double
-             * @description Producers are throttled below this free fraction.
-             */
-            soft_free: number;
-        };
         /** @description Result of a write, with the CLI command that does the same. */
         Done: {
             /** @description The equivalent `lotse-cli` command. */
@@ -895,6 +882,17 @@ export interface components {
             disk_free_bytes?: number | null;
             /**
              * Format: int64
+             * @description Below this much free space the groups the node votes in take no new
+             *     data (ADR 0122); 0 for no limit, `None` when the node did not say.
+             */
+            disk_free_limit_bytes?: number | null;
+            /**
+             * @description Whether the node is below its limit now; it is again above it only
+             *     once its free space is a tenth above the limit.
+             */
+            disk_low?: boolean | null;
+            /**
+             * Format: int64
              * @description Size of the log volume.
              */
             disk_total_bytes?: number | null;
@@ -951,7 +949,6 @@ export interface components {
         };
         /** @description The nodes screen. */
         NodesView: {
-            disk_limits?: components["schemas"]["DiskLimits"] | null;
             /** @description Recent operator events, newest first. */
             events: components["schemas"]["OperatorEvent"][];
             /** @description Nodes. */
@@ -977,7 +974,6 @@ export interface components {
             busiest_streams: components["schemas"]["StreamRow"][];
             /** @description Cluster ID. */
             cluster: string;
-            disk_limits?: components["schemas"]["DiskLimits"] | null;
             /** @description Health list. */
             health: components["schemas"]["HealthItem"][];
             /** @description Node that leads the metadata group. */
@@ -1481,7 +1477,8 @@ export interface components {
             oldest_record_age_ms?: number | null;
             /**
              * Format: int32
-             * @description Open transactions touching this stream.
+             * @description Open transactions, summed over the stream's partitions: a
+             *     transaction that writes to two partitions counts in each.
              */
             open_transactions?: number | null;
             /**

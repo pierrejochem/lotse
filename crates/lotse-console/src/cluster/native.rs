@@ -234,6 +234,19 @@ impl Seat {
     }
 }
 
+/// How old the oldest record of a resource is at `now_ms`, from its
+/// partitions' leaders (ADR 0122); `None` while no leader says.
+fn oldest_age(s: &Sample, resource_id: u64, now_ms: u64) -> Option<u64> {
+    let oldest = s
+        .answered()
+        .flat_map(|m| &m.partitions)
+        .filter(|p| p.leader && p.resource_id == resource_id)
+        .filter_map(|p| p.oldest_timestamp_ms)
+        .min()?;
+    // A producer's clock may run ahead of the console's.
+    Some(now_ms.saturating_sub(u64::try_from(oldest).unwrap_or(0)))
+}
+
 fn node_name(id: u32) -> String {
     format!("node-{id}")
 }
@@ -397,6 +410,9 @@ impl NativeCluster {
 
     fn nodes_of(&self, w: Window<'_>) -> Vec<Node> {
         let s = w.now;
+        // Zones as the nodes name them in `Metadata` (ADR 0104).
+        let zone =
+            |id: u32| s.meta.brokers.iter().find(|b| b.node_id == id).map(|b| b.rack.clone()).filter(|z| !z.is_empty());
         s.nodes
             .iter()
             .map(|(&id, r)| match r {
@@ -411,15 +427,18 @@ impl NativeCluster {
                         "Voter"
                     };
                     let h = m.host;
+                    let low = m.disk.is_some_and(|d| d.low);
                     Node {
                         id: node_name(id),
                         role: role.into(),
-                        zone: None,
+                        zone: zone(id),
                         uptime_secs: m.uptime_ms / 1000,
                         leads,
                         replicas: m.partitions.len() as u32,
                         disk_free_bytes: h.disk_free_bytes,
                         disk_total_bytes: h.disk_total_bytes,
+                        disk_free_limit_bytes: m.disk.map(|d| d.free_limit_bytes),
+                        disk_low: m.disk.map(|d| d.low),
                         produce_bytes_per_sec: mine(&|n| n.partitions.iter().map(|p| p.produce_bytes).sum()),
                         net_in_bytes_per_sec: mine(&|n| n.client_in_bytes + n.peer_in_bytes),
                         net_out_bytes_per_sec: mine(&|n| n.client_out_bytes + n.peer_out_bytes),
@@ -428,18 +447,20 @@ impl NativeCluster {
                         memory_bytes: h.memory_bytes,
                         memory_limit_bytes: h.memory_limit_bytes,
                         version: m.version.clone(),
-                        status: chip(Tone::Ok, "Answering"),
+                        status: if low { chip(Tone::Critical, "Low on disk") } else { chip(Tone::Ok, "Answering") },
                     }
                 }
                 Err(_) => Node {
                     id: node_name(id),
                     role: "Unknown".into(),
-                    zone: None,
+                    zone: zone(id),
                     uptime_secs: 0,
                     leads: 0,
                     replicas: 0,
                     disk_free_bytes: None,
                     disk_total_bytes: None,
+                    disk_free_limit_bytes: None,
+                    disk_low: None,
                     produce_bytes_per_sec: None,
                     net_in_bytes_per_sec: None,
                     net_out_bytes_per_sec: None,
@@ -552,6 +573,15 @@ impl Cluster for NativeCluster {
                 });
             }
         }
+        for m in s.answered().filter(|m| m.disk.is_some_and(|d| d.low)) {
+            alerts.push(Alert {
+                id: format!("disk-low-{}", m.node_id),
+                tone: Tone::Critical,
+                title: format!("{} is below its free space limit", node_name(m.node_id)),
+                detail: "Streams and queues with a replica on it take no new data until it has room again; reads and acks go on. Free space, or move replicas off the node.".into(),
+                node: Some(node_name(m.node_id)),
+            });
+        }
         let leaderless = groups.difference(&led).count();
         if leaderless > 0 {
             alerts.push(Alert {
@@ -606,7 +636,6 @@ impl Cluster for NativeCluster {
             },
             health,
             nodes,
-            disk_limits: None,
             busiest_streams: busiest,
             attention_queues: attention,
             stream_count: s.resources(kind::STREAM).count() as u32,
@@ -617,7 +646,7 @@ impl Cluster for NativeCluster {
     async fn nodes(&self, who: &Identity) -> ApiResult<NodesView> {
         let (s, base) = self.seat(who).window().await?;
         let nodes = self.nodes_of(Window { now: &s, base: base.as_deref() });
-        Ok(NodesView { nodes, disk_limits: None, upgrade: None, events: Vec::new() })
+        Ok(NodesView { nodes, upgrade: None, events: Vec::new() })
     }
 
     async fn streams(&self, who: &Identity) -> ApiResult<Vec<StreamRow>> {
@@ -741,8 +770,10 @@ impl Cluster for NativeCluster {
             out_bytes_per_sec: per(|p| p.fetch_bytes),
             records_per_sec: per(|p| p.produce_records),
             stored_bytes: s.replicas(id).map(|p| p.size_bytes).sum(),
-            oldest_record_age_ms: None,
-            open_transactions: None,
+            oldest_record_age_ms: oldest_age(&s, id, crate::time::now_ms()),
+            open_transactions: Some(
+                r.partitions.iter().filter_map(|p| s.lead(id, p.partition)).map(|(_, p)| p.open_transactions).sum(),
+            ),
             partitions,
             groups,
             assignment,
@@ -780,7 +811,7 @@ impl Cluster for NativeCluster {
                     connection: format!("{} on {}", c.peer, node_name(node)),
                     in_flight: c.in_flight,
                     credit_messages: c.credit,
-                    in_flight_bytes: None,
+                    in_flight_bytes: Some(c.in_flight_bytes),
                     credit_bytes: None,
                     acks_per_sec: None,
                     state: match c.state {

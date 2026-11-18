@@ -128,6 +128,12 @@ pub struct Node {
     pub disk_free_bytes: Option<u64>,
     /// Size of the log volume.
     pub disk_total_bytes: Option<u64>,
+    /// Below this much free space the groups the node votes in take no new
+    /// data (ADR 0122); 0 for no limit, `None` when the node did not say.
+    pub disk_free_limit_bytes: Option<u64>,
+    /// Whether the node is below its limit now; it is again above it only
+    /// once its free space is a tenth above the limit.
+    pub disk_low: Option<bool>,
     /// Client produce traffic into this node, bytes/s.
     pub produce_bytes_per_sec: Option<f64>,
     /// Network in, bytes/s (clients and replication).
@@ -146,15 +152,6 @@ pub struct Node {
     pub version: String,
     /// Status chip.
     pub status: Chip,
-}
-
-/// Disk thresholds, as fractions of free space.
-#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
-pub struct DiskLimits {
-    /// Producers are throttled below this free fraction.
-    pub soft_free: f64,
-    /// Writes are rejected below this free fraction.
-    pub hard_free: f64,
 }
 
 /// A row in "busiest streams".
@@ -206,8 +203,6 @@ pub struct Overview {
     pub health: Vec<HealthItem>,
     /// Nodes.
     pub nodes: Vec<Node>,
-    /// Disk thresholds for the bars, if the cluster has them.
-    pub disk_limits: Option<DiskLimits>,
     /// Busiest streams by produce rate.
     pub busiest_streams: Vec<StreamRow>,
     /// Queues that need attention.
@@ -291,8 +286,6 @@ pub struct OperatorEvent {
 pub struct NodesView {
     /// Nodes.
     pub nodes: Vec<Node>,
-    /// Disk thresholds, if the cluster has them.
-    pub disk_limits: Option<DiskLimits>,
     /// Running upgrade, if any.
     pub upgrade: Option<Upgrade>,
     /// Recent operator events, newest first.
@@ -421,7 +414,8 @@ pub struct StreamDetail {
     pub stored_bytes: u64,
     /// Age of the oldest record, ms.
     pub oldest_record_age_ms: Option<u64>,
-    /// Open transactions touching this stream.
+    /// Open transactions, summed over the stream's partitions: a
+    /// transaction that writes to two partitions counts in each.
     pub open_transactions: Option<u32>,
     /// Partitions.
     pub partitions: Vec<Partition>,

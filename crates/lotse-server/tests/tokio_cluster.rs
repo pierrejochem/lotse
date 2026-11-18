@@ -135,7 +135,8 @@ async fn three_nodes_replicate_over_tcp_and_survive_a_restart() {
                     producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
                     leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                     follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
-                    disk_free_limit: lotse_server::FreeLimit::default(),
+                    // Real disks: what the machine has free must not decide (ADR 0122).
+                    disk_free_limit: lotse_server::FreeLimit::OFF,
                     retention: lotse_server::RetentionConfig::keep(),
                     join: false,
                     auth: lotse_server::AuthConfig::none(),
