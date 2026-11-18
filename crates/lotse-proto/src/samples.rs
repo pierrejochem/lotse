@@ -1170,12 +1170,26 @@ pub fn metrics() -> DescribeMetricsResponse {
             in_open_txns: 1,
             delivered: 40,
             acked: 38,
-            consumers: vec![ConsumerMetrics {
-                subscription_id: 1,
-                peer: "10.0.0.7:51234".into(),
-                in_flight: 2,
-                credit: 8,
-            }],
+            consumers: vec![
+                ConsumerMetrics {
+                    subscription_id: 1,
+                    peer: "10.0.0.7:51234".into(),
+                    in_flight: 2,
+                    credit: 8,
+                    state: ConsumerState::Active,
+                },
+                ConsumerMetrics {
+                    subscription_id: 2,
+                    peer: "10.0.0.9:40100".into(),
+                    in_flight: 0,
+                    credit: 8,
+                    state: ConsumerState::Standby,
+                },
+            ],
+            // Tag 3 (ADR 0120): two at level 0, one at 1, one at 2, one
+            // not read yet.
+            ready_by_level: vec![2, 1, 1],
+            ready_level_unread: 1,
         }],
         groups: vec![GroupMetrics {
             tenant: DEFAULT_TENANT.into(),

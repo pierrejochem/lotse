@@ -2794,6 +2794,7 @@
           "in_flight",
           "in_open_txns",
           "levels",
+          "levels_unread",
           "consumers",
           "dead_letters",
           "handover"
@@ -2869,6 +2870,12 @@
               "$ref": "#/components/schemas/PriorityLevel"
             },
             "description": "Priority levels, highest first."
+          },
+          "levels_unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ready messages whose level the queue's leader has not read yet: a\nnew leader reads the backlog for levels (ADR 0120).",
+            "minimum": 0
           },
           "max_deliveries": {
             "type": [

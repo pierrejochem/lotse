@@ -49,6 +49,8 @@ export const TAG_HELD = 3;
 export const TAG_PRODUCER = 2;
 /** The subscription a requeueing `Nack` came on (ADR 0106). */
 export const TAG_NACK_SUBSCRIPTION = 0;
+/** A queue's ready messages per priority level and its subscriptions' states, in a `DescribeMetrics` answer (ADR 0120). */
+export const TAG_QUEUE_DETAILS = 3;
 
 /** Where a new leader is, after `NOT_LEADER` or `FENCED_LEADER_TERM`. */
 export interface LeaderHint {
@@ -625,11 +627,29 @@ export interface PartitionMetrics {
   readonly replicas: readonly ReplicaProgress[];
 }
 
+/**
+ * What a subscription does on its queue (ADR 0120): every subscription gets messages (`shared`), or the queue has a
+ * single active consumer and this is it (`active`) or waits for its turn (`standby`).
+ */
+export type ConsumerState = "shared" | "active" | "standby";
+
+/** The code of a consumer state on the wire. */
+export function consumerStateCode(state: ConsumerState): number {
+  return state === "active" ? 1 : state === "standby" ? 2 : 0;
+}
+
+/** The state a code stands for; a code from a newer version reads as `shared`. */
+export function consumerStateOf(code: number): ConsumerState {
+  return code === 1 ? "active" : code === 2 ? "standby" : "shared";
+}
+
 export interface ConsumerMetrics {
   readonly subscriptionId: number;
   readonly peer: string;
   readonly inFlight: number;
   readonly credit: number;
+  /** Shared, active or standby (ADR 0120). */
+  readonly state: ConsumerState;
 }
 
 export interface QueueMetrics {
@@ -640,6 +660,10 @@ export interface QueueMetrics {
   readonly delivered: bigint;
   readonly acked: bigint;
   readonly consumers: readonly ConsumerMetrics[];
+  /** On a queue with priority levels: ready messages per level, level 0 first; empty otherwise (ADR 0120). */
+  readonly readyByLevel: readonly bigint[];
+  /** On a queue with priority levels: ready messages whose level the leader has not read yet; with `readyByLevel` they sum to `ready`. */
+  readonly readyLevelUnread: bigint;
 }
 
 export interface GroupMemberMetrics {

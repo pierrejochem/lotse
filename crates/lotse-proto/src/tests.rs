@@ -245,9 +245,39 @@ fn the_smallest_metrics_decode() {
         DescribeMetricsResponse {
             queues: vec![QueueMetrics {
                 consumers: vec![
-                    ConsumerMetrics { subscription_id: 0, peer: String::new(), in_flight: 0, credit: 0 };
+                    ConsumerMetrics {
+                        subscription_id: 0,
+                        peer: String::new(),
+                        in_flight: 0,
+                        credit: 0,
+                        state: ConsumerState::Shared
+                    };
                     32
                 ],
+                ..queue.clone()
+            }],
+            ..base.clone()
+        },
+        // Tag 3 (ADR 0120): its queues, levels and states.
+        DescribeMetricsResponse {
+            queues: (0..32).map(|i| QueueMetrics { resource_id: i, ready_level_unread: 1, ..queue.clone() }).collect(),
+            ..base.clone()
+        },
+        DescribeMetricsResponse {
+            queues: vec![QueueMetrics { ready_by_level: vec![0; 32], ..queue.clone() }],
+            ..base.clone()
+        },
+        DescribeMetricsResponse {
+            queues: vec![QueueMetrics {
+                consumers: (0..32)
+                    .map(|i| ConsumerMetrics {
+                        subscription_id: i,
+                        peer: String::new(),
+                        in_flight: 0,
+                        credit: 0,
+                        state: ConsumerState::Standby,
+                    })
+                    .collect(),
                 ..queue
             }],
             ..base.clone()

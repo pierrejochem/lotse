@@ -698,13 +698,9 @@ impl Cluster for DemoCluster {
                     dead_lettered: Some(0),
                     levels: (0..q.priority_levels)
                         .rev()
-                        .map(|l| PriorityLevel {
-                            level: l,
-                            leader: ["broker-1", "broker-2"][usize::from(l % 2)].into(),
-                            ready: 0,
-                            oldest_ms: Some(0),
-                        })
+                        .map(|l| PriorityLevel { level: l, leader: "broker-1".into(), ready: 0, oldest_ms: Some(0) })
                         .collect(),
+                    levels_unread: 0,
                     consumers: vec![],
                     dead_letters: vec![],
                     handover: vec![HandoverEvent { at: rfc3339(now_ms()), text: format!("Created by {by}.") }],
@@ -737,6 +733,7 @@ impl Cluster for DemoCluster {
                         ready: row.ready,
                         oldest_ms: Some(45_000),
                     }],
+                    levels_unread: 0,
                     consumers: vec![],
                     dead_letters: vec![],
                     handover: vec![],
@@ -775,11 +772,13 @@ impl Cluster for DemoCluster {
                 publish_per_sec: Some(820.0 * wave(self.secs(), 17.0, 0.05)),
                 ack_per_sec: Some(805.0 * wave(self.secs(), 19.0, 0.05)),
                 dead_lettered: row.dead_lettered,
+                // One log, one leader for every level (ADR 0078).
                 levels: vec![
-                    PriorityLevel { level: 2, leader: "broker-1".into(), ready: 12, oldest_ms: Some(400) },
+                    PriorityLevel { level: 2, leader: "broker-2".into(), ready: 12, oldest_ms: Some(400) },
                     PriorityLevel { level: 1, leader: "broker-2".into(), ready: 1_880, oldest_ms: Some(130_000) },
-                    PriorityLevel { level: 0, leader: "broker-1".into(), ready: 50, oldest_ms: Some(581_000) },
+                    PriorityLevel { level: 0, leader: "broker-2".into(), ready: 50, oldest_ms: Some(581_000) },
                 ],
+                levels_unread: 0,
                 consumers: vec![
                     consumer("capture-worker-1", "10.4.6.21 → broker-2", true),
                     consumer("capture-worker-2", "10.4.6.22 → broker-2", false),

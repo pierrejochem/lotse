@@ -86,6 +86,8 @@ Every name starts with `lotse_`; every sample has the label `node`. Partition me
 | `lotse_replica_log_end_offset{replica}` | gauge | On the leader: what each replica holds. |
 | `lotse_queue_ready_messages`, `lotse_queue_in_flight_messages`, `lotse_queue_in_open_transactions_messages`, `lotse_queue_consumers` | gauge | On the queue's leader; labels `tenant`, `queue`. |
 | `lotse_queue_delivered_messages_total`, `lotse_queue_acked_messages_total` | counter | While this node led the queue. |
+| `lotse_queue_consumers_in_state{state}` | gauge | Subscriptions by state: `shared`, or a single active consumer's `active` and `standby` ones (ADR 0120). |
+| `lotse_queue_ready_by_level_messages{level}`, `lotse_queue_ready_level_unread_messages` | gauge | On a queue with priority levels: ready messages per level, and those whose level a new leader has not read yet; together they make `lotse_queue_ready_messages`. |
 | `lotse_consumer_group_members`, `lotse_consumer_group_epoch`, `lotse_consumer_group_committed_offset{resource,partition}` | gauge | On the coordinator's leader; labels `tenant`, `consumer_group`. |
 
 ## DescribeMetrics

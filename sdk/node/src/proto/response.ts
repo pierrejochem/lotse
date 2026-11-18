@@ -417,7 +417,23 @@ export function writeResponse(w: Writer, res: Response): void {
         });
         w1.array(g.offsets, (w2, o) => w2.u64(o.resourceId).u32(o.partition).u64(o.offset));
       });
-      w.noTags();
+      {
+        const details = res.queues.filter(
+          (q) => q.readyByLevel.length > 0 || q.readyLevelUnread !== 0n || q.consumers.some((c) => c.state !== "shared"),
+        );
+        if (details.length === 0) {
+          w.noTags();
+        } else {
+          const v = new Writer();
+          v.array(details, (w1, q) => {
+            w1.u64(q.resourceId);
+            w1.array(q.readyByLevel, (w2, n) => w2.u64(n));
+            w1.u64(q.readyLevelUnread);
+            w1.array(q.consumers, (w2, c) => w2.u32(c.subscriptionId).u8(m.consumerStateCode(c.state)));
+          });
+          w.tags([{ tag: m.TAG_QUEUE_DETAILS, value: v.toBytes() }]);
+        }
+      }
       return;
     case "SaslHandshake":
       w.u16(res.error).array(res.mechanisms, (w1, s) => w1.string(s));
@@ -972,8 +988,19 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
       peer: r2.string(),
       inFlight: r2.u32(),
       credit: r2.u32(),
+      state: "shared" as m.ConsumerState,
     }));
-    return { resourceId, ready, inFlight, inOpenTxns, delivered, acked, consumers };
+    return {
+      resourceId,
+      ready,
+      inFlight,
+      inOpenTxns,
+      delivered,
+      acked,
+      consumers,
+      readyByLevel: [] as bigint[],
+      readyLevelUnread: 0n,
+    };
   });
   const groups = r.array(2 + 2 + 4 + 1 + 1, (r1) => {
     const groupId = r1.string();
@@ -983,7 +1010,32 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
     const offsets = r1.array(8 + 4 + 8, (r2) => ({ resourceId: r2.u64(), partition: r2.u32(), offset: r2.u64() }));
     return { groupId, tenant, epoch, members, offsets };
   });
-  r.tags();
+  let withDetails: m.QueueMetrics[] = queues;
+  for (const t of r.tags()) {
+    if (t.tag !== m.TAG_QUEUE_DETAILS) {
+      continue; // between nodes, or from a newer version: skipped
+    }
+    const vr = new Reader(t.value);
+    // id, an empty array, unread, an empty array
+    const details = vr.array(8 + 1 + 8 + 1, (r1) => ({
+      resourceId: r1.u64(),
+      readyByLevel: r1.array(8, (r2) => r2.u64()),
+      readyLevelUnread: r1.u64(),
+      states: r1.array(4 + 1, (r2) => ({ subscriptionId: r2.u32(), state: m.consumerStateOf(r2.u8()) })),
+    }));
+    vr.finish();
+    withDetails = withDetails.map((q) => {
+      const d = details.find((x) => x.resourceId === q.resourceId);
+      if (d === undefined) {
+        return q;
+      }
+      const consumers = q.consumers.map((c) => {
+        const s = d.states.find((x) => x.subscriptionId === c.subscriptionId);
+        return s === undefined ? c : { ...c, state: s.state };
+      });
+      return { ...q, consumers, readyByLevel: d.readyByLevel, readyLevelUnread: d.readyLevelUnread };
+    });
+  }
   return {
     type: "DescribeMetrics",
     error,
@@ -1000,7 +1052,7 @@ function readMetrics(r: Reader): DescribeMetricsResponse {
     commitLatency,
     host,
     partitions,
-    queues,
+    queues: withDetails,
     groups,
   };
 }

@@ -737,6 +737,33 @@ fn higher_levels_go_first_and_the_messages_they_overtake_still_come() {
     assert_eq!(d.candidates(&q, 8, 10, &Default::default()), vec![0, 1, 2, 3, 4, 5, 7]);
 }
 
+#[test]
+fn ready_messages_are_counted_per_level_and_the_unread_apart() {
+    let mut q = queue(10);
+    let mut d = Dispatcher::new(&q);
+    // Read up to 8: 2 and 5 at level 2, 3 at level 1; 8 and 9 not read.
+    d.set_level(2, 2);
+    d.set_level(5, 2);
+    d.set_level(3, 1);
+    assert_eq!(d.ready_by_level(&q, 10, 8, 3), (vec![5, 1, 2], 2));
+    // In flight: not ready, at any level, read or not.
+    d.subscribe(1, 1, 0, 2, 1 << 20);
+    let got = d.assign(&q, &[5, 9], 100, at(0));
+    assert_eq!(got.len(), 1);
+    assert_eq!(d.ready_by_level(&q, 10, 8, 3), (vec![5, 1, 1], 1));
+    // Settled: gone, before or after a sweep.
+    q.apply(&ack(10, &[(0, 1), (2, 3)])).unwrap();
+    assert_eq!(d.ready_by_level(&q, 10, 8, 3), (vec![4, 1, 0], 1));
+    d.sweep(&q);
+    assert_eq!(d.ready_by_level(&q, 10, 8, 3), (vec![4, 1, 0], 1));
+    // Only below the limit, and nothing is unread once all is read.
+    assert_eq!(d.ready_by_level(&q, 6, 8, 3), (vec![2, 1, 0], 0));
+    assert_eq!(d.ready_by_level(&q, 10, 10, 3), (vec![5, 1, 0], 0));
+    // Nothing read yet: everything ready is unread.
+    let fresh = Dispatcher::new(&q);
+    assert_eq!(fresh.ready_by_level(&q, 10, 0, 3), (vec![0, 0, 0], 8));
+}
+
 fn checkout(base: u64, consumer: u64, at_ms: i64, deliveries: &[(u64, u16)]) -> Batch {
     let mut raw = BytesMut::from(&lotse_record::checkout_batch(consumer, deliveries).unwrap()[..]);
     lotse_record::set_base_timestamp(&mut raw, at_ms).unwrap();
