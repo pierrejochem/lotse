@@ -539,6 +539,30 @@ impl Dispatcher {
         self.levels.get(&offset).copied().unwrap_or(0)
     }
 
+    /// Ready messages below `limit` per priority level, for a queue with
+    /// `levels` levels whose log has been read for them up to `read_to`
+    /// (ADR 0120): the count of each level, lowest first, and the ready
+    /// messages at or past `read_to`, whose level is not known yet. Ready
+    /// is unsettled and not in flight, as `DescribeMetrics` counts it, so
+    /// the counts sum to the queue's ready messages.
+    pub fn ready_by_level(&self, queue: &QueueLog, limit: u64, read_to: u64, levels: u8) -> (Vec<u64>, u64) {
+        let floor = queue.floor();
+        let limit = limit.max(floor);
+        let read_to = read_to.clamp(floor, limit);
+        let in_flight = |from: u64, to: u64| self.in_flight.range(from..to).count() as u64;
+        let top = usize::from(levels.max(1)) - 1;
+        let mut by_level = vec![0u64; top + 1];
+        for (&o, &l) in self.levels.range(floor..read_to) {
+            if !queue.is_settled(o) && !self.in_flight.contains_key(&o) {
+                by_level[usize::from(l).min(top)] += 1;
+            }
+        }
+        let read = queue.unsettled_in(floor, read_to).saturating_sub(in_flight(floor, read_to));
+        by_level[0] = read.saturating_sub(by_level[1..].iter().sum::<u64>());
+        let unread = queue.unsettled_in(read_to, limit).saturating_sub(in_flight(read_to, limit));
+        (by_level, unread)
+    }
+
     /// Leaves `offset` out until `due_ms` (ms since the epoch).
     pub fn defer(&mut self, offset: u64, due_ms: i64) {
         self.redeliver.remove(&offset);

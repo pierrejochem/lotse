@@ -23,8 +23,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use lotse_client::{Client, ClientConfig, ClientError, Credentials, DEFAULT_TENANT};
 use lotse_proto::{
-    DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind, principal_kind,
-    role, subject_kind,
+    ConsumerState, DescribeMetricsResponse, ErrorCode, MetadataResponse, ResourceMetadata, RoleBindingData, kind,
+    principal_kind, role, subject_kind,
 };
 use lotse_record::{Batch, Control, ControlType};
 use lotse_rt_tokio::TokioRuntime;
@@ -740,11 +740,33 @@ impl Cluster for NativeCluster {
                     in_flight_bytes: None,
                     credit_bytes: None,
                     acks_per_sec: None,
-                    state: chip(Tone::Ok, "Active"),
+                    state: match c.state {
+                        ConsumerState::Active => chip(Tone::Ok, "Active"),
+                        ConsumerState::Standby => chip(Tone::Info, "Standby"),
+                        ConsumerState::Shared => chip(Tone::Ok, "Shared"),
+                    },
                 })
                 .collect()
         });
         let q = served.map(|(_, q)| q);
+        // One log and one leader for every level (ADR 0078); the leader
+        // counts each level's ready messages (ADR 0120), highest first here.
+        let leader = served.map_or_else(|| "none".into(), |(n, _)| node_name(n));
+        let levels = match q {
+            Some(q) if !q.ready_by_level.is_empty() => q
+                .ready_by_level
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(level, ready)| PriorityLevel {
+                    level: level as u8,
+                    leader: leader.clone(),
+                    ready: *ready,
+                    oldest_ms: None,
+                })
+                .collect(),
+            _ => vec![PriorityLevel { level: 0, leader, ready: q.map_or(0, |q| q.ready), oldest_ms: None }],
+        };
         // The queue's own settings (ADR 0055); a cluster that does not
         // answer leaves them unknown.
         let configs = self.seat(who).client.describe_configs(name).await.unwrap_or_default();
@@ -765,12 +787,8 @@ impl Cluster for NativeCluster {
                 .rate(|n| n.partitions.iter().filter(|p| p.resource_id == id).map(|p| p.produce_records).sum()),
             ack_per_sec: w.rate(|n| n.queues.iter().filter(|q| q.resource_id == id).map(|q| q.acked).sum()),
             dead_lettered: None,
-            levels: vec![PriorityLevel {
-                level: 0,
-                leader: served.map_or_else(|| "none".into(), |(n, _)| node_name(n)),
-                ready: q.map_or(0, |q| q.ready),
-                oldest_ms: None,
-            }],
+            levels,
+            levels_unread: q.map_or(0, |q| q.ready_level_unread),
             consumers,
             dead_letters: Vec::new(),
             handover: Vec::new(),

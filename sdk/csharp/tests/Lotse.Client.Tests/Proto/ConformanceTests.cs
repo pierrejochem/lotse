@@ -193,6 +193,28 @@ public class ConformanceTests
         Assert.True(found);
     }
 
+    /// <summary>Tag 3 of a metrics answer: ready messages per priority level and the subscriptions' states (ADR 0120).</summary>
+    [Fact]
+    public void QueueDetailsAreReadIntoTheirQueues()
+    {
+        bool found = false;
+        foreach (string[] v in Vectors.Lines("responses.hex"))
+        {
+            Response r = Frames.DecodeResponse(Vectors.Hex(v[2]), new ApiKey(ushort.Parse(v[1]))).Response;
+            if (r is Response.DescribeMetrics m && m.Queues.Count > 0)
+            {
+                found = true;
+                Messages.QueueMetrics q = m.Queues[0];
+                Assert.Equal(new ulong[] { 2, 1, 1 }, q.ReadyByLevel);
+                Assert.Equal(1UL, q.ReadyLevelUnread);
+                Assert.Equal(Messages.ConsumerState.Active, q.Consumers[0].State);
+                Assert.Equal(Messages.ConsumerState.Standby, q.Consumers[1].State);
+                Assert.Equal("10.0.0.9:40100", q.Consumers[1].Peer);
+            }
+        }
+        Assert.True(found);
+    }
+
     [Fact]
     public void LeaderHintsAreDecodedWhereTheyAreTagBlocks()
     {

@@ -1101,6 +1101,12 @@ export interface components {
             /** @description Priority levels, highest first. */
             levels: components["schemas"]["PriorityLevel"][];
             /**
+             * Format: int64
+             * @description Ready messages whose level the queue's leader has not read yet: a
+             *     new leader reads the backlog for levels (ADR 0120).
+             */
+            levels_unread: number;
+            /**
              * Format: int32
              * @description Deliveries before dead-lettering.
              */

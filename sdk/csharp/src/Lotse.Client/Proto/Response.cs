@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Lotse.Record;
 using static Lotse.Proto.Messages;
 
@@ -539,6 +540,11 @@ public abstract record Response
                 w1.U64(q.Delivered).U64(q.Acked);
                 w1.Array(q.Consumers, (w2, c) => w2.U32(c.SubscriptionId).String(c.Peer).U32(c.InFlight).U32(c.Credit));
             });
+            var details = Queues
+                .Where(q => q.ReadyByLevel.Count > 0
+                    || q.ReadyLevelUnread != 0
+                    || q.Consumers.Any(c => c.State != ConsumerState.Shared))
+                .ToList();
             w.Array(Groups, (w1, g) =>
             {
                 w1.String(g.GroupId).String(g.Tenant).I32(g.Epoch);
@@ -549,8 +555,54 @@ public abstract record Response
                 });
                 w1.Array(g.Offsets, (w2, o) => w2.U64(o.ResourceId).U32(o.Partition).U64(o.Offset));
             });
-            w.NoTags();
+            if (details.Count == 0)
+            {
+                w.NoTags();
+            }
+            else
+            {
+                var v = new Writer();
+                v.Array(details, (w1, q) =>
+                {
+                    w1.U64(q.ResourceId);
+                    w1.Array(q.ReadyByLevel, (w2, n) => w2.U64(n));
+                    w1.U64(q.ReadyLevelUnread);
+                    w1.Array(q.Consumers, (w2, c) => w2.U32(c.SubscriptionId).U8((byte)c.State));
+                });
+                w.Tags(new List<Tag> { new Tag(TagQueueDetails, ByteString.CopyOf(v.ToByteArray())) });
+            }
         }
+
+        /// <summary><paramref name="q"/> with what tag 3 says of it, if anything.</summary>
+        private static QueueMetrics WithDetails(QueueMetrics q, List<QueueMetrics> details)
+        {
+            foreach (QueueMetrics d in details)
+            {
+                if (d.ResourceId != q.ResourceId)
+                {
+                    continue;
+                }
+                var consumers = q.Consumers
+                    .Select(c => d.Consumers.FirstOrDefault(x => x.SubscriptionId == c.SubscriptionId) is { } found
+                        ? c with { State = found.State }
+                        : c)
+                    .ToList();
+                return q with
+                {
+                    Consumers = consumers,
+                    ReadyByLevel = d.ReadyByLevel,
+                    ReadyLevelUnread = d.ReadyLevelUnread,
+                };
+            }
+            return q;
+        }
+
+        private static ConsumerState StateOf(byte code) => code switch
+        {
+            1 => ConsumerState.Active,
+            2 => ConsumerState.Standby,
+            _ => ConsumerState.Shared,
+        };
 
         private static void PutOptU64(Writer w, ulong? v)
         {
@@ -610,7 +662,7 @@ public abstract record Response
                 // id, an empty peer, in flight, credit
                 List<ConsumerMetrics> consumers =
                     r1.Array(4 + 2 + 4 + 4, r2 => new ConsumerMetrics(r2.U32(), r2.String(), r2.U32(), r2.U32()));
-                return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers);
+                return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers, System.Array.Empty<ulong>(), 0);
             });
             // an empty id and tenant, the epoch, two empty arrays
             List<GroupMetrics> groups = r.Array(2 + 2 + 4 + 1 + 1, r1 =>
@@ -625,7 +677,26 @@ public abstract record Response
                     r1.Array(8 + 4 + 8, r2 => new CommittedOffset(r2.U64(), r2.U32(), r2.U64()));
                 return new GroupMetrics(groupId, tenant, epoch, members, offsets);
             });
-            r.Tags();
+            foreach (Tag t in r.Tags())
+            {
+                if (t.Number != TagQueueDetails)
+                {
+                    continue; // between nodes, or from a newer version: skipped
+                }
+                var vr = new Reader(t.Value.ToByteArray());
+                // id, an empty array, unread, an empty array
+                List<QueueMetrics> details = vr.Array(8 + 1 + 8 + 1, r1 =>
+                {
+                    ulong id = r1.U64();
+                    List<ulong> levels = r1.Array(8, r2 => r2.U64());
+                    ulong unread = r1.U64();
+                    List<ConsumerMetrics> states =
+                        r1.Array(4 + 1, r2 => new ConsumerMetrics(r2.U32(), "", 0, 0, StateOf(r2.U8())));
+                    return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
+                });
+                vr.Finish();
+                queues = queues.Select(q => WithDetails(q, details)).ToList();
+            }
             return new DescribeMetrics(
                 error, nodeId, version, uptime, metadataGroup, coordinatorGroup, connections, clientIn, clientOut,
                 peerIn, peerOut, latency, host, partitions, queues, groups);

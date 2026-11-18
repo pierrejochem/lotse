@@ -15,8 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lotse_proto::{
-    CommittedOffset, ConsumerMetrics, DescribeMetricsResponse, GroupMemberMetrics, GroupMetrics, GroupResponsive,
-    HostMetrics, LATENCY_BUCKETS, PartitionMetrics, QueueMetrics, ReplicaProgress, Response, TxnResource,
+    CommittedOffset, ConsumerMetrics, ConsumerState, DescribeMetricsResponse, GroupMemberMetrics, GroupMetrics,
+    GroupResponsive, HostMetrics, LATENCY_BUCKETS, PartitionMetrics, QueueMetrics, ReplicaProgress, Response,
+    TxnResource,
 };
 use lotse_raft::NodeId;
 use lotse_rt::{HostStats, Instant, Runtime};
@@ -241,9 +242,26 @@ impl Clients {
                         peer: s.conns.get(&conn).map(|o| o.peer.clone()).unwrap_or_default(),
                         in_flight: s.dispatcher.in_flight_of(sub).len() as u32,
                         credit: s.dispatcher.credit_of(sub),
+                        state: if s.dispatcher.active() == Some(sub) {
+                            ConsumerState::Active
+                        } else if s.dispatcher.is_standby(sub) {
+                            ConsumerState::Standby
+                        } else {
+                            ConsumerState::Shared
+                        },
                     })
                     .collect()
             });
+            // Per priority level (ADR 0120): what the leader has not read
+            // for levels yet, a queue nobody subscribed to all of it, is
+            // counted apart.
+            let (ready_by_level, ready_level_unread) = if qc.priority_levels > 1 {
+                serving
+                    .and_then(|s| s.ready_by_level(q, limit, qc.priority_levels))
+                    .unwrap_or_else(|| (vec![0; usize::from(qc.priority_levels)], ready))
+            } else {
+                (Vec::new(), 0)
+            };
             resp.queues.push(QueueMetrics {
                 resource_id: qc.resource_id,
                 ready,
@@ -252,6 +270,8 @@ impl Clients {
                 delivered: c.delivered,
                 acked: c.acked,
                 consumers,
+                ready_by_level,
+                ready_level_unread,
             });
         }
         // Consumer groups, from the coordinator's leader.
