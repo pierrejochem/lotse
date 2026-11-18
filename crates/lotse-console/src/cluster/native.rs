@@ -1068,7 +1068,14 @@ impl Cluster for NativeCluster {
     }
 
     async fn certificate_requests(&self, who: &Identity) -> ApiResult<CertificateRequestsView> {
-        let d = self.seat(who).client.describe_certificate_requests().await.map_err(failed)?;
+        let seat = self.seat(who);
+        let d = seat.client.describe_certificate_requests().await.map_err(failed)?;
+        let me = seat.client.who_am_i().await.map_err(failed)?;
+        let user = me.kind == lotse_proto::principal_kind::USER;
+        let all = !user || me.bindings.iter().any(|b| b.role == role::CLUSTER_ADMIN);
+        let principal = if user { me.name.clone() } else { String::new() };
+        let bound_by_name =
+            !user || me.bindings.iter().any(|b| b.subject_kind == subject_kind::USER && b.subject == me.name);
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
         let requests = d
             .requests
@@ -1089,8 +1096,9 @@ impl Cluster for NativeCluster {
                 certificate: if r.certificate.is_empty() { String::new() } else { crate::certs::pem(&r.certificate) },
                 signed_at_ms: r.signed_at_ms,
             })
-            .collect();
-        Ok(CertificateRequestsView { requests, now_ms: d.now_ms })
+            .collect::<Vec<_>>();
+        let pending = requests.iter().filter(|r| r.state == "pending").count() as u32;
+        Ok(CertificateRequestsView { requests, now_ms: d.now_ms, all, pending, principal, bound_by_name })
     }
 
     async fn request_certificate(&self, who: &Identity, principal: &str, csr: Vec<u8>) -> ApiResult<()> {

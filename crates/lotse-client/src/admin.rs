@@ -522,7 +522,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 
     /// Asks the CA holder for a client certificate for `principal`, with a
     /// PKCS#10 signing request in DER form (ADR 0092). The private key stays
-    /// with whoever made the request. Needs the cluster-admin role.
+    /// with whoever made the request. A cluster admin asks in any name;
+    /// anyone else only in their own, and a new request replaces their
+    /// pending one (ADR 0119).
     pub async fn request_certificate(&self, principal: &str, csr: Vec<u8>) -> Result<(), ClientError> {
         self.admin_change(Request::RequestCertificate(lotse_proto::RequestCertificateRequest {
             principal: principal.into(),
@@ -531,8 +533,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         .await
     }
 
-    /// The certificate requests, newest first (ADR 0092). Needs the
-    /// cluster-admin role.
+    /// The certificate requests, newest first (ADR 0092): all of them for a
+    /// cluster admin, the caller's own for anyone else (ADR 0119).
     pub async fn describe_certificate_requests(
         &self,
     ) -> Result<lotse_proto::DescribeCertificateRequestsResponse, ClientError> {

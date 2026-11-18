@@ -337,7 +337,11 @@ function CertificateList({ cluster }: { cluster: string }) {
 
 const REQUEST_TONE = { pending: 'warn', signed: 'plain', expired: 'plain' } as const;
 
-/** Requests for client certificates: waiting for the CA holder, signed (with the certificate to download) or lapsed (ADR 0092). */
+/**
+ * Requests for client certificates: waiting for the CA holder, signed (with
+ * the certificate to download) or lapsed (ADR 0092). A cluster admin sees and
+ * asks for any; everyone else for themselves (ADR 0119).
+ */
 function CertificateRequests({ cluster }: { cluster: string }) {
   const q = useCertificateRequests(cluster);
   if (q.isPending) return <Loading />;
@@ -347,15 +351,29 @@ function CertificateRequests({ cluster }: { cluster: string }) {
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
-  const { requests, now_ms } = q.data;
+  const { requests, now_ms, all, pending, principal, bound_by_name } = q.data;
+  const mine = !all;
   return (
     <div className="stack">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <p className="sub" style={{ margin: 0 }}>
+          {mine ? 'Your requests. ' : ''}
           The key is made in your browser and never reaches the console. The CA holder signs a request with <span className="mono">lotse certs --sign</span>, on the machine with the CA key; a request lapses after 7 days.
+          {all && pending > 0 && (
+            <> <strong>{pending === 1 ? '1 request waits' : `${pending} requests wait`}</strong> for the CA holder.</>
+          )}
         </p>
-        <RequestCertificateDialog cluster={cluster} />
+        {mine ? (
+          principal ? <RequestCertificateDialog cluster={cluster} own={principal} pending={pending > 0} /> : null
+        ) : (
+          <RequestCertificateDialog cluster={cluster} />
+        )}
       </div>
+      {mine && principal && !bound_by_name && (
+        <p role="note" className="muted" style={{ margin: 0 }}>
+          No role is bound to {principal} itself. A certificate signs in without your identity provider&apos;s groups, so it would grant nothing until a cluster admin binds a role to {principal}.
+        </p>
+      )}
       <section className="table-wrap" aria-label="Certificate requests">
         <table>
           <thead>
@@ -391,7 +409,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
                 </td>
               </tr>
             ))}
-            {requests.length === 0 && <tr><td colSpan={6} className="muted">No requests.</td></tr>}
+            {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests.' : 'No requests.'}</td></tr>}
           </tbody>
         </table>
       </section>
@@ -467,6 +485,22 @@ function RevokeBySerial({ cluster }: { cluster: string }) {
   );
 }
 
+/** The tab's label, with how many requests wait for the CA holder when the caller sees them all. */
+function CertificatesTab({ cluster }: { cluster: string }) {
+  const q = useCertificateRequests(cluster);
+  const waiting = q.data?.all ? q.data.pending : 0;
+  return (
+    <Tabs.Trigger value="certificates">
+      Certificates
+      {waiting > 0 && (
+        <span className="chip warn" style={{ marginLeft: 6 }} aria-label={`${waiting} waiting for the CA holder`}>
+          {waiting}
+        </span>
+      )}
+    </Tabs.Trigger>
+  );
+}
+
 export function UsersAccess() {
   const { cluster = '' } = useParams();
   return (
@@ -480,7 +514,7 @@ export function UsersAccess() {
           <Tabs.Trigger value="users">Users</Tabs.Trigger>
           <Tabs.Trigger value="bindings">Role bindings</Tabs.Trigger>
           <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
-          <Tabs.Trigger value="certificates">Certificates</Tabs.Trigger>
+          <CertificatesTab cluster={cluster} />
         </Tabs.List>
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>

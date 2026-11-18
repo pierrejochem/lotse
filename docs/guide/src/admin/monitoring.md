@@ -70,6 +70,7 @@ Every name starts with `lotse_`; every sample has the label `node`. Partition me
 | `lotse_node_uptime_seconds` | gauge | Time since start. |
 | `lotse_node_ready` | gauge | 1 while `/readyz` would answer 200. |
 | `lotse_node_connections` | gauge | Open client connections. |
+| `lotse_certificate_requests_pending` | gauge | Client certificate requests waiting for the CA holder, as this node has applied them ([ADR 0119](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0119-users-request-certificates-in-their-own-name.md)). |
 | `lotse_client_received_bytes_total`, `lotse_client_sent_bytes_total` | counter | Traffic with clients. |
 | `lotse_peer_received_bytes_total`, `lotse_peer_sent_bytes_total` | counter | Traffic with other nodes. |
 | `lotse_commit_latency_seconds` | histogram | Produces by time to acknowledgement, at the leader; buckets at powers of two in ms. |
@@ -142,5 +143,6 @@ The repository ships no alert rules. These follow from the metrics above; the th
 - A queue whose `lotse_queue_ready_messages` grows while `lotse_queue_consumers` is 0, or whose in-flight count does not fall.
 - A consumer group whose committed offsets fall behind the partition's high watermark.
 - Certificates within 30 days of expiry: run `lotse check` on each node.
+- Certificate requests waiting for the CA holder: `max(lotse_certificate_requests_pending) > 0` for an hour or so, routed to whoever holds the CA key. A request lapses after 7 days.
 
 Logs: set `LOTSE_LOG` for the filter (default `info`). A node logs "starting", "stopping: handing the groups this node leads to other voters", "stopped", "drained", and "TLS files changed: reloaded" with the number of revoked connections closed. It logs "TLS files do not load; keeping the material in use" once when new certificate files are broken.

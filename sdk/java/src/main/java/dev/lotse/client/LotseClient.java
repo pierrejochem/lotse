@@ -1557,8 +1557,9 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
-     * Asks the CA holder for a client certificate (cluster admin). The request's id is the SHA-256 of {@code csr},
-     * so the same request sent twice is one request.
+     * Asks the CA holder for a client certificate. A cluster admin asks in any name; anyone else only in their own,
+     * and a new request replaces their pending one (ADR 0119). The request's id is the SHA-256 of {@code csr}, so the
+     * same request sent twice is one request.
      *
      * @param principal the principal the certificate will name: its common name
      * @param csr a PKCS#10 signing request in DER form; the private key stays with the requester
@@ -1568,7 +1569,7 @@ public final class LotseClient implements AutoCloseable {
         adminChange(new Request.RequestCertificate(principal, ByteString.copyOf(csr)));
     }
 
-    /** The certificate requests, newest first (cluster admin). */
+    /** The certificate requests, newest first: all of them for a cluster admin, the caller's own for anyone else. */
     public CertificateRequests describeCertificateRequests() {
         checkOpen();
         return retrying(() -> {

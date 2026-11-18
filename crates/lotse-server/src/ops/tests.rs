@@ -118,9 +118,11 @@ fn metrics_render_as_openmetrics() {
             ResourceName { kind: "stream", tenant: "acme".into(), name: "orders \"eu\"\\x".into() },
         )]),
         groups: BTreeMap::from([(10, GroupHealth { membership: voters(&[1, 2, 3]), state: GroupState::Leads })]),
+        certificate_requests_pending: Some(3),
         may_scrape: true,
     };
     let text = render(&obs);
+    assert!(text.contains("lotse_certificate_requests_pending{node=\"1\"} 3\n"));
     assert!(text.ends_with("# EOF\n"));
     assert!(text.contains("lotse_node_info{node=\"1\",version=\"0.1.0\"} 1\n"));
     assert!(text.contains("lotse_client_received_bytes_total{node=\"1\"} 1234\n"));

@@ -80,6 +80,8 @@ The *Users and access* page manages who may sign in and what they may do, as you
 
 *Request certificate* asks the CA holder for a new client certificate. Your browser makes the key and the signing request; the private key is saved as a file once and never reaches the console. The CA holder signs the request with `lotse certs --sign`, and the signed certificate can then be downloaded from the list ([ADR 0092](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0092-requesting-and-signing-client-certificates.md)).
 
+You need not be a cluster admin to ask for a certificate in your own name. The tab then lists only your requests, and the dialog fills in your name. Asking again replaces your request that is still waiting, and the key file of the old one will not fit a certificate signed from then on. If no role is bound to your name itself, the page says so: a certificate signs in without your identity provider's groups, so ask a cluster admin to bind a role to your name. Cluster admins see every request, and the tab shows how many wait for the CA holder ([ADR 0119](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0119-users-request-certificates-in-their-own-name.md)).
+
 ![Request a certificate](../images/request-certificate.png)
 
 ## When something is missing
