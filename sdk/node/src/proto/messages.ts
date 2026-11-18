@@ -51,6 +51,12 @@ export const TAG_PRODUCER = 2;
 export const TAG_NACK_SUBSCRIPTION = 0;
 /** A queue's ready messages per priority level and its subscriptions' states, in a `DescribeMetrics` answer (ADR 0120). */
 export const TAG_QUEUE_DETAILS = 3;
+/** Each partition's oldest record and open transactions, in a `DescribeMetrics` answer (ADR 0122). */
+export const TAG_PARTITION_DETAILS = 4;
+/** The bytes each queue consumer holds, in a `DescribeMetrics` answer (ADR 0122). */
+export const TAG_IN_FLIGHT_BYTES = 5;
+/** The node's free disk limit, in a `DescribeMetrics` answer (ADR 0122). */
+export const TAG_DISK = 6;
 
 /** Where a new leader is, after `NOT_LEADER` or `FENCED_LEADER_TERM`. */
 export interface LeaderHint {
@@ -656,6 +662,14 @@ export interface HostMetrics {
   readonly diskTotalBytes: bigint | null;
 }
 
+/** A node's free space limit (ADR 0122). */
+export interface DiskMetrics {
+  /** The leaders of the groups it votes in take no new data while its data volume has fewer free bytes than this; 0 for no limit. */
+  readonly freeLimitBytes: bigint;
+  /** Whether it is below the limit now: it goes below when free space falls under the limit and back once it is a tenth above it. */
+  readonly low: boolean;
+}
+
 export interface ReplicaProgress {
   readonly nodeId: number;
   readonly logEnd: bigint;
@@ -676,6 +690,10 @@ export interface PartitionMetrics {
   readonly produceRecords: bigint;
   readonly fetchBytes: bigint;
   readonly replicas: readonly ReplicaProgress[];
+  /** When the oldest data record still stored was written, ms since the epoch; `null` for an empty log or a node's own groups (ADR 0122). */
+  readonly oldestTimestampMs: bigint | null;
+  /** Transactions open on this partition, as this replica knows them (ADR 0122). */
+  readonly openTransactions: number;
 }
 
 /**
@@ -701,6 +719,8 @@ export interface ConsumerMetrics {
   readonly credit: number;
   /** Shared, active or standby (ADR 0120). */
   readonly state: ConsumerState;
+  /** Bytes of the messages it holds, each message's share of its batch as stored (ADR 0122). */
+  readonly inFlightBytes: bigint;
 }
 
 export interface QueueMetrics {

@@ -292,7 +292,9 @@ impl ErrorCode {
     pub const INVALID_TXN_STATE: ErrorCode = ErrorCode(9);
     /// The tenant's storage quota is used up.
     pub const QUOTA_EXCEEDED: ErrorCode = ErrorCode(10);
-    /// The node's hard storage limit is reached.
+    /// A voter of the partition has less free disk space than its limit
+    /// (ADR 0122): the leader takes no new data until it has room again.
+    /// Nothing was written; retry later.
     pub const STORAGE_FULL: ErrorCode = ErrorCode(11);
     /// CRC or format invalid.
     pub const CORRUPT_BATCH: ErrorCode = ErrorCode(12);
@@ -410,6 +412,7 @@ impl ErrorCode {
                 | ErrorCode::UNSTABLE_OFFSET_COMMIT
                 | ErrorCode::CONCURRENT_GROUP_CHANGE
                 | ErrorCode::PRODUCER_LIMIT
+                | ErrorCode::STORAGE_FULL
         )
     }
 }

@@ -174,6 +174,11 @@ impl TxnState {
         }
     }
 
+    /// Transactions open in the whole log (ADR 0122).
+    pub(crate) fn open_count(&self) -> usize {
+        self.open.len()
+    }
+
     /// Whether `producer_id` has a transaction open in the whole log: then
     /// its non-transactional batches are refused.
     pub(crate) fn has_open(&self, producer_id: u64) -> bool {

@@ -139,6 +139,11 @@ pub(crate) enum Change {
     /// [`Change::SetVoters`], and the spreading of replicas leaves it there.
     /// No voters releases it.
     Reassign { group: GroupId, voters: Vec<NodeId> },
+    /// A node's disk went below its free space limit, or back above it
+    /// (ADR 0122). The metadata leader proposes it from what each node's
+    /// `DescribeMetrics` says; while a group has a voter here, its leader
+    /// takes no new data.
+    DiskLow { node: NodeId, low: bool },
 }
 
 /// Which runtime resources a node knows to be deleted: those with a
@@ -517,6 +522,8 @@ pub(crate) struct MetadataState {
     /// Groups an operator placed (ADR 0115): rebalancing and the
     /// replication factor leave them alone; a drain still moves them.
     pub(crate) placed: BTreeSet<GroupId>,
+    /// Nodes whose disk is below their free space limit (ADR 0122).
+    pub(crate) disk_low: BTreeSet<NodeId>,
 }
 
 const VERSION: u8 = 4;
@@ -810,6 +817,7 @@ impl MetadataState {
                 self.nodes.remove(&id);
                 self.draining.remove(&id);
                 self.gone.insert(id);
+                self.disk_low.remove(&id);
                 self.pins.retain(|_, n| *n != id);
             }
             Change::SetVoters { group, voters } => self.set_voters(index, group, voters),
@@ -828,6 +836,14 @@ impl MetadataState {
                 }
                 for g in groups {
                     self.placed.remove(&g);
+                }
+            }
+            Change::DiskLow { node, low } => {
+                // A node that is gone has no disk to speak of.
+                if low && !self.gone.contains(&node) {
+                    self.disk_low.insert(node);
+                } else {
+                    self.disk_low.remove(&node);
                 }
             }
             Change::Reassign { group, voters } => {
@@ -1079,7 +1095,8 @@ impl MetadataState {
         // that made each tombstone (ADR 0100), the zones of nodes added at
         // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
         // queues' resume windows (ADR 0109), replication factors and placed
-        // groups (ADR 0115), queues' length limits (ADR 0118). A later
+        // groups (ADR 0115), queues' length limits (ADR 0118), nodes low on
+        // disk (ADR 0122). A later
         // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -1102,7 +1119,9 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections = if !lengths.is_empty() {
+        let sections = if !self.disk_low.is_empty() {
+            16
+        } else if !lengths.is_empty() {
             15
         } else if !self.replication.is_empty() || !self.placed.is_empty() {
             14
@@ -1245,6 +1264,12 @@ impl MetadataState {
             for (id, l) in &lengths {
                 b.put_u64_le(*id);
                 put_length(&mut b, l);
+            }
+        }
+        if sections >= 16 {
+            b.put_u32_le(self.disk_low.len() as u32);
+            for n in &self.disk_low {
+                b.put_u64_le(*n);
             }
         }
         b.freeze()
@@ -1468,6 +1493,12 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                s.disk_low.insert(b.get_u64_le());
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1629,6 +1660,11 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(25);
             b.put_u64_le(*resource_id);
             b.put_u32_le(*replication);
+        }
+        Change::DiskLow { node, low } => {
+            b.put_u8(28);
+            b.put_u64_le(*node);
+            b.put_u8(u8::from(*low));
         }
         Change::Reassign { group, voters } => {
             b.put_u8(26);
@@ -1956,6 +1992,11 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let at_ms = b.get_u64_le();
             let principal = get_str(b)?;
             Change::RequestOwnCertificate { id, principal, csr: get_bytes(b)?.to_vec(), at_ms }
+        }
+        28 => {
+            need(b, 9)?;
+            let node = b.get_u64_le();
+            Change::DiskLow { node, low: b.get_u8() != 0 }
         }
         _ => return Err("unknown metadata change".into()),
     };

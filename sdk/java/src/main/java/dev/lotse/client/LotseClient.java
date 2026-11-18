@@ -406,6 +406,7 @@ public final class LotseClient implements AutoCloseable {
         boolean maybeDone = false;
         while (true) {
             String why;
+            ErrorCode refused = null;
             try {
                 return attempt.get();
             } catch (Attempt a) {
@@ -431,6 +432,10 @@ public final class LotseClient implements AutoCloseable {
                         maybeDone = true;
                         why = a.getMessage();
                     }
+                    case REFUSED -> {
+                        refused = a.code;
+                        why = a.getMessage();
+                    }
                     default -> throw new IllegalStateException();
                 }
             }
@@ -443,8 +448,11 @@ public final class LotseClient implements AutoCloseable {
                         : failedLogin;
             }
             if (elapsed(start).compareTo(cfg.retryFor()) >= 0) {
-                throw maybeDone
-                        ? new ClientException.Unknown("still unknown after " + cfg.retryFor() + ": " + why)
+                if (maybeDone) {
+                    throw new ClientException.Unknown("still unknown after " + cfg.retryFor() + ": " + why);
+                }
+                throw refused != null
+                        ? new ClientException.Broker(refused, why)
                         : new ClientException.GaveUp(cfg.retryFor(), why);
             }
             if (!pause()) {
@@ -676,6 +684,10 @@ public final class LotseClient implements AutoCloseable {
         if (code.equals(ErrorCode.PRODUCER_LIMIT)) {
             // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
             throw Attempt.retry(p.errorMsg() != null ? p.errorMsg() : code.toString());
+        }
+        if (code.equals(ErrorCode.STORAGE_FULL)) {
+            // Not written: the partition takes new data once its voters have room again (ADR 0122).
+            throw Attempt.refused(code, p.errorMsg() != null ? p.errorMsg() : code.toString());
         }
         if (code.equals(ErrorCode.REQUEST_TIMED_OUT)) {
             forget(stream, partition);

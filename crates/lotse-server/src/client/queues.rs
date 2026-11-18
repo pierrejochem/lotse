@@ -1100,8 +1100,13 @@ async fn deliver<R: Runtime, S: StateMachine>(
                 continue;
             }
             let here = &here[..];
+            // Each message's share of its batch as stored, for the bytes a
+            // consumer holds (ADR 0122).
+            let each = (raw.len() / (batch.record_count() as usize).max(1)) as u32;
             for (id, deliveries) in s.dispatcher.assign(q, here, raw.len() as u32, now) {
                 delivered += deliveries.len();
+                let given: Vec<u64> = deliveries.iter().map(|d| d.offset).collect();
+                s.dispatcher.weigh(&given, each);
                 let push = DeliverPush {
                     subscription_id: id,
                     error: ErrorCode::NONE,

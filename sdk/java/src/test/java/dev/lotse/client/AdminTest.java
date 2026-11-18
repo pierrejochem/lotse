@@ -319,7 +319,7 @@ class AdminTest {
     void everyNodeIsAskedForItsMetricsAndOneThatIsDownIsReported() {
         Response.DescribeMetrics m = new Response.DescribeMetrics(
                 ErrorCode.NONE, 1, "0.0.1", 10, 1, 2, 0, 0, 0, 0, 0, List.of(),
-                new Messages.HostMetrics(null, null, null, null, null), List.of(), List.of(), List.of());
+                new Messages.HostMetrics(null, null, null, null, null), List.of(), List.of(), List.of(), null);
         a.on((n, r) -> r instanceof Request.Metadata ? metadata() : m);
         client = new LotseClient(Fx.config(a).build());
         client.metadata();

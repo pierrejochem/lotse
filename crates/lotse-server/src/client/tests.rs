@@ -3036,3 +3036,113 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
         );
     });
 }
+
+/// While a voter of the group is low on disk (ADR 0122) its leader takes
+/// no new data: a new produce and a dead letter are refused with
+/// STORAGE_FULL. A retry of a batch taken before is answered as written,
+/// and acks still pass, so consumers can make room.
+#[test]
+fn a_voter_low_on_disk_refuses_only_new_data() {
+    Sim::new(5).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig::new("jobs", 7, G)];
+        let addrs = BTreeMap::new();
+        let (none, low) = (BTreeSet::new(), BTreeSet::from([1]));
+        let view = |disk_low| ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: None,
+            node: NodeView { disk_low, ..NodeView::default() },
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+        let request = |key, request| ClientRequest {
+            outbox: outbox.clone(),
+            header: header(key),
+            request,
+            principal: Principal::Anonymous,
+        };
+        let produced = |outbox: &Outbox| -> Vec<ErrorCode> {
+            drain(outbox, ApiKey::PRODUCE)
+                .0
+                .iter()
+                .map(|r| match r {
+                    Response::Produce(p) => p.resources[0].partitions[0].error,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        // Taken while there is room.
+        clients.handle(request(ApiKey::PRODUCE, idempotent_request("a", 0)), &view(&none), &mut groups).await.unwrap();
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view(&none), &mut groups).await.unwrap();
+        }
+        assert_eq!(produced(&outbox), [ErrorCode::NONE]);
+
+        // Low: something new is refused, a retry is answered as written.
+        let low_view = view(&low);
+        for req in [idempotent_request("b", 1), idempotent_request("a", 0), produce_request("c")] {
+            clients.handle(request(ApiKey::PRODUCE, req), &low_view, &mut groups).await.unwrap();
+        }
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&low_view, &mut groups).await.unwrap();
+        }
+        let mut got = produced(&outbox);
+        got.sort_by_key(|c| c.0);
+        assert_eq!(got, [ErrorCode::NONE, ErrorCode::STORAGE_FULL, ErrorCode::STORAGE_FULL], "only the retry");
+        let Request::Produce(x) = produce_request("x") else { unreachable!() };
+        let record = Batch::parse(&x.resources[0].partitions[0].batch).unwrap().0.records().unwrap().remove(0);
+        let info = lotse_record::DeadLetterInfo {
+            queue: "other",
+            queue_id: 8,
+            offset: 3,
+            floor: 0,
+            reason: lotse_record::dead_letter::Reason::Expired,
+            deliveries: 1,
+        };
+        let letter = lotse_record::dead_letter_item(&record, info).unwrap();
+        let dead = Request::DeadLetter(lotse_proto::DeadLetterRequest { queue_id: 7, batches: vec![letter.clone()] });
+        clients.handle(request(ApiKey::DEAD_LETTER, dead), &low_view, &mut groups).await.unwrap();
+        let (r, _) = drain(&outbox, ApiKey::DEAD_LETTER);
+        assert!(matches!(&r[..], [Response::Outcome(o)] if o.error == ErrorCode::STORAGE_FULL), "{r:?}");
+        // An ack is no new data.
+        let ack = Request::Ack(lotse_proto::AckRequest::plain(7, vec![(0, 1)]));
+        clients.handle(request(ApiKey::ACK, ack), &low_view, &mut groups).await.unwrap();
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&low_view, &mut groups).await.unwrap();
+        }
+        let (r, _) = drain(&outbox, ApiKey::ACK);
+        assert!(matches!(&r[..], [Response::Outcome(o)] if o.error == ErrorCode::NONE), "{r:?}");
+
+        // Room again: the refused batch's sequence is free.
+        clients.handle(request(ApiKey::PRODUCE, idempotent_request("b", 1)), &view(&none), &mut groups).await.unwrap();
+        for _ in 0..3 {
+            groups.get_mut(&G).unwrap().process().await.unwrap();
+            clients.after_round(&view(&none), &mut groups).await.unwrap();
+        }
+        assert_eq!(produced(&outbox), [ErrorCode::NONE]);
+    });
+}

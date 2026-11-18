@@ -410,6 +410,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             string why;
+            ErrorCode? refused = null;
             try
             {
                 return await attempt().ConfigureAwait(false);
@@ -435,6 +436,10 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                     case Attempt.Kind.Retry:
                         why = a.Message;
                         break;
+                    case Attempt.Kind.Refused:
+                        refused = a.Code;
+                        why = a.Message;
+                        break;
                     default:
                         maybeDone = true;
                         why = a.Message;
@@ -451,8 +456,12 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             }
             if (clock.Elapsed >= _cfg.RetryFor)
             {
-                throw maybeDone
-                    ? new OutcomeUnknownException($"still unknown after {_cfg.RetryFor}: {why}")
+                if (maybeDone)
+                {
+                    throw new OutcomeUnknownException($"still unknown after {_cfg.RetryFor}: {why}");
+                }
+                throw refused is { } code
+                    ? new BrokerErrorException(code, why)
                     : new GaveUpException(_cfg.RetryFor, why);
             }
             await Task.Delay(_cfg.Backoff, ct).ConfigureAwait(false);
@@ -713,6 +722,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         {
             // Not written either: the partition takes a new producer once it has forgotten an idle one (ADR 0110).
             throw Attempt.Retry(p.ErrorMsg ?? code.ToString());
+        }
+        if (code.Equals(ErrorCode.StorageFull))
+        {
+            // Not written: the partition takes new data once its voters have room again (ADR 0122).
+            throw Attempt.Refused(code, p.ErrorMsg ?? code.ToString());
         }
         if (code.Equals(ErrorCode.RequestTimedOut))
         {

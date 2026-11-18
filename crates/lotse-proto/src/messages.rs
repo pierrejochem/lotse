@@ -40,6 +40,14 @@ const TAG_RESPONSIVE: u64 = 2;
 /// A queue's ready messages per priority level and its subscriptions'
 /// states (ADR 0120), in a node's `DescribeMetrics` answer.
 const TAG_QUEUE_DETAILS: u64 = 3;
+/// `DescribeMetrics`: per partition, when its oldest record was written and
+/// its open transactions (ADR 0122).
+const TAG_PARTITION_DETAILS: u64 = 4;
+/// `DescribeMetrics`: the bytes each queue consumer holds (ADR 0122).
+const TAG_IN_FLIGHT_BYTES: u64 = 5;
+/// `DescribeMetrics`: the node's free disk limit and whether it is below it
+/// (ADR 0122).
+const TAG_DISK: u64 = 6;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -2501,6 +2509,20 @@ pub struct DescribeMetricsResponse {
     /// what tells a node whether it may stop. A tag between nodes: other
     /// clients may ignore it.
     pub responsive: Vec<GroupResponsive>,
+    /// The node's free space limit on its data volume and whether it is
+    /// below it (ADR 0122); `None` while it cannot tell. A tag.
+    pub disk: Option<DiskMetrics>,
+}
+
+/// A node's free space limit (ADR 0122).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskMetrics {
+    /// The leaders of the groups it votes in take no new data while its
+    /// data volume has fewer free bytes than this; 0 for no limit.
+    pub free_limit_bytes: u64,
+    /// Whether it is below the limit now: it goes below when free space
+    /// falls under the limit and back once it is a tenth above it.
+    pub low: bool,
 }
 
 /// The members of one group that answered its leader lately (ADR 0117).
@@ -2562,6 +2584,13 @@ pub struct PartitionMetrics {
     pub fetch_bytes: u64,
     /// On the leader: the last offset each replica holds (plus one).
     pub replicas: Vec<ReplicaProgress>,
+    /// When the oldest data record still stored was written (the leader's
+    /// append time of its batch, ms since the epoch); `None` for an empty
+    /// log or a node's own groups (ADR 0122). A tag.
+    pub oldest_timestamp_ms: Option<i64>,
+    /// Transactions open on this partition, as this replica knows them
+    /// (ADR 0122). A tag.
+    pub open_transactions: u32,
 }
 
 /// How far a replica is.
@@ -2654,6 +2683,9 @@ pub struct ConsumerMetrics {
     pub credit: u32,
     /// Shared, active or standby (ADR 0120).
     pub state: ConsumerState,
+    /// Bytes of the messages it holds, each message's share of its batch
+    /// as stored (ADR 0122). A tag.
+    pub in_flight_bytes: u64,
 }
 
 /// A consumer group, from the coordinator's leader.
@@ -2815,6 +2847,37 @@ impl DescribeMetricsResponse {
             });
             tags.push((TAG_QUEUE_DETAILS, v.finish()));
         }
+        let parts: Vec<&PartitionMetrics> =
+            self.partitions.iter().filter(|p| p.oldest_timestamp_ms.is_some() || p.open_transactions > 0).collect();
+        if !parts.is_empty() {
+            let mut v = Writer::new();
+            v.array(&parts, |w, p| {
+                w.u64(p.group);
+                // -1: nothing stored.
+                w.i64(p.oldest_timestamp_ms.unwrap_or(-1));
+                w.u32(p.open_transactions);
+            });
+            tags.push((TAG_PARTITION_DETAILS, v.finish()));
+        }
+        let holding: Vec<&QueueMetrics> =
+            self.queues.iter().filter(|q| q.consumers.iter().any(|c| c.in_flight_bytes > 0)).collect();
+        if !holding.is_empty() {
+            let mut v = Writer::new();
+            v.array(&holding, |w, q| {
+                w.u64(q.resource_id);
+                w.array(&q.consumers, |w, c| {
+                    w.u32(c.subscription_id);
+                    w.u64(c.in_flight_bytes);
+                });
+            });
+            tags.push((TAG_IN_FLIGHT_BYTES, v.finish()));
+        }
+        if let Some(d) = self.disk {
+            let mut v = Writer::new();
+            v.u64(d.free_limit_bytes);
+            v.u8(u8::from(d.low));
+            tags.push((TAG_DISK, v.finish()));
+        }
         if tags.is_empty() {
             w.no_tags();
         } else {
@@ -2871,6 +2934,8 @@ impl DescribeMetricsResponse {
                 produce_records,
                 fetch_bytes,
                 replicas,
+                oldest_timestamp_ms: None,
+                open_transactions: 0,
             })
         })?;
         // six counters and an empty array.
@@ -2887,6 +2952,7 @@ impl DescribeMetricsResponse {
                     in_flight: r.u32()?,
                     credit: r.u32()?,
                     state: ConsumerState::Shared,
+                    in_flight_bytes: 0,
                 })
             })?;
             let [resource_id, ready, in_flight, in_open_txns, delivered, acked] = v;
@@ -2915,7 +2981,7 @@ impl DescribeMetricsResponse {
         })?;
         let mut removed_through = None;
         let mut responsive = Vec::new();
-        let mut queues = queues;
+        let (mut queues, mut partitions, mut disk) = (queues, partitions, None);
         for (tag, value) in r.tags()? {
             let mut v = Reader::new(value);
             match tag {
@@ -2943,6 +3009,27 @@ impl DescribeMetricsResponse {
                         }
                     }
                 }
+                TAG_PARTITION_DETAILS => {
+                    for (group, oldest, open) in v.array(8 + 8 + 4, |r| Ok((r.u64()?, r.i64()?, r.u32()?)))? {
+                        if let Some(p) = partitions.iter_mut().find(|p| p.group == group) {
+                            p.oldest_timestamp_ms = (oldest >= 0).then_some(oldest);
+                            p.open_transactions = open;
+                        }
+                    }
+                }
+                TAG_IN_FLIGHT_BYTES => {
+                    // id and an empty array.
+                    let held = v.array(8 + 1, |r| Ok((r.u64()?, r.array(4 + 8, |r| Ok((r.u32()?, r.u64()?)))?)))?;
+                    for (id, subs) in held {
+                        let Some(q) = queues.iter_mut().find(|q| q.resource_id == id) else { continue };
+                        for (sub, bytes) in subs {
+                            if let Some(c) = q.consumers.iter_mut().find(|c| c.subscription_id == sub) {
+                                c.in_flight_bytes = bytes;
+                            }
+                        }
+                    }
+                }
+                TAG_DISK => disk = Some(DiskMetrics { free_limit_bytes: v.u64()?, low: v.u8()? != 0 }),
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }
@@ -2967,6 +3054,7 @@ impl DescribeMetricsResponse {
             groups,
             removed_through,
             responsive,
+            disk,
         })
     }
 }

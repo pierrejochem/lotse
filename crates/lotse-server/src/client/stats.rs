@@ -55,7 +55,15 @@ pub(crate) struct NodeView<'a> {
     pub(crate) host: HostStats,
     /// The node's open client sessions (ADR 0121).
     pub(crate) sessions: &'a crate::auth::OpenSessions,
+    /// Its free disk limit and whether it is below it (ADR 0122); `None`
+    /// until the host was read.
+    pub(crate) disk: Option<lotse_proto::DiskMetrics>,
+    /// Nodes whose disk is below their limit (ADR 0122): those the metadata
+    /// group recorded, and this node itself at once when it is.
+    pub(crate) disk_low: &'a std::collections::BTreeSet<NodeId>,
 }
+
+static NO_LOW: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
 
 static NO_SESSIONS: crate::auth::OpenSessions = crate::auth::OpenSessions::new();
 
@@ -69,7 +77,15 @@ static NO_NET: NetStats = NetStats {
 
 impl Default for NodeView<'_> {
     fn default() -> Self {
-        NodeView { id: 0, started: Instant::ZERO, net: &NO_NET, host: HostStats::default(), sessions: &NO_SESSIONS }
+        NodeView {
+            id: 0,
+            started: Instant::ZERO,
+            net: &NO_NET,
+            host: HostStats::default(),
+            sessions: &NO_SESSIONS,
+            disk: None,
+            disk_low: &NO_LOW,
+        }
     }
 }
 
@@ -188,6 +204,7 @@ impl Clients {
             // The view is rebuilt from the metadata only once the groups of
             // what it shows deleted are closed and their files removed.
             removed_through: (view.deleted.applied > 0).then_some(view.deleted.applied),
+            disk: node.disk,
             ..DescribeMetricsResponse::default()
         };
         for (&g, replica) in groups {
@@ -226,6 +243,8 @@ impl Clients {
                 produce_records: c.produce_records,
                 fetch_bytes: c.fetch_bytes,
                 replicas,
+                oldest_timestamp_ms: replica.oldest_timestamp_ms(),
+                open_transactions: replica.open_transactions() as u32,
             });
         }
         // Every queue this node leads with a quorum behind it, served
@@ -253,6 +272,7 @@ impl Clients {
                         } else {
                             ConsumerState::Shared
                         },
+                        in_flight_bytes: s.dispatcher.in_flight_bytes_of(sub),
                     })
                     .collect()
             });

@@ -92,6 +92,9 @@ struct Subscription {
 struct InFlight {
     sub: SubscriptionId,
     at: Instant,
+    /// Its share of its batch as stored ([`Dispatcher::weigh`]); 0 when
+    /// unknown, as for a message a consumer resumed with.
+    bytes: u32,
 }
 
 /// A message an earlier leader handed to a consumer that has not
@@ -262,7 +265,7 @@ impl Dispatcher {
         }
         for &(o, at) in &mine {
             self.waiting.remove(&o);
-            self.in_flight.insert(o, InFlight { sub: id, at });
+            self.in_flight.insert(o, InFlight { sub: id, at, bytes: 0 });
         }
         let alone = self.waiting.is_empty()
             && self.in_flight.values().all(|f| f.sub == id)
@@ -682,7 +685,7 @@ impl Dispatcher {
             s.credit_bytes = s.credit_bytes.saturating_sub(batch_bytes);
             let mut deliveries = Vec::with_capacity(n);
             for &o in mine {
-                self.in_flight.insert(o, InFlight { sub: id, at: now });
+                self.in_flight.insert(o, InFlight { sub: id, at: now, bytes: 0 });
                 // Only a message found new moves the cursor: what goes out
                 // again may lie beyond it (one an earlier leader handed out,
                 // ADR 0109), and the messages before it are still to come.
@@ -736,6 +739,23 @@ impl Dispatcher {
     /// The messages in flight with `id`.
     pub fn in_flight_of(&self, id: SubscriptionId) -> Vec<u64> {
         self.in_flight.iter().filter(|(_, f)| f.sub == id).map(|(o, _)| *o).collect()
+    }
+
+    /// Records that each of `offsets`, if out with a consumer, takes `each`
+    /// bytes: its share of the batch it came in (ADR 0122). Only counted,
+    /// never acted on.
+    pub fn weigh(&mut self, offsets: &[u64], each: u32) {
+        for o in offsets {
+            if let Some(f) = self.in_flight.get_mut(o) {
+                f.bytes = each;
+            }
+        }
+    }
+
+    /// The bytes of the messages `id` holds, as [`Dispatcher::weigh`]
+    /// recorded them.
+    pub fn in_flight_bytes_of(&self, id: SubscriptionId) -> u64 {
+        self.in_flight.values().filter(|f| f.sub == id).map(|f| u64::from(f.bytes)).sum()
     }
 
     /// Whether a transaction holds `offset`, or a transactional ack took it.

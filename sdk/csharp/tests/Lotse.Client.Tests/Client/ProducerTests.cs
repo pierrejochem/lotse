@@ -202,6 +202,31 @@ public sealed class ProducerTests : IDisposable
     }
 
     [Fact]
+    public async Task AVoterLowOnDiskIsAskedAgainUntilItHasRoom()
+    {
+        // ADR 0122: nothing was written, and the partition takes new data once its voters have room.
+        Serve(n => n <= 2 ? Fx.Produced(StreamId, 0, ErrorCode.StorageFull, 0) : Ok());
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(2));
+        List<Request.Produce> sent = _node.Requests<Request.Produce>();
+        Assert.Equal(3, sent.Count);
+        Assert.Equal(Fx.BytesOf(sent[0]), Fx.BytesOf(sent[2])); // the same bytes again
+    }
+
+    [Fact]
+    public async Task AVoterLowOnDiskForTooLongEndsWithTheRefusalAndTheSequenceStaysFree()
+    {
+        Serve(n => n == 1 ? Ok() : Fx.Produced(StreamId, 0, ErrorCode.StorageFull, 0));
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        var e = await Assert.ThrowsAsync<BrokerErrorException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        Assert.Equal(ErrorCode.StorageFull, e.Code); // the refusal, not a timeout
+        List<Request.Produce> sent = _node.Requests<Request.Produce>();
+        Assert.Equal(1, Fx.BatchOf(sent[^1]).BaseSequence); // the sequence of a batch not written
+        Assert.Equal(1, _node.Count<Request.InitProducer>()); // the producer id stayed
+    }
+
+    [Fact]
     public async Task AFullQueueRefusesAtOnceAndTheSequenceStaysFree()
     {
         // ADR 0118: nothing was written, and the caller decides whether to try again.

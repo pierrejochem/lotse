@@ -40,7 +40,7 @@ public readonly record struct ErrorCode(ushort Code)
     /// <summary>The tenant's storage quota is used up.</summary>
     public static readonly ErrorCode QuotaExceeded = new(10);
 
-    /// <summary>The node's hard storage limit is reached.</summary>
+    /// <summary>A voter of the partition has less free disk space than its limit (ADR 0122): nothing was written, retry later.</summary>
     public static readonly ErrorCode StorageFull = new(11);
 
     /// <summary>CRC or format invalid.</summary>
@@ -135,7 +135,7 @@ public readonly record struct ErrorCode(ushort Code)
     /// Whether the same request may succeed later, after reloading metadata. Retrying a request whose outcome is
     /// unknown (<see cref="RequestTimedOut"/>) is only safe where the request is idempotent.
     /// </summary>
-    public bool Retriable => Code is 1 or 2 or 5 or 6 or 18 or 19 or 24 or 25 or 33;
+    public bool Retriable => Code is 1 or 2 or 5 or 6 or 11 or 18 or 19 or 24 or 25 or 33;
 
     /// <inheritdoc/>
     public override string ToString() => $"{CodeName} ({Code})";

@@ -125,6 +125,9 @@ pub enum ProposeError {
     /// A queue at its length limit refuses a new batch (ADR 0118).
     #[error("{0}")]
     QueueFull(String),
+    /// A voter of the group has too little free disk space (ADR 0122).
+    #[error("{0}")]
+    StorageFull(String),
 }
 
 /// What became of a marker the coordinator asked for.
@@ -329,7 +332,24 @@ pub struct Replica<D: Disk, S> {
     moved_at: Option<u64>,
     /// As leader: how long each producer has been idle (ADR 0110).
     idle: IdleClock,
+    /// When the oldest data record stored was written, and what of the log
+    /// that was read from (ADR 0122).
+    oldest: Option<(OldestAt, Option<i64>)>,
 }
+
+/// What of the log [`Replica::look_at_oldest`] last read from: where it
+/// started, how big its first segment was (compaction rewrites it), and
+/// where it ended if no data was found (new data may come after).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OldestAt {
+    start: u64,
+    first_segment_bytes: u64,
+    end: Option<u64>,
+}
+
+/// How much [`Replica::look_at_oldest`] reads from the log start to find a
+/// data batch: one read, never a scan of the log.
+const OLDEST_READ_BYTES: usize = 64 * 1024;
 
 impl<D: Disk, S> fmt::Debug for Replica<D, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -456,6 +476,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             max_fill_bytes: 1 << 20,
             moved_at,
             idle: IdleClock::default(),
+            oldest: None,
         })
     }
 
@@ -528,12 +549,13 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// [`Replica::propose`], asking `admit` about a batch that is new here:
     /// not about a duplicate, which is written already and answered as
     /// such, nor about one refused for another reason. A queue's length
-    /// limit (ADR 0118) refuses this way: a retry of a batch that was taken
-    /// must not be refused, or its producer would take its sequence as free.
+    /// limit (ADR 0118) and a voter low on disk (ADR 0122) refuse this way:
+    /// a retry of a batch that was taken must not be refused, or its
+    /// producer would take its sequence as free.
     pub fn propose_admitted(
         &mut self,
         batch: Bytes,
-        admit: impl FnOnce(&Batch) -> Result<(), String>,
+        admit: impl FnOnce(&Batch) -> Result<(), ProposeError>,
     ) -> Result<Proposed, ProposeError> {
         let (parsed, rest) = Batch::parse(&batch)?;
         if !rest.is_empty() {
@@ -579,7 +601,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             Check::Fenced { current } => return Err(ProposeError::ProducerFenced { current }),
             Check::Full => return Err(ProposeError::ProducerLimit(self.state.producers.max())),
         }
-        admit(&parsed).map_err(ProposeError::QueueFull)?;
+        admit(&parsed)?;
         let (first, last) =
             self.raft.propose(u64::from(parsed.record_count()), batch).map_err(ProposeError::NotLeader)?;
         let term = self.raft.term();
@@ -984,6 +1006,53 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.log.trim_before(cut).await?;
         self.state.txns.forget_aborted_before(self.log.start_offset());
         Ok(Some(cut))
+    }
+
+    /// Looks again, if the log start changed, when the oldest data record
+    /// still stored was written (ADR 0122): the timestamp of the first data
+    /// batch within [`OLDEST_READ_BYTES`] of the log start, as its producer
+    /// or, on a queue, its leader stamped it. Control batches and the
+    /// broker's own queue state are passed over.
+    pub async fn look_at_oldest(&mut self) -> Result<(), Error> {
+        let start = self.log.start_offset();
+        let end = self.log.next_offset();
+        let first_segment_bytes = self.log.segments().next().map_or(0, |s| s.bytes);
+        let at = OldestAt { start, first_segment_bytes, end: None };
+        if let Some((seen, found)) = self.oldest
+            && (OldestAt { end: None, ..seen }) == at
+            && (found.is_some() || seen.end == Some(end))
+        {
+            return Ok(());
+        }
+        if start >= end {
+            self.oldest = Some((OldestAt { end: Some(end), ..at }, None));
+            return Ok(());
+        }
+        let read = self.log.read(start, OLDEST_READ_BYTES).await?;
+        let mut rest = read;
+        let mut found = None;
+        while let Ok((batch, more)) = Batch::parse(&rest) {
+            let a = batch.attributes();
+            if !a.control && matches!(a.kind, lotse_record::BatchKind::Data | lotse_record::BatchKind::DeadLetter) {
+                found = Some(batch.base_timestamp());
+                break;
+            }
+            rest = more;
+        }
+        let at = if found.is_some() { at } else { OldestAt { end: Some(end), ..at } };
+        self.oldest = Some((at, found));
+        Ok(())
+    }
+
+    /// When the oldest data record stored was written, ms since the epoch,
+    /// as [`Replica::look_at_oldest`] last found it.
+    pub fn oldest_timestamp_ms(&self) -> Option<i64> {
+        self.oldest.and_then(|(_, t)| t)
+    }
+
+    /// Transactions open on this partition (ADR 0122).
+    pub fn open_transactions(&self) -> usize {
+        self.state.txns.open_count()
     }
 
     /// One step of compaction (ADR 0067). Returns the base of the segment

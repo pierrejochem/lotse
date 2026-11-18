@@ -31,7 +31,13 @@ struct DiskState {
     incarnation: u64,
     /// Write operations left before the power goes ([`SimDisk::arm_power_loss`]).
     power_left: Option<u64>,
+    /// What the host reports as free on this disk's volume ([`SimDisk::set_free_bytes`]).
+    free_bytes: u64,
 }
+
+/// The volume a simulated disk reports: 4 TiB, 3 TiB of it free unless a
+/// test says otherwise.
+pub const SIM_DISK_TOTAL: u64 = 4 << 40;
 
 /// What a crash destroyed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -73,6 +79,7 @@ impl SimDisk {
                 dirs: Default::default(),
                 incarnation: 0,
                 power_left: None,
+                free_bytes: 3 << 40,
             })),
             rng,
         }
@@ -113,6 +120,17 @@ impl SimDisk {
     /// decide what survived.
     pub fn arm_power_loss(&self, ops: u64) {
         self.state.lock().expect("disk lock").power_left = Some(ops);
+    }
+
+    /// What the host reports as free on this disk's volume from now on, so a
+    /// test can run a node low on space. It does not stop writes.
+    pub fn set_free_bytes(&self, bytes: u64) {
+        self.state.lock().expect("disk lock").free_bytes = bytes.min(SIM_DISK_TOTAL);
+    }
+
+    /// What the host reports as free on this disk's volume.
+    pub fn free_bytes(&self) -> u64 {
+        self.state.lock().expect("disk lock").free_bytes
     }
 
     /// `true` once an armed power loss has happened.

@@ -584,6 +584,8 @@ public sealed interface Response {
      * @param partitions every Raft group hosted here
      * @param queues queues this node leads
      * @param groups consumer groups, if this node leads the coordinator group
+     * @param disk the node's free space limit and whether it is below it, or {@code null} while it cannot tell
+     *     (ADR 0122)
      */
     record DescribeMetrics(
             ErrorCode error,
@@ -601,7 +603,8 @@ public sealed interface Response {
             HostMetrics host,
             List<PartitionMetrics> partitions,
             List<QueueMetrics> queues,
-            List<GroupMetrics> groups)
+            List<GroupMetrics> groups,
+            DiskMetrics disk)
             implements Response {
         /** Creates the response. */
         public DescribeMetrics {
@@ -652,9 +655,8 @@ public sealed interface Response {
                 });
                 w1.array(g.offsets(), (w2, o) -> w2.u64(o.resourceId()).u32(o.partition()).u64(o.offset()));
             });
-            if (details.isEmpty()) {
-                w.noTags();
-            } else {
+            List<Tag> tags = new java.util.ArrayList<>();
+            if (!details.isEmpty()) {
                 Writer v = new Writer();
                 v.array(details, (w1, q) -> {
                     w1.u64(q.resourceId());
@@ -662,7 +664,38 @@ public sealed interface Response {
                     w1.u64(q.readyLevelUnread());
                     w1.array(q.consumers(), (w2, c) -> w2.u32(c.subscriptionId()).u8(c.state().code()));
                 });
-                w.tags(List.of(new Tag(Messages.TAG_QUEUE_DETAILS, ByteString.copyOf(v.toByteArray()))));
+                tags.add(new Tag(Messages.TAG_QUEUE_DETAILS, ByteString.copyOf(v.toByteArray())));
+            }
+            List<PartitionMetrics> parts = partitions.stream()
+                    .filter(p -> p.oldestTimestampMs() != null || p.openTransactions() != 0)
+                    .toList();
+            if (!parts.isEmpty()) {
+                Writer v = new Writer();
+                v.array(parts, (w1, p) -> w1.u64(p.group())
+                        .i64(p.oldestTimestampMs() != null ? p.oldestTimestampMs() : -1)
+                        .u32(p.openTransactions()));
+                tags.add(new Tag(Messages.TAG_PARTITION_DETAILS, ByteString.copyOf(v.toByteArray())));
+            }
+            List<QueueMetrics> holding = queues.stream()
+                    .filter(q -> q.consumers().stream().anyMatch(c -> c.inFlightBytes() != 0))
+                    .toList();
+            if (!holding.isEmpty()) {
+                Writer v = new Writer();
+                v.array(holding, (w1, q) -> {
+                    w1.u64(q.resourceId());
+                    w1.array(q.consumers(), (w2, c) -> w2.u32(c.subscriptionId()).u64(c.inFlightBytes()));
+                });
+                tags.add(new Tag(Messages.TAG_IN_FLIGHT_BYTES, ByteString.copyOf(v.toByteArray())));
+            }
+            if (disk != null) {
+                Writer v = new Writer();
+                v.u64(disk.freeLimitBytes()).bool(disk.low());
+                tags.add(new Tag(Messages.TAG_DISK, ByteString.copyOf(v.toByteArray())));
+            }
+            if (tags.isEmpty()) {
+                w.noTags();
+            } else {
+                w.tags(tags);
             }
         }
 
@@ -677,12 +710,48 @@ public sealed interface Response {
                                 .filter(s -> s.subscriptionId() == c.subscriptionId())
                                 .findFirst()
                                 .map(s -> new ConsumerMetrics(
-                                        c.subscriptionId(), c.peer(), c.inFlight(), c.credit(), s.state()))
+                                        c.subscriptionId(), c.peer(), c.inFlight(), c.credit(), s.state(),
+                                        c.inFlightBytes()))
                                 .orElse(c))
                         .toList();
                 return new QueueMetrics(
                         q.resourceId(), q.ready(), q.inFlight(), q.inOpenTxns(), q.delivered(), q.acked(), consumers,
                         d.readyByLevel(), d.readyLevelUnread());
+            }
+            return q;
+        }
+
+        /** {@code p} with what tag 4 says of it, if anything. */
+        private static PartitionMetrics withPartitionDetails(PartitionMetrics p, List<long[]> details) {
+            for (long[] d : details) {
+                if (d[0] == p.group()) {
+                    return new PartitionMetrics(
+                            p.group(), p.resourceId(), p.partition(), p.leader(), p.term(), p.highWatermark(),
+                            p.lastStable(), p.logStart(), p.logEnd(), p.sizeBytes(), p.produceBytes(),
+                            p.produceRecords(), p.fetchBytes(), p.replicas(), d[1] >= 0 ? d[1] : null, d[2]);
+                }
+            }
+            return p;
+        }
+
+        /** {@code q} with what tag 5 says of its consumers, if anything. */
+        private static QueueMetrics withBytes(QueueMetrics q, List<QueueMetrics> held) {
+            for (QueueMetrics h : held) {
+                if (h.resourceId() != q.resourceId()) {
+                    continue;
+                }
+                List<ConsumerMetrics> consumers = q.consumers().stream()
+                        .map(c -> h.consumers().stream()
+                                .filter(s -> s.subscriptionId() == c.subscriptionId())
+                                .findFirst()
+                                .map(s -> new ConsumerMetrics(
+                                        c.subscriptionId(), c.peer(), c.inFlight(), c.credit(), c.state(),
+                                        s.inFlightBytes()))
+                                .orElse(c))
+                        .toList();
+                return new QueueMetrics(
+                        q.resourceId(), q.ready(), q.inFlight(), q.inOpenTxns(), q.delivered(), q.acked(), consumers,
+                        q.readyByLevel(), q.readyLevelUnread());
             }
             return q;
         }
@@ -729,7 +798,7 @@ public sealed interface Response {
                 List<ReplicaProgress> replicas = r1.array(12, r2 -> new ReplicaProgress(r2.u32(), r2.u64()));
                 return new PartitionMetrics(
                         group, resource, partition, leader, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8],
-                        replicas);
+                        replicas, null, 0);
             });
             // six counters and an empty array
             List<QueueMetrics> queues = r.array(6 * 8 + 1, r1 -> {
@@ -740,7 +809,7 @@ public sealed interface Response {
                 // id, an empty peer, in flight, credit
                 List<ConsumerMetrics> consumers = r1.array(
                         4 + 2 + 4 + 4,
-                        r2 -> new ConsumerMetrics(r2.u32(), r2.string(), r2.u32(), r2.u32(), ConsumerState.SHARED));
+                        r2 -> new ConsumerMetrics(r2.u32(), r2.string(), r2.u32(), r2.u32(), ConsumerState.SHARED, 0));
                 return new QueueMetrics(v[0], v[1], v[2], v[3], v[4], v[5], consumers, List.of(), 0);
             });
             // an empty id and tenant, the epoch, two empty arrays
@@ -755,26 +824,44 @@ public sealed interface Response {
                         r1.array(8 + 4 + 8, r2 -> new CommittedOffset(r2.u64(), r2.u32(), r2.u64()));
                 return new GroupMetrics(groupId, tenant, epoch, members, offsets);
             });
+            DiskMetrics disk = null;
             for (Tag t : r.tags()) {
-                if (t.tag() != Messages.TAG_QUEUE_DETAILS) {
+                Reader vr = new Reader(t.value().toByteArray());
+                if (t.tag() == Messages.TAG_QUEUE_DETAILS) {
+                    // id, an empty array, unread, an empty array
+                    List<QueueMetrics> details = vr.array(8 + 1 + 8 + 1, r1 -> {
+                        long id = r1.u64();
+                        List<Long> levels = r1.array(8, Reader::u64);
+                        long unread = r1.u64();
+                        List<ConsumerMetrics> states = r1.array(
+                                4 + 1,
+                                r2 -> new ConsumerMetrics(r2.u32(), "", 0, 0, ConsumerState.fromCode(r2.u8()), 0));
+                        return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
+                    });
+                    queues = queues.stream().map(q -> withDetails(q, details)).toList();
+                } else if (t.tag() == Messages.TAG_PARTITION_DETAILS) {
+                    // group, oldest, open transactions
+                    List<long[]> details = vr.array(8 + 8 + 4, r1 -> new long[] {r1.u64(), r1.i64(), r1.u32()});
+                    partitions = partitions.stream().map(p -> withPartitionDetails(p, details)).toList();
+                } else if (t.tag() == Messages.TAG_IN_FLIGHT_BYTES) {
+                    // id and an empty array
+                    List<QueueMetrics> held = vr.array(8 + 1, r1 -> {
+                        long id = r1.u64();
+                        List<ConsumerMetrics> bytes = r1.array(
+                                4 + 8, r2 -> new ConsumerMetrics(r2.u32(), "", 0, 0, ConsumerState.SHARED, r2.u64()));
+                        return new QueueMetrics(id, 0, 0, 0, 0, 0, bytes, List.of(), 0);
+                    });
+                    queues = queues.stream().map(q -> withBytes(q, held)).toList();
+                } else if (t.tag() == Messages.TAG_DISK) {
+                    disk = new DiskMetrics(vr.u64(), vr.bool());
+                } else {
                     continue; // between nodes, or from a newer version: skipped
                 }
-                Reader vr = new Reader(t.value().toByteArray());
-                // id, an empty array, unread, an empty array
-                List<QueueMetrics> details = vr.array(8 + 1 + 8 + 1, r1 -> {
-                    long id = r1.u64();
-                    List<Long> levels = r1.array(8, Reader::u64);
-                    long unread = r1.u64();
-                    List<ConsumerMetrics> states = r1.array(
-                            4 + 1, r2 -> new ConsumerMetrics(r2.u32(), "", 0, 0, ConsumerState.fromCode(r2.u8())));
-                    return new QueueMetrics(id, 0, 0, 0, 0, 0, states, levels, unread);
-                });
                 vr.finish();
-                queues = queues.stream().map(q -> withDetails(q, details)).toList();
             }
             return new DescribeMetrics(
                     error, nodeId, version, uptime, metadataGroup, coordinatorGroup, connections, clientIn,
-                    clientOut, peerIn, peerOut, latency, host, partitions, queues, groups);
+                    clientOut, peerIn, peerOut, latency, host, partitions, queues, groups, disk);
         }
     }
 

@@ -31,7 +31,9 @@ public record ErrorCode(int code) {
     public static final ErrorCode INVALID_TXN_STATE = new ErrorCode(9);
     /** The tenant's storage quota is used up. */
     public static final ErrorCode QUOTA_EXCEEDED = new ErrorCode(10);
-    /** The node's hard storage limit is reached. */
+    /**
+     * A voter of the partition has less free disk space than its limit (ADR 0122): nothing was written, retry later.
+     */
     public static final ErrorCode STORAGE_FULL = new ErrorCode(11);
     /** CRC or format invalid. */
     public static final ErrorCode CORRUPT_BATCH = new ErrorCode(12);
@@ -117,7 +119,7 @@ public record ErrorCode(int code) {
      */
     public boolean retriable() {
         return switch (code) {
-            case 1, 2, 5, 6, 18, 19, 24, 25, 33 -> true;
+            case 1, 2, 5, 6, 11, 18, 19, 24, 25, 33 -> true;
             default -> false;
         };
     }

@@ -258,6 +258,26 @@ fn metrics_round_trip_in_full() {
         responsive,
         ..DescribeMetricsResponse::default()
     });
+    // Tags of ADR 0122 only for what has something to say: a partition
+    // without an oldest record or open transactions, a consumer holding no
+    // bytes and a node that cannot tell its disk add nothing.
+    let quiet = DescribeMetricsResponse {
+        partitions: vec![PartitionMetrics::default()],
+        queues: vec![QueueMetrics {
+            consumers: vec![ConsumerMetrics {
+                subscription_id: 1,
+                peer: String::new(),
+                in_flight: 0,
+                credit: 0,
+                state: ConsumerState::Shared,
+                in_flight_bytes: 0,
+            }],
+            ..QueueMetrics::default()
+        }],
+        ..DescribeMetricsResponse::default()
+    };
+    let frame = encode_response(3, &Response::DescribeMetrics(Box::new(quiet)));
+    assert_eq!(frame.last(), Some(&0), "no tags");
 }
 
 /// Each array of a metrics answer filled with its smallest elements, one
@@ -288,7 +308,8 @@ fn the_smallest_metrics_decode() {
                         peer: String::new(),
                         in_flight: 0,
                         credit: 0,
-                        state: ConsumerState::Shared
+                        state: ConsumerState::Shared,
+                        in_flight_bytes: 0,
                     };
                     32
                 ],
@@ -314,12 +335,42 @@ fn the_smallest_metrics_decode() {
                         in_flight: 0,
                         credit: 0,
                         state: ConsumerState::Standby,
+                        in_flight_bytes: 0,
                     })
                     .collect(),
-                ..queue
+                ..queue.clone()
             }],
             ..base.clone()
         },
+        // Tags 4 and 5 (ADR 0122): partitions and consumers by their ids.
+        DescribeMetricsResponse {
+            partitions: (0..32)
+                .map(|i| PartitionMetrics { group: i, open_transactions: 1, ..partition.clone() })
+                .collect(),
+            ..base.clone()
+        },
+        DescribeMetricsResponse {
+            partitions: vec![PartitionMetrics { oldest_timestamp_ms: Some(0), ..partition.clone() }],
+            ..base.clone()
+        },
+        DescribeMetricsResponse {
+            queues: (0..32)
+                .map(|i| QueueMetrics {
+                    resource_id: i,
+                    consumers: vec![ConsumerMetrics {
+                        subscription_id: 0,
+                        peer: String::new(),
+                        in_flight: 0,
+                        credit: 0,
+                        state: ConsumerState::Shared,
+                        in_flight_bytes: 1,
+                    }],
+                    ..queue.clone()
+                })
+                .collect(),
+            ..base.clone()
+        },
+        DescribeMetricsResponse { disk: Some(DiskMetrics::default()), ..base.clone() },
         DescribeMetricsResponse { groups: vec![group.clone(); 32], ..base.clone() },
         DescribeMetricsResponse {
             groups: vec![GroupMetrics {
