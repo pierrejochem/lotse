@@ -1195,6 +1195,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 members: &known.nodes,
                 configured_voters: &configured_voters,
                 client_cas: &cfg.auth.client_cas,
+                renewal: &cfg.auth.renewal,
             },
             client_addrs: &known.client_addrs,
             zones: &known.zones,
@@ -1800,6 +1801,7 @@ impl Known {
         auth.set_users(&state.users);
         auth.set_revocations(&state.revocations);
         auth.set_revoked_certs(&state.revoked_certs);
+        auth.set_renewed(&state.renewed);
         let mut known = Known::configured(cfg);
         known.access = Access::build(&cfg.auth, &configured_ids(cfg), &state);
         known.applied = self.applied;

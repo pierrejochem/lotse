@@ -42,6 +42,7 @@ mod consumer;
 mod group;
 mod publish;
 
+pub use admin::RenewedCertificate;
 pub use auth::Credentials;
 pub use consumer::{Consumer, Message};
 pub use group::{GroupConfig, GroupConsumer, GroupRecord};

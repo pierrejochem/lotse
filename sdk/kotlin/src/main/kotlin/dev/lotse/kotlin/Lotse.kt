@@ -246,6 +246,18 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     public suspend fun requestCertificate(principal: String, csr: ByteArray): Unit =
         io { java.requestCertificate(principal, csr) }
 
+    /**
+     * Renews the client certificate this client's connections are made with, in its renewal window (ADR 0123), and
+     * returns the new key and chain; see [LotseClient.renewCertificate].
+     */
+    public suspend fun renewCertificate(): dev.lotse.client.RenewedCertificate = io { java.renewCertificate() }
+
+    /** Renews as [renewCertificate] does and writes the new key, then the new chain, over the files. */
+    public suspend fun renewCertificate(
+        certPem: java.nio.file.Path,
+        keyPem: java.nio.file.Path,
+    ): dev.lotse.client.RenewedCertificate = io { java.renewCertificate(certPem, keyPem) }
+
     /** The certificate requests, newest first (cluster admin, ADR 0092). */
     public suspend fun describeCertificateRequests(): LotseClient.CertificateRequests =
         io { java.describeCertificateRequests() }

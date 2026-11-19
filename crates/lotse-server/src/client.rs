@@ -110,6 +110,9 @@ pub(crate) struct Outbox {
     closed: AtomicBool,
     /// The client's address, for metrics.
     peer: String,
+    /// The client certificate the connection authenticated with and the
+    /// principal it names, for `RenewCertificate` (ADR 0123).
+    presented: Option<(lotse_rt::CertInfo, String)>,
 }
 
 impl Outbox {
@@ -151,7 +154,7 @@ pub(crate) async fn serve<R: Runtime>(
     session.note_cert(now_ms);
     let mut noted = rt.now();
     let conn = Arc::new(conn);
-    let outbox = Arc::new(Outbox { peer, ..Outbox::default() });
+    let outbox = Arc::new(Outbox { peer, presented: session.presented(), ..Outbox::default() });
     let closed = Signal::default();
     let writer = rt.spawn(write_to(conn.clone(), outbox.clone(), net.clone(), stop.clone(), closed.clone()));
     loop {
@@ -527,6 +530,7 @@ impl Clients {
                 self.describe_certificate_requests(outbox, id, &principal, view, groups)
             }
             Request::RecordCertificate(req) => self.record_certificate(outbox, id, req, view, groups),
+            Request::RenewCertificate(req) => self.renew_certificate(outbox, id, req, &principal, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, view, groups),

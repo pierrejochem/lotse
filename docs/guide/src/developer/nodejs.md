@@ -128,6 +128,21 @@ await group.close();                          // commits the positions and leave
 
 The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call rejects with `ResourceExistsError` and the id.
 
+### Renewing the client certificate
+
+On a cluster with a renewal CA, a client that signs in with a certificate renews it in its window: its last 30 days, or past two thirds of its validity ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)).
+
+```ts
+const files = { certPemFile: "alice.pem", keyPemFile: "alice.key" };
+const client = new LotseClient({
+  bootstrap: ["10.0.0.1:9000"],
+  tls: await TlsConfig.fromFiles("ca.pem", files.certPemFile, files.keyPemFile), // read again when they change
+  renewCertificate: files, // renews by itself in the window; looks every hour (renewCheckMs)
+});
+```
+
+`client.renewCertificate(files)` renews once and writes the new key, then the new chain; without `files` it only returns them. `renewalDue(file)` says whether the window is open, and `client.renewalFailure` why the last automatic renewal failed.
+
 ## Compressed batches
 
 zstd and lz4 are read and written without a package to install. Set `attributes.compression` on a `BatchBuilder`; nothing compresses by default.

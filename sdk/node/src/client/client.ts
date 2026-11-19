@@ -55,6 +55,7 @@ import { type GroupConfig } from "./group-config.js";
 import { type GroupHost, GroupConsumer } from "./group-consumer.js";
 import { buildBatch, type OutHeader, type OutMessage, type ProduceResult } from "./messages.js";
 import { Mutex } from "./mutex.js";
+import { newRenewalKey, pem, type RenewedCertificate, renewalDue, writeRenewed } from "./renewal.js";
 import { OffsetAt } from "./offset-at.js";
 import { type QueueHost, QueueConsumer } from "./queue-consumer.js";
 import type { Published, PublishOptions, RoutedQueue } from "./published.js";
@@ -211,12 +212,90 @@ export class LotseClient {
   constructor(options: ClientOptions) {
     this.cfg = resolveClientOptions(options);
     this.pool = new ConnectionPool(this.cfg.connection);
+    if (this.cfg.renewCertificate !== null) {
+      void this.keepRenewed(this.cfg.renewCertificate.certPemFile, this.cfg.renewCertificate.keyPemFile);
+    }
   }
 
   /** Closes every connection. Calls in progress fail. */
   close(): void {
     this.isClosed = true;
+    this.stopRenewing.abort();
     this.pool.close();
+  }
+
+  // ---- renewing the client certificate (ADR 0123) ----
+
+  private readonly stopRenewing = new AbortController();
+  private lastRenewalFailure: unknown = null;
+
+  /** Why the last automatic renewal failed, or `null` if none has since one succeeded. */
+  get renewalFailure(): unknown {
+    return this.lastRenewalFailure;
+  }
+
+  /**
+   * Renews the client certificate this client's connections are made with: makes a new P-256 key, has the metadata
+   * leader sign a certificate for it naming the same principal, and returns the key and chain. The certificate must be
+   * in its renewal window: its last 30 days, or past two thirds of its validity (`mayRenew`). A retry after a lost
+   * answer renews again; the earlier renewal then stops working, so use only the one returned.
+   *
+   * With `files`, writes the new key, then the new chain, over them (each moved into place whole); a `TlsConfig` read
+   * from these files with `fromFiles` uses them from the next connection on. If a file cannot be written the renewed
+   * certificate is lost and the old one still works, so renew again.
+   *
+   * @throws BrokerResponseError with `INVALID_REQUEST` outside the window, without a client certificate, or if the
+   *   cluster has no renewal CA
+   */
+  async renewCertificate(
+    files?: { readonly certPemFile: string; readonly keyPemFile: string },
+    options: CallOptions = {},
+  ): Promise<RenewedCertificate> {
+    this.checkOpen();
+    const key = newRenewalKey();
+    const req: Request = { type: "RenewCertificate", csr: key.csr };
+    const r = await this.retrying(async () => {
+      const resp = await this.callAdmin(req);
+      if (resp.type !== "RenewCertificate") {
+        throw Attempt.retry(`unexpected response ${resp.type}`);
+      }
+      this.adminAnswer(resp.error, resp.leaderHint, resp.errorMsg);
+      return resp;
+    }, options.signal);
+    const renewed: RenewedCertificate = {
+      keyPem: key.keyPem,
+      chainPem: r.chain.map((c) => pem("CERTIFICATE", c)).join(""),
+      notAfterMs: r.notAfterMs,
+    };
+    if (files !== undefined) {
+      writeRenewed(renewed, files.certPemFile, files.keyPemFile);
+    }
+    return renewed;
+  }
+
+  /** Looks at the certificate file now and every `renewCheckMs`; renews once its window is open. Failures: again a minute later. */
+  private async keepRenewed(certPemFile: string, keyPemFile: string): Promise<void> {
+    const signal = this.stopRenewing.signal;
+    while (!signal.aborted) {
+      let wait = this.cfg.renewCheckMs;
+      try {
+        if (renewalDue(certPemFile)) {
+          await this.renewCertificate({ certPemFile, keyPemFile }, { signal });
+        }
+        this.lastRenewalFailure = null;
+      } catch (e) {
+        if (signal.aborted) {
+          return;
+        }
+        this.lastRenewalFailure = e;
+        wait = Math.min(wait, 60_000);
+      }
+      try {
+        await sleep(wait, undefined, { signal, ref: false });
+      } catch {
+        return;
+      }
+    }
   }
 
   // ---- metadata ----

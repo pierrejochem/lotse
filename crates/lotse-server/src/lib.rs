@@ -25,7 +25,7 @@ mod txns;
 pub mod wire;
 
 pub use access::DEFAULT_TENANT;
-pub use auth::{AuthConfig, ClientCas, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal};
+pub use auth::{AuthConfig, ClientCas, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, OidcConfig, Principal, RenewalSlot};
 pub use client::{QueueConfig, StreamConfig};
 pub use disk::FreeLimit;
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};

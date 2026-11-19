@@ -27,5 +27,14 @@ export { type Bytes, buildBatch, type OutHeader, type OutMessage, type ProduceRe
 export { OffsetAt } from "./offset-at.js";
 export { type DeadLetter, Delivery } from "./delivery.js";
 export { offsetRanges } from "./offset-ranges.js";
+export {
+  mayRenew,
+  newRenewalKey,
+  RENEWAL_WINDOW_MS,
+  renewalDue,
+  renewalWindowOpensMs,
+  type RenewedCertificate,
+  writeRenewed,
+} from "./renewal.js";
 export { type ConsumerCallOptions, QueueConsumer } from "./queue-consumer.js";
 export { DEFAULT_CREDIT, type QueueOptions, type SubscribeOptions } from "./queue-options.js";

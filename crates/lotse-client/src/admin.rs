@@ -533,6 +533,61 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         .await
     }
 
+    /// Renews the client certificate the connections are made with (ADR
+    /// 0123): makes a new P-256 key, asks the metadata leader to sign a
+    /// certificate for it with the cluster's renewal CA, and returns the
+    /// key and the certificate chain as PEM, for the caller to write where
+    /// its TLS configuration reads them. The certificate must be in its
+    /// renewal window: its last 30 days, or past two thirds of its
+    /// validity. A retry after a lost answer renews again; the earlier
+    /// renewal then stops working, so use only the one returned.
+    pub async fn renew_certificate(&self) -> Result<RenewedCertificate, ClientError> {
+        let key = loop {
+            let mut secret = [0u8; 32];
+            self.rt.fill_secret(&mut secret);
+            if let Some(key) = lotse_auth::renew::new_key(&secret, "renewal") {
+                break key.map_err(|e| ClientError::Broker {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Some(e.to_string()),
+                })?;
+            }
+        };
+        let req = Request::RenewCertificate(lotse_proto::RenewCertificateRequest { csr: key.csr.into() });
+        let r = self
+            .retrying(|| async {
+                match self.call_admin(&req).await? {
+                    Response::RenewCertificate(r) => match self.admin_answer(r.error, r.leader_hint) {
+                        Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                            Err(Attempt::Fail(ClientError::Broker { code, message: r.error_msg.clone() }))
+                        }
+                        Err(e) => Err(e),
+                        Ok(()) => Ok(r),
+                    },
+                    other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+                }
+            })
+            .await?;
+        let chain_pem = r.chain.iter().map(|c| lotse_auth::renew::pem("CERTIFICATE", c)).collect();
+        Ok(RenewedCertificate { key_pem: key.key_pem, chain_pem, not_after_ms: r.not_after_ms })
+    }
+
+    /// Renews the client certificate as [`Client::renew_certificate`] does,
+    /// but only once its window is open by this client's clock: `leaf` is
+    /// the certificate the connections are made with, DER. `None` before
+    /// the window opens, without asking the cluster, so a timer may call it
+    /// as often as it likes (ADR 0123).
+    pub async fn renew_certificate_if_due(&self, leaf: &[u8]) -> Result<Option<RenewedCertificate>, ClientError> {
+        let facts = lotse_auth::x509::facts(leaf).ok_or_else(|| ClientError::Broker {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Some("the certificate to renew does not parse as X.509".into()),
+        })?;
+        let now = u64::try_from(self.rt.unix_time().as_millis()).unwrap_or(u64::MAX);
+        if !lotse_auth::renew::may_renew(facts.not_before_ms, facts.not_after_ms, now) {
+            return Ok(None);
+        }
+        self.renew_certificate().await.map(Some)
+    }
+
     /// The certificate requests, newest first (ADR 0092): all of them for a
     /// cluster admin, the caller's own for anyone else (ADR 0119).
     pub async fn describe_certificate_requests(
@@ -795,4 +850,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             }
         }
     }
+}
+
+/// A renewed client certificate (ADR 0123).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenewedCertificate {
+    /// The new private key, PKCS #8 PEM.
+    pub key_pem: String,
+    /// The new certificate and then the renewal CA's, PEM: what to show
+    /// with the new key from now on.
+    pub chain_pem: String,
+    /// Millisecond the new certificate stops being valid in, since the Unix
+    /// epoch.
+    pub not_after_ms: u64,
 }

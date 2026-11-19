@@ -35,6 +35,8 @@ public final class ClientConfig {
     private final Credentials credentials;
     private final TlsConfig tls;
     private final boolean plaintextOnLoopback;
+    private final List<java.nio.file.Path> renewCertificateFiles;
+    private final Duration renewCheck;
 
     private ClientConfig(Builder b) {
         this.bootstrap = List.copyOf(b.bootstrap);
@@ -52,6 +54,8 @@ public final class ClientConfig {
         this.credentials = b.credentials;
         this.tls = b.tls;
         this.plaintextOnLoopback = b.plaintextOnLoopback;
+        this.renewCertificateFiles = b.renewCertificateFiles;
+        this.renewCheck = b.renewCheck;
     }
 
     /**
@@ -142,6 +146,19 @@ public final class ClientConfig {
         return credentials;
     }
 
+    /**
+     * The certificate and key files the client renews by itself in the renewal window (ADR 0123), certificate first,
+     * or {@code null} if it does not.
+     */
+    public List<java.nio.file.Path> renewCertificateFiles() {
+        return renewCertificateFiles;
+    }
+
+    /** How often the client looks whether its certificate may be renewed, when it renews by itself. */
+    public Duration renewCheck() {
+        return renewCheck;
+    }
+
     ConnectionOptions connectionOptions() {
         ConnectionOptions.Builder b = ConnectionOptions.builder().requestTimeout(requestTimeout).credentials(credentials);
         if (tls != null) {
@@ -169,6 +186,8 @@ public final class ClientConfig {
         private Credentials credentials;
         private TlsConfig tls;
         private boolean plaintextOnLoopback;
+        private List<java.nio.file.Path> renewCertificateFiles;
+        private Duration renewCheck = Duration.ofHours(1);
 
         private Builder(List<String> bootstrap) {
             for (String b : bootstrap) {
@@ -286,6 +305,27 @@ public final class ClientConfig {
         public Builder plaintextOnLoopback() {
             this.plaintextOnLoopback = true;
             this.tls = null;
+            return this;
+        }
+
+        /**
+         * Renews the client certificate in these files by itself (ADR 0123): the client looks at the certificate
+         * when it starts and every {@link #renewCheck}, and once its renewal window is open renews it over a
+         * connection and writes the new key and chain over the files. Give the same files to
+         * {@link TlsConfig.Builder#clientIdentity(java.nio.file.Path, java.nio.file.Path)}, which reads them again
+         * for the next connection. Off by default.
+         */
+        public Builder renewCertificate(java.nio.file.Path certPem, java.nio.file.Path keyPem) {
+            this.renewCertificateFiles = List.of(certPem, keyPem);
+            return this;
+        }
+
+        /** How often to look whether the certificate may be renewed; an hour by default. */
+        public Builder renewCheck(Duration every) {
+            if (every.isNegative() || every.isZero()) {
+                throw new IllegalArgumentException("renewCheck must be positive");
+            }
+            this.renewCheck = every;
             return this;
         }
 

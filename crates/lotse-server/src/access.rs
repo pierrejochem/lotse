@@ -294,6 +294,12 @@ impl Access {
                 Principal::User { .. } => Ok(()),
                 _ => admin(),
             },
+            // A user renews the certificate the connection was made with;
+            // the handler checks that it was (ADR 0123).
+            Request::RenewCertificate(_) => match p {
+                Principal::User { .. } => Ok(()),
+                _ => Err(format!("{p} has no client certificate to renew")),
+            },
             Request::DescribeNodes(_) => {
                 if self.sees_cluster(p) {
                     Ok(())

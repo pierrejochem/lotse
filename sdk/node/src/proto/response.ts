@@ -164,6 +164,17 @@ export interface DescribeCertificatesResponse {
   readonly nowMs: bigint;
   readonly certificates: readonly m.CertificateEntry[];
 }
+/** `RenewCertificate` (key 60): the renewed certificate (ADR 0123). The leader hint is the block of tagged fields. */
+export interface RenewCertificateResponse {
+  readonly type: "RenewCertificate";
+  readonly error: ErrorCodeValue;
+  readonly errorMsg: string | null;
+  /** The new certificate first, then the renewal CA's, DER. */
+  readonly chain: readonly Uint8Array[];
+  /** Milliseconds since the Unix epoch at which the new certificate stops being valid. */
+  readonly notAfterMs: bigint;
+  readonly leaderHint: m.LeaderHint | null;
+}
 /** `DescribeSessions` (key 59): a node's open client sessions, oldest first (ADR 0121). */
 export interface DescribeSessionsResponse {
   readonly type: "DescribeSessions";
@@ -257,6 +268,7 @@ export type Response =
   | DescribeUsersResponse
   | DescribeCertificatesResponse
   | DescribeSessionsResponse
+  | RenewCertificateResponse
   | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
   | DescribeRoleBindingsResponse
@@ -507,6 +519,13 @@ export function writeResponse(w: Writer, res: Response): void {
           .bytes(c.certificate)
           .u64(c.signedAtMs),
       );
+      return;
+    case "RenewCertificate":
+      w.u16(res.error)
+        .optString(res.errorMsg)
+        .array(res.chain, (w1, c) => w1.bytes(c))
+        .u64(res.notAfterMs);
+      m.putHint(w, res.leaderHint);
       return;
     case "DescribeSessions":
       w.u16(res.error).u32(res.nodeId).u64(res.nowMs);
@@ -824,6 +843,14 @@ export function readResponse(apiKey: number, r: Reader): Response {
         signedAtMs: r1.u64(),
       }));
       return { type: "DescribeCertificateRequests", error, leaderHint, nowMs, requests };
+    }
+    case ApiKey.RENEW_CERTIFICATE: {
+      const error = r.u16();
+      const errorMsg = r.optString();
+      // A certificate is at least its length prefix.
+      const chain = r.array(4, (r1) => r1.bytes());
+      const notAfterMs = r.u64();
+      return { type: "RenewCertificate", error, errorMsg, chain, notAfterMs, leaderHint: m.getHint(r) };
     }
     case ApiKey.DESCRIBE_SESSIONS: {
       const error = r.u16();

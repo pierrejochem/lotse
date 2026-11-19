@@ -61,6 +61,36 @@ pub struct AuthConfig {
     /// The cluster's CA certificates: a certificate the CA holder records
     /// must be signed by one of them (ADR 0096). Empty: none is taken.
     pub client_cas: ClientCas,
+    /// The renewal CA, if the node has one: the metadata leader renews
+    /// client certificates with it, and every node accepts a certificate
+    /// it issued only while the metadata group records it (ADR 0123).
+    pub renewal: RenewalSlot,
+}
+
+/// The renewal CA (ADR 0123), shared with whoever reloads it.
+#[derive(Debug, Clone, Default)]
+pub struct RenewalSlot(Arc<Mutex<Option<Arc<lotse_auth::renew::RenewalCa>>>>);
+
+impl RenewalSlot {
+    /// This renewal CA.
+    pub fn new(ca: Option<lotse_auth::renew::RenewalCa>) -> RenewalSlot {
+        RenewalSlot(Arc::new(Mutex::new(ca.map(Arc::new))))
+    }
+
+    /// Replaces it, for every holder of a clone.
+    pub fn set(&self, ca: Option<lotse_auth::renew::RenewalCa>) {
+        *self.0.lock().expect("renewal lock") = ca.map(Arc::new);
+    }
+
+    /// It now.
+    pub fn get(&self) -> Option<Arc<lotse_auth::renew::RenewalCa>> {
+        self.0.lock().expect("renewal lock").clone()
+    }
+
+    /// Whether `issuer` (an issuer fingerprint) names the renewal CA.
+    pub(crate) fn issued(&self, issuer: &[u8; 32]) -> bool {
+        self.get().is_some_and(|ca| lotse_auth::renew::issued_by(ca.certificate()).contains(issuer))
+    }
 }
 
 /// The cluster's CA certificates (DER), shared with whoever reloads them,
@@ -100,6 +130,7 @@ impl AuthConfig {
             tenants: Vec::new(),
             resource_tenants: BTreeMap::new(),
             client_cas: ClientCas::default(),
+            renewal: RenewalSlot::default(),
         }
     }
 
@@ -199,6 +230,10 @@ pub(crate) struct Auth<R> {
     seen: Mutex<BTreeMap<CertKey, SeenCert>>,
     /// The node's open client sessions, for `DescribeSessions` (ADR 0121).
     pub(crate) sessions: OpenSessions,
+    /// Certificates the renewal CA issued and the principal each names, as
+    /// the metadata group last applied them (ADR 0123). A change wakes the
+    /// revocations' signal: a replaced one ends its connections.
+    renewed: Mutex<BTreeMap<CertKey, String>>,
     oidc: Option<Oidc<R>>,
 }
 
@@ -267,8 +302,25 @@ impl<R: Clock + Http + Clone> Auth<R> {
             certs: Mutex::new(BTreeSet::new()),
             seen: Mutex::new(BTreeMap::new()),
             sessions: OpenSessions::new(),
+            renewed: Mutex::new(BTreeMap::new()),
             oidc,
         })
+    }
+
+    /// Publishes the renewed certificates the metadata group applied.
+    pub(crate) fn set_renewed(&self, renewed: &BTreeMap<CertKey, crate::metadata::RenewedCert>) {
+        let now: BTreeMap<CertKey, String> = renewed.iter().map(|(k, r)| (k.clone(), r.principal.clone())).collect();
+        let mut r = self.renewed.lock().expect("renewed lock");
+        if *r != now {
+            *r = now;
+            std::mem::take(&mut self.revocations.lock().expect("revocations lock").1).set();
+        }
+    }
+
+    /// Whether the metadata group records `cert` as renewed for `principal`.
+    pub(crate) fn renewed_for(&self, cert: &CertInfo, principal: &str) -> bool {
+        let key = CertKey { issuer: cert.issuer, serial: cert.serial.clone() };
+        self.renewed.lock().expect("renewed lock").get(&key).is_some_and(|p| p == principal)
     }
 
     /// Publishes the runtime users the metadata group applied.
