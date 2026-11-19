@@ -1208,4 +1208,32 @@ public abstract record Response
             w.Tags(new[] { new Tag(TagReason, ByteString.Utf8(Message)) });
         }
     }
+
+    /// <summary>The renewed certificate (ADR 0123). The leader hint is the structure's block of tagged fields.</summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="ErrorMsg">Why, for a refusal, or <c>null</c>.</param>
+    /// <param name="Chain">The new certificate first, then the renewal CA's, DER.</param>
+    /// <param name="NotAfterMs">Milliseconds since the epoch at which the new certificate stops being valid.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    public sealed record RenewCertificate(
+        ErrorCode Error, string? ErrorMsg, IReadOnlyList<ByteString> Chain, ulong NotAfterMs, LeaderHint? LeaderHint)
+        : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code).OptString(ErrorMsg).Array(Chain, (w1, c) => w1.Bytes(c)).U64(NotAfterMs);
+            PutHint(w, LeaderHint);
+        }
+
+        internal static RenewCertificate Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            var errorMsg = r.OptString();
+            // A certificate is at least its length prefix.
+            var chain = r.Array(4, r1 => r1.Bytes());
+            var notAfterMs = r.U64();
+            return new RenewCertificate(error, errorMsg, chain, notAfterMs, GetHint(r));
+        }
+    }
 }

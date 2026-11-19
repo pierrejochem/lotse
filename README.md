@@ -102,6 +102,13 @@ rm /etc/lotse/node-2.pem /etc/lotse/node-2.key && lotse certs --config cluster.t
 lotse certs --config cluster.toml --revoke alice/alice.pem         # then copy crl.pem to every node
 ```
 
+Client certificates renew themselves once the cluster has a renewal CA: an intermediate under the cluster's CA that every node holds, which signs a new certificate for the same principal over a connection made with the old one, in its last 30 days or past two thirds of its validity. A certificate from it signs in only while the cluster has recorded it (ADR 0123):
+
+```sh
+lotse certs --config cluster.toml --renewal-ca                    # then add [tls] renewal_ca and copy both files to every node
+lotse certs --config cluster.toml --renew --if-due --cert alice/alice.pem --key alice/alice.key   # from a daily timer
+```
+
 To add a node, give it a `[[node]]` entry, make its certificate, announce it and start it with `--join`; to remove one, drain it. Its replicas move to other nodes, then it leaves the list and stops by itself (ADR 0048, ADR 0051). A new node fills up by itself: replicas and leadership move onto it until the nodes are even (ADR 0050).
 
 ```sh
@@ -194,7 +201,7 @@ None known. Report one as an issue.
 ### Not built yet
 
 - **Raft:** followers serve `Fetch` and `ListOffsets` in a client's zone and stop when they lag (ADR 0104, ADR 0116); committed offsets and admin reads still go to their leaders, and a reader sent to the leader returns to its zone only at its next metadata refresh.
-- **Certificates and sessions:** renewing a certificate over a connection made with it (a user asks again, ADR 0119); a notice to the CA holder other than the `/metrics` gauge and the console's count; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
+- **Certificates and sessions:** automatic renewal in the Rust client (it has `renew_certificate_if_due`, ADR 0123); a notice to the CA holder other than the `/metrics` gauge and the console's count; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
 - **Packages:** releases and the image are built only by GitHub Actions; the package targets systemd systems.
 

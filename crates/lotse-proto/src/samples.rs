@@ -382,6 +382,9 @@ pub fn requests() -> Vec<Request> {
         }),
         Request::CreatePartitions(CreatePartitionsRequest { resource_id: 1_099_511_627_776, count: 12 }),
         Request::DescribeSessions(DescribeSessionsRequest),
+        Request::RenewCertificate(RenewCertificateRequest {
+            csr: Bytes::from_static(b"0\x81\x9a stands for a PKCS #10 request"),
+        }),
         Request::Publish(PublishRequest {
             txn_id: None,
             timeout_ms: 5_000,
@@ -895,6 +898,26 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         revoked_at_ms: 1_749_500_000_000,
                     },
                 ],
+            }),
+        ),
+        (
+            ApiKey::RENEW_CERTIFICATE,
+            Response::RenewCertificate(RenewCertificateResponse {
+                error: ErrorCode::NONE,
+                error_msg: None,
+                leader_hint: None,
+                chain: vec![Bytes::from_static(b"the new certificate"), Bytes::from_static(b"the renewal CA")],
+                not_after_ms: 1_757_776_000_000,
+            }),
+        ),
+        (
+            ApiKey::RENEW_CERTIFICATE,
+            Response::RenewCertificate(RenewCertificateResponse {
+                error: ErrorCode::NOT_LEADER,
+                error_msg: None,
+                leader_hint: Some(LeaderHint { leader: 2, term: 7 }),
+                chain: vec![],
+                not_after_ms: 0,
             }),
         ),
         (

@@ -37,6 +37,9 @@ pub(super) struct Session<R> {
     cert: Option<CertInfo>,
     /// The principal that certificate names, when it authenticates (ADR 0091).
     cert_name: Option<String>,
+    /// The renewal CA issued that certificate: it holds only while the
+    /// metadata group records it (ADR 0123).
+    renewal_issued: bool,
     /// When the session ends; `None` for one that lasts the connection
     /// (a certificate, or no authentication required).
     until: Option<Instant>,
@@ -88,6 +91,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             (Some(PeerIdentity::Principal(name)), true) => Some(name.clone()),
             _ => None,
         };
+        let renewal_issued = cert_name.is_some() && cert.as_ref().is_some_and(|c| auth.cfg.renewal.issued(&c.issuer));
         let principal = match identity {
             Some(PeerIdentity::Node(id)) => Some(Principal::Node(id)),
             Some(PeerIdentity::Principal(name)) if auth.cfg.mtls => Some(Principal::User { name, groups: Vec::new() }),
@@ -103,6 +107,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             principal,
             cert,
             cert_name,
+            renewal_issued,
             until: None,
             sasl_name: None,
             since_ms: now_ms,
@@ -145,6 +150,26 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         // it then authenticates as (ADR 0090).
         self.cert.as_ref().is_some_and(|c| self.auth.cert_revoked(c))
             || self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
+            || self.unrecorded()
+    }
+
+    /// The renewal CA issued the connection's certificate, and the metadata
+    /// group does not record it for that principal (ADR 0123): not, or not
+    /// yet, or no longer, as when a later renewal of the same certificate
+    /// replaced it. Without the record a stolen renewal CA key mints
+    /// nothing that works.
+    fn unrecorded(&self) -> bool {
+        self.renewal_issued
+            && match (&self.cert, &self.cert_name) {
+                (Some(cert), Some(name)) => !self.auth.renewed_for(cert, name),
+                _ => true,
+            }
+    }
+
+    /// The client certificate the connection authenticated with and the
+    /// principal it names, for a renewal (ADR 0123).
+    pub(super) fn presented(&self) -> Option<(CertInfo, String)> {
+        Some((self.cert.clone()?, self.cert_name.clone()?))
     }
 
     /// Tells the node that the connection's certificate was accepted, for

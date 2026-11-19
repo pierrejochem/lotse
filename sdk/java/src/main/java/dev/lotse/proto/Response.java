@@ -1385,4 +1385,39 @@ public sealed interface Response {
             w.tags(List.of(new Tag(Messages.TAG_REASON, ByteString.utf8(message))));
         }
     }
+
+    /**
+     * {@code RenewCertificate} (60): the renewed certificate (ADR 0123). The leader hint is the structure's block of
+     * tagged fields.
+     *
+     * @param error the outcome
+     * @param errorMsg why, for a refusal, or {@code null}
+     * @param chain the new certificate first, then the renewal CA's, DER
+     * @param notAfterMs milliseconds since the Unix epoch at which the new certificate stops being valid, a
+     *     {@code u64}
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     */
+    record RenewCertificate(
+            ErrorCode error, String errorMsg, List<ByteString> chain, long notAfterMs, LeaderHint leaderHint)
+            implements Response {
+        /** Creates the response. */
+        public RenewCertificate {
+            chain = List.copyOf(chain);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code()).optString(errorMsg).array(chain, Writer::bytes).u64(notAfterMs);
+            Messages.putHint(w, leaderHint);
+        }
+
+        static RenewCertificate read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            String errorMsg = r.optString();
+            // A certificate is at least its length prefix.
+            List<ByteString> chain = r.array(4, Reader::bytes);
+            long notAfterMs = r.u64();
+            return new RenewCertificate(error, errorMsg, chain, notAfterMs, Messages.getHint(r));
+        }
+    }
 }

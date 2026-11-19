@@ -41,6 +41,12 @@ internal sealed class Certs
         ClientKey = Path.Combine(dir, "clients", "alice.key");
     }
 
+    /// <summary>The certificate file <c>lotse certs</c> wrote for <paramref name="user"/>.</summary>
+    internal string CertOf(string user) => Path.Combine(Dir, "clients", user + ".pem");
+
+    /// <summary>The key file <c>lotse certs</c> wrote for <paramref name="user"/>.</summary>
+    internal string KeyOf(string user) => Path.Combine(Dir, "clients", user + ".key");
+
     /// <param name="bin">The <c>lotse</c> executable.</param>
     /// <param name="extra">More lines for the <c>[auth]</c> section, such as <c>max_session_s = 3</c>.</param>
     internal static async Task<Certs> CreateAsync(string bin, string extra)
@@ -51,10 +57,18 @@ internal sealed class Certs
             certs.Config,
             $"[cluster]\ndata_dir = \"{dir}/data/node-{{id}}\"\n\n"
             + $"[tls]\nca = \"{dir}/tls/ca.pem\"\ncert = \"{dir}/tls/node-{{id}}.pem\"\n"
-            + $"key = \"{dir}/tls/node-{{id}}.key\"\n\n[retention]\nms = -1\n\n"
+            + $"key = \"{dir}/tls/node-{{id}}.key\"\nrenewal_ca = \"{dir}/tls/renewal-ca.pem\"\n\n[retention]\nms = -1\n\n"
             + $"[auth]\nadmins = [\"alice\"]\n{extra}\n[[node]]\nid = 1\npeer = \"127.0.0.1:{certs.PeerPort}\"\nclient = \"127.0.0.1:{certs.ClientPort}\"\n");
         await LotseBinary.RunAsync(bin, "certs", "--config", certs.Config);
         await LotseBinary.RunAsync(bin, "certs", "--config", certs.Config, "--client", "alice", "--out", Path.Combine(dir, "clients"));
+        // For renewal (ADR 0123): the renewal CA, and two users whose certificates are in their window from the start,
+        // 20 days long.
+        await LotseBinary.RunAsync(bin, "certs", "--config", certs.Config, "--renewal-ca");
+        foreach (string user in new[] { "carol", "dave" })
+        {
+            await LotseBinary.RunAsync(
+                bin, "certs", "--config", certs.Config, "--client", user, "--out", Path.Combine(dir, "clients"), "--days", "20");
+        }
         return certs;
     }
 

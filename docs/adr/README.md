@@ -95,7 +95,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0089 | [Console users and access](0089-console-users-and-access.md) | Accepted |
 | 0090 | [Revoking client certificates in the metadata group](0090-revoking-client-certificates-in-the-metadata-group.md) | Accepted |
 | 0091 | [Client certificate inventory](0091-client-certificate-inventory.md) | Accepted |
-| 0092 | [Requesting and signing client certificates](0092-requesting-and-signing-client-certificates.md) | Accepted |
+| 0092 | [Requesting and signing client certificates](0092-requesting-and-signing-client-certificates.md) | Accepted, in part changed by [0123](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) |
 | 0093 | [Rust 1.88 as the minimum version](0093-rust-1-88-as-the-minimum-version.md) | Accepted |
 | 0094 | [Segment index files and reads without copies](0094-segment-index-files-and-reads-without-copies.md) | Accepted |
 | 0095 | [A new group starts on its preferred node](0095-a-new-group-starts-on-its-preferred-node.md) | Accepted |
@@ -122,9 +122,10 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0116 | [Followers answer ListOffsets and stop serving when they lag](0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md) | Accepted |
 | 0117 | [Prometheus metrics and health endpoints on every node](0117-prometheus-metrics-and-health-endpoints-on-every-node.md) | Accepted |
 | 0118 | [Queue length limits](0118-queue-length-limits.md) | Accepted |
-| 0119 | [Users request certificates in their own name](0119-users-request-certificates-in-their-own-name.md) | Accepted |
+| 0119 | [Users request certificates in their own name](0119-users-request-certificates-in-their-own-name.md) | Accepted, in part changed by [0123](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) |
 | 0120 | [Queue metrics per priority level and consumer state](0120-queue-metrics-per-priority-level-and-consumer-state.md) | Accepted |
 | 0121 | [The console places partitions and lists open sessions](0121-the-console-places-partitions-and-lists-open-sessions.md) | Accepted |
 | 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted |
+| 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

@@ -1133,3 +1133,132 @@ fn open_sessions_are_listed_to_admins_and_to_their_own_user() {
         });
     });
 }
+
+/// The renewal CA (ADR 0123): an intermediate under the cluster's CA (seed
+/// 1) with a P-256 key from a fixed seed.
+fn renewal_ca() -> lotse_auth::renew::RenewalCa {
+    let key = lotse_auth::renew::new_key(&[7; 32], "renewal").unwrap().unwrap();
+    let pair = rcgen::KeyPair::from_pem(&key.key_pem).unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    params.distinguished_name.push(rcgen::DnType::CommonName, "Lotse renewal CA");
+    params.serial_number = Some(rcgen::SerialNumber::from(2u64));
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    let cert = params.signed_by(&pair, &test_ca(1).0).unwrap();
+    lotse_auth::renew::RenewalCa::from_pem(&cert.pem(), &key.key_pem).unwrap()
+}
+
+/// A client showing `cert` for `name`.
+fn client_with_cert(rt: &SimRuntime, host: &str, name: &str, cert: &CertInfo) -> Client<SimRuntime> {
+    Client::new(
+        rt.node(host).with_identity(Some(PeerIdentity::Principal(name.into()))).with_cert(cert.clone()),
+        ClientConfig {
+            retry_for: Duration::from_secs(10),
+            ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+        },
+    )
+}
+
+/// What a connection shows for a renewed certificate in PEM.
+fn shown(chain_pem: &str) -> CertInfo {
+    let der = x509_parser::pem::parse_x509_pem(chain_pem.as_bytes()).unwrap().1.contents;
+    let f = lotse_auth::x509::facts(&der).unwrap();
+    CertInfo { issuer: f.issuer, serial: f.serial, not_before_ms: f.not_before_ms, not_after_ms: f.not_after_ms }
+}
+
+#[test]
+fn a_certificate_is_renewed_over_its_connection_and_works_only_while_recorded() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let ca = renewal_ca();
+            let renewal_issuer = lotse_auth::renew::issued_by(ca.certificate())[0];
+            let nodes =
+                cluster_with(&rt, AuthConfig { renewal: lotse_server::RenewalSlot::new(Some(ca)), ..auth() }).await;
+            let day = 86_400_000u64;
+            let now = u64::try_from(rt.unix_time().as_millis()).unwrap();
+            let cert = |serial: u8, not_before_ms: u64, not_after_ms: u64| CertInfo {
+                issuer: [1; 32],
+                serial: vec![serial],
+                not_before_ms,
+                not_after_ms,
+            };
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+            let invalid = |r: &Result<lotse_client::RenewedCertificate, ClientError>, why: &str| {
+                assert!(
+                    matches!(r, Err(ClientError::Broker { code: ErrorCode::INVALID_REQUEST, message: Some(m) }) if m.contains(why)),
+                    "{r:?}"
+                );
+            };
+
+            // Not yet in its window: a year long, three months in.
+            let early = client_with_cert(&rt, "e", "alice", &cert(1, now - 90 * day, now + 275 * day));
+            invalid(&early.renew_certificate().await, "two thirds");
+            // No certificate at all: a SCRAM user has nothing to renew.
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            invalid(&admin.renew_certificate().await, "only a connection made with a client certificate");
+            // A certificate connection that signed in with SCRAM as someone
+            // else acts as them, and renews nothing in the certificate's name.
+            let switched = Client::new(
+                rt.node("w")
+                    .with_identity(Some(PeerIdentity::Principal("alice".into())))
+                    .with_cert(cert(3, now - 355 * day, now + 10 * day)),
+                ClientConfig {
+                    retry_for: Duration::from_secs(10),
+                    credentials: scram("admin", "admin-pw"),
+                    ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+                },
+            );
+            let got = switched.renew_certificate().await;
+            assert!(matches!(&got, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{got:?}");
+
+            // In its window: the last 10 days.
+            let old = cert(2, now - 355 * day, now + 10 * day);
+            let alice = client_with_cert(&rt, "a", "alice", &old);
+            let first = alice.renew_certificate().await.expect("renewed");
+            let renewed = shown(&first.chain_pem);
+            assert_eq!(renewed.issuer, renewal_issuer);
+            assert_eq!(first.not_after_ms, renewed.not_after_ms);
+            assert_eq!(renewed.not_after_ms / 1000, (now + 90 * day) / 1000);
+            assert_eq!(first.chain_pem.matches("BEGIN CERTIFICATE").count(), 2);
+            assert!(first.key_pem.contains("BEGIN PRIVATE KEY"));
+
+            // It signs in on every node once the record reached it.
+            rt.sleep(TICK * 20).await;
+            let mut conns = Vec::new();
+            for (i, host) in ["r1", "r2", "r3"].into_iter().enumerate() {
+                let rt2 = rt.node(host).with_identity(Some(PeerIdentity::Principal("alice".into()))).with_cert(renewed.clone());
+                let conn = rt2.connect(&format!("n{}:9000", i + 1), Link::Client).await.unwrap();
+                assert!(matches!(call(&rt, &conn, i as u32, &meta).await, Response::Metadata(_)), "node {}", i + 1);
+                conns.push(conn);
+            }
+            // As anyone else, the same certificate does not.
+            let rt2 = rt.node("r4").with_identity(Some(PeerIdentity::Principal("mallory".into()))).with_cert(renewed.clone());
+            let other = rt2.connect("n1:9000", Link::Client).await.unwrap();
+            assert!(conn_closed(&rt, &other).await, "a recorded certificate holds only for its principal");
+            // One the renewal CA issued that the cluster never recorded does not.
+            let unrecorded = CertInfo { serial: vec![9, 9, 9], ..renewed.clone() };
+            let rt2 = rt.node("r5").with_identity(Some(PeerIdentity::Principal("alice".into()))).with_cert(unrecorded);
+            let forged = rt2.connect("n2:9000", Link::Client).await.unwrap();
+            assert!(conn_closed(&rt, &forged).await, "an unrecorded certificate from the renewal CA");
+
+            // The inventory lists it.
+            let listed = admin.describe_certificates().await.unwrap();
+            assert!(listed.certificates.iter().any(|c| c.serial.as_ref() == renewed.serial.as_slice() && c.principal == "alice"));
+
+            // Renewing the same certificate again replaces the first renewal:
+            // its connections end; the second works.
+            let second = alice.renew_certificate().await.expect("renewed again");
+            let again = shown(&second.chain_pem);
+            assert_ne!(again.serial, renewed.serial);
+            for conn in &conns {
+                assert!(conn_closed(&rt, conn).await, "the replaced renewal's connections end");
+            }
+            rt.sleep(TICK * 20).await;
+            let rt2 = rt.node("r6").with_identity(Some(PeerIdentity::Principal("alice".into()))).with_cert(again.clone());
+            let conn = rt2.connect("n3:9000", Link::Client).await.unwrap();
+            assert!(matches!(call(&rt, &conn, 40, &meta).await, Response::Metadata(_)));
+            stop(nodes).await;
+        });
+    });
+}

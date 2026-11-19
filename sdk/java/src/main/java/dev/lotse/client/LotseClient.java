@@ -28,6 +28,7 @@ import dev.lotse.record.BatchBuilder;
 import dev.lotse.record.ByteString;
 import dev.lotse.record.Header;
 import dev.lotse.record.RecordFormatException;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -148,6 +149,9 @@ public final class LotseClient implements AutoCloseable {
             t.setDaemon(true);
             return t;
         });
+        if (config.renewCertificateFiles() != null) {
+            executor.execute(this::keepRenewed);
+        }
     }
 
     /** Closes every connection and stops the client's threads. Calls in progress fail. */
@@ -1697,6 +1701,88 @@ public final class LotseClient implements AutoCloseable {
         checkOpen();
         adminChange(new Request.RevokeCertificate(
                 ByteString.copyOf(issuer), ByteString.copyOf(serial), notAfterMs, reason));
+    }
+
+    /**
+     * Renews the client certificate this client's connections are made with (ADR 0123): makes a new P-256 key, has
+     * the metadata leader sign a certificate for it naming the same principal, and returns the key and chain. The
+     * certificate must be in its renewal window: its last 30 days, or past two thirds of its validity
+     * ({@link CertificateRenewal#mayRenew}). A retry after a lost answer renews again; the earlier renewal then stops
+     * working, so use only the one returned.
+     *
+     * @throws ClientException.Broker with {@code INVALID_REQUEST} outside the window, without a client certificate,
+     *     or if the cluster has no renewal CA
+     */
+    public RenewedCertificate renewCertificate() {
+        checkOpen();
+        CertificateRenewal.NewKey key = CertificateRenewal.newKey();
+        Request req = new Request.RenewCertificate(ByteString.copyOf(key.csr()));
+        Response.RenewCertificate r = retrying(() -> {
+            Response resp = callAdmin(req);
+            if (!(resp instanceof Response.RenewCertificate c)) {
+                throw Attempt.retry("unexpected response " + resp);
+            }
+            adminAnswer(c.error(), c.leaderHint(), c.errorMsg());
+            return c;
+        });
+        List<byte[]> chain = new ArrayList<>();
+        for (ByteString c : r.chain()) {
+            chain.add(c.toByteArray());
+        }
+        return new RenewedCertificate(key.keyPem(), CertificateRenewal.chainPem(chain), r.notAfterMs());
+    }
+
+    /**
+     * Renews as {@link #renewCertificate()} does and writes the new key, then the new chain, over the files (each
+     * moved into place whole). A {@link dev.lotse.net.TlsConfig} built from these files uses them from the next
+     * connection on.
+     *
+     * @throws java.io.UncheckedIOException if a file cannot be written; the renewed certificate is then lost and the
+     *     old one still works, so renew again
+     */
+    public RenewedCertificate renewCertificate(Path certPem, Path keyPem) {
+        RenewedCertificate renewed = renewCertificate();
+        try {
+            CertificateRenewal.write(renewed, certPem, keyPem);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException("cannot write the renewed certificate: " + e.getMessage(), e);
+        }
+        return renewed;
+    }
+
+    /** Why the last automatic renewal failed, or {@code null} if none has since one succeeded. */
+    public Exception renewalFailure() {
+        return renewalFailure;
+    }
+
+    private volatile Exception renewalFailure;
+
+    /**
+     * With {@link ClientConfig.Builder#renewCertificate}: looks at the certificate file now and every
+     * {@link ClientConfig#renewCheck()}, and renews it once its window is open. A failure is tried again a minute
+     * later.
+     */
+    private void keepRenewed() {
+        Path cert = cfg.renewCertificateFiles().get(0);
+        Path key = cfg.renewCertificateFiles().get(1);
+        while (!closed) {
+            long wait = cfg.renewCheck().toMillis();
+            try {
+                if (CertificateRenewal.due(cert, System.currentTimeMillis())) {
+                    renewCertificate(cert, key);
+                }
+                renewalFailure = null;
+            } catch (RuntimeException | java.io.IOException e) {
+                renewalFailure = e;
+                wait = Math.min(wait, 60_000);
+            }
+            try {
+                Thread.sleep(wait);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     /**

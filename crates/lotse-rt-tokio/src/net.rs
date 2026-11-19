@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 
 use crate::TokioRuntime;
-use crate::tls::{TlsConfig, identity_of};
+use crate::tls::{TlsConfig, chain_identity};
 
 /// How a runtime talks to the network.
 #[derive(Debug, Clone)]
@@ -226,7 +226,7 @@ fn checked(
     link: Link,
     certs: Option<&[rustls::pki_types::CertificateDer<'static>]>,
 ) -> io::Result<Option<PeerIdentity>> {
-    let identity = certs.and_then(|c| c.first()).and_then(identity_of);
+    let identity = certs.and_then(chain_identity);
     if link == Link::Node && !matches!(identity, Some(PeerIdentity::Node(_))) {
         return Err(io::Error::new(
             ErrorKind::PermissionDenied,

@@ -105,12 +105,26 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     {
         _cfg = config ?? throw new ArgumentNullException(nameof(config));
         _pool = new ConnectionPool(config.ConnectionOptions());
+        if (config.RenewCertificateFiles is { } files)
+        {
+            CancellationToken stop = _stopRenewing.Token;
+            _ = Task.Run(() => KeepRenewedAsync(files.CertPemFile, files.KeyPemFile, stop));
+        }
     }
+
+    /// <summary>Stops the automatic renewal when the client closes.</summary>
+    private readonly CancellationTokenSource _stopRenewing = new();
 
     /// <summary>Closes every connection. Calls in progress fail.</summary>
     public void Dispose()
     {
+        if (_closed)
+        {
+            return;
+        }
         _closed = true;
+        _stopRenewing.Cancel();
+        _stopRenewing.Dispose();
         _pool.Dispose();
     }
 
