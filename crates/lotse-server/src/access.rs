@@ -152,6 +152,7 @@ impl Access {
                 Request::WriteTxnMarkers(_)
                 | Request::SettleVoters(_)
                 | Request::RecordCertificates(_)
+                | Request::ReportDisk(_)
                 | Request::DeadLetter(_)
                 | Request::VerifyTxn(_)
                 | Request::CheckEmpty(_),
@@ -169,12 +170,13 @@ impl Access {
             (_, Request::WriteTxnMarkers(_)) => return Err("only broker nodes write transaction markers".into()),
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
             (_, Request::RecordCertificates(_)) => return Err("only broker nodes report client certificates".into()),
+            (_, Request::ReportDisk(_)) => return Err("only broker nodes report their disk".into()),
             (_, Request::DeadLetter(_)) => return Err("only broker nodes forward dead letters".into()),
             (_, Request::VerifyTxn(_)) => return Err("only broker nodes verify transactions".into()),
             (_, Request::CheckEmpty(_)) => return Err("only broker nodes ask whether a partition is empty".into()),
             (Principal::Node(id), _) => {
                 return Err(format!(
-                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters and client certificates, forward dead letters, verify transactions, check partitions for a delete and write what it publishes"
+                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters, client certificates and its disk, forward dead letters, verify transactions, check partitions for a delete and write what it publishes"
                 ));
             }
             (Principal::Anonymous, _) => return Ok(()),
@@ -314,6 +316,7 @@ impl Access {
             | Request::WriteTxnMarkers(_)
             | Request::SettleVoters(_)
             | Request::RecordCertificates(_)
+            | Request::ReportDisk(_)
             | Request::DeadLetter(_)
             | Request::VerifyTxn(_)
             | Request::CheckEmpty(_)

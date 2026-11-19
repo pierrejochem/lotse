@@ -197,6 +197,12 @@ pub struct DiskSection {
     /// the larger of 1 GiB and 5 %.
     #[serde(default)]
     pub free_limit: Option<SizeOrShare>,
+    /// How often a node reads its data volume's free space, ms (default
+    /// 1,000; ADR 0124). A node that crosses the limit tells the metadata
+    /// group at its next read, so this is most of the delay before the
+    /// leaders of its groups refuse new data.
+    #[serde(default)]
+    pub check_interval_ms: Option<u64>,
 }
 
 /// A number of bytes, or text with a unit or a percent sign.
@@ -389,6 +395,11 @@ impl ClusterFile {
         if self.cluster.follower_max_lag_ms == Some(0) {
             return invalid("cluster.follower_max_lag_ms must be at least 1".into());
         }
+        if let Some(ms) = self.disk.check_interval_ms
+            && !(10..=60_000).contains(&ms)
+        {
+            return invalid(format!("disk.check_interval_ms is {ms}: give 10 to 60000 (10 ms to a minute)"));
+        }
         if self.producers.expiration_ms == Some(0) {
             return invalid("producers.expiration_ms must be at least 1".into());
         }
@@ -525,6 +536,10 @@ impl ClusterFile {
                 Some(l) => l.free_limit().map_err(ConfigError::Invalid)?,
                 None => lotse_server::FreeLimit::default(),
             },
+            disk_check_interval: self
+                .disk
+                .check_interval_ms
+                .map_or(lotse_server::DEFAULT_DISK_CHECK_INTERVAL, Duration::from_millis),
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

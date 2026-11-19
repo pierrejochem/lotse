@@ -95,6 +95,20 @@ fn the_disk_limit_has_a_default_and_takes_bytes_or_a_share() {
 }
 
 #[test]
+fn the_disk_is_read_every_second_unless_set() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.disk_check_interval, lotse_server::DEFAULT_DISK_CHECK_INTERVAL);
+    let read = |v: &str| {
+        let f = ClusterFile::parse(&format!("{THREE}\n[disk]\ncheck_interval_ms = {v}\n"), "t")?;
+        Ok::<_, ConfigError>(f.node_config(1)?.disk_check_interval)
+    };
+    assert_eq!(read("250").unwrap(), std::time::Duration::from_millis(250));
+    for bad in ["0", "9", "60001"] {
+        assert!(read(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn producers_have_defaults_and_may_be_set() {
     let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
     assert_eq!(c.max_producers, lotse_server::DEFAULT_MAX_PRODUCERS);

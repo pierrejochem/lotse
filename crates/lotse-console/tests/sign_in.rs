@@ -285,6 +285,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
         // Real disks: what the machine has free must not decide (ADR 0122).
         disk_free_limit: lotse_server::FreeLimit::OFF,
+        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth,

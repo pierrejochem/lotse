@@ -121,6 +121,7 @@ async fn the_console_shows_a_real_cluster() {
             follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
             // One byte: whatever the machine's disk, never low (ADR 0122).
             disk_free_limit: lotse_server::FreeLimit { bytes: 1, permille: 0 },
+            disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
             retention: lotse_server::RetentionConfig::keep(),
             join: false,
             auth: lotse_server::AuthConfig::none(),
