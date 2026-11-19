@@ -73,6 +73,20 @@ The example below creates a stream, writes ten messages and reads them back. It 
 
 The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`.
 
+### Renewing the client certificate
+
+On a cluster with a renewal CA, a client that signs in with a certificate renews it in its window: its last 30 days, or past two thirds of its validity ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)).
+
+```java
+TlsConfig tls = TlsConfig.fromFiles(ca, cert, key);   // reads the files again when they change
+LotseClient client = new LotseClient(ClientConfig.builder("10.0.0.1:9000")
+        .tls(tls)
+        .renewCertificate(cert, key)                   // renews by itself in the window; looks every hour
+        .build());
+```
+
+`renewCertificate(cert, key)` on the client renews once and writes the new key, then the new chain, over the files; `renewCertificate()` only returns them. `CertificateRenewal.due(cert, now)` says whether the window is open. `renewalFailure()` tells why the last automatic renewal failed. Connections made after the files changed show the new certificate; the old one keeps working until it expires.
+
 ## Kotlin
 
 `dev.lotse.kotlin` wraps the Java client: every call is a `suspend` function that runs the blocking Java call on `Dispatchers.IO`.

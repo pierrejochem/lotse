@@ -263,6 +263,99 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
+    /// Renews the client certificate this client's connections are made with (ADR 0123): makes a new P-256 key, has the
+    /// metadata leader sign a certificate for it naming the same principal, and returns the key and chain. The certificate
+    /// must be in its renewal window: its last 30 days, or past two thirds of its validity
+    /// (<see cref="CertificateRenewal.MayRenew"/>). A retry after a lost answer renews again; the earlier renewal then
+    /// stops working, so use only the one returned.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the call.</param>
+    /// <exception cref="BrokerErrorException"><c>INVALID_REQUEST</c> outside the window, without a client certificate, or if the cluster has no renewal CA.</exception>
+    public async Task<RenewedCertificate> RenewCertificateAsync(CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        (string keyPem, byte[] csr) = CertificateRenewal.NewKey();
+        var req = new Request.RenewCertificate(ByteString.CopyOf(csr));
+        Response.RenewCertificate renewed = await RetryingAsync<Response.RenewCertificate>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                if (r is not Response.RenewCertificate c)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(c.Error, c.LeaderHint, c.ErrorMsg);
+                return c;
+            },
+            cancellationToken).ConfigureAwait(false);
+        var chain = new System.Text.StringBuilder();
+        foreach (ByteString c in renewed.Chain)
+        {
+            chain.Append(CertificateRenewal.Pem("CERTIFICATE", c.Span));
+        }
+        return new RenewedCertificate(keyPem, chain.ToString(), renewed.NotAfterMs);
+    }
+
+    /// <summary>
+    /// Renews as <see cref="RenewCertificateAsync(CancellationToken)"/> does and writes the new key, then the new chain,
+    /// over the files (each moved into place whole). A <see cref="TlsConfig"/> built from these files uses them from the
+    /// next connection on. If a file cannot be written the renewed certificate is lost and the old one still works, so
+    /// renew again.
+    /// </summary>
+    /// <param name="certPemFile">The certificate file the client's TLS reads.</param>
+    /// <param name="keyPemFile">The key file the client's TLS reads.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<RenewedCertificate> RenewCertificateAsync(
+        string certPemFile, string keyPemFile, CancellationToken cancellationToken = default)
+    {
+        RenewedCertificate renewed = await RenewCertificateAsync(cancellationToken).ConfigureAwait(false);
+        CertificateRenewal.Write(renewed, certPemFile, keyPemFile);
+        return renewed;
+    }
+
+    /// <summary>Why the last automatic renewal failed, or <c>null</c> if none has since one succeeded.</summary>
+    public Exception? RenewalFailure => _renewalFailure;
+
+    private volatile Exception? _renewalFailure;
+
+    /// <summary>
+    /// With <see cref="ClientConfig.Builder.RenewCertificate"/>: looks at the certificate file now and every
+    /// <see cref="ClientConfig.RenewCheck"/>, and renews it once its window is open. A failure is tried again a minute later.
+    /// </summary>
+    private async Task KeepRenewedAsync(string cert, string key, CancellationToken stop)
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            TimeSpan wait = _cfg.RenewCheck;
+            try
+            {
+                if (CertificateRenewal.Due(cert, (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+                {
+                    await RenewCertificateAsync(cert, key, stop).ConfigureAwait(false);
+                }
+                _renewalFailure = null;
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception e)
+            {
+                _renewalFailure = e;
+                wait = wait < TimeSpan.FromMinutes(1) ? wait : TimeSpan.FromMinutes(1);
+            }
+            try
+            {
+                await Task.Delay(wait, stop).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
     /// The client certificates the cluster has seen or had revoked, by expiry, with the answering node's clock the
     /// states are computed against. Needs the cluster-admin role.
     /// </summary>

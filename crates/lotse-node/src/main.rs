@@ -16,6 +16,8 @@ usage:
   lotse certs --config <cluster.toml> [--days <n>]
   lotse certs --config <cluster.toml> --client <principal> --out <dir> [--days <n>]
   lotse certs --config <cluster.toml> --revoke <cert.pem>
+  lotse certs --config <cluster.toml> --renewal-ca [--days <n>]
+  lotse certs --config <cluster.toml> --renew [--if-due] --cert <file> --key <file>
   lotse certs --config <cluster.toml> --sign [--request <id>] [--yes] [--out <dir>] [--days <n>] <admin>
   lotse check --config <cluster.toml>
   lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port> --zone <zone>] <admin>
@@ -38,7 +40,13 @@ certs  makes the cluster's CA and every node's certificate where [tls] says,
        one's principal and key fingerprint, signs those you confirm (--yes
        with --request <id>, the id or its first digits, signs without
        asking) and records the certificates in the cluster; --out also
-       writes each as <principal>.pem.
+       writes each as <principal>.pem. --renewal-ca makes the renewal CA
+       at [tls] renewal_ca, under the CA; copy it and its key to every
+       node. --renew renews the client certificate in --cert over a
+       connection made with it, once it is in its last 30 days or past two
+       thirds of its validity, and writes the new key and certificate over
+       --key and --cert; with --if-due it does nothing before then, for a
+       timer to run daily.
 check  reads the file and says what it describes, and which certificates
        expire within 30 days.
 node   adds a node (addresses from its [[node]] entry unless given), drains
@@ -62,6 +70,9 @@ struct Args {
     days: Option<u32>,
     revoke: Option<PathBuf>,
     sign: bool,
+    renewal_ca: bool,
+    renew: bool,
+    if_due: bool,
     request: Option<String>,
     yes: bool,
 }
@@ -92,6 +103,9 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--revoke" => a.revoke = Some(PathBuf::from(value()?)),
             "--sign" => a.sign = true,
+            "--renewal-ca" => a.renewal_ca = true,
+            "--renew" => a.renew = true,
+            "--if-due" => a.if_due = true,
             "--request" => a.request = Some(value()?.to_lowercase()),
             "--yes" => a.yes = true,
             other => return Err(format!("unknown argument {other}")),
@@ -191,6 +205,29 @@ async fn shutdown() {
 
 fn certs(a: &Args) -> Result<(), String> {
     let file = load(a)?;
+    if a.renew {
+        if a.client.is_some() || a.revoke.is_some() || a.sign || a.renewal_ca {
+            return Err("--renew goes alone, with --cert and --key".into());
+        }
+        return renew(&file, a);
+    }
+    if a.if_due {
+        return Err("--if-due goes with --renew".into());
+    }
+    if a.renewal_ca {
+        if a.client.is_some() || a.revoke.is_some() || a.sign {
+            return Err("--renewal-ca goes alone".into());
+        }
+        let outcomes = certs::renewal_ca(&file, a.days.unwrap_or(certs::LEAF_DAYS)).map_err(|e| e.to_string())?;
+        for o in outcomes {
+            match o {
+                Outcome::Wrote(p) => println!("wrote {}", p.display()),
+                Outcome::Kept(p) => println!("kept  {}", p.display()),
+            }
+        }
+        println!("\nCopy the renewal CA and its key to every node; each takes them up within 10 s.");
+        return Ok(());
+    }
     if a.sign {
         if a.client.is_some() || a.revoke.is_some() {
             return Err("--sign goes alone".into());
@@ -230,6 +267,40 @@ fn certs(a: &Args) -> Result<(), String> {
             certs::ca_key_path(std::path::Path::new(ca)).display()
         );
     }
+    Ok(())
+}
+
+/// `lotse certs --renew`: renews the client certificate in `--cert` over a
+/// connection made with it (ADR 0123) and writes the new key and chain over
+/// the old files.
+fn renew(file: &ClusterFile, a: &Args) -> Result<(), String> {
+    let (Some(cert), Some(key)) = (&a.cert, &a.key) else {
+        return Err("--renew needs --cert <file> --key <file>: the certificate to renew and its key".into());
+    };
+    let client = lotse_node::admin_client(file, Some((cert.clone(), key.clone())), None).map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let renewed = if a.if_due {
+        let pem = std::fs::read(cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+        let Some(leaf) = lotse_node::pem_certificates(&pem).into_iter().next() else {
+            return Err(format!("{}: no certificate", cert.display()));
+        };
+        match runtime.block_on(client.renew_certificate_if_due(&leaf)).map_err(|e| e.to_string())? {
+            Some(r) => r,
+            None => {
+                let days = certs::expires_in(cert).map_err(|e| e.to_string())?.max(0) / 86_400;
+                println!("not due: {} is valid for {days} more days, before its renewal window", cert.display());
+                return Ok(());
+            }
+        }
+    } else {
+        runtime.block_on(client.renew_certificate()).map_err(|e| e.to_string())?
+    };
+    // The key first: a certificate without its key would not load, a key
+    // without its certificate is noticed at once.
+    certs::replace(key, &renewed.key_pem, true).map_err(|e| e.to_string())?;
+    certs::replace(cert, &renewed.chain_pem, false).map_err(|e| e.to_string())?;
+    let days = certs::expires_in(cert).map_err(|e| e.to_string())?.max(0) / 86_400;
+    println!("renewed: wrote {} and {}; valid for {days} more days", cert.display(), key.display());
     Ok(())
 }
 

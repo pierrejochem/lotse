@@ -101,6 +101,45 @@ async fn a_node_link_needs_node_certificates_on_both_ends() {
 }
 
 #[tokio::test]
+async fn a_node_certificate_counts_only_when_the_ca_signed_it_itself() {
+    // An intermediate under the cluster's CA, as the renewal CA is (ADR
+    // 0123): its client certificates sign in, but it names no node.
+    let ca = DevCa::new();
+    let inter = ca.intermediate();
+    let a = node(&ca, 1);
+    let l = a.listen("127.0.0.1:0", Link::Node).await.unwrap();
+    let addr = l.local_addr();
+    let through = |c: lotse_rt_tokio::dev_certs::Issued| {
+        let chain = format!("{}{}", c.cert_pem, inter.ca_pem());
+        rt().with_tls(
+            TlsConfig::from_pem(ca.ca_pem().as_bytes(), Some((chain.as_bytes(), c.key_pem.as_bytes()))).unwrap(),
+        )
+    };
+    let forged = through(inter.node(2, &["127.0.0.1"]));
+    if let Ok(conn) = forged.connect(&addr, Link::Node).await {
+        assert!(refused(&conn).await, "a node certificate through an intermediate");
+    }
+    // The same intermediate's client certificate is let in on a client
+    // link, and names its principal.
+    let clients = a.listen("127.0.0.1:0", Link::Client).await.unwrap();
+    let alice = through(inter.principal("alice"));
+    let conn = alice.connect(&clients.local_addr(), Link::Client).await.unwrap();
+    conn.send(Bytes::from_static(b"hi")).await.unwrap();
+    let server = accepted(&clients).await.expect("a client through an intermediate is let in");
+    assert_eq!(server.peer_identity(), Some(PeerIdentity::Principal("alice".into())));
+    // A node certificate the CA signed itself, sent with the CA's own
+    // certificate after it, still names its node.
+    let n = ca.node(3, &["127.0.0.1"]);
+    let chain = format!("{}{}", n.cert_pem, ca.ca_pem());
+    let with_root = rt()
+        .with_tls(TlsConfig::from_pem(ca.ca_pem().as_bytes(), Some((chain.as_bytes(), n.key_pem.as_bytes()))).unwrap());
+    let conn = with_root.connect(&addr, Link::Node).await.unwrap();
+    assert_eq!(conn.peer_identity(), Some(PeerIdentity::Node(1)));
+    let server = accepted(&l).await.expect("a node sending its CA along is let in");
+    assert_eq!(server.peer_identity(), Some(PeerIdentity::Node(3)));
+}
+
+#[tokio::test]
 async fn clients_check_the_name_and_may_show_a_certificate() {
     let ca = DevCa::new();
     let server = node(&ca, 1);

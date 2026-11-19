@@ -141,6 +141,19 @@ After an exception that aborted the transaction, call `group.Rewind()` to read t
 
 The admin calls are methods of `LotseClient`: `DeleteAsync`, `DeleteIfEmptyAsync`, `PurgeAsync`, `RequeueAsync`, `AlterConfigsAsync`, `DescribeConfigsAsync`, `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync`, `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync`, `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync`, `RevokeSessionsAsync`, `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync`, `MoveLeaderAsync`, `ReassignPartitionAsync`, `CreatePartitionsAsync` and `NodeMetricsAsync`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call throws `ResourceExistsException` with the id.
 
+### Renewing the client certificate
+
+On a cluster with a renewal CA, a client that signs in with a certificate renews it in its window: its last 30 days, or past two thirds of its validity ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)).
+
+```csharp
+var client = new LotseClient(ClientConfig.CreateBuilder("10.0.0.1:9000")
+    .Tls(TlsConfig.FromFiles("ca.pem", "alice.pem", "alice.key"))   // read again when they change
+    .RenewCertificate("alice.pem", "alice.key")                       // renews by itself; looks every hour
+    .Build());
+```
+
+`RenewCertificateAsync(cert, key)` renews once and writes the new key, then the new chain; without the files it only returns them. `CertificateRenewal.Due(file, nowMs)` says whether the window is open, and `RenewalFailure` why the last automatic renewal failed.
+
 ## Compressed batches
 
 Add the `Lotse.Client.Codecs` package to read and write zstd and LZ4 batches. It brings ZstdSharp.Port and K4os.Compression.LZ4.Streams, and is found by name the first time a compressed batch is read or built. A program that is trimmed or compiled ahead of time calls `LotseCodecs.Register()` once.

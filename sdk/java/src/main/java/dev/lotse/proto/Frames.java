@@ -145,6 +145,7 @@ public final class Frames {
             case 57 -> request = Request.RecordCertificate.read(r);
             case 58 -> request = Request.ReassignPartition.read(r);
             case 59 -> request = Request.DescribeSessions.read(r);
+            case 60 -> request = Request.RenewCertificate.read(r);
             case 9 -> request = Request.Publish.read(r);
             default -> throw new IllegalStateException("checked against the implemented keys");
         }
@@ -216,6 +217,7 @@ public final class Frames {
             case 33 -> response = Response.DescribeUsers.read(r);
             case 53 -> response = Response.DescribeCertificates.read(r);
             case 59 -> response = Response.DescribeSessions.read(r);
+            case 60 -> response = Response.RenewCertificate.read(r);
             case 56 -> response = Response.DescribeCertificateRequests.read(r);
             case 36 -> response = Response.DescribeTenants.read(r);
             case 38 -> response = Response.DescribeRoleBindings.read(r);

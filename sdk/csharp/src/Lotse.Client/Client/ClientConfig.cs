@@ -40,6 +40,8 @@ public sealed class ClientConfig
         Time = b.TimeValue;
         _tls = b.TlsValue;
         _plaintextOnLoopback = b.PlaintextValue;
+        RenewCertificateFiles = b.RenewFilesValue;
+        RenewCheck = b.RenewCheckValue;
     }
 
     /// <summary>Starts a configuration.</summary>
@@ -97,6 +99,15 @@ public sealed class ClientConfig
     /// <summary>The clock a <see cref="GroupConsumer"/> measures its session by; <see cref="TimeProvider.System"/> unless a test set one.</summary>
     internal TimeProvider Time { get; }
 
+    /// <summary>
+    /// The certificate and key files the client renews by itself in the renewal window (ADR 0123), or <c>null</c> if it
+    /// does not.
+    /// </summary>
+    public (string CertPemFile, string KeyPemFile)? RenewCertificateFiles { get; }
+
+    /// <summary>How often the client looks whether its certificate may be renewed, when it renews by itself.</summary>
+    public TimeSpan RenewCheck { get; }
+
     internal ConnectionOptions ConnectionOptions()
     {
         ConnectionOptions.Builder b = Net.ConnectionOptions.CreateBuilder().WithRequestTimeout(RequestTimeout).WithCredentials(Credentials);
@@ -130,6 +141,8 @@ public sealed class ClientConfig
         internal TlsConfig? TlsValue;
         internal bool PlaintextValue;
         internal TimeProvider TimeValue = TimeProvider.System;
+        internal (string, string)? RenewFilesValue;
+        internal TimeSpan RenewCheckValue = TimeSpan.FromHours(1);
 
         internal Builder(IEnumerable<string> bootstrap)
         {
@@ -266,6 +279,28 @@ public sealed class ClientConfig
         {
             PlaintextValue = true;
             TlsValue = null;
+            return this;
+        }
+
+        /// <summary>
+        /// Renews the client certificate in these files by itself (ADR 0123): the client looks at the certificate when it
+        /// starts and every <see cref="WithRenewCheck"/>, and once its renewal window is open renews it over a connection
+        /// and writes the new key and chain over the files. Give the same files to
+        /// <see cref="TlsConfig.Builder.ClientIdentityFiles"/>, which reads them again for the next connection. Off by
+        /// default.
+        /// </summary>
+        public Builder RenewCertificate(string certPemFile, string keyPemFile)
+        {
+            ArgumentNullException.ThrowIfNull(certPemFile);
+            ArgumentNullException.ThrowIfNull(keyPemFile);
+            RenewFilesValue = (certPemFile, keyPemFile);
+            return this;
+        }
+
+        /// <summary>How often to look whether the certificate may be renewed. Default an hour.</summary>
+        public Builder WithRenewCheck(TimeSpan every)
+        {
+            RenewCheckValue = Positive(every);
             return this;
         }
 

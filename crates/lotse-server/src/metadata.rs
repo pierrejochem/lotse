@@ -144,6 +144,19 @@ pub(crate) enum Change {
     /// `DescribeMetrics` says; while a group has a voter here, its leader
     /// takes no new data.
     DiskLow { node: NodeId, low: bool },
+    /// The metadata leader renewed a client certificate with the renewal CA
+    /// (ADR 0123). A certificate an intermediate issued works only while it
+    /// is recorded here; a renewal of the same certificate replaces an
+    /// earlier one, which stops working. `at_ms` is the leader's clock:
+    /// renewed certificates that expired before it are dropped.
+    RenewCertificate {
+        cert: CertKey,
+        principal: String,
+        not_before_ms: u64,
+        not_after_ms: u64,
+        renews: CertKey,
+        at_ms: u64,
+    },
 }
 
 /// Which runtime resources a node knows to be deleted: those with a
@@ -524,11 +537,22 @@ pub(crate) struct MetadataState {
     pub(crate) placed: BTreeSet<GroupId>,
     /// Nodes whose disk is below their free space limit (ADR 0122).
     pub(crate) disk_low: BTreeSet<NodeId>,
+    /// Certificates the renewal CA issued, until they expire (ADR 0123).
+    pub(crate) renewed: BTreeMap<CertKey, RenewedCert>,
 }
 
 const VERSION: u8 = 4;
 
 impl MetadataState {
+    /// Whether a renewal of `renews` may be signed at `now_ms`: it replaces
+    /// an earlier one, or fewer than [`MAX_RENEWED`] renewed certificates
+    /// are still valid. Expired ones are pruned only when a renewal applies,
+    /// so they must not count, or a full map would never empty.
+    pub(crate) fn room_for_renewal(&self, renews: &CertKey, now_ms: u64) -> bool {
+        self.renewed.values().any(|r| r.renews == *renews)
+            || self.renewed.values().filter(|r| r.not_after_ms > now_ms).count() < MAX_RENEWED
+    }
+
     /// Applies the voters a group is to have, from the planner or an
     /// operator (ADR 0048, ADR 0115).
     fn set_voters(&mut self, index: u64, group: GroupId, mut voters: Vec<NodeId>) {
@@ -838,6 +862,20 @@ impl MetadataState {
                     self.placed.remove(&g);
                 }
             }
+            Change::RenewCertificate { cert, principal, not_before_ms, not_after_ms, renews, at_ms } => {
+                self.renewed.retain(|_, r| r.not_after_ms > at_ms && r.renews != renews);
+                if not_after_ms > at_ms {
+                    let seen = SeenCert {
+                        principal: principal.clone(),
+                        not_before_ms,
+                        not_after_ms,
+                        first_seen_ms: 0,
+                        last_seen_ms: 0,
+                    };
+                    self.certs.entry(cert.clone()).or_insert(seen);
+                    self.renewed.insert(cert, RenewedCert { principal, not_after_ms, renews });
+                }
+            }
             Change::DiskLow { node, low } => {
                 // A node that is gone has no disk to speak of.
                 if low && !self.gone.contains(&node) {
@@ -1096,7 +1134,7 @@ impl MetadataState {
         // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
         // queues' resume windows (ADR 0109), replication factors and placed
         // groups (ADR 0115), queues' length limits (ADR 0118), nodes low on
-        // disk (ADR 0122). A later
+        // disk (ADR 0122), renewed certificates (ADR 0123). A later
         // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -1119,7 +1157,9 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections = if !self.disk_low.is_empty() {
+        let sections = if !self.renewed.is_empty() {
+            17
+        } else if !self.disk_low.is_empty() {
             16
         } else if !lengths.is_empty() {
             15
@@ -1270,6 +1310,15 @@ impl MetadataState {
             b.put_u32_le(self.disk_low.len() as u32);
             for n in &self.disk_low {
                 b.put_u64_le(*n);
+            }
+        }
+        if sections >= 17 {
+            b.put_u32_le(self.renewed.len() as u32);
+            for (cert, r) in &self.renewed {
+                put_cert_key(&mut b, cert);
+                put_str(&mut b, &r.principal);
+                b.put_u64_le(r.not_after_ms);
+                put_cert_key(&mut b, &r.renews);
             }
         }
         b.freeze()
@@ -1499,6 +1548,16 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let cert = get_cert_key(b)?;
+                let principal = get_str(b)?;
+                need(b, 8)?;
+                let not_after_ms = b.get_u64_le();
+                let renews = get_cert_key(b)?;
+                s.renewed.insert(cert, RenewedCert { principal, not_after_ms, renews });
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1660,6 +1719,15 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(25);
             b.put_u64_le(*resource_id);
             b.put_u32_le(*replication);
+        }
+        Change::RenewCertificate { cert, principal, not_before_ms, not_after_ms, renews, at_ms } => {
+            b.put_u8(29);
+            put_cert_key(&mut b, cert);
+            put_str(&mut b, principal);
+            b.put_u64_le(*not_before_ms);
+            b.put_u64_le(*not_after_ms);
+            put_cert_key(&mut b, renews);
+            b.put_u64_le(*at_ms);
         }
         Change::DiskLow { node, low } => {
             b.put_u8(28);
@@ -1998,6 +2066,15 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let node = b.get_u64_le();
             Change::DiskLow { node, low: b.get_u8() != 0 }
         }
+        29 => {
+            let cert = get_cert_key(b)?;
+            let principal = get_str(b)?;
+            need(b, 16)?;
+            let (not_before_ms, not_after_ms) = (b.get_u64_le(), b.get_u64_le());
+            let renews = get_cert_key(b)?;
+            need(b, 8)?;
+            Change::RenewCertificate { cert, principal, not_before_ms, not_after_ms, renews, at_ms: b.get_u64_le() }
+        }
         _ => return Err("unknown metadata change".into()),
     };
     if b.has_remaining() {
@@ -2207,6 +2284,22 @@ fn get_compaction(b: &mut &[u8], s: &mut StreamSettings) -> Result<(), String> {
 pub(crate) struct CertKey {
     pub(crate) issuer: [u8; 32],
     pub(crate) serial: Vec<u8>,
+}
+
+/// Most renewed certificates still valid that the state holds at once
+/// (ADR 0123): each certificate has at most one, so this bounds a flood, not
+/// normal use.
+pub(crate) const MAX_RENEWED: usize = 4096;
+
+/// A certificate the renewal CA issued (ADR 0123).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenewedCert {
+    /// The principal it names.
+    pub(crate) principal: String,
+    /// Millisecond it stops being valid in, since the Unix epoch.
+    pub(crate) not_after_ms: u64,
+    /// The certificate it renews.
+    pub(crate) renews: CertKey,
 }
 
 /// A revoked certificate, until it expires.

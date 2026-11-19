@@ -45,6 +45,19 @@ impl DevCa {
         DevCa { cert, params, key }
     }
 
+    /// An intermediate CA under this one, as the renewal CA is (ADR 0123):
+    /// what it issues chains to this CA through it.
+    pub fn intermediate(&self) -> DevCa {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.distinguished_name.push(DnType::CommonName, "Lotse development intermediate");
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.use_authority_key_identifier_extension = true;
+        let key = KeyPair::generate().expect("a key pair");
+        let cert = params.signed_by(&key, &Issuer::from_params(&self.params, &self.key)).expect("an intermediate");
+        DevCa { cert, params, key }
+    }
+
     /// The CA certificate, PEM.
     pub fn ca_pem(&self) -> String {
         self.cert.pem()

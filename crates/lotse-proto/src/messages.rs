@@ -4380,6 +4380,66 @@ impl RecordCertificateRequest {
     }
 }
 
+/// `RenewCertificate` (ADR 0123): renews the client certificate the
+/// connection was made with. Only a connection that authenticated with a
+/// client certificate may send it, once that certificate is in its renewal
+/// window. The metadata leader signs a certificate with the request's key,
+/// for the principal the connection's certificate names, and records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenewCertificateRequest {
+    /// A PKCS #10 signing request, DER, signed with the new key. Its
+    /// subject and extensions are ignored.
+    pub csr: Bytes,
+}
+
+impl RenewCertificateRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.bytes(&self.csr);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RenewCertificateRequest { csr: r.bytes()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Answer to [`RenewCertificateRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RenewCertificateResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Why, for a refusal.
+    pub error_msg: Option<String>,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The new certificate first, then the renewal CA's, DER: what the
+    /// client shows from now on, with its new key.
+    pub chain: Vec<Bytes>,
+    /// Millisecond the new certificate stops being valid in, since the
+    /// Unix epoch.
+    pub not_after_ms: u64,
+}
+
+impl RenewCertificateResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.opt_string(self.error_msg.as_deref());
+        w.array(&self.chain, |w, c| w.bytes(c));
+        w.u64(self.not_after_ms);
+        // The leader hint is the structure's block of tagged fields.
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let error = ErrorCode(r.u16()?);
+        let error_msg = r.opt_string()?;
+        // A certificate is at least its length prefix.
+        let chain = r.array(4, |r| r.bytes())?;
+        let not_after_ms = r.u64()?;
+        Ok(RenewCertificateResponse { error, error_msg, leader_hint: get_hint(r)?, chain, not_after_ms })
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

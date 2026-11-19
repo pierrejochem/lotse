@@ -175,6 +175,7 @@ public static class Frames
             57 => Request.RecordCertificate.Read(r),
             58 => Request.ReassignPartition.Read(r),
             59 => Request.DescribeSessions.Read(r),
+            60 => Request.RenewCertificate.Read(r),
             _ => throw new InvalidOperationException("checked against the implemented keys"),
         };
         r.Finish();
@@ -253,6 +254,7 @@ public static class Frames
             33 => Response.DescribeUsers.Read(r),
             53 => Response.DescribeCertificates.Read(r),
             59 => Response.DescribeSessions.Read(r),
+            60 => Response.RenewCertificate.Read(r),
             56 => Response.DescribeCertificateRequests.Read(r),
             36 => Response.DescribeTenants.Read(r),
             38 => Response.DescribeRoleBindings.Read(r),

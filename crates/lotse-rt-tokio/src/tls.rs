@@ -484,6 +484,25 @@ impl ServerCertVerifier for AnyServerVerifier {
     }
 }
 
+/// Who a verified chain's end-entity certificate names ([`identity_of`]),
+/// except that a node certificate counts only when the cluster's CA signed
+/// it itself: a chain with an intermediate CA names no node (ADR 0123). The
+/// renewal CA is such an intermediate; were its key stolen, it could mint
+/// client certificates (which nodes accept only while the cluster records
+/// them), but no node. A self-signed certificate after the end entity is a
+/// root a client sent along, not an intermediate.
+pub(crate) fn chain_identity(chain: &[CertificateDer<'_>]) -> Option<PeerIdentity> {
+    let (first, rest) = chain.split_first()?;
+    let identity = identity_of(first)?;
+    let through_intermediate = rest
+        .iter()
+        .any(|c| x509_parser::parse_x509_certificate(c.as_ref()).map_or(true, |(_, c)| c.subject() != c.issuer()));
+    match identity {
+        PeerIdentity::Node(_) if through_intermediate => None,
+        other => Some(other),
+    }
+}
+
 /// Who a verified end-entity certificate names: a node if it carries exactly
 /// one node URI, otherwise the principal in its subject's common name.
 /// `None` for a certificate that names nobody, or claims two nodes.

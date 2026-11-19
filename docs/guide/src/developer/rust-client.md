@@ -147,6 +147,10 @@ The admin calls are methods of `Client`, in `crates/lotse-client/src/admin.rs`:
 
 Each is checked against the signed-in principal's roles on the broker ([ADR 0039](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0039-tenants-and-roles.md)).
 
+### Renewing the client certificate
+
+On a cluster with a renewal CA, `renew_certificate` renews the certificate the client's connections are made with, once it is in its window: its last 30 days, or past two thirds of its validity ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)). It makes a new P-256 key and returns `RenewedCertificate` with the key and chain as PEM, for you to write where the runtime's TLS reads them; a `TokioRuntime` takes new files up with `reload_tls`. `renew_certificate_if_due` takes the certificate (DER) and does nothing before the window opens. A retry after a lost answer renews again, and the earlier renewal then stops working, so keep only the one returned.
+
 ## Testing against the simulation
 
 Because the client takes its runtime as a parameter, you can run it on `lotse-sim` with crashing disks and a faulty network. The client simulation in `crates/lotse-server/tests/clients.rs` does this. See [Contributing](contributing.md).

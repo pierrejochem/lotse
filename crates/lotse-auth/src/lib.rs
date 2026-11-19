@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod oauth;
+pub mod renew;
 pub mod roles;
 pub mod scram;
 #[cfg(feature = "testing")]

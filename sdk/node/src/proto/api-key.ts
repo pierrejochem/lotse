@@ -61,6 +61,8 @@ export const ApiKey = {
   REASSIGN_PARTITION: 58,
   /** The open client sessions of the node asked (ADR 0121). */
   DESCRIBE_SESSIONS: 59,
+  /** Renews the client certificate the connection was made with (ADR 0123). */
+  RENEW_CERTIFICATE: 60,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -121,6 +123,7 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.RECORD_CERTIFICATE,
   ApiKey.REASSIGN_PARTITION,
   ApiKey.DESCRIBE_SESSIONS,
+  ApiKey.RENEW_CERTIFICATE,
   ApiKey.PUBLISH,
 ];
 

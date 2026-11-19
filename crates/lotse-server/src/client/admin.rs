@@ -78,12 +78,15 @@ pub(crate) struct AdminView<'a> {
     pub(crate) retention: crate::RetentionConfig,
     /// The cluster's CA certificates, for recorded certificates.
     pub(crate) client_cas: &'a crate::auth::ClientCas,
+    /// The renewal CA, for renewed certificates (ADR 0123).
+    pub(crate) renewal: &'a crate::auth::RenewalSlot,
 }
 
 static NO_VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
 static NO_USERS: BTreeMap<String, ScramCredential> = BTreeMap::new();
 static NO_MEMBERS: BTreeMap<NodeId, (String, String)> = BTreeMap::new();
 static NO_CAS: std::sync::LazyLock<crate::auth::ClientCas> = std::sync::LazyLock::new(Default::default);
+static NO_RENEWAL: std::sync::LazyLock<crate::auth::RenewalSlot> = std::sync::LazyLock::new(Default::default);
 
 impl Default for AdminView<'_> {
     fn default() -> Self {
@@ -97,6 +100,7 @@ impl Default for AdminView<'_> {
             members: &NO_MEMBERS,
             configured_voters: &[],
             client_cas: &NO_CAS,
+            renewal: &NO_RENEWAL,
         }
     }
 }
@@ -118,6 +122,9 @@ pub(crate) enum AdminThen {
     AlteredQueue { resource_id: u64, change: QueueChange },
     /// A user's credential, a tenant or role bindings changed.
     Changed,
+    /// A renewed certificate was recorded (ADR 0123): the answer carries
+    /// its chain.
+    Renewed { cert: crate::metadata::CertKey, chain: Vec<bytes::Bytes>, not_after_ms: u64 },
 }
 
 impl AdminThen {
@@ -130,6 +137,7 @@ impl AdminThen {
             | AdminThen::Altered { .. }
             | AdminThen::AlteredQueue { .. }
             | AdminThen::Changed => admin_response(code, None, h),
+            AdminThen::Renewed { chain, not_after_ms, .. } => renewed_response(code, None, h, chain, *not_after_ms),
         }
     }
 }
@@ -149,6 +157,24 @@ fn created(error: ErrorCode, resource_id: u64, why: Option<&str>, leader_hint: O
 
 fn outcome_response(error: ErrorCode, leader_hint: Option<LeaderHint>) -> Response {
     Response::Outcome(OutcomeResponse { error, leader_hint })
+}
+
+/// A `RenewCertificate` answer; the chain goes only with success.
+pub(super) fn renewed_response(
+    error: ErrorCode,
+    why: Option<&str>,
+    leader_hint: Option<LeaderHint>,
+    chain: &[bytes::Bytes],
+    not_after_ms: u64,
+) -> Response {
+    let ok = error == ErrorCode::NONE;
+    Response::RenewCertificate(lotse_proto::RenewCertificateResponse {
+        error,
+        error_msg: why.map(str::to_string),
+        leader_hint,
+        chain: if ok { chain.to_vec() } else { Vec::new() },
+        not_after_ms: if ok { not_after_ms } else { 0 },
+    })
 }
 
 pub(super) fn admin_response(error: ErrorCode, why: Option<&str>, leader_hint: Option<LeaderHint>) -> Response {
@@ -1258,6 +1284,12 @@ impl Clients {
                                 admin_response(ErrorCode::INVALID_REQUEST, Some(why), None)
                             }
                         },
+                        // Replaced by a renewal of the same certificate that
+                        // came after: this one would not work.
+                        AdminThen::Renewed { cert, .. } if !state.renewed.contains_key(cert) => {
+                            let why = "a later renewal of the same certificate replaced this one; renew again";
+                            renewed_response(ErrorCode::INVALID_REQUEST, Some(why), None, &[], 0)
+                        }
                         AdminThen::Deleted { resource_id } if state.queues.contains_key(resource_id) => {
                             let why = "a queue dead-letters into it; change that setting first";
                             admin_response(ErrorCode::INVALID_REQUEST, Some(why), None)

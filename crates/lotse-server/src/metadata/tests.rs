@@ -525,6 +525,48 @@ fn the_certificate_inventory_merges_reports_and_forgets_the_long_expired() {
 }
 
 #[test]
+fn a_renewal_replaces_the_earlier_one_joins_the_inventory_and_survives_a_snapshot() {
+    use crate::metadata::{CertKey, MAX_RENEWED};
+    let key = |issuer: u8, serial: u16| CertKey { issuer: [issuer; 32], serial: serial.to_be_bytes().to_vec() };
+    let renew = |serial: u16, renews: u16, not_after_ms: u64, at_ms: u64| Change::RenewCertificate {
+        cert: key(9, serial),
+        principal: "alice".into(),
+        not_before_ms: at_ms,
+        not_after_ms,
+        renews: key(1, renews),
+        at_ms,
+    };
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&renew(10, 1, 50_000, 1_000))).unwrap();
+    s.apply(2, &payload(&renew(20, 2, 60_000, 1_100))).unwrap();
+    assert_eq!(s.renewed.len(), 2);
+    assert_eq!(s.renewed[&key(9, 10)].principal, "alice");
+    assert_eq!(s.certs[&key(9, 10)].principal, "alice", "the inventory lists it");
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+    // A second renewal of the same certificate replaces the first.
+    s.apply(3, &payload(&renew(11, 1, 70_000, 2_000))).unwrap();
+    assert!(!s.renewed.contains_key(&key(9, 10)), "the earlier renewal stops counting");
+    assert!(s.renewed.contains_key(&key(9, 11)) && s.renewed.contains_key(&key(9, 20)));
+    // A later renewal drops those that expired; one expired already is not
+    // recorded.
+    s.apply(4, &payload(&renew(30, 3, 90_000, 65_000))).unwrap();
+    assert!(!s.renewed.contains_key(&key(9, 20)));
+    s.apply(5, &payload(&renew(40, 4, 65_500, 66_000))).unwrap();
+    assert!(!s.renewed.contains_key(&key(9, 40)));
+    assert_eq!(s.renewed.len(), 2);
+    assert_eq!(MetadataState::decode(&s.encode()).unwrap(), s);
+
+    // The cap counts what is still valid, and a replacement always fits.
+    let mut full = MetadataState::default();
+    for i in 0..MAX_RENEWED as u16 {
+        full.apply(u64::from(i) + 1, &payload(&renew(i, i, 100_000, 1_000))).unwrap();
+    }
+    assert!(!full.room_for_renewal(&key(1, u16::MAX), 99_999), "full");
+    assert!(full.room_for_renewal(&key(1, 7), 99_999), "a replacement fits");
+    assert!(full.room_for_renewal(&key(1, u16::MAX), 100_000), "expired ones do not count");
+}
+
+#[test]
 fn certificate_requests_are_signed_once_lapse_and_survive_a_snapshot() {
     use crate::metadata::{CertKey, REQUEST_TTL_MS, SIGNED_KEEP_MS};
     let day = 24 * 3_600_000;

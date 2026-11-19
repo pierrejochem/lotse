@@ -8,11 +8,12 @@ pub mod config;
 use std::future::Future;
 
 use bytes::Bytes;
+use lotse_auth::renew::RenewalCa;
 use lotse_record::Batch;
 use lotse_rt_tokio::TlsConfig;
 use lotse_rt_tokio::TokioRuntime;
 use lotse_rt_tokio::{HttpRequest, HttpResponse};
-use lotse_server::{ClientCas, Node, StateMachine};
+use lotse_server::{ClientCas, Node, RenewalSlot, StateMachine};
 
 use crate::config::{ClusterFile, ConfigError};
 
@@ -33,6 +34,9 @@ pub enum RunError {
     /// The certificates.
     #[error("TLS: {0}")]
     Tls(#[from] lotse_rt_tokio::TlsError),
+    /// The renewal CA (ADR 0123).
+    #[error("[tls] renewal_ca: {0}")]
+    Renewal(#[from] lotse_auth::renew::RenewError),
     /// The node itself.
     #[error(transparent)]
     Node(#[from] lotse_server::Error),
@@ -86,6 +90,10 @@ pub fn tls_files(file: &ClusterFile, id: u64) -> Result<Option<(FileContents, Tl
     let Some((ca, cert, key)) = file.tls_paths(id) else { return Ok(None) };
     let mut paths = vec![ca, cert, key];
     paths.extend(file.crl_path());
+    // Last, so they change nothing above: the renewal CA (ADR 0123).
+    if let Some((cert, key)) = file.renewal_paths() {
+        paths.extend([cert, key]);
+    }
     let mut contents = Vec::new();
     for p in &paths {
         contents.push(
@@ -94,9 +102,22 @@ pub fn tls_files(file: &ClusterFile, id: u64) -> Result<Option<(FileContents, Tl
             })?,
         );
     }
-    let crl = contents.get(3).map(Vec::as_slice);
+    let crl = file.crl_path().and(contents.get(3)).map(Vec::as_slice);
     let tls = TlsConfig::from_pem_with_crl(&contents[0], Some((&contents[1], &contents[2])), crl)?;
     Ok(Some((contents, tls)))
+}
+
+/// The renewal CA from the files [`tls_files`] read (ADR 0123): `None` when
+/// `[tls]` names none. It must be signed by a CA certificate of the CA
+/// file, and its key must be the certificate's.
+pub fn renewal_ca(file: &ClusterFile, contents: &FileContents) -> Result<Option<RenewalCa>, RunError> {
+    if file.renewal_paths().is_none() {
+        return Ok(None);
+    }
+    let [.., cert, key] = &contents[..] else { return Ok(None) };
+    let ca = RenewalCa::from_pem(&String::from_utf8_lossy(cert), &String::from_utf8_lossy(key))?;
+    ca.check_under(&pem_certificates(&contents[0]))?;
+    Ok(Some(ca))
 }
 
 /// The certificates (DER) of a PEM bundle such as the CA file, in order;
@@ -116,8 +137,8 @@ pub fn pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
 /// do not make a working configuration (half written, a key that does not
 /// match) are reported and the old material kept, so a mistake never takes
 /// a running node off the network.
-pub async fn reload_tls(rt: TokioRuntime, file: ClusterFile, id: u64, cas: ClientCas) {
-    reload_tls_every(rt, file, id, cas, TLS_RELOAD_EVERY).await
+pub async fn reload_tls(rt: TokioRuntime, file: ClusterFile, id: u64, cas: ClientCas, renewal: RenewalSlot) {
+    reload_tls_every(rt, file, id, cas, renewal, TLS_RELOAD_EVERY).await
 }
 
 /// [`reload_tls`], looking every `every`.
@@ -126,6 +147,7 @@ pub async fn reload_tls_every(
     file: ClusterFile,
     id: u64,
     cas: ClientCas,
+    renewal: RenewalSlot,
     every: std::time::Duration,
 ) {
     let mut seen = match tls_files(&file, id) {
@@ -137,8 +159,19 @@ pub async fn reload_tls_every(
         tokio::time::sleep(every).await;
         match tls_files(&file, id) {
             Ok(Some((contents, tls))) if contents != seen => {
+                let ca = match renewal_ca(&file, &contents) {
+                    Ok(ca) => ca,
+                    Err(e) => {
+                        if !failing {
+                            tracing::warn!(node = id, error = %e, "TLS files do not load; keeping the material in use");
+                        }
+                        failing = true;
+                        continue;
+                    }
+                };
                 let closed = rt.reload_tls(tls);
                 cas.set(pem_certificates(&contents[0]));
+                renewal.set(ca);
                 tracing::info!(node = id, revoked_connections_closed = closed, "TLS files changed: reloaded");
                 seen = contents;
                 failing = false;
@@ -164,6 +197,7 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
     let rt = runtime(file, id)?;
     if let Some((contents, _)) = tls_files(file, id)? {
         cfg.auth.client_cas.set(pem_certificates(&contents[0]));
+        cfg.auth.renewal.set(renewal_ca(file, &contents)?);
     }
     tracing::info!(
         node = id,
@@ -174,8 +208,8 @@ pub async fn run(file: &ClusterFile, id: u64, join: bool, shutdown: impl Future<
         "starting"
     );
     // Stops with this function, however it returns.
-    let _reload =
-        AbortOnDrop(tokio::spawn(reload_tls(rt.clone(), file.clone(), id, cfg.auth.client_cas.clone())).abort_handle());
+    let reload = reload_tls(rt.clone(), file.clone(), id, cfg.auth.client_cas.clone(), cfg.auth.renewal.clone());
+    let _reload = AbortOnDrop(tokio::spawn(reload).abort_handle());
     let metrics_at = file.node(id)?.metrics.clone();
     let node = Node::start(rt.clone(), cfg, |_| NoStateMachine).await?;
     let handle = node.handle();

@@ -60,6 +60,15 @@ export interface ClientOptions {
   readonly zone?: string;
   /** For the TCP connect and the TLS handshake together. Default 10 000. */
   readonly connectTimeoutMs?: number;
+  /**
+   * Renews the client certificate in these files by itself (ADR 0123): the client looks at the certificate when it
+   * starts and every `renewCheckMs`, and once its renewal window is open renews it over a connection and writes the
+   * new key and chain over the files. Read the same files with `TlsConfig.fromFiles`, which reads them again for the
+   * next connection. Default none.
+   */
+  readonly renewCertificate?: { readonly certPemFile: string; readonly keyPemFile: string };
+  /** How often to look whether the certificate may be renewed, when the client renews by itself. Default an hour. */
+  readonly renewCheckMs?: number;
 }
 
 /** `ClientOptions` with every default filled in and every value checked. */
@@ -77,6 +86,8 @@ export interface ClientConfig {
   readonly tenant: string;
   readonly zone: string | null;
   readonly connection: ConnectionOptions;
+  readonly renewCertificate: { readonly certPemFile: string; readonly keyPemFile: string } | null;
+  readonly renewCheckMs: number;
 }
 
 function positive(name: string, v: number | undefined, fallback: number): number {
@@ -118,5 +129,7 @@ export function resolveClientOptions(o: ClientOptions): ClientConfig {
     tenant: o.tenant ?? DEFAULT_TENANT,
     zone: o.zone ?? null,
     connection,
+    renewCertificate: o.renewCertificate ?? null,
+    renewCheckMs: positive("renewCheckMs", o.renewCheckMs, 3_600_000),
   };
 }

@@ -1522,4 +1522,25 @@ public abstract record Request
             return new DescribeNodes();
         }
     }
+
+    /// <summary>
+    /// Renews the client certificate the connection was made with, in its renewal window (ADR 0123). The metadata leader
+    /// signs a certificate for the request's key, naming the principal the connection's certificate names, and records it.
+    /// </summary>
+    /// <param name="Csr">A PKCS#10 signing request in DER form, signed with the new key; its subject and extensions are ignored.</param>
+    public sealed record RenewCertificate(ByteString Csr) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RenewCertificate;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.Bytes(Csr).NoTags();
+
+        internal static RenewCertificate Read(Reader r)
+        {
+            var x = new RenewCertificate(r.Bytes());
+            r.Tags();
+            return x;
+        }
+    }
 }

@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::TokioRuntime;
 use crate::net::{Security, cert_info};
-use crate::tls::identity_of;
+use crate::tls::chain_identity;
 
 /// One request to the operator's endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +137,7 @@ impl HttpListener {
                             let Some(cfg) = shared.current().server(Link::Client) else { return Ok(()) };
                             let tls = tokio_rustls::TlsAcceptor::from(cfg).accept(stream).await?;
                             let first = tls.get_ref().1.peer_certificates().and_then(|c| c.first()).cloned();
-                            let identity = first.as_ref().and_then(identity_of);
+                            let identity = tls.get_ref().1.peer_certificates().and_then(chain_identity);
                             let cert = first.as_ref().and_then(|c| cert_info(c.as_ref()));
                             one(tls, true, identity, cert, &*handler).await
                         }

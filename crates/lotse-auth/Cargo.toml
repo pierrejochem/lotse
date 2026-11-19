@@ -19,6 +19,10 @@ jsonwebtoken.workspace = true
 # X.509 for client certificates (ADR 0096); `verify` checks signatures with ring.
 x509-parser = { workspace = true, features = ["verify"] }
 ring = { workspace = true, optional = true }
+# Signing renewed client certificates and making signing requests (ADR 0123).
+rcgen.workspace = true
+p256.workspace = true
+time.workspace = true
 
 [features]
 # A fake identity provider that signs tokens, for tests and simulations.
@@ -26,7 +30,6 @@ testing = ["dep:ring"]
 
 [dev-dependencies]
 lotse-auth = { path = ".", features = ["testing"] }
-rcgen.workspace = true
 
 [lints]
 workspace = true

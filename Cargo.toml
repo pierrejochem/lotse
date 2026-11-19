@@ -37,6 +37,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 x509-parser = "0.18"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
+# Renewing client certificates (ADR 0123): P-256 keys and deterministic ECDSA (RFC 6979), so signing needs no
+# randomness beyond the runtime seam; already in the tree through jsonwebtoken.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem", "std"] }
 tracing = "0.1"
 # Authentication in lotse-auth: SCRAM-SHA-512 and JWT validation.
 sha2 = "0.11"
