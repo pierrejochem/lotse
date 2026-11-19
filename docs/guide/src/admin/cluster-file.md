@@ -113,8 +113,9 @@ How much free space each node keeps on its data volume ([ADR 0122](https://githu
 | Key | Type, unit | Default | Meaning |
 | --- | --- | --- | --- |
 | `free_limit` | bytes or a share | the larger of 1 GiB and 5 % | Below this much free space a node takes no new data in the groups it votes in. Bytes as a number (`2147483648`) or text with a unit (`"2GiB"`, `"500MB"`; KB, MB, GB, TB, KiB, MiB, GiB, TiB), a share of the volume (`"5%"`, `"2.5%"`), or `0` for no limit. |
+| `check_interval_ms` | integer | 1000 | How often a node reads its volume's free space, 10 to 60000. A node that crosses the limit reports it at its next read ([ADR 0124](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0124-a-node-reports-a-low-disk-at-once.md)). |
 
-A node reads its volume every 5 s. Below the limit it is low: the leaders of every group with a replica on it refuse produces, publishes and dead letters with `STORAGE_FULL`, which clients retry; reads, acks and metadata changes go on. It is no longer low once its free space is a tenth above the limit. Other nodes learn of it through the metadata group within about 15 s; the node itself refuses at once for the groups it leads. See [Nodes](nodes.md#a-node-low-on-disk).
+A node reads its volume every `check_interval_ms`. Below the limit it is low: the leaders of every group with a replica on it refuse produces, publishes and dead letters with `STORAGE_FULL`, which clients retry; reads, acks and metadata changes go on. It is no longer low once its free space is a tenth above the limit. The node tells the metadata group at once, so other nodes learn of it within a few seconds; the node itself refuses at once for the groups it leads. See [Nodes](nodes.md#a-node-low-on-disk).
 
 ## `[producers]`
 

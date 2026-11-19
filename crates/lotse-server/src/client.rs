@@ -535,6 +535,7 @@ impl Clients {
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
             Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
+            Request::ReportDisk(req) => self.report_disk(outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,

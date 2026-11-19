@@ -1,6 +1,7 @@
 //! Adding and removing nodes (ADR 0048): `AddNode`, `RemoveNode` and
-//! `DescribeNodes` for admins, and `SettleVoters`, by which a group's
-//! leader tells the metadata group that the group's voters are in place.
+//! `DescribeNodes` for admins, `SettleVoters`, by which a group's leader
+//! tells the metadata group that the group's voters are in place, and
+//! `ReportDisk`, by which a node says it went low on disk or back (ADR 0124).
 //! The node list and every group's voters live in the metadata group;
 //! nodes follow them (`node.rs`).
 
@@ -9,13 +10,14 @@ use std::sync::Arc;
 
 use lotse_proto::{
     AddNodeRequest, DescribeNodesRequest, DescribeNodesResponse, ErrorCode, MoveLeaderRequest, NodeEntry,
-    ReassignPartitionRequest, RemoveNodeRequest, Response, SettleVotersRequest, node_state,
+    ReassignPartitionRequest, RemoveNodeRequest, ReportDiskRequest, Response, SettleVotersRequest, node_state,
 };
 use lotse_raft::NodeId;
 use lotse_rt::Runtime;
 
 use super::admin::{AdminThen, admin_response};
 use super::{Clients, ClusterView, Outbox};
+use crate::auth::Principal;
 use crate::metadata::{Change, MetadataState};
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
@@ -279,6 +281,39 @@ impl Clients {
             return outbox.push(id, &admin_response(ErrorCode::NONE, None, None));
         }
         let change = Change::Settled { group: req.group, voters: req.voters };
+        self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `ReportDisk`: a node went low on disk or back (ADR 0124). A node
+    /// speaks only for itself; with the state already saying so, nothing
+    /// is written, so a node may repeat its report until it sees it applied.
+    pub(super) fn report_disk<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: ReportDiskRequest,
+        principal: &Principal,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        if let Principal::Node(n) = principal
+            && u64::from(req.node_id) != *n
+        {
+            let why = format!("node {n} reports only for itself, not for node {}", req.node_id);
+            return outbox.push(id, &admin_response(ErrorCode::UNAUTHORIZED, Some(&why), None));
+        }
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &admin_response(code, None, h)),
+        };
+        let node = NodeId::from(req.node_id);
+        let state = replica.metadata();
+        // A node that left has no disk to speak of: applying would drop it
+        // anyway, so there is nothing to write.
+        if state.disk_low.contains(&node) == req.low || (req.low && state.gone.contains(&node)) {
+            return outbox.push(id, &admin_response(ErrorCode::NONE, None, None));
+        }
+        let change = Change::DiskLow { node, low: req.low };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 }

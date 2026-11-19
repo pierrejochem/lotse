@@ -168,6 +168,9 @@ impl ApiKey {
     /// Renews the client certificate the connection was made with (ADR
     /// 0123): the metadata leader signs a new one with the renewal CA.
     pub const RENEW_CERTIFICATE: ApiKey = ApiKey(60);
+    /// Internal, from a node: it tells the metadata leader that it went low
+    /// on disk or back (ADR 0124).
+    pub const REPORT_DISK: ApiKey = ApiKey(61);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -192,7 +195,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 60] = [
+    pub const SUPPORTED: [ApiVersionRange; 61] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -252,6 +255,7 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::REASSIGN_PARTITION, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_SESSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::RENEW_CERTIFICATE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::REPORT_DISK, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -573,6 +577,8 @@ pub enum Request {
     DescribeSessions(DescribeSessionsRequest),
     /// [`ApiKey::RENEW_CERTIFICATE`].
     RenewCertificate(RenewCertificateRequest),
+    /// [`ApiKey::REPORT_DISK`].
+    ReportDisk(ReportDiskRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -640,6 +646,7 @@ impl Request {
             Request::ReassignPartition(_) => ApiKey::REASSIGN_PARTITION,
             Request::DescribeSessions(_) => ApiKey::DESCRIBE_SESSIONS,
             Request::RenewCertificate(_) => ApiKey::RENEW_CERTIFICATE,
+            Request::ReportDisk(_) => ApiKey::REPORT_DISK,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -795,6 +802,7 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::ReassignPartition(r) => r.put(&mut w),
         Request::DescribeSessions(r) => r.put(&mut w),
         Request::RenewCertificate(r) => r.put(&mut w),
+        Request::ReportDisk(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -877,6 +885,7 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::REASSIGN_PARTITION => Request::ReassignPartition(ReassignPartitionRequest::get(&mut r)?),
         ApiKey::DESCRIBE_SESSIONS => Request::DescribeSessions(DescribeSessionsRequest::get(&mut r)?),
         ApiKey::RENEW_CERTIFICATE => Request::RenewCertificate(RenewCertificateRequest::get(&mut r)?),
+        ApiKey::REPORT_DISK => Request::ReportDisk(ReportDiskRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -1028,6 +1037,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::CREATE_PARTITIONS
         | ApiKey::REVOKE_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATES
+        | ApiKey::REPORT_DISK
         | ApiKey::REQUEST_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATE
         | ApiKey::REASSIGN_PARTITION

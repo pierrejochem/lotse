@@ -78,7 +78,7 @@ Each node keeps free space on its data volume: `[disk] free_limit` in the [clust
 - **How it shows:** `lotse_disk_low` is 1 on the node's `/metrics`, `DescribeMetrics` says so, and the console marks the node "Low on disk" with an alert.
 - **How it ends:** free space on the volume, delete data (a stream's retention, or a resource you no longer need), or move replicas off the node by draining it or placing partitions elsewhere. New data is taken again once free space is a tenth above the limit, so a volume that hovers at the limit does not switch on and off.
 
-Other nodes hear that a node is low through the metadata group, within about 15 s; the node refuses at once for the groups it leads. The default margin of 5 % leaves room for that and for snapshots.
+A node reports that it is low, or back, to the metadata group at its next read of its volume (every second by default, `[disk] check_interval_ms`), so other nodes hear of it within a few seconds; the node refuses at once for the groups it leads. A low node that cannot reach the metadata group stays as it was recorded until it can. The default margin of 5 % leaves room for that and for snapshots.
 
 ## Limits
 

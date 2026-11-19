@@ -125,7 +125,8 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0119 | [Users request certificates in their own name](0119-users-request-certificates-in-their-own-name.md) | Accepted, in part changed by [0123](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) |
 | 0120 | [Queue metrics per priority level and consumer state](0120-queue-metrics-per-priority-level-and-consumer-state.md) | Accepted |
 | 0121 | [The console places partitions and lists open sessions](0121-the-console-places-partitions-and-lists-open-sessions.md) | Accepted |
-| 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted |
+| 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted, in part changed by [0124](0124-a-node-reports-a-low-disk-at-once.md) |
 | 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted |
+| 0124 | [A node reports a low disk at once](0124-a-node-reports-a-low-disk-at-once.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

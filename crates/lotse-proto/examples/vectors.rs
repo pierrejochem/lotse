@@ -377,7 +377,7 @@ fn main() {
             assert_eq!(decode_request(frame.clone()).expect("decodes").1, *req);
             format!("req-{i:03}-{} {}", variant(&format!("{req:?}")), hex(&frame))
         })
-        // Node-internal keys (43, 44, 1000) are not part of the client protocol.
+        // Node-internal keys (43 to 46, 61 and 1000) are not part of the client protocol.
         .zip(samples::requests())
         .filter(|(_, req)| {
             !matches!(
@@ -387,6 +387,7 @@ fn main() {
                     | ApiKey::WRITE_TXN_MARKERS
                     | ApiKey::VERIFY_TXN
                     | ApiKey::CHECK_EMPTY
+                    | ApiKey::REPORT_DISK
             )
         })
         .map(|(line, _)| line)
@@ -408,6 +409,7 @@ fn main() {
                     | ApiKey::DEAD_LETTER
                     | ApiKey::VERIFY_TXN
                     | ApiKey::CHECK_EMPTY
+                    | ApiKey::REPORT_DISK
             )
         })
         .map(|(i, (key, resp))| {
