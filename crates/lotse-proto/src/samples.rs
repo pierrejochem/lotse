@@ -490,6 +490,10 @@ pub fn requests() -> Vec<Request> {
             resume: Some(0x8000_0000_0000_0001),
             held: Some(Vec::new()),
         }),
+        // Node-internal, left out of the client vectors: last, so that
+        // the others keep their correlation ids.
+        Request::ReportDisk(ReportDiskRequest { node_id: 3, low: true }),
+        Request::ReportDisk(ReportDiskRequest { node_id: 3, low: false }),
     ]
 }
 
@@ -1176,6 +1180,14 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 leader_hint: None,
                 standby: false,
                 consumer_id: 0x8000_0000_0000_0001,
+            }),
+        ),
+        (
+            ApiKey::REPORT_DISK,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::UNAUTHORIZED,
+                error_msg: Some("node 2 reports only for itself, not for node 3".into()),
+                leader_hint: None,
             }),
         ),
     ]

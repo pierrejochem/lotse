@@ -418,6 +418,17 @@ impl Host for TokioRuntime {
             stats.unwrap_or_default()
         }
     }
+
+    fn disk_space(&self) -> impl Future<Output = (Option<u64>, Option<u64>)> + Send {
+        self.volume()
+    }
+}
+
+impl TokioRuntime {
+    fn volume(&self) -> impl Future<Output = (Option<u64>, Option<u64>)> + Send + use<> {
+        let root = Arc::clone(&self.root);
+        async move { tokio::task::spawn_blocking(move || volume_of(&root)).await.unwrap_or((None, None)) }
+    }
 }
 
 /// Free and total bytes of the volume `dir` is on: the mounted disk with the

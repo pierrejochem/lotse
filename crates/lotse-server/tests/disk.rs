@@ -4,9 +4,12 @@
 //!
 //! Checked: the follower says it is low; the leaders on the other nodes,
 //! which only learn of it through the metadata group, refuse new data with
-//! STORAGE_FULL; reads, acks and metadata changes go on; the node stays low
-//! until its volume is a tenth above the limit, and then produces pass
-//! again. A scenario: its value does not grow with seeds (`check_few_seeds`).
+//! STORAGE_FULL within a few seconds, since the node reports a change at its
+//! next read of its volume (ADR 0124); reads, acks and metadata changes go
+//! on; the node stays low until its volume is a tenth above the limit, and
+//! then produces pass again just as soon; and a node may report only for
+//! itself. A scenario: its value does not grow with seeds
+//! (`check_few_seeds`).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -71,6 +74,7 @@ fn config(id: NodeId) -> NodeConfig {
         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
         disk_free_limit: lotse_server::FreeLimit::default(),
+        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth: lotse_server::AuthConfig::none(),
@@ -99,10 +103,12 @@ async fn until(rt: &SimRuntime, client: &Client<SimRuntime>, name: &str, taken: 
 }
 
 async fn run(rt: SimRuntime) {
+    // Identities on: a node's reports are checked against who sent them.
+    rt.net().verify_peers(true);
     let mut runtimes = Vec::new();
     let mut nodes = Vec::new();
     for id in 1..=3 {
-        let node_rt = rt.node(&format!("n{id}"));
+        let node_rt = rt.node(&format!("n{id}")).with_identity(Some(lotse_rt::PeerIdentity::Node(id)));
         nodes.push(Node::start(node_rt.clone(), config(id), |_| Nothing).await.unwrap());
         runtimes.push(node_rt);
     }
@@ -140,7 +146,9 @@ async fn run(rt: SimRuntime) {
     let low = followers[rt.below(2) as usize];
     let disk = runtimes[low as usize - 1].disk();
     disk.set_free_bytes(LIMIT - 1);
-    until(&rt, &client, "s", false, Duration::from_secs(60)).await;
+    // A read a second, a report, a commit: a few seconds, where the
+    // metadata leader's poll of every node's metrics took up to 15.
+    until(&rt, &client, "s", false, Duration::from_secs(5)).await;
     assert!(!takes(&client, "q", "refused").await, "the queue has a voter there too");
     let report = client.node_metrics().await.expect("metadata");
     for (n, m) in report {
@@ -167,9 +175,30 @@ async fn run(rt: SimRuntime) {
     disk.set_free_bytes(LIMIT + LIMIT / 20);
     rt.sleep(Duration::from_secs(30)).await;
     assert!(!takes(&client, "s", "still").await, "back only a tenth above the limit");
+    // Room again while the node is cut off from the others: its report is
+    // lost, and it reports again until the metadata state says so.
+    for n in (1..=3).filter(|n| *n != low) {
+        rt.net().block(&format!("n{low}"), &format!("n{n}"));
+    }
     disk.set_free_bytes(LIMIT + LIMIT / 10);
-    until(&rt, &client, "s", true, Duration::from_secs(60)).await;
+    rt.sleep(Duration::from_secs(3)).await;
+    rt.net().heal();
+    until(&rt, &client, "s", true, Duration::from_secs(15)).await;
     assert!(takes(&client, "q", "again").await);
+
+    // A node speaks only for itself.
+    let other = followers.iter().copied().find(|n| *n != low).unwrap_or(leader);
+    let liar = Client::new(
+        rt.node("n-liar").with_identity(Some(lotse_rt::PeerIdentity::Node(other.into()))),
+        ClientConfig {
+            retry_for: Duration::from_secs(2),
+            ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+        },
+    );
+    let got = liar.report_disk(low, true).await;
+    assert!(matches!(&got, Err(ClientError::Broker { code: ErrorCode::UNAUTHORIZED, .. })), "{got:?}");
+    assert!(takes(&client, "s", "still taken").await, "the lie changed nothing");
+    drop(liar);
 
     consumer.close().await;
     drop(client);

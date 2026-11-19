@@ -250,6 +250,10 @@ impl lotse_rt::Host for SimRuntime {
             disk_total_bytes: Some(disk::SIM_DISK_TOTAL),
         })
     }
+
+    fn disk_space(&self) -> impl Future<Output = (Option<u64>, Option<u64>)> + Send {
+        std::future::ready((Some(self.disk.free_bytes()), Some(disk::SIM_DISK_TOTAL)))
+    }
 }
 
 impl lotse_rt::Net for SimRuntime {
