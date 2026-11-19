@@ -113,6 +113,9 @@ pub struct NodeConfig {
     /// The free space this node keeps on its data volume: below it, the
     /// leaders of the groups it votes in take no new data (ADR 0122).
     pub disk_free_limit: crate::FreeLimit,
+    /// How often this node reads its data volume's free space for that
+    /// limit (ADR 0124; [`crate::DEFAULT_DISK_CHECK_INTERVAL`] by default).
+    pub disk_check_interval: Duration,
     /// How clients authenticate.
     pub auth: AuthConfig,
     /// What streams keep unless they say otherwise (ADR 0046).
@@ -385,15 +388,36 @@ fn membership_pass<R: Runtime, S: StateMachine>(
         let _ = meta.propose_internal(crate::metadata::record(&change));
     }
     drop(removed);
-    // Nodes low on disk, as they said last (ADR 0122). One that did not
-    // answer stays as it was recorded.
-    let reports = shared.disk_reports.lock().expect("disk lock").clone();
-    for (node, low) in reports {
-        if known.nodes.contains_key(&node) && state.disk_low.contains(&node) != low {
-            let change = crate::metadata::Change::DiskLow { node, low };
-            let _ = meta.propose_internal(crate::metadata::record(&change));
-        }
+}
+
+/// Tells the metadata group that this node went low on disk or back, as
+/// soon as a read of its volume differs from what its view of the metadata
+/// state records (ADR 0124). One report at a time; while the view still
+/// differs, the next read reports again, so a lost report, a leader change
+/// or a node that restarted all end the same way. A node that is down stays
+/// as it was recorded.
+#[allow(clippy::too_many_arguments)]
+fn report_disk<R: Runtime>(
+    rt: &R,
+    id: NodeId,
+    disk: &crate::disk::DiskWatch,
+    known: &Known,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+    reporting: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    // Before a read has told, the node does not know: say nothing.
+    let Some(now) = disk.metrics() else { return };
+    let Ok(node_id) = u32::try_from(id) else { return };
+    if known.state.disk_low.contains(&id) == now.low || reporting.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
     }
+    let (client, stop, reporting) = (client.clone(), shared.stop.clone(), reporting.clone());
+    jobs.spawn(rt, async move {
+        let _ = race(client.report_disk(node_id, now.low), &[&stop]).await;
+        reporting.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
 }
 
 /// Tells the metadata group which client certificates this node accepted
@@ -575,9 +599,6 @@ struct Shared {
     /// On the metadata leader: the metadata index through which each node
     /// that answered has removed the files of deleted resources (ADR 0100).
     removed_through: Mutex<BTreeMap<NodeId, Option<u64>>>,
-    /// On the metadata leader: whether each node said it is low on disk
-    /// (ADR 0122), from the same answers.
-    disk_reports: Mutex<BTreeMap<NodeId, bool>>,
     /// Set by [`NodeHandle::leave`]: how long the node may take to hand
     /// the groups it leads to other voters before it stops (ADR 0114).
     leaving: Mutex<Option<Duration>>,
@@ -1072,9 +1093,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // The host is read every few seconds, not per request: CPU use is
     // measured between two reads.
     let (mut host, mut next_host) = (lotse_rt::HostStats::default(), started);
-    // Whether this node is low on disk (ADR 0122), from each read of the
-    // host.
+    // Whether this node is low on disk (ADR 0122), from each read of its
+    // volume, every `disk_check_interval` (ADR 0124).
     let mut disk = crate::disk::DiskWatch::default();
+    let (mut next_disk, reporting_disk) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let mut next_retain = started + RETAIN_EVERY;
     // Compacted partitions take turns at the node's one sweep (ADR 0098):
     // the next one to start is the first after this group.
@@ -1155,7 +1177,12 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         if rt.now() >= next_host {
             host = rt.host_stats().await;
             next_host = rt.now() + HOST_EVERY;
-            disk.observe(cfg.disk_free_limit, host.disk_free_bytes, host.disk_total_bytes);
+        }
+        if rt.now() >= next_disk {
+            let (free, total) = rt.disk_space().await;
+            next_disk = rt.now() + cfg.disk_check_interval;
+            disk.observe(cfg.disk_free_limit, free, total);
+            report_disk(rt, cfg.id, &disk, &known, &marker_client, shared, jobs, &reporting_disk);
         }
         let now = rt.now();
         caught_up.retain(|g, _| groups.contains_key(g));
@@ -1546,12 +1573,8 @@ fn ask_for_sizes<R: Runtime, S: StateMachine>(
         if let Some(Ok(nodes)) = race(client.node_metrics(), &[&stop]).await {
             let mut sizes = BTreeMap::new();
             let mut removed = BTreeMap::new();
-            let mut disk = BTreeMap::new();
             for m in nodes.into_iter().filter_map(|(_, m)| m.ok()) {
                 removed.insert(NodeId::from(m.node_id), m.removed_through);
-                if let Some(d) = m.disk {
-                    disk.insert(NodeId::from(m.node_id), d.low);
-                }
                 for p in m.partitions {
                     let s = sizes.entry(p.group).or_insert(0u64);
                     *s = (*s).max(p.size_bytes);
@@ -1559,7 +1582,6 @@ fn ask_for_sizes<R: Runtime, S: StateMachine>(
             }
             *shared.sizes.lock().expect("sizes lock") = sizes;
             *shared.removed_through.lock().expect("removed lock") = removed;
-            *shared.disk_reports.lock().expect("disk lock") = disk;
         }
         sizing.store(false, std::sync::atomic::Ordering::Relaxed);
     });

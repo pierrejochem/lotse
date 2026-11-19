@@ -356,6 +356,11 @@ pub struct HostStats {
 pub trait Host: Send + Sync + 'static {
     /// The machine right now.
     fn host_stats(&self) -> impl Future<Output = HostStats> + Send;
+
+    /// Free and total bytes of the volume that holds the node's data, as in
+    /// [`HostStats`], read alone: cheap enough to ask every second, for a
+    /// node's free space limit (ADR 0124).
+    fn disk_space(&self) -> impl Future<Output = (Option<u64>, Option<u64>)> + Send;
 }
 
 /// Everything a Lotse node needs from its environment.

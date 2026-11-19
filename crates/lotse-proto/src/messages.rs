@@ -3747,6 +3747,31 @@ impl SettleVotersRequest {
     }
 }
 
+/// A node tells the metadata group's leader that it went low on disk or
+/// back (internal, from a node, ADR 0124), at once and again until its own
+/// view of the metadata state agrees. Answered with [`AdminResponse`] once
+/// the change is committed, or at once when the state already says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportDiskRequest {
+    /// The node reporting; a node reports only for itself.
+    pub node_id: u32,
+    /// Whether it is low now.
+    pub low: bool,
+}
+
+impl ReportDiskRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.node_id);
+        w.u8(u8::from(self.low));
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = ReportDiskRequest { node_id: r.u32()?, low: r.u8()? != 0 };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
 /// A queue's leader forwards messages to its dead-letter queue (internal,
 /// from a node). Answered with [`OutcomeResponse`] once the queue's leader
 /// has them committed. Sending a message again is harmless: the receiving

@@ -142,6 +142,7 @@ impl World {
                         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
                         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
                         disk_free_limit: lotse_server::FreeLimit::default(),
+                        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
                         // Half the runs map 6 to 12 keys per sweep (ADR 0098),
                         // fewer than the run writes now and then, so a
                         // partition takes several sweeps; fewer still would
@@ -554,6 +555,7 @@ fn returned_config(id: NodeId, log: LogConfig) -> NodeConfig {
         leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
         disk_free_limit: lotse_server::FreeLimit::default(),
+        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
         retention: RetentionConfig::keep(),
         join: id > 3,
         auth: lotse_server::AuthConfig::none(),

@@ -495,6 +495,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::SettleVoters(SettleVotersRequest { group, voters })).await
     }
 
+    /// Internal, for nodes: tells the metadata group that `node_id`, this
+    /// node, went low on disk or back (ADR 0124).
+    pub async fn report_disk(&self, node_id: u32, low: bool) -> Result<(), ClientError> {
+        self.admin_change(Request::ReportDisk(lotse_proto::ReportDiskRequest { node_id, low })).await
+    }
+
     /// Internal, for nodes: reports client certificates the node accepted
     /// (ADR 0091).
     pub async fn record_certificates(

@@ -44,4 +44,6 @@ pub const DEFAULT_LEADER_SETTLE: std::time::Duration = std::time::Duration::from
 /// was committed and still serve reads (ADR 0116), like Kafka's
 /// `replica.lag.time.max.ms`.
 pub const DEFAULT_FOLLOWER_MAX_LAG: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often a node reads its data volume's free space by default (ADR 0124).
+pub const DEFAULT_DISK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 pub use replica::{Error, Output, ProposeError, Proposed, Replica, ReplicaOptions, Retention, StateMachine, Sweep};
