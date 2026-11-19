@@ -169,14 +169,14 @@ function dial(
       socket = net.connect({ host: target, port: address.port });
       socket.once("connect", ok);
     } else {
+      const identity = tlsConfig.identity();
       socket = tls.connect({
         host: target,
         port: address.port,
         // SNI takes a name, not an address.
         ...(net.isIP(address.host) === 0 ? { servername: address.host } : {}),
         ca: tlsConfig.ca,
-        ...(tlsConfig.cert === undefined ? {} : { cert: tlsConfig.cert }),
-        ...(tlsConfig.key === undefined ? {} : { key: tlsConfig.key }),
+        ...identity,
         minVersion: TLS_PROTOCOL,
         maxVersion: TLS_PROTOCOL,
         rejectUnauthorized: true,

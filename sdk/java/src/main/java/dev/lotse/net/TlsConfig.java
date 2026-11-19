@@ -1,7 +1,9 @@
 package dev.lotse.net;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.PrivateKey;
@@ -19,22 +21,91 @@ import javax.net.ssl.TrustManagerFactory;
  * <p>Only TLS 1.3 is spoken, and the node's certificate must be valid for the host the client dialled (a name in
  * its DNS entries, or an IP address in its IP entries). Only the CA given here is trusted, not the JDK's roots.
  * Nothing is read from the system's trust store or from key stores.
+ *
+ * <p>A client identity given as files is read again for the next connection once either file changed, so a renewed
+ * certificate (ADR 0123) is used without a restart. If the files cannot be read then, half written for instance, the
+ * identity read before is kept.
  */
 public final class TlsConfig {
     /** The only protocol version. */
     public static final String PROTOCOL = "TLSv1.3";
 
-    private final SSLContext context;
+    private final List<X509Certificate> authorities;
     private final boolean clientCertificate;
+    /** The identity's files, or {@code null} when it was given as text or not at all. */
+    private final Path certFile;
+    private final Path keyFile;
 
-    private TlsConfig(SSLContext context, boolean clientCertificate) {
+    private SSLContext context;
+    private List<FileTime> stamps;
+
+    private TlsConfig(
+            List<X509Certificate> authorities,
+            SSLContext context,
+            boolean clientCertificate,
+            Path certFile,
+            Path keyFile,
+            List<FileTime> stamps) {
+        this.authorities = authorities;
         this.context = context;
         this.clientCertificate = clientCertificate;
+        this.certFile = certFile;
+        this.keyFile = keyFile;
+        this.stamps = stamps;
     }
 
-    /** The context connections are made with. */
-    SSLContext context() {
+    /** The context connections are made with: built again first if the identity's files changed. */
+    synchronized SSLContext context() {
+        if (certFile == null) {
+            return context;
+        }
+        List<FileTime> now = stamps(certFile, keyFile);
+        if (now != null && !now.equals(stamps)) {
+            try {
+                List<X509Certificate> chain = Pem.certificatesFile(certFile);
+                PrivateKey key = Pem.privateKeyFile(keyFile);
+                // Between the writes of a renewal the key may be new and the certificate not yet.
+                if (!chain.isEmpty() && matches(chain.get(0), key)) {
+                    context = Builder.contextOf(authorities, chain, key);
+                    stamps = now;
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                // Half written, or a key that does not match yet: keep what worked, look again next time.
+            }
+        }
         return context;
+    }
+
+    /** Whether {@code key} belongs to the certificate: it signs what the certificate's key verifies. */
+    static boolean matches(X509Certificate cert, PrivateKey key) {
+        String algorithm =
+                switch (key.getAlgorithm()) {
+                    case "EC" -> "SHA256withECDSA";
+                    case "RSA" -> "SHA256withRSA";
+                    default -> key.getAlgorithm();
+                };
+        try {
+            byte[] probe = "lotse".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            java.security.Signature sign = java.security.Signature.getInstance(algorithm);
+            sign.initSign(key);
+            sign.update(probe);
+            byte[] sig = sign.sign();
+            java.security.Signature verify = java.security.Signature.getInstance(algorithm);
+            verify.initVerify(cert.getPublicKey());
+            verify.update(probe);
+            return verify.verify(sig);
+        } catch (GeneralSecurityException e) {
+            return false;
+        }
+    }
+
+    /** The modification times of both files, or {@code null} if either cannot be read. */
+    private static List<FileTime> stamps(Path cert, Path key) {
+        try {
+            return List.of(Files.getLastModifiedTime(cert), Files.getLastModifiedTime(key));
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /** Whether a client certificate is presented when a node asks for one. */
@@ -62,6 +133,9 @@ public final class TlsConfig {
         private final List<X509Certificate> authorities = new ArrayList<>();
         private List<X509Certificate> chain;
         private PrivateKey key;
+        private Path certFile;
+        private Path keyFile;
+        private List<FileTime> stamps;
 
         private Builder() {}
 
@@ -79,8 +153,11 @@ public final class TlsConfig {
 
         /** Presents a client certificate (the chain, leaf first) with its PKCS#8 private key, from files. */
         public Builder clientIdentity(Path certPem, Path keyPem) throws IOException {
+            stamps = stamps(certPem, keyPem);
             chain = Pem.certificatesFile(certPem);
             key = Pem.privateKeyFile(keyPem);
+            certFile = certPem;
+            keyFile = keyPem;
             return this;
         }
 
@@ -88,6 +165,8 @@ public final class TlsConfig {
         public Builder clientIdentity(String certPem, String keyPem) {
             chain = Pem.certificates(certPem);
             key = Pem.privateKey(keyPem);
+            certFile = null;
+            keyFile = null;
             return this;
         }
 
@@ -100,6 +179,11 @@ public final class TlsConfig {
             if (authorities.isEmpty()) {
                 throw new IllegalStateException("no CA certificate: give the cluster's ca.pem");
             }
+            List<X509Certificate> cas = List.copyOf(authorities);
+            return new TlsConfig(cas, contextOf(cas, chain, key), key != null, certFile, keyFile, stamps);
+        }
+
+        static SSLContext contextOf(List<X509Certificate> authorities, List<X509Certificate> chain, PrivateKey key) {
             try {
                 KeyStore trust = KeyStore.getInstance("PKCS12");
                 trust.load(null, null);
@@ -119,7 +203,7 @@ public final class TlsConfig {
                 }
                 SSLContext context = SSLContext.getInstance(PROTOCOL);
                 context.init(keys, tmf.getTrustManagers(), null);
-                return new TlsConfig(context, key != null);
+                return context;
             } catch (GeneralSecurityException | IOException e) {
                 throw new IllegalArgumentException("cannot build the TLS configuration: " + e.getMessage(), e);
             }

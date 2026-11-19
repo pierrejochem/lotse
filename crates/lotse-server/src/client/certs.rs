@@ -17,7 +17,7 @@ use lotse_proto::{
 use lotse_rt::Runtime;
 use sha2::{Digest, Sha256};
 
-use super::admin::{AdminThen, admin_response};
+use super::admin::{AdminThen, admin_response, renewed_response};
 use super::{Clients, ClusterView, Outbox};
 use crate::auth::Principal;
 use crate::metadata::{CertKey, CertRequest, Change, REQUEST_TTL_MS, SeenCert};
@@ -238,6 +238,82 @@ impl Clients {
             }
         };
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+    }
+
+    /// `RenewCertificate` (ADR 0123): the metadata leader signs a new
+    /// certificate for the principal the connection's certificate names,
+    /// with the request's key and the renewal CA, records it and answers
+    /// with its chain once that record applied. Only a connection made with
+    /// a client certificate in its renewal window may ask.
+    pub(super) fn renew_certificate<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: Arc<Outbox>,
+        id: u32,
+        req: lotse_proto::RenewCertificateRequest,
+        principal: &Principal,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        let refuse = |code: ErrorCode, why: &str| outbox.push(id, &renewed_response(code, Some(why), None, &[], 0));
+        let Some((cert, name)) = outbox.presented.clone() else {
+            return refuse(
+                ErrorCode::INVALID_REQUEST,
+                "only a connection made with a client certificate renews it; sign in with the certificate",
+            );
+        };
+        // A session that signed in again with SASL acts as someone else.
+        if !matches!(principal, Principal::User { name: n, .. } if *n == name) {
+            return refuse(ErrorCode::UNAUTHORIZED, "the session no longer acts as the certificate's principal");
+        }
+        if !lotse_auth::renew::may_renew(cert.not_before_ms, cert.not_after_ms, view.unix_ms) {
+            let opens = lotse_auth::renew::window_opens_ms(cert.not_before_ms, cert.not_after_ms);
+            return refuse(
+                ErrorCode::INVALID_REQUEST,
+                &format!(
+                    "the certificate may be renewed from {opens} ms since the epoch, in its last 30 days or once two \
+                     thirds of its validity have passed"
+                ),
+            );
+        }
+        if req.csr.is_empty() || req.csr.len() > MAX_CSR {
+            return refuse(ErrorCode::INVALID_REQUEST, "a signing request has 1 to 4096 bytes");
+        }
+        let replica = match Self::metadata_leader(view, groups) {
+            Ok(r) => r,
+            Err((code, h)) => return outbox.push(id, &renewed_response(code, None, h, &[], 0)),
+        };
+        let Some(ca) = view.admin.renewal.get() else {
+            return refuse(
+                ErrorCode::INVALID_REQUEST,
+                "this cluster has no renewal CA ([tls] renewal_ca); ask the CA holder for a new certificate",
+            );
+        };
+        let renews = CertKey { issuer: cert.issuer, serial: cert.serial.clone() };
+        if !replica.metadata().room_for_renewal(&renews, view.unix_ms) {
+            return refuse(ErrorCode::INVALID_REQUEST, "4096 renewed certificates are held; try again later");
+        }
+        let Some(random) = self.random.as_ref() else {
+            return refuse(ErrorCode::INVALID_REQUEST, "this node draws no serial numbers");
+        };
+        let mut serial = [0u8; 16];
+        serial[..8].copy_from_slice(&random().to_be_bytes());
+        serial[8..].copy_from_slice(&random().to_be_bytes());
+        let signed = match ca.sign(&req.csr, &name, serial, view.unix_ms) {
+            Ok(s) => s,
+            Err(e) => return refuse(ErrorCode::INVALID_REQUEST, &e.to_string()),
+        };
+        let key = CertKey { issuer: signed.facts.issuer, serial: signed.facts.serial.clone() };
+        let change = Change::RenewCertificate {
+            cert: key.clone(),
+            principal: name,
+            not_before_ms: signed.facts.not_before_ms,
+            not_after_ms: signed.facts.not_after_ms,
+            renews,
+            at_ms: view.unix_ms,
+        };
+        let chain = vec![bytes::Bytes::from(signed.der), bytes::Bytes::copy_from_slice(ca.certificate())];
+        let then = AdminThen::Renewed { cert: key, chain, not_after_ms: signed.facts.not_after_ms };
+        self.propose_admin(replica, view.now, &change, (outbox, id), then);
     }
 
     /// `RecordCertificate`: the CA holder records what it signed.

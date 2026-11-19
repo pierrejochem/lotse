@@ -148,6 +148,17 @@ pub struct Tls {
     /// writes it; the same file goes to every node.
     #[serde(default)]
     pub crl: Option<String>,
+    /// The renewal CA's certificate, PEM (ADR 0123): an intermediate under
+    /// the CA that `lotse certs --renewal-ca` makes. With it, the metadata
+    /// leader renews client certificates over connections made with them,
+    /// and a certificate it issued works only while the cluster records it.
+    /// The same file goes to every node.
+    #[serde(default)]
+    pub renewal_ca: Option<String>,
+    /// The renewal CA's private key, PEM; default: `renewal_ca` with
+    /// `.key`. Every node holds it.
+    #[serde(default)]
+    pub renewal_ca_key: Option<String>,
     /// No TLS: allowed only when every address is on loopback, for trying
     /// a cluster on one machine.
     #[serde(default)]
@@ -369,6 +380,9 @@ impl ClusterFile {
         if let Some(l) = &self.disk.free_limit {
             l.free_limit().map_err(ConfigError::Invalid)?;
         }
+        if self.tls.renewal_ca_key.is_some() && self.tls.renewal_ca.is_none() {
+            return invalid("[tls] names renewal_ca_key without renewal_ca".into());
+        }
         if self.producers.max == Some(0) {
             return invalid("producers.max must be at least 1".into());
         }
@@ -379,7 +393,12 @@ impl ClusterFile {
             return invalid("producers.expiration_ms must be at least 1".into());
         }
         if self.tls.plaintext_on_loopback {
-            if self.tls.ca.is_some() || self.tls.cert.is_some() || self.tls.key.is_some() || self.tls.crl.is_some() {
+            if self.tls.ca.is_some()
+                || self.tls.cert.is_some()
+                || self.tls.key.is_some()
+                || self.tls.crl.is_some()
+                || self.tls.renewal_ca.is_some()
+            {
                 return invalid("[tls] names certificates and plaintext_on_loopback; choose one".into());
             }
             for n in &self.nodes {
@@ -466,6 +485,7 @@ impl ClusterFile {
             resource_tenants: BTreeMap::new(),
             // Filled from `[tls] ca` when the node runs.
             client_cas: lotse_server::ClientCas::default(),
+            renewal: lotse_server::RenewalSlot::default(),
         };
         Ok(lotse_server::NodeConfig {
             id,
@@ -518,6 +538,17 @@ impl ClusterFile {
     /// The revocation list's path, if `[tls]` names one.
     pub fn crl_path(&self) -> Option<PathBuf> {
         self.tls.crl.as_deref().map(PathBuf::from)
+    }
+
+    /// The renewal CA's certificate and key paths (ADR 0123), if `[tls]`
+    /// names one.
+    pub fn renewal_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        let cert = PathBuf::from(self.tls.renewal_ca.as_deref()?);
+        let key = match &self.tls.renewal_ca_key {
+            Some(k) => PathBuf::from(k),
+            None => cert.with_extension("key"),
+        };
+        Some((cert, key))
     }
 
     /// Node `id`'s CA, certificate and key paths; `None` without TLS.

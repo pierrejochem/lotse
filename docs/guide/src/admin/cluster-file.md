@@ -81,6 +81,8 @@ Either name `ca`, `cert` and `key`, or set `plaintext_on_loopback`. Naming both 
 | `cert` | path with `{id}` | none | The node's certificate chain, PEM. |
 | `key` | path with `{id}` | none | The node's private key, PEM. |
 | `crl` | path | none | The certificate revocation list, PEM. Optional. A certificate it names is refused in every handshake ([ADR 0060](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0060-certificate-renewal-and-revocation.md)). |
+| `renewal_ca` | path | none | The renewal CA's certificate, PEM, made by `lotse certs --renewal-ca`. Optional. With it, a client certificate is renewed over a connection made with it ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)). Not with `plaintext_on_loopback`. |
+| `renewal_ca_key` | path | `renewal_ca` ending in `.key` | The renewal CA's private key, PEM. Only with `renewal_ca`. |
 | `plaintext_on_loopback` | boolean | false | No TLS. Allowed only when every address, including `peer_bind` and `client_bind`, is on loopback. Needs `auth.required = false`. For trying a cluster on one machine. |
 
 Plain TCP is refused off loopback ([ADR 0037](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0037-tls-and-node-identity.md)).

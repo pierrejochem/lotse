@@ -244,8 +244,14 @@ async fn a_running_node_takes_up_a_revocation_and_keeps_working_material() {
     let l = rt.listen("127.0.0.1:0", Link::Client).await.unwrap();
     let addr = l.local_addr();
     let cas = lotse_server::ClientCas::default();
-    let reload =
-        tokio::spawn(lotse_node::reload_tls_every(rt.clone(), file.clone(), 1, cas.clone(), Duration::from_millis(50)));
+    let reload = tokio::spawn(lotse_node::reload_tls_every(
+        rt.clone(),
+        file.clone(),
+        1,
+        cas.clone(),
+        Default::default(),
+        Duration::from_millis(50),
+    ));
     let a = client(&ca, &clients, "alice").connect(&addr, Link::Client).await.unwrap();
     let sa = accepted(&l).await.unwrap();
     let b = client(&ca, &clients, "bob").connect(&addr, Link::Client).await.unwrap();

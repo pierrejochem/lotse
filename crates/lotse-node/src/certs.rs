@@ -60,6 +60,9 @@ pub enum CertError {
     /// A signing request that this command will not sign.
     #[error("the signing request is refused: {0}")]
     BadRequest(String),
+    /// `--renewal-ca` needs `[tls] renewal_ca`.
+    #[error("[tls] names no renewal_ca; add `renewal_ca = \"<path>\"` to say where the renewal CA goes")]
+    NoRenewalCa,
     /// A principal name that would not make a file name.
     #[error("{0:?} is not a principal name this command takes: letters, digits, `.`, `_`, `-` and `@` only")]
     BadName(String),
@@ -157,6 +160,49 @@ pub fn node_certs(file: &ClusterFile, days: u32) -> Result<Vec<Outcome>, CertErr
         out.push(Outcome::Wrote(key));
     }
     Ok(out)
+}
+
+/// The renewal CA (ADR 0123) at `[tls] renewal_ca` and its key, unless
+/// they exist: an intermediate CA signed by the cluster's CA, for client
+/// certificates only (extended key usage client authentication), valid for
+/// `days`. Every node gets both files; the metadata leader renews client
+/// certificates with it, and no renewed certificate outlives it.
+pub fn renewal_ca(file: &ClusterFile, days: u32) -> Result<Vec<Outcome>, CertError> {
+    let (cert, key) = file.renewal_paths().ok_or(CertError::NoRenewalCa)?;
+    let ca_path = PathBuf::from(file.tls.ca.as_deref().ok_or(CertError::NoTls)?);
+    if !ca_path.exists() || !ca_key_path(&ca_path).exists() {
+        return Err(CertError::NoCa(ca_key_path(&ca_path).display().to_string()));
+    }
+    if cert.exists() && key.exists() {
+        return Ok(vec![Outcome::Kept(cert), Outcome::Kept(key)]);
+    }
+    let ca = load_or_make_ca(&ca_path, &mut Vec::new())?;
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.distinguished_name.push(DnType::CommonName, "Lotse renewal CA");
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+    // Client certificates only: a verifier that checks usage along the
+    // chain refuses a server certificate from it.
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    (params.not_before, params.not_after) = validity(days);
+    let pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| cert_err("the renewal CA key", e))?;
+    let made = params.signed_by(&pair, ca.issuer()).map_err(|e| cert_err("the renewal CA", e))?;
+    write(&cert, &made.pem(), false)?;
+    write(&key, &pair.serialize_pem(), true)?;
+    Ok(vec![Outcome::Wrote(cert), Outcome::Wrote(key)])
+}
+
+/// Writes `text` to `path` in place of what is there: to a file beside it
+/// first, then renamed over it, so a reader sees the old file or the new
+/// one, never half of one.
+pub fn replace(path: &Path, text: &str, secret: bool) -> Result<(), CertError> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = PathBuf::from(tmp);
+    let _ = std::fs::remove_file(&tmp);
+    write(&tmp, text, secret)?;
+    std::fs::rename(&tmp, path).map_err(|source| CertError::Io { path: path.display().to_string(), source })
 }
 
 /// A client certificate for `principal` (its common name, which a node
@@ -344,7 +390,7 @@ pub fn revoke(file: &ClusterFile, cert: &Path) -> Result<Revoked, CertError> {
             invalidity_date: None,
         });
     }
-    replace(&crl_path, &revocation_list(&ca, revoked, number)?)?;
+    replace(&crl_path, &revocation_list(&ca, revoked, number)?, false)?;
     let serial = serial.iter().map(|b| format!("{b:02x}")).collect();
     Ok(Revoked { serial, already, crl: crl_path })
 }
@@ -468,16 +514,6 @@ fn cert_err(what: &str, e: impl std::fmt::Display) -> CertError {
 
 fn read(path: &Path) -> Result<String, CertError> {
     std::fs::read_to_string(path).map_err(|source| CertError::Io { path: path.display().to_string(), source })
-}
-
-/// Replaces a file whole: written beside it, then renamed over it, so a node
-/// reading it sees the old list or the new one, never half.
-fn replace(path: &Path, text: &str) -> Result<(), CertError> {
-    let io = |source| CertError::Io { path: path.display().to_string(), source };
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
-    write(&tmp, text, false)?;
-    std::fs::rename(&tmp, path).map_err(io)
 }
 
 /// Writes a new file; a key is readable by its owner only.

@@ -1002,6 +1002,7 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "lotse-auth",
+ "p256",
  "pbkdf2",
  "rcgen",
  "ring",
@@ -1009,6 +1010,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
+ "time",
  "x509-parser",
 ]
 

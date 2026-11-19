@@ -31,7 +31,8 @@ final class RealCluster implements AutoCloseable {
         StringBuilder text = new StringBuilder("[cluster]\ndata_dir = \"" + dir + "/data/node-{id}\"\n\n");
         if (tls) {
             text.append("[tls]\nca = \"").append(dir).append("/tls/ca.pem\"\ncert = \"").append(dir)
-                    .append("/tls/node-{id}.pem\"\nkey = \"").append(dir).append("/tls/node-{id}.key\"\n\n");
+                    .append("/tls/node-{id}.pem\"\nkey = \"").append(dir).append("/tls/node-{id}.key\"\n")
+                    .append("renewal_ca = \"").append(dir).append("/tls/renewal-ca.pem\"\n\n");
         } else {
             text.append("[tls]\nplaintext_on_loopback = true\n\n");
         }
@@ -49,12 +50,32 @@ final class RealCluster implements AutoCloseable {
             LotseBinary.run(bin, "certs", "--config", config.toString());
             LotseBinary.run(bin, "certs", "--config", config.toString(), "--client", "alice", "--out",
                     dir.resolve("clients").toString());
+            // For renewal (ADR 0123): the renewal CA, and two users whose certificates are in their window from
+            // the start, 20 days long.
+            LotseBinary.run(bin, "certs", "--config", config.toString(), "--renewal-ca");
+            for (String user : List.of("carol", "dave")) {
+                LotseBinary.run(bin, "certs", "--config", config.toString(), "--client", user, "--out",
+                        dir.resolve("clients").toString(), "--days", "20");
+            }
         }
     }
 
     TlsConfig adminTls() throws IOException {
         return TlsConfig.fromFiles(
                 dir.resolve("tls/ca.pem"), dir.resolve("clients/alice.pem"), dir.resolve("clients/alice.key"));
+    }
+
+    /** TLS as {@code user}, from the files {@code lotse certs} wrote, read again when they change. */
+    TlsConfig userTls(String user) throws IOException {
+        return TlsConfig.fromFiles(dir.resolve("tls/ca.pem"), certFile(user), keyFile(user));
+    }
+
+    Path certFile(String user) {
+        return dir.resolve("clients/" + user + ".pem");
+    }
+
+    Path keyFile(String user) {
+        return dir.resolve("clients/" + user + ".key");
     }
 
     TlsConfig anonymousTls() throws IOException {

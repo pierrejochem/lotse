@@ -1921,4 +1921,29 @@ public sealed interface Request {
             return new DescribeNodes();
         }
     }
+
+    /**
+     * {@code RenewCertificate} (60): renews the client certificate the connection was made with, in its renewal
+     * window (ADR 0123). The metadata leader signs a certificate for the request's key, naming the principal the
+     * connection's certificate names, and records it.
+     *
+     * @param csr a PKCS #10 signing request, DER, signed with the new key; its subject and extensions are ignored
+     */
+    record RenewCertificate(ByteString csr) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.RENEW_CERTIFICATE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.bytes(csr).noTags();
+        }
+
+        static RenewCertificate read(Reader r) {
+            RenewCertificate x = new RenewCertificate(r.bytes());
+            r.tags();
+            return x;
+        }
+    }
 }

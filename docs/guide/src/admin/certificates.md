@@ -87,4 +87,25 @@ lotse certs --config cluster.toml --sign --user admin       # password in LOTSE_
 
 The command shows each request's principal, who asked and the fingerprint of the key, and signs those you confirm. `--request <id>` (the id or its first digits) with `--yes` signs that one without asking, never all of them; `--out <dir>` also writes each certificate as `<principal>.pem`; `--days` sets the validity (default 365). The certificate is made from the key and the principal only: whatever else a request asks for is ignored. The signed certificate is recorded in the cluster, which takes it only if it has the request's key and principal and is signed by a CA certificate in the nodes' `[tls] ca` file, and the console's list offers it for download; it works with the key file saved earlier ([ADR 0092](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0092-requesting-and-signing-client-certificates.md)).
 
+## Renew a client certificate over its connection
+
+A client certificate renews itself, without the CA holder, once the cluster has a renewal CA ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)):
+
+```sh
+lotse certs --config cluster.toml --renewal-ca      # on the machine with ca.key
+```
+
+makes, under the cluster's CA, an intermediate CA that may sign client certificates only: `renewal-ca.pem` and its key `renewal-ca.key` at the path `[tls] renewal_ca` names. Add `renewal_ca` to the cluster file and copy both files to every node. Each node takes them up within 10 s. Keep `ca.key` offline as before.
+
+A certificate may then be renewed from the earlier of its last 30 days and two thirds of its validity, until it expires; a year-long certificate opens on day 243. The client sends a signing request for a new key over a connection made with the certificate. The metadata leader signs a certificate for the same principal, valid for 90 days, and records it in the cluster. The old certificate keeps working until it expires.
+
+```sh
+lotse certs --config cluster.toml --renew --cert alice/alice.pem --key alice/alice.key
+lotse certs --config cluster.toml --renew --if-due --cert alice/alice.pem --key alice/alice.key   # from a daily timer
+```
+
+renews the certificate in `--cert` and writes the new key, then the new certificate (with the renewal CA's after it), over the files. With `--if-due` it does nothing before the window opens. The clients for Java, Kotlin, C# and Node.js can renew by themselves, and every client has a call for it (see the client guides).
+
+A certificate from the renewal CA signs in only while the cluster holds its record for that principal. A copy of the renewal CA's key therefore mints nothing that signs in. Renewing the same certificate a second time replaces the first renewal, whose connections end. The *Certificates* tab lists renewed certificates like any other.
+
 A revoked certificate does not end a user's other ways in. To cut off a user's sessions, see [Revoking sessions](authentication-and-roles.md#revoking-sessions).

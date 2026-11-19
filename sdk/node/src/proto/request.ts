@@ -250,6 +250,16 @@ export interface RevokeCertificateRequest {
   readonly notAfterMs: bigint;
   readonly reason: string;
 }
+/**
+ * `RenewCertificate` (key 60): renews the client certificate the connection was made with, in its renewal window
+ * (ADR 0123). The metadata leader signs a certificate for the request's key, naming the principal the connection's
+ * certificate names, and records it.
+ */
+export interface RenewCertificateRequest {
+  readonly type: "RenewCertificate";
+  /** A PKCS #10 signing request, DER, signed with the new key; its subject and extensions are ignored. */
+  readonly csr: Uint8Array;
+}
 /** `DescribeCertificates` (key 53): the client certificates the cluster has seen or had revoked. Cluster admin. */
 export interface DescribeCertificatesRequest {
   readonly type: "DescribeCertificates";
@@ -398,6 +408,7 @@ export type Request =
   | RevokeCertificateRequest
   | DescribeCertificatesRequest
   | DescribeSessionsRequest
+  | RenewCertificateRequest
   | RecordCertificatesRequest
   | RequestCertificateRequest
   | DescribeCertificateRequestsRequest
@@ -453,6 +464,7 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
   DescribeCertificates: ApiKey.DESCRIBE_CERTIFICATES,
   DescribeSessions: ApiKey.DESCRIBE_SESSIONS,
+  RenewCertificate: ApiKey.RENEW_CERTIFICATE,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
   DescribeCertificateRequests: ApiKey.DESCRIBE_CERTIFICATE_REQUESTS,
@@ -727,6 +739,9 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RequestCertificate":
       w.string(req.principal).bytes(req.csr).noTags();
+      return;
+    case "RenewCertificate":
+      w.bytes(req.csr).noTags();
       return;
     case "RecordCertificate":
       w.bytes(req.id)
@@ -1115,6 +1130,11 @@ export function readRequest(apiKey: number, r: Reader): Request {
         notAfterMs: r.u64(),
         reason: r.string(),
       };
+      r.tags();
+      return x;
+    }
+    case ApiKey.RENEW_CERTIFICATE: {
+      const x: RenewCertificateRequest = { type: "RenewCertificate", csr: r.bytes() };
       r.tags();
       return x;
     }

@@ -106,12 +106,19 @@ export class Certs {
     writeFileSync(
       certs.config,
       `[cluster]\ndata_dir = "${dir}/data/node-{id}"\n\n` +
-        `[tls]\nca = "${dir}/tls/ca.pem"\ncert = "${dir}/tls/node-{id}.pem"\nkey = "${dir}/tls/node-{id}.key"\n\n` +
+        `[tls]\nca = "${dir}/tls/ca.pem"\ncert = "${dir}/tls/node-{id}.pem"\nkey = "${dir}/tls/node-{id}.key"\n` +
+        `renewal_ca = "${dir}/tls/renewal-ca.pem"\n\n` +
         `[retention]\nms = -1\n\n[auth]\nadmins = ["alice"]\n${extra}\n` +
         `[[node]]\nid = 1\npeer = "127.0.0.1:${certs.peerPort}"\nclient = "127.0.0.1:${certs.clientPort}"\n`,
     );
     run(bin, "certs", "--config", certs.config);
     run(bin, "certs", "--config", certs.config, "--client", "alice", "--out", join(dir, "clients"));
+    // For renewal (ADR 0123): the renewal CA, and two users whose certificates are in their window from the start,
+    // 20 days long.
+    run(bin, "certs", "--config", certs.config, "--renewal-ca");
+    for (const user of ["carol", "dave"]) {
+      run(bin, "certs", "--config", certs.config, "--client", user, "--out", join(dir, "clients"), "--days", "20");
+    }
     return certs;
   }
 
@@ -121,6 +128,17 @@ export class Certs {
 
   adminTls(): Promise<TlsConfig> {
     return TlsConfig.fromFiles(this.ca, this.clientCert, this.clientKey);
+  }
+
+  /** The certificate and key files `lotse certs` wrote for `user`. */
+  filesOf(user: string): { certPemFile: string; keyPemFile: string } {
+    return { certPemFile: join(this.dir, `clients/${user}.pem`), keyPemFile: join(this.dir, `clients/${user}.key`) };
+  }
+
+  /** TLS as `user`, from those files, read again when they change. */
+  userTls(user: string): Promise<TlsConfig> {
+    const f = this.filesOf(user);
+    return TlsConfig.fromFiles(this.ca, f.certPemFile, f.keyPemFile);
   }
 
   anonymousTls(): Promise<TlsConfig> {
