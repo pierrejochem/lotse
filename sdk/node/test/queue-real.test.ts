@@ -307,33 +307,40 @@ describe("queues against three real nodes", { skip }, () => {
   });
 
   test("a closed consumer gives back what it did not read", async () => {
-    await client.createQueue("giveback");
-    await produce("giveback", 5);
-    await settled("giveback");
-    const leaderBefore = await leaderTerm(client, "giveback");
-    const c1 = await client.subscribe("giveback", { credit: 5 });
-    const first = await take(c1);
-    await sleep(300); // the rest of the batch is buffered in c1
-    c1.close();
-    const c2 = await client.subscribe("giveback", { credit: 5 });
-    try {
-      const rest: Delivery[] = [];
-      for (let i = 0; i < 4; i++) {
-        rest.push(await take(c2));
+    // What is in flight lives with the leader (ADR 0031), and a new leader keeps a consumer's messages for it for the
+    // resume window (ADR 0109), as long as a take waits here: the scenario runs again, on a new queue, if a leader moved
+    // while it ran.
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const giveback = named("giveback", attempt);
+      await client.createQueue(giveback);
+      await produce(giveback, 5);
+      await settled(giveback);
+      await steady.watch(giveback);
+      const leaderBefore = await leaderTerm(client, giveback);
+      const c1 = await client.subscribe(giveback, { credit: 5 });
+      const first = await take(c1);
+      await sleep(300); // the rest of the batch is buffered in c1
+      c1.close();
+      const c2 = await client.subscribe(giveback, { credit: 5 });
+      try {
+        const rest: Delivery[] = [];
+        for (let i = 0; i < 4; i++) {
+          rest.push(await take(c2));
+        }
+        // The message stays with the connection it was handed out on, as long as its leader stays: when leadership
+        // moves, what was handed out and not acknowledged is handed out again, which is right and not asserted here.
+        if ((await leaderTerm(client, giveback)) === leaderBefore) {
+          assert.ok(!rest.some((d) => d.offset === first.offset), "the one handed out stays with c1");
+        }
+        assert.ok(rest.every((d) => d.deliveryCount >= 1));
+        await c2.ack(rest);
+        // Not asserted: whether the broker also takes back the message c1 had handed out. PROTOCOL.md says it stays
+        // with the consumer's connection; a real node was seen to deliver it again, now and then, so only the unread
+        // ones are checked here.
+      } finally {
+        c2.close();
       }
-      // The message stays with the connection it was handed out on, as long as its leader stays: when leadership moves,
-      // what was handed out and not acknowledged is handed out again, which is right and not asserted here.
-      if ((await leaderTerm(client, "giveback")) === leaderBefore) {
-        assert.ok(!rest.some((d) => d.offset === first.offset), "the one handed out stays with c1");
-      }
-      assert.ok(rest.every((d) => d.deliveryCount >= 1));
-      await c2.ack(rest);
-      // Not asserted: whether the broker also takes back the message c1 had handed out. PROTOCOL.md says it stays with
-      // the consumer's connection; a real node was seen to deliver it again, now and then, so only the unread ones are
-      // checked here.
-    } finally {
-      c2.close();
-    }
+    });
   });
 
   test("a message delivered too often lands in the dead-letter queue with its origin", async () => {
