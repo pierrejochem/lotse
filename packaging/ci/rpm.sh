@@ -5,6 +5,7 @@
 #
 #   docker run --rm -v "$PWD:/src" -w /src fedora:42 sh packaging/ci/rpm.sh
 set -eux
+dnf install -y -q util-linux   # setpriv; the minimal image lacks it
 dnf install -y -q ./dist/lotse-*.x86_64.rpm
 lotse --version
 getent passwd lotse
