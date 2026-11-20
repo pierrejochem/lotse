@@ -1,13 +1,26 @@
-# Lotse
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/readme-hero-dark.png">
+    <img src="docs/brand/readme-hero-light.png" alt="Lotse: queues and streams on one replicated log" width="100%">
+  </picture>
+</p>
 
-<p><img src="docs/brand/logos/lotse-wordmark.svg" alt="Lotse" height="56"></p>
+<p align="center">
+  <a href="https://github.com/pierrejochem/lotse/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/pierrejochem/lotse/ci.yml?branch=main&label=CI" alt="CI"></a>
+  <a href="https://pierrejochem.github.io/lotse/"><img src="https://img.shields.io/github/actions/workflow/status/pierrejochem/lotse/docs.yml?branch=main&label=docs" alt="Docs"></a>
+  <a href="https://github.com/pierrejochem/lotse/releases"><img src="https://img.shields.io/github/v/release/pierrejochem/lotse?include_prereleases" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust: 1.85+"></a>
+  <a href="AGENTS.md"><img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe: forbidden"></a>
+</p>
 
-[![CI](https://github.com/pierrejochem/lotse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pierrejochem/lotse/actions/workflows/ci.yml)
-[![Docs](https://github.com/pierrejochem/lotse/actions/workflows/docs.yml/badge.svg?branch=main)](https://pierrejochem.github.io/lotse/)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust: 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
-[![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](AGENTS.md)
-[![Latest release](https://img.shields.io/github/v/release/pierrejochem/lotse?include_prereleases)](https://github.com/pierrejochem/lotse/releases)
+<p align="center">
+  <a href="https://pierrejochem.github.io/lotse/"><b>Guide</b></a> ·
+  <a href="#quick-start"><b>Quick start</b></a> ·
+  <a href="docs/status.md"><b>Status</b></a> ·
+  <a href="sdk/"><b>Client SDKs</b></a> ·
+  <a href="docs/design.md"><b>Design</b></a>
+</p>
 
 Lotse is a message broker in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery.
 

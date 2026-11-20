@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lotse README hero</title>
+<!--
+  The banner at the top of the README, in both themes. Render it with
+  `python3 docs/brand/render-hero.py`, which writes readme-hero-light.png and
+  readme-hero-dark.png at twice this size (2560 × 720). The README picks one
+  by the reader's colour scheme with <picture>.
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;800&display=swap">
+<script>
+  // ?theme=dark renders the dark banner; tokens.css switches on data-theme.
+  document.documentElement.dataset.theme = new URLSearchParams(location.search).get("theme") || "light";
+</script>
+<style>
+  html, body { margin:0; background:transparent; }
+  body { font-family:var(--font-sans); width:1280px; height:360px; }
+  .hero { position:relative; box-sizing:border-box; width:1280px; height:360px; overflow:hidden;
+          background:var(--surface); border:1px solid var(--line); border-radius:24px; }
+  .words { position:absolute; left:64px; top:0; bottom:0; display:flex; flex-direction:column; justify-content:center; }
+  .name { margin:0; font-size:144px; line-height:.9; font-weight:800; letter-spacing:-.035em; color:var(--ink); }
+  .tag { margin:22px 0 0 6px; font-size:28px; line-height:36px; font-weight:500; color:var(--ink-muted); letter-spacing:-.005em; }
+  .facts { margin:26px 0 0 6px; font-size:17px; line-height:24px; font-weight:500; color:var(--ink-muted);
+           text-transform:uppercase; letter-spacing:.1em; }
+  .facts span + span::before { content:"·"; margin:0 .7em; color:var(--line); }
+  .art { position:absolute; right:0; top:0; width:600px; height:360px; }
+  .art svg { display:block; width:600px; height:360px; }
+  .elbe { fill:var(--elbe); }
+  .signal { fill:var(--signal); }
+  .fog { fill:var(--fog); }
+  .brass { fill:var(--brass); }
+  .cut { fill:var(--surface); }
+  .wire { fill:none; stroke:var(--surface); stroke-width:10; stroke-linecap:round; }
+</style>
+</head>
+<body>
+<div class="hero">
+<div class="words">
+<h1 class="name">Lotse</h1>
+<p class="tag">Queues and streams on one replicated log.</p>
+<p class="facts"><span>Exactly-once</span><span>Raft replication</span><span>Written in Rust</span></p>
+</div>
+<div class="art" aria-hidden="true">
+<svg viewBox="0 0 600 360" width="600" height="360">
+<!--
+  The Fairway motion of the mark (brand README): the pilot-flag block, elbe and
+  signal flush side by side with the mark's rounded corners; three lanes of log
+  segments on the elbe half curve into one stream across the signal half; the
+  stream goes on as elbe segments on a fog satellite and ends in brass, the
+  committed offset. Lane pitch 40, segment 30 × 10, stream 20 tall.
+-->
+<rect class="elbe" x="24" y="40" width="400" height="280" rx="28"/>
+<rect class="signal" x="224" y="40" width="200" height="280" rx="28"/>
+<rect class="signal" x="224" y="40" width="28" height="280"/>
+<rect class="fog" x="440" y="130" width="120" height="100" rx="18"/>
+<rect class="cut" x="56" y="135" width="30" height="10" rx="5"/>
+<rect class="cut" x="96" y="135" width="30" height="10" rx="5"/>
+<rect class="cut" x="136" y="135" width="30" height="10" rx="5"/>
+<rect class="cut" x="56" y="175" width="30" height="10" rx="5"/>
+<rect class="cut" x="96" y="175" width="30" height="10" rx="5"/>
+<rect class="cut" x="136" y="175" width="30" height="10" rx="5"/>
+<rect class="cut" x="56" y="215" width="30" height="10" rx="5"/>
+<rect class="cut" x="96" y="215" width="30" height="10" rx="5"/>
+<rect class="cut" x="136" y="215" width="30" height="10" rx="5"/>
+<path class="wire" d="M172 140C206 140 202 180 232 180M172 220C206 220 202 180 232 180M172 180H232"/>
+<rect class="cut" x="224" y="170" width="168" height="20" rx="10"/>
+<rect class="elbe" x="460" y="175" width="30" height="10" rx="5"/>
+<rect class="brass" x="502" y="175" width="30" height="10" rx="5"/>
+</svg>
+</div>
+</div>
+</body>
+</html>

@@ -1,6 +1,11 @@
 # Lotse brand
 
-<p><img src="logos/lotse-wordmark.svg" alt="Lotse" height="48"></p>
+<p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logos/lotse-wordmark-reversed.svg">
+    <img src="logos/lotse-wordmark.svg" alt="Lotse" height="48">
+  </picture>
+</p>
 
 Lotse is a message broker written in Rust: reliable queues and persistent streams on one replicated log, with exactly-once delivery. A *Lotse* is a harbour pilot, the person who boards a ship and guides it safely to its berth. The broker does the same for messages.
 
@@ -19,7 +24,7 @@ Lotse talks like an experienced pilot on the radio: calm, exact, short.
 
 The mark, Fairway, is a rounded square split down the middle: `elbe` on the left, `signal` on the right. Three short white lanes on the navy half curve into one wider white stream that runs across the red half. Queues in, stream out, one log underneath. Files are in [`logos/`](logos/).
 
-- **Primary:** [`lotse-wordmark.svg`](logos/lotse-wordmark.svg) on light grounds, [`lotse-wordmark-reversed.svg`](logos/lotse-wordmark-reversed.svg) on `surface` in dark mode or on `elbe` bands.
+- **Primary:** [`lotse-wordmark.svg`](logos/lotse-wordmark.svg) on light grounds, [`lotse-wordmark-reversed.svg`](logos/lotse-wordmark-reversed.svg) on `surface` in dark mode or on `elbe` bands. Where the reader's theme decides (GitHub), give both in a `<picture>` with a `prefers-color-scheme: dark` source.
 - **Mark alone:** [`lotse-mark.svg`](logos/lotse-mark.svg) for favicons, avatars, CLI banners and the diagram header. Minimum size 16px; keep clear space of a quarter of the mark's width on every side.
 - **Single colour:** [`lotse-wordmark-mono.svg`](logos/lotse-wordmark-mono.svg) and [`lotse-mark-mono.svg`](logos/lotse-mark-mono.svg) use `currentColor`; the red half drops to 55% of the ink so the split survives in one colour. Use these for print, embossing and inline SVG in docs.
 - Never recolour the halves, swap their order, put the mark on `signal`, rotate or mirror it (the flow always runs left to right), change the number of lanes, or set the wordmark in another typeface.
@@ -58,6 +63,7 @@ No custom icon set yet. Use a plain 1.5px-stroke outline set at 16 and 20px, col
 ## Files
 
 - [`tokens.json`](tokens.json): colours (light and dark), type styles, spacing and radii; the source of truth.
+- [`readme-hero.html`](readme-hero.html): the banner at the top of the main README, in both themes; `python3 render-hero.py` writes [`readme-hero-light.png`](readme-hero-light.png) and [`readme-hero-dark.png`](readme-hero-dark.png), and the README picks one by the reader's colour scheme.
 - [`tokens.css`](tokens.css): the same tokens as CSS custom properties, generated from `tokens.json` with `python3 docs/brand/tokens.py`.
 - [`logos/`](logos/): the five lockups described above.
 - [`cover.html`](cover.html) and [`cover.png`](cover.png): the cover with the Fairway motif.
