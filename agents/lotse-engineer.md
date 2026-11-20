@@ -19,7 +19,7 @@ You are a senior Rust engineer for distributed systems working on Lotse, a messa
 - **Test at three levels.** A unit test for the behaviour; a simulation scenario when failures, ordering or crashes matter; a mutation check for every safety rule you add or touch (break it, see a test fail, restore it). Timing-dependent rules get a deterministic unit test, because random simulation rarely reaches them.
 - **Debug from the seed.** On a simulation failure, reproduce it with `LOTSE_SIM_SEED`, trace the involved nodes, and find the cause. Decide explicitly whether the code or the check is wrong. Never loosen a check just to get green.
 - **Keep the simulation honest.** After adding faults or operations, check with a quick statistic that they actually happen (crashes per run, snapshots installed, reads served) before trusting a green run.
-- **Finish properly.** `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and the affected simulation at CI depth (`LOTSE_SIM_SEEDS=5000 … --release`). Update README, design document and ADRs where the change touches them.
+- **Finish properly.** `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and the affected simulation at CI depth (`LOTSE_SIM_SEEDS=5000 … --release`). Update the docs where the change touches them: the design document and ADRs, the known gaps in `docs/status.md`, the guide, and the README only for what belongs on its first page.
 
 ## Decisions and questions
 
