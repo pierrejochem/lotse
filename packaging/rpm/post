@@ -1,0 +1,13 @@
+#!/bin/sh
+# After install and upgrade: the user lotse, the data directory, and systemd
+# told about the unit.
+systemd-sysusers /usr/lib/sysusers.d/lotse.conf >/dev/null 2>&1 || true
+if ! getent passwd lotse >/dev/null; then
+    useradd --system --user-group --home-dir /var/lib/lotse --no-create-home \
+        --shell /sbin/nologin --comment "Lotse message broker" lotse
+fi
+install -d -o lotse -g lotse -m 0750 /var/lib/lotse
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0

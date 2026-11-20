@@ -1,6 +1,6 @@
 # Install
 
-Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's certificates and checks the cluster file. There are three ways to get it.
+Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's certificates and checks the cluster file. There are four ways to get it: a package, the tarball, the container image, or a build from source.
 
 ## What you need
 
@@ -9,18 +9,52 @@ Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's
 - Two TCP ports per node. The examples use 7000 for the other nodes (`peer`) and 9000 for clients (`client`). Both are set per node in the cluster file.
 - A disk for the data directory. Retention keeps 7 days by default, so the size follows your traffic.
 
-Each release has static binaries, Debian packages and a container image ([ADR 0049](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0049-packaging.md)).
+Each release has, for x86_64 and aarch64, a static binary, a tarball, a `.deb`, an `.rpm`, an `.apk` and a container image ([ADR 0049](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0049-packaging.md), [ADR 0126](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0126-reproducible-releases-built-by-one-script-for-every-init-system.md)). Replace `<version>` below with the release you downloaded. The next chapter, [A first cluster](first-cluster.md), continues from here.
 
-## Debian or Ubuntu
+## Packages
 
-The package installs the binary, the unit `lotse@.service`, the system user `lotse` and an example cluster file at `/usr/share/doc/lotse/cluster.toml.example`.
+Every package installs the binary, the system user `lotse`, the data directory `/var/lib/lotse` and an example cluster file at `/usr/share/doc/lotse/cluster.toml.example`. Removing a package, even with purge, leaves data and configuration.
+
+| System | Package | Runs a node with |
+| --- | --- | --- |
+| Debian, Ubuntu | `lotse_<version>-1_amd64.deb` | systemd: `lotse@<id>.service` |
+| Debian, Devuan without systemd | the same `.deb` | sysvinit: `/etc/init.d/lotse`, `LOTSE_NODE` in `/etc/default/lotse` |
+| Fedora, RHEL, SUSE | `lotse-<version>-1.x86_64.rpm` | systemd: `lotse@<id>.service` |
+| Alpine | `lotse_<version>-r1_x86_64.apk` | OpenRC: `/etc/init.d/lotse.<id>`, a link to `lotse` |
 
 ```sh
-sudo apt install ./lotse_<version>_amd64.deb
+sudo apt install ./lotse_<version>-1_amd64.deb             # Debian, Ubuntu, Devuan
+sudo dnf install ./lotse-<version>-1.x86_64.rpm            # Fedora, RHEL
+sudo zypper install ./lotse-<version>-1.x86_64.rpm         # SUSE
+apk add --allow-untrusted ./lotse_<version>-r1_x86_64.apk  # Alpine
 lotse --version
 ```
 
-Replace `<version>` with the release you downloaded. The next chapter, [A first cluster](first-cluster.md), continues from here.
+The packages are not signed, so Alpine needs `--allow-untrusted`. Check a download against the release's `SHA256SUMS` first (below).
+
+## Tarball
+
+For any other Linux, `lotse-<version>-linux-amd64.tar.gz` holds the static binary, the systemd unit, the OpenRC and sysvinit scripts and the example cluster file. Its `INSTALL.md` lists where each goes.
+
+```sh
+tar -xzf lotse-<version>-linux-amd64.tar.gz
+sudo install -m 0755 lotse-<version>-linux-amd64/bin/lotse /usr/bin/lotse
+```
+
+## Check a download
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Releases are reproducible: the release workflow builds every file twice, on two machines, and publishes only when the two builds match byte for byte. You can do the same from the source tree at the release's tag. This needs the pinned tools, which `make release-tools` installs:
+
+```sh
+git checkout v<version>
+make release-verify VERSION=<version> SUMS=path/to/SHA256SUMS
+```
+
+It lists every file as `same` or `differs`.
 
 ## Container image
 
@@ -50,7 +84,7 @@ cd lotse
 cargo build --release -p lotse-node      # target/release/lotse
 ```
 
-`cargo deb -p lotse-node` builds the Debian package from the repository (install the tool with `cargo install cargo-deb`), and `docker build -f packaging/Dockerfile -t lotse .` builds the image.
+`make release-tools && make release VERSION=<version>` builds the whole release into `dist/`: binaries, tarballs and packages for both architectures. `docker build -f packaging/Dockerfile -t lotse .` builds the image.
 
 ## Check the install
 

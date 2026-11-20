@@ -1,0 +1,113 @@
+# The .deb, .rpm and .apk packages (ADR 0126), made by nfpm from a binary
+# packaging/release.sh built; it sets VERSION, ARCH (amd64 or arm64) and
+# BINARY. Every timestamp is SOURCE_DATE_EPOCH, so the packages are
+# reproducible.
+#
+# - deb: systemd (lotse@<id>.service) and, on systems without systemd,
+#   sysvinit (/etc/init.d/lotse, set LOTSE_NODE in /etc/default/lotse).
+# - rpm: systemd.
+# - apk: OpenRC (/etc/init.d/lotse.<id>, a link to lotse).
+#
+# Installing creates the user lotse and /var/lib/lotse; removing, even with
+# purge, leaves data and configuration.
+name: lotse
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+release: 1
+section: net
+priority: optional
+maintainer: Pierre Jochem <pierrejochem@msn.com>
+vendor: Lotse
+homepage: https://github.com/pierrejochem/lotse
+license: Apache-2.0
+description: "Message broker: reliable queues and persistent streams on one replicated log"
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/lotse
+    expand: true
+    file_info:
+      mode: 0755
+  - src: packaging/cluster.toml.example
+    dst: /usr/share/doc/lotse/cluster.toml.example
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/lotse/LICENSE
+    file_info:
+      mode: 0644
+
+  # systemd: deb and rpm.
+  - src: packaging/systemd/lotse@.service
+    dst: /usr/lib/systemd/system/lotse@.service
+    file_info:
+      mode: 0644
+    packager: deb
+  - src: packaging/systemd/lotse@.service
+    dst: /usr/lib/systemd/system/lotse@.service
+    file_info:
+      mode: 0644
+    packager: rpm
+  - src: packaging/systemd/lotse.sysusers
+    dst: /usr/lib/sysusers.d/lotse.conf
+    file_info:
+      mode: 0644
+    packager: deb
+  - src: packaging/systemd/lotse.sysusers
+    dst: /usr/lib/sysusers.d/lotse.conf
+    file_info:
+      mode: 0644
+    packager: rpm
+
+  # sysvinit: deb. On systemd, the instance unit runs the nodes, so the unit
+  # systemd would make from the init script is masked.
+  - src: packaging/sysvinit/lotse.init
+    dst: /etc/init.d/lotse
+    type: config|noreplace
+    file_info:
+      mode: 0755
+    packager: deb
+  - src: packaging/sysvinit/lotse.default
+    dst: /etc/default/lotse
+    type: config|noreplace
+    file_info:
+      mode: 0644
+    packager: deb
+  - src: /dev/null
+    dst: /usr/lib/systemd/system/lotse.service
+    type: symlink
+    packager: deb
+
+  # OpenRC: apk.
+  - src: packaging/openrc/lotse.initd
+    dst: /etc/init.d/lotse
+    type: config|noreplace
+    file_info:
+      mode: 0755
+    packager: apk
+  - src: packaging/openrc/lotse.confd
+    dst: /etc/conf.d/lotse
+    type: config|noreplace
+    file_info:
+      mode: 0644
+    packager: apk
+
+overrides:
+  deb:
+    depends:
+      - adduser
+    scripts:
+      postinstall: packaging/deb/postinst
+      preremove: packaging/deb/prerm
+      postremove: packaging/deb/postrm
+  rpm:
+    scripts:
+      postinstall: packaging/rpm/post
+      postremove: packaging/rpm/postun
+  apk:
+    depends:
+      - openrc
+    scripts:
+      postinstall: packaging/apk/post-install
