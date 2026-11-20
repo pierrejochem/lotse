@@ -63,6 +63,18 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     call(app, "GET", uri, None).await
 }
 
+/// Who leads partition 0 of `name`, and in which term: `(0, 0)` while no
+/// leader is known.
+async fn leader_term(client: &Client<TokioRuntime>, name: &str) -> (u32, u64) {
+    let Ok(m) = client.metadata(&[name]).await else { return (0, 0) };
+    m.resources
+        .iter()
+        .filter(|r| r.name == name)
+        .flat_map(|r| &r.partitions)
+        .find(|p| p.partition == 0)
+        .map_or((0, 0), |p| (p.leader, p.leader_term))
+}
+
 async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut req = Request::builder().method(method).uri(uri);
     let body = match body {
@@ -311,29 +323,51 @@ async fn the_console_shows_a_real_cluster() {
     assert!(purged, "nothing ready in jobs");
 
     // Requeue: a message that failed once goes to the dead-letter queue, and
-    // from there back.
+    // from there back. Its leader is pinned where it is first: a new group's
+    // leader may still move in its first seconds, and a requeue that a move
+    // overtakes leaves the message waiting for the closed consumer for the
+    // resume window (ADR 0109), longer than the wait below.
+    let mut work_leader = (0, 0);
+    for _ in 0..100 {
+        work_leader = leader_term(&client, "work").await;
+        if work_leader.0 != 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    client.move_leader("work", 0, Some(u64::from(work_leader.0))).await.expect("pin work's leader");
     for _ in 0..50 {
         if client.produce("work", 0, batch("task")).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let before = leader_term(&client, "work").await;
     {
         let mut c = client.subscribe("work", 1).await.expect("subscribe");
         let m = c.next(Duration::from_secs(5)).await.expect("next").expect("the task");
         c.nack(&m, true).await.expect("nack");
         c.close().await;
     }
+    // 10 s; if work's leader moved meanwhile (an election a starved node
+    // lost, despite the pin), the resume window and 10 s more.
     let mut dead = false;
-    for _ in 0..100 {
+    let mut tries = 100;
+    let mut i = 0;
+    while i < tries {
         let (_, d) = get(&app, "/api/v1/clusters/local/queues/work.dlq").await;
         if d["ready"] == 1 {
             dead = true;
             break;
         }
+        i += 1;
+        if i == tries && tries == 100 && leader_term(&client, "work").await != before {
+            tries += (QueueConfig::DEFAULT_RESUME_WINDOW.as_millis() / 100) as usize + 100;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(dead, "the task reaches the dead-letter queue");
+    let after = leader_term(&client, "work").await;
+    assert!(dead, "the task reaches the dead-letter queue (work's leader and term {before:?} before, {after:?} now)");
     let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues/work.dlq/requeue", None).await;
     assert_eq!(status, StatusCode::OK, "{done}");
     assert_eq!(done["message"], "Requeued 1 message from work.dlq to their queues.", "{done}");
