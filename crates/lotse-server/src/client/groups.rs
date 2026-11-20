@@ -39,7 +39,7 @@ use super::coord::{Busy, Then};
 use super::{Clients, ClusterView, Outbox};
 use crate::auth::Principal;
 use crate::coordinator::{Phase, TxnMeta};
-use crate::groups::{Committed, GroupMeta, MemberMeta, Tp, group_record, offsets_record};
+use crate::groups::{Committed, GroupMeta, MemberMeta, Tp, group_change_record, offsets_record};
 use crate::replica::{Replica, StateMachine};
 use crate::wire::GroupId;
 use lotse_auth::roles::Operation;
@@ -210,7 +210,12 @@ impl Clients {
             return outbox.push(id, &refuse(ErrorCode::CONCURRENT_GROUP_CHANGE));
         }
         let term = replica.raft_ref().term();
-        let mut g = replica.coordinator().groups().groups.get(&req.group_id).cloned().unwrap_or_default();
+        // What this change starts from: the applied group, which no other
+        // record changes while this one is on its way (the group is busy
+        // until it commits), so a record of only what changed (ADR 0125)
+        // brings every replica to what this node computes.
+        let before = replica.coordinator().groups().groups.get(&req.group_id).cloned();
+        let mut g = before.clone().unwrap_or_default();
         let tenant = super::ids::split(&req.group_id).0.to_string();
         // The pattern this heartbeat subscribes by: the one it sends when
         // joining, otherwise the member's own (ADR 0073).
@@ -321,7 +326,7 @@ impl Clients {
                 g.retarget(partitions_of(view));
                 self.group_timers.forget(&req.group_id, &req.member_id);
                 let resp = GroupHeartbeatResponse { member_epoch: -1, ..refuse_resp(&req, interval) };
-                let record = group_record(&req.group_id, &g);
+                let record = group_change_record(&req.group_id, before.as_ref(), &g);
                 return self.propose_record(replica, view.now, record, key, Some((outbox, id)), Then::Heartbeat(resp));
             }
             epoch => {
@@ -355,7 +360,7 @@ impl Clients {
         if !changed {
             return outbox.push(id, &Response::GroupHeartbeat(resp));
         }
-        let record = group_record(&req.group_id, &g);
+        let record = group_change_record(&req.group_id, before.as_ref(), &g);
         self.propose_record(replica, view.now, record, key, Some((outbox, id)), Then::Heartbeat(resp));
     }
 
@@ -521,14 +526,15 @@ impl Clients {
             if self.busy.contains(&key) {
                 continue;
             }
-            let mut g = state.iter().find(|(id, _)| *id == gid).expect("listed").1.clone();
+            let before = &state.iter().find(|(id, _)| *id == gid).expect("listed").1;
+            let mut g = before.clone();
             for mid in &members {
                 g.members.remove(mid);
                 self.group_timers.forget(&gid, mid);
             }
             g.epoch += 1;
             g.retarget(partitions_of(view));
-            let record = group_record(&gid, &g);
+            let record = group_change_record(&gid, Some(before), &g);
             self.propose_record(replica, view.now, record, key, None, Then::Nothing);
         }
     }
