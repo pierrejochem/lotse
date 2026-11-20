@@ -2,8 +2,12 @@
 //! transaction coordinator's.
 //!
 //! Membership is persisted (KIP-848 style): every change to a group is one
-//! record holding the whole group (`GroupState`), so a coordinator failover
-//! keeps members, their epochs and their partitions. Committed offsets are
+//! `GroupState` record, so a coordinator failover keeps members, their
+//! epochs and their partitions. Since ADR 0125 a record holds only what
+//! changed: the group's epoch, the members removed and each changed member
+//! in full, computed against the applied state, which a coordinator only
+//! changes one record per group at a time. Records holding the whole group
+//! (versions 1 to 3) are still read. Committed offsets are
 //! records of their own (`GroupOffsets`); offsets committed within a
 //! transaction wait in the transaction's state and join these when the
 //! transaction's `PrepareCommit` is applied (see [`crate::coordinator`]).
@@ -168,6 +172,8 @@ const VERSION_INSTANCES: u8 = 2;
 /// A group record whose members' instance ids and patterns follow the
 /// group (ADR 0073).
 const VERSION_EXTRAS: u8 = 3;
+/// A record holding only what changed in a group (ADR 0125).
+const VERSION_DELTA: u8 = 4;
 
 fn put_str(b: &mut BytesMut, s: &str) {
     b.put_u16_le(s.len() as u16);
@@ -321,9 +327,10 @@ fn get_patterns(b: &mut &[u8], g: &mut GroupMeta) -> Result<(), String> {
     Ok(())
 }
 
-/// The record that sets group `id` to `g`, written in the oldest version
-/// that holds it, so that nodes from before instance ids (ADR 0072) and
-/// patterns (ADR 0073) read what they can.
+/// The record that sets group `id` to `g` whole, as nodes before ADR 0125
+/// wrote it, in the oldest version that holds it (ADR 0072, ADR 0073). Kept
+/// to test that such records in a log are still read.
+#[cfg(test)]
 pub(crate) fn group_record(id: &str, g: &GroupMeta) -> Bytes {
     let mut b = BytesMut::new();
     let version = if !patterns(g).is_empty() {
@@ -344,6 +351,69 @@ pub(crate) fn group_record(id: &str, g: &GroupMeta) -> Bytes {
     lotse_record::internal_control_batch(lotse_record::InternalControl::GroupState, &b).expect("one record")
 }
 
+/// Writes one member in full, with its instance id and pattern.
+fn put_member(b: &mut BytesMut, mid: &str, m: &MemberMeta) {
+    put_str(b, mid);
+    b.put_i32_le(m.epoch);
+    b.put_u32_le(m.rebalance_timeout_ms);
+    b.put_u32_le(m.subscribed.len() as u32);
+    for r in &m.subscribed {
+        b.put_u64_le(*r);
+    }
+    put_tps(b, &m.target);
+    put_tps(b, &m.assigned);
+    put_tps(b, &m.revoking);
+    for s in [&m.instance_id, &m.pattern] {
+        b.put_u8(u8::from(s.is_some()));
+        if let Some(s) = s {
+            put_str(b, s);
+        }
+    }
+}
+
+/// Reads what [`put_member`] wrote.
+fn get_member(b: &mut &[u8]) -> Result<(String, MemberMeta), String> {
+    let mid = get_str(b)?;
+    need(b, 12)?;
+    let (epoch, rebalance_timeout_ms, s) = (b.get_i32_le(), b.get_u32_le(), b.get_u32_le() as usize);
+    need(b, s.saturating_mul(8))?;
+    let subscribed = (0..s).map(|_| b.get_u64_le()).collect();
+    let (target, assigned, revoking) = (get_tps(b)?, get_tps(b)?, get_tps(b)?);
+    let mut opt = || -> Result<Option<String>, String> {
+        need(b, 1)?;
+        if b.get_u8() != 0 { get_str(b).map(Some) } else { Ok(None) }
+    };
+    let (instance_id, pattern) = (opt()?, opt()?);
+    Ok((mid, MemberMeta { epoch, subscribed, rebalance_timeout_ms, target, assigned, revoking, instance_id, pattern }))
+}
+
+/// The record that takes group `id` from `before` (the applied state, `None`
+/// if the coordinator holds no such group) to `after` (ADR 0125): the new
+/// epoch, the members `after` no longer has, and each member that is new or
+/// differs, in full. Members that did not change are not written. A group
+/// left without members is removed when the record applies.
+pub(crate) fn group_change_record(id: &str, before: Option<&GroupMeta>, after: &GroupMeta) -> Bytes {
+    let empty = GroupMeta::default();
+    let base = before.unwrap_or(&empty);
+    let removed: Vec<&String> = base.members.keys().filter(|mid| !after.members.contains_key(*mid)).collect();
+    let changed: Vec<(&String, &MemberMeta)> =
+        after.members.iter().filter(|(mid, m)| base.members.get(*mid) != Some(m)).collect();
+    let mut b = BytesMut::new();
+    b.put_u8(VERSION_DELTA);
+    put_str(&mut b, id);
+    b.put_u8(u8::from(before.is_some()));
+    b.put_i32_le(after.epoch);
+    b.put_u32_le(removed.len() as u32);
+    for mid in removed {
+        put_str(&mut b, mid);
+    }
+    b.put_u32_le(changed.len() as u32);
+    for (mid, m) in changed {
+        put_member(&mut b, mid, m);
+    }
+    lotse_record::internal_control_batch(lotse_record::InternalControl::GroupState, &b).expect("one record")
+}
+
 /// The record that commits `offsets` for group `id`.
 pub(crate) fn offsets_record(id: &str, offsets: &[(Tp, Committed)]) -> Bytes {
     let mut b = BytesMut::new();
@@ -360,6 +430,9 @@ impl GroupsState {
     /// Applies a `GroupState` record.
     pub(crate) fn apply_group(&mut self, mut b: &[u8]) -> Result<(), String> {
         let version = if b.has_remaining() { b.get_u8() } else { 0 };
+        if version == VERSION_DELTA {
+            return self.apply_change(b);
+        }
         if !(VERSION..=VERSION_EXTRAS).contains(&version) {
             return Err("group record has an unknown version".into());
         }
@@ -374,6 +447,42 @@ impl GroupsState {
             self.groups.remove(&id);
         } else {
             self.groups.insert(id, g);
+        }
+        Ok(())
+    }
+
+    /// Applies a record of what changed in a group (ADR 0125).
+    fn apply_change(&mut self, mut b: &[u8]) -> Result<(), String> {
+        let id = get_str(&mut b)?;
+        need(&b, 9)?;
+        let existed = b.get_u8() != 0;
+        let epoch = b.get_i32_le();
+        let mut removed = Vec::new();
+        for _ in 0..b.get_u32_le() {
+            removed.push(get_str(&mut b)?);
+        }
+        need(&b, 4)?;
+        let mut changed = Vec::new();
+        for _ in 0..b.get_u32_le() {
+            changed.push(get_member(&mut b)?);
+        }
+        if b.has_remaining() {
+            return Err("group record has trailing bytes".into());
+        }
+        // Computed against a group that has since been forgotten with its
+        // tenant (ADR 0069): it stays forgotten, rather than coming back
+        // with only the members this record names.
+        if existed && !self.groups.contains_key(&id) {
+            return Ok(());
+        }
+        let g = self.groups.entry(id.clone()).or_default();
+        g.epoch = epoch;
+        for mid in removed {
+            g.members.remove(&mid);
+        }
+        g.members.extend(changed);
+        if g.members.is_empty() {
+            self.groups.remove(&id);
         }
         Ok(())
     }

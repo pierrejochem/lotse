@@ -37,7 +37,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0030 | [Client simulation in its own CI job](0030-client-simulation-in-its-own-ci-job.md) | Accepted |
 | 0031 | [Queues: the first cut](0031-queues-first-cut.md) | Accepted |
 | 0032 | [Publish: exchanges routed by the client](0032-publish-routed-by-the-client.md) | Accepted |
-| 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted |
+| 0033 | [Consumer groups: the first cut](0033-consumer-groups-first-cut.md) | Accepted, in part changed by [0125](0125-a-group-change-writes-only-the-members-it-changes.md) |
 | 0034 | [The metadata group: resources created at runtime](0034-metadata-group.md) | Accepted |
 | 0035 | [Deleting resources and changing settings](0035-deleting-resources-and-changing-settings.md) | Accepted; in part superseded by 0100 |
 | 0036 | [DescribeMetrics and the console against a real cluster](0036-describemetrics-and-the-console-against-a-real-cluster.md) | Accepted, refined by 0117 |
@@ -128,5 +128,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted, in part changed by [0124](0124-a-node-reports-a-low-disk-at-once.md) |
 | 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted |
 | 0124 | [A node reports a low disk at once](0124-a-node-reports-a-low-disk-at-once.md) | Accepted |
+| 0125 | [A group change writes only the members it changes](0125-a-group-change-writes-only-the-members-it-changes.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

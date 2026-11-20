@@ -197,3 +197,122 @@ fn instance_ids_and_patterns_round_trip_and_old_forms_stay_readable() {
     only.encode_instances(&mut b);
     assert!(b.is_empty());
 }
+
+/// The payload of a coordinator record.
+fn payload_of(record: &Bytes) -> Bytes {
+    match lotse_record::control(&lotse_record::Batch::parse(record).unwrap().0) {
+        Ok(Some(lotse_record::Control::Internal(lotse_record::InternalControl::GroupState, p))) => p,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Takes group `id` in `s` from what it holds to `after` with a record of
+/// what changed, as the coordinator does, and returns the record's size.
+fn step(s: &mut GroupsState, id: &str, after: &GroupMeta) -> usize {
+    let before = s.groups.get(id).cloned();
+    let record = group_change_record(id, before.as_ref(), after);
+    s.apply_group(&payload_of(&record)).unwrap();
+    record.len()
+}
+
+#[test]
+fn a_change_record_brings_a_replica_to_what_the_coordinator_computed() {
+    // The coordinator's own view, changed step by step as a heartbeat or an
+    // expiry would, and a replica that only applies the records.
+    let mut g = GroupMeta::default();
+    let mut replica = GroupsState::default();
+    let mut check = |g: &GroupMeta, what: &str| {
+        step(&mut replica, "g", g);
+        if g.members.is_empty() {
+            assert!(!replica.groups.contains_key("g"), "{what}: a group without members is gone");
+        } else {
+            assert_eq!(replica.groups["g"], *g, "{what}");
+        }
+    };
+    g.members.insert("a".into(), MemberMeta { epoch: 1, ..member(&[7]) });
+    g.epoch += 1;
+    g.retarget(four);
+    check(&g, "a joins a group that did not exist");
+    g.reconcile("a", None);
+    check(&g, "a takes its partitions");
+    g.members.insert("b".into(), MemberMeta { epoch: 1, instance_id: Some("w1".into()), ..member(&[7]) });
+    g.members.insert("c".into(), MemberMeta { epoch: 1, pattern: Some("orders-.*".into()), ..member(&[7, 8]) });
+    g.epoch += 1;
+    g.retarget(four);
+    check(&g, "b and c join, every target moves");
+    g.reconcile("a", None);
+    check(&g, "a revokes what goes to the others");
+    let released = g.members["a"].assigned.clone();
+    g.reconcile("a", Some(&released));
+    check(&g, "a releases");
+    for m in ["b", "c"] {
+        g.reconcile(m, None);
+        check(&g, m);
+    }
+    g.members.remove("b");
+    g.epoch += 1;
+    g.retarget(four);
+    check(&g, "b leaves");
+    g.members.get_mut("c").expect("c").rebalance_timeout_ms = 9_000;
+    check(&g, "a member changes one setting");
+    check(&g, "nothing changed");
+    g.members.clear();
+    g.epoch += 1;
+    check(&g, "the last members expire");
+}
+
+#[test]
+fn a_reconcile_writes_only_the_member_it_moves() {
+    let mut g = GroupMeta { epoch: 1, ..GroupMeta::default() };
+    for i in 0..100 {
+        g.members.insert(format!("m{i:03}"), MemberMeta { epoch: 1, ..member(&[7]) });
+    }
+    let hundred = |_: u64| 100;
+    g.retarget(hundred);
+    let mut s = GroupsState::default();
+    step(&mut s, "g", &g);
+    let mut after = g.clone();
+    assert!(after.reconcile("m042", None));
+    let one = step(&mut s, "g", &after);
+    assert_eq!(s.groups["g"], after);
+    // Before ADR 0125 this step wrote all hundred members; now it writes
+    // one, plus the batch's own header.
+    let whole = group_record("g", &after).len();
+    assert!(one * 25 < whole, "one member: {one} bytes, the whole group: {whole} bytes");
+    let payload = payload_of(&group_change_record("g", Some(&g), &after));
+    assert_eq!(payload[0], VERSION_DELTA);
+}
+
+#[test]
+fn a_change_to_a_forgotten_group_leaves_it_forgotten() {
+    let mut g = GroupMeta { epoch: 1, ..GroupMeta::default() };
+    g.members.insert("a".into(), MemberMeta { epoch: 1, ..member(&[7]) });
+    g.members.insert("b".into(), MemberMeta { epoch: 1, ..member(&[7]) });
+    let mut after = g.clone();
+    after.members.get_mut("a").expect("a").epoch = 2;
+    // Computed while the group existed; applied after a Forget dropped it.
+    let record = group_change_record("g", Some(&g), &after);
+    let mut s = GroupsState::default();
+    s.apply_group(&payload_of(&record)).unwrap();
+    assert!(!s.groups.contains_key("g"), "not back with only member a");
+    // A group that did not exist is created by its first record.
+    let record = group_change_record("g", None, &after);
+    s.apply_group(&payload_of(&record)).unwrap();
+    assert_eq!(s.groups["g"], after);
+}
+
+#[test]
+fn a_damaged_change_record_is_refused() {
+    let mut g = GroupMeta { epoch: 2, ..GroupMeta::default() };
+    g.members.insert("a".into(), MemberMeta { pattern: Some("p".into()), ..member(&[7]) });
+    g.members.insert("b".into(), MemberMeta { instance_id: Some("i".into()), ..member(&[7]) });
+    let before = GroupMeta { epoch: 1, members: [("z".to_string(), member(&[7]))].into() };
+    let payload = payload_of(&group_change_record("g", Some(&before), &g));
+    for cut in 1..payload.len() {
+        let mut s = GroupsState { groups: [("g".to_string(), before.clone())].into(), ..GroupsState::default() };
+        assert!(s.apply_group(&payload[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut longer = payload.to_vec();
+    longer.push(0);
+    assert!(GroupsState::default().apply_group(&longer).is_err(), "trailing bytes");
+}
