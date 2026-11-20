@@ -127,21 +127,29 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task TheMessagesCanBeReadAsAnAsyncSequence()
     {
-        await Client.CreateQueueAsync("sequence");
-        await ProduceAsync("sequence", 5);
-        var values = new List<string>();
-        await using QueueConsumer c = await Client.SubscribeAsync("sequence", SubscribeOptions.WithCredit(2));
-        using var stop = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await foreach (Delivery d in c.DeliveriesAsync(stop.Token))
+        // What is in flight lives with the leader (ADR 0031): a leader that moves gives unacked messages out again, so
+        // the scenario runs again, on a new queue, if one moved while it ran, as the Node.js test does.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
         {
-            values.Add(d.Value!.ToUtf8());
-            await c.AckAsync(d, stop.Token);
-            if (values.Count == 5)
+            string sequence = attempt == 1 ? "sequence" : "sequence-" + attempt;
+            await Client.CreateQueueAsync(sequence);
+            await ProduceAsync(sequence, 5);
+            await SettledAsync(sequence);
+            await steady.WatchAsync(sequence);
+            var values = new List<string>();
+            await using QueueConsumer c = await Client.SubscribeAsync(sequence, SubscribeOptions.WithCredit(2));
+            using var stop = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await foreach (Delivery d in c.DeliveriesAsync(stop.Token))
             {
-                break;
+                values.Add(d.Value!.ToUtf8());
+                await c.AckAsync(d, stop.Token);
+                if (values.Count == 5)
+                {
+                    break;
+                }
             }
-        }
-        Assert.Equal(Enumerable.Range(0, 5).Select(i => "sequence-" + i), values);
+            Assert.Equal(Enumerable.Range(0, 5).Select(i => sequence + "-" + i), values);
+        });
     }
 
     [LotseFact]
@@ -188,19 +196,26 @@ public sealed class RealQueueTests : IClassFixture<RealCluster>, IAsyncLifetime
     [LotseFact]
     public async Task ADelayedRequeueWaitsForItsDelay()
     {
-        await Client.CreateQueueAsync("backoff");
-        await ProduceAsync("backoff", 1);
-        await SettledAsync("backoff");
-        await using QueueConsumer c = await Client.SubscribeAsync("backoff");
-        Delivery first = await Take(c);
-        var clock = Stopwatch.StartNew();
-        await c.NackAfterAsync(first, TimeSpan.FromMilliseconds(1500));
-        Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(700))); // not due yet
-        Delivery second = await Take(c);
-        Assert.True(clock.ElapsedMilliseconds >= 1200, $"came back after only {clock.ElapsedMilliseconds} ms");
-        Assert.Equal(first.Offset, second.Offset);
-        Assert.Equal(2, second.DeliveryCount);
-        await c.AckAsync(second);
+        // Delivery counts and what is in flight live with the leader (ADR 0031): the scenario runs again, on a new
+        // queue, if a leader moved while it ran, as the Node.js test does.
+        await RealWaits.RetryIfLeaderMovedAsync(Client, async (steady, attempt) =>
+        {
+            string backoff = attempt == 1 ? "backoff" : "backoff-" + attempt;
+            await Client.CreateQueueAsync(backoff);
+            await ProduceAsync(backoff, 1);
+            await SettledAsync(backoff);
+            await steady.WatchAsync(backoff);
+            await using QueueConsumer c = await Client.SubscribeAsync(backoff);
+            Delivery first = await Take(c);
+            var clock = Stopwatch.StartNew();
+            await c.NackAfterAsync(first, TimeSpan.FromMilliseconds(1500));
+            Assert.Null(await c.PollAsync(TimeSpan.FromMilliseconds(700))); // not due yet
+            Delivery second = await Take(c);
+            Assert.True(clock.ElapsedMilliseconds >= 1200, $"came back after only {clock.ElapsedMilliseconds} ms");
+            Assert.Equal(first.Offset, second.Offset);
+            Assert.Equal(2, second.DeliveryCount);
+            await c.AckAsync(second);
+        });
     }
 
     [LotseFact]
