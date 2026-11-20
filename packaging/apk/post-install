@@ -1,0 +1,7 @@
+#!/bin/sh
+# The user lotse and the data and log directories. A node runs as
+# lotse.<id>: ln -s lotse /etc/init.d/lotse.<id>.
+addgroup -S lotse 2>/dev/null || true
+adduser -S -D -H -h /var/lib/lotse -s /sbin/nologin -G lotse -g "Lotse message broker" lotse 2>/dev/null || true
+install -d -o lotse -g lotse -m 0750 /var/lib/lotse /var/log/lotse
+exit 0

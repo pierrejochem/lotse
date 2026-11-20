@@ -1,0 +1,47 @@
+#!/sbin/openrc-run
+# One Lotse node under OpenRC (ADR 0126). The service's suffix is the node's
+# id in the cluster file, as with lotse@<id> under systemd:
+#
+#   ln -s lotse /etc/init.d/lotse.2
+#   rc-update add lotse.2 default
+#   rc-service lotse.2 start
+#
+# Settings for every node go to /etc/conf.d/lotse, for one node to
+# /etc/conf.d/lotse.2. A node joining a running cluster starts once with
+# LOTSE_JOIN=1 there. The node writes its log to /var/log/lotse/lotse.<id>.log.
+
+node=${RC_SVCNAME#lotse.}
+name="Lotse node $node"
+description="Lotse message broker node"
+
+supervisor=supervise-daemon
+command=/usr/bin/lotse
+command_args="run"
+command_user="lotse:lotse"
+directory=/var/lib/lotse
+output_log="/var/log/lotse/$RC_SVCNAME.log"
+error_log="/var/log/lotse/$RC_SVCNAME.log"
+respawn_delay=5
+respawn_max=0
+# The node stops cleanly on SIGTERM; give it time to hand its groups over.
+retry="TERM/60/KILL/5"
+rc_ulimit="${rc_ulimit:--n 1048576}"
+umask=027
+
+export LOTSE_NODE="$node"
+export LOTSE_CONFIG="${LOTSE_CONFIG:-/etc/lotse/cluster.toml}"
+[ -n "${LOTSE_JOIN:-}" ] && export LOTSE_JOIN
+[ -n "${LOTSE_LOG:-}" ] && export LOTSE_LOG
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    if [ "$node" = "$RC_SVCNAME" ]; then
+        eerror "Start a node as lotse.<id>: ln -s lotse /etc/init.d/lotse.<id>"
+        return 1
+    fi
+    checkpath --directory --owner lotse:lotse --mode 0750 /var/lib/lotse /var/log/lotse
+}

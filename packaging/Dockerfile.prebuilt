@@ -1,9 +1,13 @@
-# The release image (ADR 0049): the same as packaging/Dockerfile, from
-# static binaries the release workflow built already, one per platform, in
-# dist/lotse-<arch> (amd64, arm64).
-FROM gcr.io/distroless/static-debian12:nonroot
+# The release image (ADR 0049, ADR 0126): the same as packaging/Dockerfile,
+# from the static binaries packaging/release.sh built, one per platform, in
+# $DIST/lotse-$VERSION-linux-<arch> (amd64, arm64). packaging/image.sh builds
+# it reproducibly, on a base named by its digest.
+ARG BASE=gcr.io/distroless/static-debian12:nonroot
+FROM ${BASE}
 ARG TARGETARCH
-COPY --chmod=0755 dist/lotse-${TARGETARCH} /usr/bin/lotse
+ARG VERSION
+ARG DIST=dist
+COPY --chmod=0755 ${DIST}/lotse-${VERSION}-linux-${TARGETARCH} /usr/bin/lotse
 ENV LOTSE_CONFIG=/etc/lotse/cluster.toml
 VOLUME ["/var/lib/lotse"]
 EXPOSE 7000 9000

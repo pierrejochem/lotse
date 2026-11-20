@@ -4,10 +4,10 @@ This chapter sets up three nodes with TLS 1.3. Every node reads the same cluster
 
 ## The cluster file
 
-Copy the example to `/etc/lotse/cluster.toml` and change the addresses. The Debian package ships it as `/usr/share/doc/lotse/cluster.toml.example`.
+Copy the example to `/etc/lotse/cluster.toml` and change the addresses. The `.deb`, `.rpm` and `.apk` packages ship it as `/usr/share/doc/lotse/cluster.toml.example`, the tarball as `cluster.toml.example`.
 
 ```toml
-{{#include ../../../../packaging/deb/cluster.toml.example}}
+{{#include ../../../../packaging/cluster.toml.example}}
 ```
 
 What the keys mean:
@@ -67,7 +67,7 @@ A node stops cleanly on Ctrl-C or SIGTERM. `LOTSE_LOG` sets the log filter, for 
 
 ## Run under systemd
 
-The Debian package installs `lotse@.service`. The text after `@` is the node's id. The unit reads `/etc/lotse/cluster.toml`, runs as the user `lotse` and restarts the node on failure.
+The `.deb` and `.rpm` packages install `lotse@.service`. The text after `@` is the node's id. The unit reads `/etc/lotse/cluster.toml`, runs as the user `lotse` and restarts the node on failure.
 
 ```sh
 sudo install -d /etc/lotse
@@ -79,7 +79,28 @@ sudo systemctl enable --now lotse@1
 
 Run the last command on each machine with its own id (`lotse@2`, `lotse@3`). Keep `data_dir` at `/var/lib/lotse` or below: the unit lets the node write nowhere else. Follow a node with `journalctl -u lotse@1 -f`.
 
-This guide ran `lotse check` and `lotse certs` on the example file's shape and started three nodes on one machine ([the trial](one-machine-trial.md)). It did not run the systemd unit or a cluster across three machines.
+## Run under OpenRC or sysvinit
+
+On Alpine, the `.apk` installs an OpenRC service. A node runs as `lotse.<id>`, a link to it:
+
+```sh
+ln -s lotse /etc/init.d/lotse.1
+rc-update add lotse.1 default
+rc-service lotse.1 start
+```
+
+Settings for every node go to `/etc/conf.d/lotse`, for one node to `/etc/conf.d/lotse.1`; the log is `/var/log/lotse/lotse.1.log`.
+
+On Debian or Devuan without systemd, the `.deb` installs `/etc/init.d/lotse`, which runs the one node `LOTSE_NODE` names in `/etc/default/lotse`. Nothing starts until it is set:
+
+```sh
+sudo sed -i 's/^LOTSE_NODE=.*/LOTSE_NODE=1/' /etc/default/lotse
+sudo /etc/init.d/lotse start
+```
+
+The log is `/var/log/lotse/lotse.log`. Both scripts run the node as `lotse` and give it 60 s to stop on SIGTERM, like the unit.
+
+This guide ran `lotse check` and `lotse certs` on the example file's shape and started three nodes on one machine ([the trial](one-machine-trial.md)). It did not run the systemd unit or a cluster across three machines. CI starts a one-node cluster under sysvinit and OpenRC from the packages.
 
 ## Next
 

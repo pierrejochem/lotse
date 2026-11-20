@@ -71,7 +71,7 @@ Larger setups put certificates from their own CA at the same paths. Clients auth
 
 ## Packages, images and systemd
 
-Each release (ADR 0049) has static binaries for x86_64 and aarch64, Debian packages and the image `ghcr.io/pierrejochem/lotse`. A node takes its id from `--node` or `LOTSE_NODE`, its cluster file from `--config` or `LOTSE_CONFIG`, and joins with `--join` or `LOTSE_JOIN=1`.
+Each release (ADR 0049, ADR 0126) has, for x86_64 and aarch64, a static binary, a tarball, a `.deb` (systemd, and sysvinit without it), an `.rpm` (systemd) and an `.apk` (OpenRC), and the image `ghcr.io/pierrejochem/lotse`. Releases are reproducible: built twice and compared before they are published, and checkable by anyone. A node takes its id from `--node` or `LOTSE_NODE`, its cluster file from `--config` or `LOTSE_CONFIG`, and joins with `--join` or `LOTSE_JOIN=1`.
 
 ```sh
 # Debian or Ubuntu: the binary, lotse@.service, the lotse user
@@ -81,9 +81,32 @@ sudo cp /usr/share/doc/lotse/cluster.toml.example /etc/lotse/cluster.toml   # th
 sudo lotse certs --config /etc/lotse/cluster.toml && sudo chown -R lotse: /etc/lotse
 sudo systemctl enable --now lotse@1
 
+# Fedora, RHEL or SUSE: the same, with systemd
+sudo dnf install ./lotse-<version>-1.x86_64.rpm
+
+# Alpine: OpenRC runs node 1 as lotse.1
+apk add --allow-untrusted ./lotse_<version>-r1_x86_64.apk
+ln -s lotse /etc/init.d/lotse.1 && rc-update add lotse.1 default && rc-service lotse.1 start
+
+# Debian or Devuan without systemd: set LOTSE_NODE=1 in /etc/default/lotse, then
+sudo /etc/init.d/lotse start
+
 # A container: the cluster file and certificates read-only, the data in a volume
 docker run -e LOTSE_NODE=1 -v /etc/lotse:/etc/lotse:ro -v lotse-1:/var/lib/lotse \
   -p 7000:7000 -p 9000:9000 ghcr.io/pierrejochem/lotse
 ```
 
-`packaging/` holds the Dockerfile, the unit and the package scripts; `docker build -f packaging/Dockerfile .` and `cargo deb -p lotse-node` build them from the repository. In the image and under the unit the data directory is `/var/lib/lotse`, so the cluster file's `data_dir` should be that path or one below it.
+Any other Linux takes the tarball, whose `INSTALL.md` covers systemd, OpenRC and sysvinit. In the image and under every init script the data directory is `/var/lib/lotse`, so the cluster file's `data_dir` should be that path or one below it.
+
+### Building and checking a release
+
+`packaging/` holds the Dockerfile, the init scripts, the package definition (`nfpm.yaml`) and the release script. A release builds on any Linux with the tools `packaging/release.env` pins:
+
+```sh
+make release-tools                                   # Rust, zig, cargo-zigbuild and nfpm at the pinned versions
+make release VERSION=0.4.0                           # dist/: binaries, tarballs, .deb, .rpm, .apk, BUILDINFO, SHA256SUMS
+git checkout v0.4.0 && make release-verify VERSION=0.4.0 SUMS=~/Downloads/SHA256SUMS   # the same bytes as published?
+docker build -f packaging/Dockerfile -t lotse .      # the image from source
+```
+
+The same commit with the same tools gives the same bytes. Every timestamp is the commit's, no path of the build machine stays in a binary, and the release workflow builds twice on two runners and publishes only when every file matches. `packaging/image.sh` builds the release image the same way (ADR 0126).
