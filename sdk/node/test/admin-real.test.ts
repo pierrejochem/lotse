@@ -25,7 +25,7 @@ import {
 } from "../src/index.js";
 import { formatAddress } from "../src/net/address.js";
 import { PlainCluster } from "./support/cluster.js";
-import { leaderOf as currentLeader, pinLeader } from "./support/failover.js";
+import { leaderOf as currentLeader, pinLeader, retryIfLeaderMoved } from "./support/failover.js";
 import { binary, Certs, NodeProcess, retry, skipWithoutBinary } from "./support/lotse.js";
 
 /**
@@ -191,43 +191,50 @@ describe("admin calls against three real nodes", { skip }, () => {
   });
 
   test("a purge settles the messages that are ready and leaves what a consumer holds", async () => {
-    // The id from the answer: a node asked for metadata right after may not know the queue yet, and the id it gives
-    // then matches nothing in the metrics.
-    const queueId = await client.createQueue("purge-q");
-    await pinLeader(client, "purge-q");
-    await client.produce("purge-q", 0, [{ value: "m0" }, { value: "m1" }, { value: "m2" }, { value: "m3" }]);
-    const c = await client.subscribe("purge-q", { credit: 1 });
-    const kept: string[] = [];
-    let purged = 0n;
-    try {
-      const held = await c.poll(30_000);
-      assert.notEqual(held, null);
-      kept.push((held as NonNullable<typeof held>).text() as string);
-      // Until the leader has nothing ready: what the leader has pushed to the consumer's credit is held, not ready.
-      await until("the queue to have nothing ready", async () => {
-        purged += await client.purge("purge-q");
-        // Only the node the metadata names leader counts: a leader that was deposed goes on reporting the queue, with
-        // what it last knew, until it hears of the new term.
-        const leader = await currentLeader(client, "purge-q");
-        const ready = (await client.nodeMetrics())
-          .filter((m) => m.nodeId === leader)
-          .flatMap((m) => m.metrics?.queues ?? [])
-          .filter((q) => q.resourceId === queueId)
-          .map((q) => q.ready);
-        assert.deepEqual(ready, [0n]);
-      });
-      await c.ack(held as NonNullable<typeof held>);
-      for (let d = await c.poll(500); d !== null; d = await c.poll(500)) {
-        kept.push(d.text() as string);
-        await c.ack(d);
+    // The order the consumer gets messages in holds only while the queue's leader stays where it is: a leader that
+    // moves under the subscription hands back what it had pushed, and it comes again after a later one. The scenario
+    // runs again, on a new queue, only if the leader moved (`retryIfLeaderMoved`).
+    await retryIfLeaderMoved(client, async (steady, attempt) => {
+      const name = attempt === 1 ? "purge-q" : `purge-q-${attempt}`;
+      // The id from the answer: a node asked for metadata right after may not know the queue yet, and the id it gives
+      // then matches nothing in the metrics.
+      const queueId = await client.createQueue(name);
+      await pinLeader(client, name);
+      await steady.watch(name);
+      await client.produce(name, 0, [{ value: "m0" }, { value: "m1" }, { value: "m2" }, { value: "m3" }]);
+      const c = await client.subscribe(name, { credit: 1 });
+      const kept: string[] = [];
+      let purged = 0n;
+      try {
+        const held = await c.poll(30_000);
+        assert.notEqual(held, null);
+        kept.push((held as NonNullable<typeof held>).text() as string);
+        // Until the leader has nothing ready: what the leader has pushed to the consumer's credit is held, not ready.
+        await until("the queue to have nothing ready", async () => {
+          purged += await client.purge(name);
+          // Only the node the metadata names leader counts: a leader that was deposed goes on reporting the queue,
+          // with what it last knew, until it hears of the new term.
+          const leader = await currentLeader(client, name);
+          const ready = (await client.nodeMetrics())
+            .filter((m) => m.nodeId === leader)
+            .flatMap((m) => m.metrics?.queues ?? [])
+            .filter((q) => q.resourceId === queueId)
+            .map((q) => q.ready);
+          assert.deepEqual(ready, [0n]);
+        });
+        await c.ack(held as NonNullable<typeof held>);
+        for (let d = await c.poll(500); d !== null; d = await c.poll(500)) {
+          kept.push(d.text() as string);
+          await c.ack(d);
+        }
+      } finally {
+        c.close();
       }
-    } finally {
-      c.close();
-    }
-    assert.ok(kept.length >= 1, "the held message was not purged");
-    assert.equal(BigInt(kept.length) + purged, 4n, "every message was purged or reached the consumer, none twice");
-    assert.deepEqual(kept, ["m0", "m1", "m2", "m3"].slice(0, kept.length), "the consumer got the first ones; purge took the rest");
-    assert.equal(await client.purge("purge-q"), 0n, "nothing is left");
+      assert.ok(kept.length >= 1, "the held message was not purged");
+      assert.equal(BigInt(kept.length) + purged, 4n, "every message was purged or reached the consumer, none twice");
+      assert.deepEqual(kept, ["m0", "m1", "m2", "m3"].slice(0, kept.length), "the consumer got the first ones; purge took the rest");
+      assert.equal(await client.purge(name), 0n, "nothing is left");
+    });
     await assert.rejects(client.purge("no-such-queue"), UnknownStreamError);
   });
 
