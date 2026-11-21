@@ -918,8 +918,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             None => {
                 let known: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
                 let pool = if known.is_empty() { self.cfg.bootstrap.clone() } else { known };
+                // No address at all: nothing to ask yet. Retried until
+                // `retry_for` runs out, as when every broker is down.
+                if pool.is_empty() {
+                    return Err(Attempt::Retry("no broker address is known: bootstrap is empty".into()));
+                }
                 let n = self.admin_turn.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
-                pool[n % pool.len().max(1)].clone()
+                pool[n % pool.len()].clone()
             }
         };
         match self.call(&addr, req).await {
