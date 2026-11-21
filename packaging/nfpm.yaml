@@ -94,6 +94,11 @@ contents:
       mode: 0644
     packager: apk
 
+# The RPM header records the build machine's name, which would make every
+# runner's package different; a fixed one keeps it reproducible.
+rpm:
+  buildhost: lotse
+
 overrides:
   deb:
     depends:
