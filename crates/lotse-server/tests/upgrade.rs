@@ -359,3 +359,46 @@ async fn scenario(rt: SimRuntime) {
 fn turns_wait_for_quorums_holders_and_pauses() {
     check_few_seeds(3, |seed| Sim::new(seed).run(scenario));
 }
+
+/// Groups 1 and 2 each have a leader that a quorum answered, as some
+/// node's metrics say.
+async fn every_group_led(client: &Client<SimRuntime>) -> Option<()> {
+    let nodes = client.node_metrics().await.ok()?;
+    let led: BTreeSet<u64> = nodes
+        .into_iter()
+        .filter_map(|(_, m)| m.ok())
+        .flat_map(|m| m.partitions.into_iter().filter(|p| p.leader).map(|p| p.group))
+        .collect();
+    (led.contains(&1) && led.contains(&2)).then_some(())
+}
+
+/// A rolling restart where each restarted node's old connections vanish
+/// instead of breaking, as when a Kubernetes pod is replaced and comes back
+/// at another address: the other nodes' sends to the old process succeed
+/// and go nowhere, and only the old process's close says it is gone. A node
+/// that went on sending into such a connection would never be heard by the
+/// restarted node again, and after the second restart no group would have a
+/// quorum (seen on kind, ADR 0128).
+async fn restarts_at_new_addresses(rt: SimRuntime) {
+    rt.net().set_silent_close(true);
+    let cluster = Cluster::new(&rt).await;
+    let client = Client::new(rt.node("c1"), client_config());
+    until!(rt, "the cluster takes the version its nodes run with", Duration::from_secs(60), {
+        upgrade(&client).await.map(|_| ())
+    });
+    for id in (1..=NODES).rev() {
+        cluster.stop(id).await;
+        cluster.start(id, old()).await;
+        until!(rt, &format!("every group has a leader after node {id} restarted"), Duration::from_secs(10), {
+            every_group_led(&client).await
+        });
+    }
+    for id in 1..=NODES {
+        cluster.kill(id).await;
+    }
+}
+
+#[test]
+fn a_rolling_restart_survives_old_connections_that_vanish() {
+    check_few_seeds(3, |seed| Sim::new(seed).run(restarts_at_new_addresses));
+}

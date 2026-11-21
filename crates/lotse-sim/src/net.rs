@@ -31,6 +31,10 @@ struct Pipe {
     closed: bool,
     /// The connection broke: both ends see an error, in-flight frames are lost.
     broken: bool,
+    /// The reading end went away and its address with it, as a Kubernetes
+    /// pod's does: sends still succeed and the frames are lost, the way
+    /// TCP keeps writing into an address nobody answers at.
+    vanished: bool,
 }
 
 struct ListenerState {
@@ -55,6 +59,9 @@ struct NetState {
     max_latency: Duration,
     /// Whether connections carry proved identities, as with TLS.
     verify: bool,
+    /// Whether a connection whose end is dropped vanishes instead of
+    /// breaking (see [`SimNet::set_silent_close`]).
+    silent_close: bool,
 }
 
 impl NetState {
@@ -106,6 +113,7 @@ impl SimNet {
                 isolated: BTreeSet::new(),
                 max_latency: Duration::from_millis(5),
                 verify: false,
+                silent_close: false,
             })),
             exec,
             rng,
@@ -123,6 +131,17 @@ impl SimNet {
     /// link needs one on the server. Off by default (plain TCP).
     pub fn verify_peers(&self, on: bool) {
         self.state.lock().expect("net lock").verify = on;
+    }
+
+    /// With `on`, a connection end that is dropped (its node stopped) does
+    /// not break the other end's sends: they succeed and the frames are
+    /// lost, while the other end's reads still see the close. That is TCP
+    /// towards an address that went away with its process, as when a
+    /// Kubernetes pod is replaced and gets a new address: no reset comes
+    /// back. Without it, as on a machine that keeps its address, the next
+    /// send fails.
+    pub fn set_silent_close(&self, on: bool) {
+        self.state.lock().expect("net lock").silent_close = on;
     }
 
     /// Whether connections carry proved identities.
@@ -232,6 +251,7 @@ impl SimNet {
                     reader: None,
                     closed: false,
                     broken: false,
+                    vanished: false,
                 },
             );
             id
@@ -320,12 +340,18 @@ impl Drop for SimConn {
                 w.wake();
             }
         }
-        // Nobody reads our side any more: the peer's sends fail.
+        // Nobody reads our side any more: the peer's sends fail, or with a
+        // silent close they go nowhere.
+        let silent = s.silent_close;
         if let Some(p) = s.pipes.get_mut(&self.rx) {
-            p.broken = true;
+            if silent {
+                p.vanished = true;
+            } else {
+                p.broken = true;
+            }
             p.frames.clear();
         }
-        let gone = |id: u64, s: &NetState| s.pipes.get(&id).is_none_or(|p| p.closed && p.broken);
+        let gone = |id: u64, s: &NetState| s.pipes.get(&id).is_none_or(|p| p.closed && (p.broken || p.vanished));
         if gone(self.tx, &s) {
             s.pipes.remove(&self.tx);
         }
@@ -359,6 +385,9 @@ impl lotse_rt::Conn for SimConn {
             let Some(p) = s.pipes.get(&self.tx) else { return Err(reset()) };
             if p.broken {
                 return Err(reset());
+            }
+            if p.vanished {
+                return Ok(());
             }
             let (from, to) = (p.from.clone(), p.to.clone());
             if s.cut(&from, &to) {

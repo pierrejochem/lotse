@@ -29,7 +29,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0022 | [Brand: Lotse and the Fairway mark](0022-brand-lotse-and-the-fairway-mark.md) | Accepted |
 | 0023 | [Persist the hard state after the log](0023-persist-the-hard-state-after-the-log.md) | Accepted |
 | 0024 | [Tool-independent project memory and agent](0024-tool-independent-project-memory-and-agent.md) | Accepted |
-| 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted |
+| 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted, in part changed by [0130](0130-node-links-notice-a-peer-that-went-away.md) |
 | 0026 | [Native protocol: the first cut](0026-native-protocol-first-cut.md) | Accepted |
 | 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted; job layout amended by 0030 |
 | 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted, in part superseded by [0110](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) |
@@ -133,5 +133,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0127 | [Rolling upgrades with a cluster version and restart turns](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) | Accepted |
 | 0128 | [A Helm chart whose pods take the restart turn](0128-a-helm-chart-whose-pods-take-the-restart-turn.md) | Accepted |
 | 0129 | [A Kubernetes operator after the chart](0129-a-kubernetes-operator-after-the-chart.md) | Proposed |
+| 0130 | [Node links notice a peer that went away](0130-node-links-notice-a-peer-that-went-away.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

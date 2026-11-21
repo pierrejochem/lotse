@@ -41,7 +41,7 @@ use crate::client::{
 };
 use crate::metadata::MetadataState;
 use crate::replica::{Error, ProposeError, Replica, ReplicaOptions, Retention, StateMachine};
-use crate::signal::{Signal, race};
+use crate::signal::{Signal, before, race};
 use crate::wire::{self, GroupId};
 
 /// Frames kept per unreachable peer; older ones are dropped.
@@ -1833,6 +1833,12 @@ fn heard(
 /// Keeps a connection to node `to` and sends its frames. When the network
 /// verifies peers, a connection whose certificate names another node is
 /// dropped like a failed one: the address may now belong to someone else.
+///
+/// The other end never writes on this connection, so a read on it ends
+/// only when the other end closes it. Then this end connects anew, even
+/// though its sends still succeed: a node that restarts at another address,
+/// as a Kubernetes pod does, leaves an address nobody answers at, and TCP
+/// would go on taking frames for it for many minutes (ADR 0130).
 async fn send_to<R: Runtime>(rt: R, to: NodeId, addr: String, peer: Arc<Peer>, shared: Arc<Shared>, tick: Duration) {
     let (net, stop) = (&shared.net, [&shared.stop, &peer.closed]);
     let mut backoff = tick;
@@ -1858,20 +1864,25 @@ async fn send_to<R: Runtime>(rt: R, to: NodeId, addr: String, peer: Arc<Peer>, s
             None => return,
         };
         backoff = tick;
-        loop {
-            let next = peer.queue.lock().expect("peer queue lock").pop_front();
-            let Some(frame) = next else {
-                if race(peer.ready.wait(), &stop).await.is_none() {
-                    return;
+        let sending = async {
+            loop {
+                let next = peer.queue.lock().expect("peer queue lock").pop_front();
+                let Some(frame) = next else {
+                    if race(peer.ready.wait(), &stop).await.is_none() {
+                        return;
+                    }
+                    peer.ready.take();
+                    continue;
+                };
+                NetStats::add(&net.peer_out, frame.len());
+                if race(conn.send(frame), &stop).await.is_none_or(|r| r.is_err()) {
+                    return; // reconnect; the frame is lost, Raft resends
                 }
-                peer.ready.take();
-                continue;
-            };
-            NetStats::add(&net.peer_out, frame.len());
-            if race(conn.send(frame), &stop).await.is_none_or(|r| r.is_err()) {
-                break; // reconnect; the frame is lost, Raft resends
             }
-        }
+        };
+        let closed = async { while let Ok(Some(_)) = conn.recv().await {} };
+        // Either way, connect anew (or stop, which the loop checks).
+        let _ = before(sending, closed).await;
     }
 }
 
