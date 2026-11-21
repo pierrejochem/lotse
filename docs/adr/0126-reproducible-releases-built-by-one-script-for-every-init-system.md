@@ -28,7 +28,7 @@ ADR 0049 put the release build into `.github/workflows/release.yml`: steps writt
   - Sources map to `/lotse` and `/cargo` in Rust (`--remap-path-prefix`) and in C (`-ffile-prefix-map`).
   - Debug info is stripped and symbols stay, for backtraces.
   - The tarball is written by `packaging/tarball.py`: entries sorted, owned by root, and a gzip header without a name or time.
-  - nfpm writes the packages with the epoch as every time.
+  - nfpm writes the packages with the epoch as every time, and the `.rpm` with a fixed build host (`lotse`), since its header otherwise records the machine's name.
 - **Checking a release.** `packaging/release.sh --verify SHA256SUMS VERSION`, at the release's tag, builds again and compares file by file with a published `SHA256SUMS` (`make release-verify`).
 - **Packages, all made by nfpm from `packaging/nfpm.yaml`.** nfpm replaces cargo-deb: one tool and one file for three formats, and it writes reproducible packages.
   - **deb.** systemd as before. `/etc/init.d/lotse` and `/etc/default/lotse` serve systems without systemd: one node per machine, the one `LOTSE_NODE` names; nothing starts until it is set. The node runs as `lotse` under `start-stop-daemon` and logs to `/var/log/lotse/lotse.log`. On systemd, the unit systemd would generate from the init script is masked (`lotse.service` → `/dev/null`), so only `lotse@<id>` runs nodes. Without systemd the package registers the script with `update-rc.d` and stops the node before removal.
@@ -69,4 +69,5 @@ Rejected options:
   - Two builds by the script, from two checkouts in different directories with different `CARGO_HOME`, gave identical `SHA256SUMS`. This machine cannot download the musl targets, so that check built for `x86_64-unknown-linux-gnu`.
   - The packages' contents and scripts were inspected.
   - The sysvinit script started and stopped a node here.
+- The first run of the release workflow on the branch built everything twice on two runners. The binaries, tarballs, `.deb` and `.apk` files matched; the `.rpm` files did not, because their header held each runner's host name. With a fixed build host, packages made under two host names match here in all three formats.
 - Not verified here: the musl builds, the OpenRC and RPM runs, and the image. This machine has no musl target, no Docker daemon and no container registry. The CI packaging job and the release workflow run by hand on the branch check them.
