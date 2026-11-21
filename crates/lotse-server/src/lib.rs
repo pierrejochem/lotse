@@ -22,6 +22,7 @@ mod producers;
 mod replica;
 mod signal;
 mod txns;
+pub mod version;
 pub mod wire;
 
 pub use access::DEFAULT_TENANT;

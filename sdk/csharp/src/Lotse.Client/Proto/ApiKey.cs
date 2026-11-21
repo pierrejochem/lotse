@@ -186,6 +186,12 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>Renews the client certificate the connection was made with (ADR 0123).</summary>
     public static readonly ApiKey RenewCertificate = new(60);
 
+    /// <summary>Changes a rolling upgrade: pauses or resumes restart turns, gives one back, raises the cluster version (ADR 0127).</summary>
+    public static readonly ApiKey AlterUpgrade = new(64);
+
+    /// <summary>Where a rolling upgrade stands (cluster admin or viewer, ADR 0127).</summary>
+    public static readonly ApiKey DescribeUpgrade = new(65);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
@@ -208,7 +214,8 @@ public readonly record struct ApiKey(ushort Id)
         Range(DescribeRoleBindings), Range(WhoAmI), Range(AddNode), Range(RemoveNode),
         Range(DescribeNodes), Range(PurgeQueue), Range(Requeue), Range(MoveLeader), Range(RevokeSessions),
         Range(CreatePartitions), Range(RevokeCertificate), Range(DescribeCertificates), Range(RecordCertificates),
-        Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(ReassignPartition), Range(DescribeSessions), Range(RenewCertificate), Range(Publish),
+        Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(ReassignPartition), Range(DescribeSessions), Range(RenewCertificate),
+        Range(AlterUpgrade), Range(DescribeUpgrade), Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);

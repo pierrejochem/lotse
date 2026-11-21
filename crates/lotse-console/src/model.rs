@@ -247,17 +247,24 @@ pub enum PhaseState {
     Pending,
 }
 
-/// A rolling upgrade run by the operator.
+/// A rolling upgrade (ADR 0127): run by the operator, or node by node
+/// with the cluster's restart turn.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Upgrade {
     /// Version before.
     pub from: String,
     /// Version after.
     pub to: String,
-    /// Who started it.
-    pub started_by: String,
-    /// Start, RFC 3339.
-    pub started_at: String,
+    /// Who started it, where known.
+    pub started_by: Option<String>,
+    /// Start, RFC 3339, where known.
+    pub started_at: Option<String>,
+    /// The cluster version in force, `major.minor`: the formats every node
+    /// writes.
+    pub cluster_version: Option<String>,
+    /// A newer cluster version every node runs with, which a cluster admin
+    /// may raise it to; `None` while some node does not.
+    pub raise_to: Option<String>,
     /// Nodes done.
     pub nodes_done: u32,
     /// Nodes in total.
@@ -266,7 +273,8 @@ pub struct Upgrade {
     pub groups_catching_up: u32,
     /// Steps, one per node in upgrade order.
     pub steps: Vec<UpgradeStep>,
-    /// `true` once the operator stops after the current node.
+    /// `true` once the upgrade stops after the current node: restart turns
+    /// are paused.
     pub paused_after_current: bool,
 }
 

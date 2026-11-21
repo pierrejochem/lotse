@@ -27,7 +27,13 @@ import {
   ResourceKind,
 } from "../proto/messages.js";
 import type { Request } from "../proto/request.js";
-import type { DescribeMetricsResponse, DescribeSessionsResponse, Response, WhoAmIResponse } from "../proto/response.js";
+import type {
+  DescribeMetricsResponse,
+  DescribeSessionsResponse,
+  DescribeUpgradeResponse,
+  Response,
+  WhoAmIResponse,
+} from "../proto/response.js";
 import { Batch } from "../record/batch.js";
 import { RecordFormatError } from "../record/errors.js";
 import type { BatchRecord, Header } from "../record/types.js";
@@ -362,27 +368,37 @@ export class LotseClient {
 
   /** Asks every known broker and merges what they know: per name, the newest resource any of them knows. */
   private async metadataFromAll(asked: readonly string[]): Promise<ResourceMetadata[]> {
+    return (await this.metadataFromEvery(asked)).resources;
+  }
+
+  /** What every broker knows, as `metadataFromAll`, and whether every broker answered. */
+  private async metadataFromEvery(
+    asked: readonly string[],
+  ): Promise<{ resources: ResourceMetadata[]; allAnswered: boolean }> {
     const sorted = this.candidates().sort((a, b) => {
       const x = formatAddress(a);
       const y = formatAddress(b);
       return x < y ? -1 : x > y ? 1 : 0;
     });
     const merged: ResourceMetadata[] = [];
+    let allAnswered = true;
     for (const addr of sorted) {
       try {
         const m = await this.call(addr, { type: "Metadata", names: asked });
         if (m.type === "Metadata") {
           this.learn(m);
           mergeNewest(merged, m.resources);
+        } else {
+          allAnswered = false;
         }
       } catch (e) {
         if (!(e instanceof CallFailure)) {
           throw e;
         }
-        // a broker that does not answer knows nothing
+        allAnswered = false; // a broker that does not answer knows nothing
       }
     }
-    return merged;
+    return { resources: merged, allAnswered };
   }
 
   private learn(m: Extract<Response, { type: "Metadata" }>): void {
@@ -437,13 +453,19 @@ export class LotseClient {
       throw e;
     }
     let resources: readonly ResourceMetadata[] = m.resources;
+    let allAnswered = true;
     if (find(resources, stream) === undefined) {
       // A resource created a moment ago may not have reached that broker yet: any broker that knows it will do.
-      resources = await this.metadataFromAll([stream]);
+      ({ resources, allAnswered } = await this.metadataFromEvery([stream]));
     }
     const res = find(resources, stream);
     const p = res?.partitions.find((c) => c.partition === partition);
     if (res === undefined || p === undefined) {
+      // Only every broker saying so makes it unknown: the one that did not answer may be the metadata leader, the
+      // only one that has applied a creation just answered.
+      if (!allAnswered) {
+        throw Attempt.retry(`no broker that answered knows ${stream} yet`);
+      }
       throw Attempt.fail(new UnknownStreamError(stream, partition));
     }
     let leader = p.leader;
@@ -2023,6 +2045,58 @@ export class LotseClient {
     this.checkOpen();
     const subjectKind = group ? SubjectKind.GROUP : SubjectKind.USER;
     return this.adminChange({ type: "RevokeSessions", subjectKind, subject, beforeMs: 0n }, options.signal);
+  }
+
+  /**
+   * Pauses (`true`) or resumes (`false`) the cluster's restart turns (ADR 0127): while paused, no node takes the next
+   * turn, and the one that holds it keeps it. Needs the cluster-admin role.
+   */
+  async holdUpgrade(hold: boolean, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "AlterUpgrade", hold }, options.signal);
+  }
+
+  /**
+   * Gives back the restart turn `node` holds, for a node that will not come back to give it back itself (ADR 0127).
+   * Nothing happens if the node holds no turn. Needs the cluster-admin role.
+   */
+  async releaseTurn(node: bigint | number, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "AlterUpgrade", releaseTurn: BigInt(node) }, options.signal);
+  }
+
+  /**
+   * Raises the cluster version to `major.minor` (ADR 0127), once every node runs a release that supports it; the
+   * metadata leader refuses it, naming the nodes that do not, otherwise. The version is never lowered. Needs the
+   * cluster-admin role.
+   */
+  async raiseClusterVersion(major: number, minor: number, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    for (const part of [major, minor]) {
+      if (!Number.isInteger(part) || part < 0 || part > 0xffff) {
+        throw new RangeError("a cluster version's major and minor are 0 to 65535");
+      }
+    }
+    return this.adminChange({ type: "AlterUpgrade", clusterVersion: major * 0x10000 + minor }, options.signal);
+  }
+
+  /**
+   * Where a rolling upgrade stands (ADR 0127): the cluster version, the restart turn, the pause and each node's
+   * versions. Needs the cluster-admin or cluster-viewer role.
+   */
+  async describeUpgrade(options: CallOptions = {}): Promise<DescribeUpgradeResponse> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeUpgrade" });
+        if (r.type !== "DescribeUpgrade") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r;
+      },
+      options.signal,
+    );
   }
 
   /**

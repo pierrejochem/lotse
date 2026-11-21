@@ -31,6 +31,8 @@ use crate::model::*;
         overview,
         nodes,
         pause_upgrade,
+        resume_upgrade,
+        raise_cluster_version,
         streams,
         stream,
         read_records,
@@ -122,7 +124,41 @@ pub async fn pause_upgrade(State(st): State<AppState>, who: Identity, Path(id): 
     cluster(&st, &id)?.pause_upgrade(&who).await?;
     Ok(Json(Done {
         message: "The upgrade stops after the node it is on.".into(),
-        cli: format!("lotse-cli --cluster {id} upgrade pause"),
+        cli: "lotse upgrade hold --config <cluster.toml> <admin>".into(),
+    }))
+}
+
+/// Resumes a paused rolling upgrade (ADR 0127).
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/upgrade/resume",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, description = "Success.", body = Done), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
+pub async fn resume_upgrade(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Done>> {
+    cluster(&st, &id)?.resume_upgrade(&who).await?;
+    Ok(Json(Done {
+        message: "The upgrade goes on with the next node.".into(),
+        cli: "lotse upgrade resume --config <cluster.toml> <admin>".into(),
+    }))
+}
+
+/// Raises the cluster version to the newest every node runs with (ADR
+/// 0127): new formats come into use, and no node can go back to the
+/// previous release.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/upgrade/raise",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "Not every node runs with a newer version.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
+pub async fn raise_cluster_version(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Done>> {
+    let version = cluster(&st, &id)?.raise_cluster_version(&who).await?;
+    Ok(Json(Done {
+        message: format!("The cluster runs at cluster version {version}."),
+        cli: format!("lotse upgrade finalize --config <cluster.toml> --version {version} <admin>"),
     }))
 }
 

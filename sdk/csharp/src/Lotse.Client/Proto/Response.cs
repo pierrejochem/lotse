@@ -898,6 +898,71 @@ public abstract record Response
         }
     }
 
+    /// <summary>The node holding the restart turn, in <see cref="DescribeUpgrade"/>.</summary>
+    /// <param name="NodeId">The node.</param>
+    /// <param name="SinceMs">When it got the turn, by the metadata leader's clock, in milliseconds since the epoch.</param>
+    public sealed record UpgradeTurn(ulong NodeId, ulong SinceMs);
+
+    /// <summary>One node in <see cref="DescribeUpgrade"/>.</summary>
+    /// <param name="NodeId">Its id.</param>
+    /// <param name="Release">Its release; empty until it reported, and then the versions mean nothing.</param>
+    /// <param name="Oldest">The oldest cluster version it runs with, <c>major &lt;&lt; 16 | minor</c>.</param>
+    /// <param name="Newest">The newest, its own.</param>
+    public sealed record UpgradeNode(ulong NodeId, string Release, uint Oldest, uint Newest);
+
+    /// <summary>
+    /// <c>DescribeUpgrade</c> (65): where a rolling upgrade stands, from the metadata group's leader (ADR 0127). The
+    /// leader hint is the structure's block of tagged fields.
+    /// </summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    /// <param name="ClusterVersion">The cluster version in force, <c>major &lt;&lt; 16 | minor</c>, or <c>null</c> while
+    /// there is none yet; version 0.0 is a version too.</param>
+    /// <param name="Held">Whether restart turns are paused.</param>
+    /// <param name="Turn">The node holding the restart turn, or <c>null</c>.</param>
+    /// <param name="Nodes">Every node of the cluster, by id.</param>
+    public sealed record DescribeUpgrade(
+        ErrorCode Error, LeaderHint? LeaderHint, uint? ClusterVersion, bool Held, UpgradeTurn? Turn,
+        IReadOnlyList<UpgradeNode> Nodes)
+        : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code);
+            if (ClusterVersion is uint version)
+            {
+                w.U8(1).U32(version);
+            }
+            else
+            {
+                w.U8(0);
+            }
+            w.Bool(Held);
+            if (Turn is null)
+            {
+                w.U8(0);
+            }
+            else
+            {
+                w.U8(1).U64(Turn.NodeId).U64(Turn.SinceMs);
+            }
+            w.Array(Nodes, (w1, n) => w1.U64(n.NodeId).String(n.Release).U32(n.Oldest).U32(n.Newest));
+            PutHint(w, LeaderHint);
+        }
+
+        internal static DescribeUpgrade Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            uint? version = r.U8() == 0 ? null : r.U32();
+            bool held = r.U8() != 0;
+            UpgradeTurn? turn = r.U8() == 0 ? null : new UpgradeTurn(r.U64(), r.U64());
+            // at least: id, release, two u32 (the bound the Rust codec uses)
+            List<UpgradeNode> nodes = r.Array(17, r1 => new UpgradeNode(r1.U64(), r1.String(), r1.U32(), r1.U32()));
+            return new DescribeUpgrade(error, GetHint(r), version, held, turn, nodes);
+        }
+    }
+
     /// <summary>A node's open client sessions, oldest first (ADR 0121).</summary>
     /// <param name="Error">The outcome.</param>
     /// <param name="NodeId">The answering node.</param>

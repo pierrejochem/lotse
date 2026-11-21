@@ -127,6 +127,24 @@ export function usePauseUpgrade(cluster: string) {
   });
 }
 
+/** Resumes a paused rolling upgrade (ADR 0127). */
+export function useResumeUpgrade(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(api.POST('/api/v1/clusters/{cluster}/upgrade/resume', path(cluster))),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.nodes(cluster) }),
+  });
+}
+
+/** Raises the cluster version to the newest every node runs with (ADR 0127). */
+export function useRaiseClusterVersion(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(api.POST('/api/v1/clusters/{cluster}/upgrade/raise', path(cluster))),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.nodes(cluster) }),
+  });
+}
+
 /** Purges a queue's ready messages; `confirm` is the queue's name typed again (ADR 0064). */
 export function usePurgeQueue(cluster: string, name: string) {
   const qc = useQueryClient();

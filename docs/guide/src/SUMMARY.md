@@ -18,6 +18,7 @@
 - [Retention and compaction](admin/retention-and-compaction.md)
 - [Monitoring](admin/monitoring.md)
 - [Operations](admin/operations.md)
+- [Upgrades](admin/upgrades.md)
 
 # Development
 

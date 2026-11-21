@@ -271,6 +271,23 @@ export interface DescribeCertificatesRequest {
 export interface DescribeSessionsRequest {
   readonly type: "DescribeSessions";
 }
+/**
+ * `AlterUpgrade` (key 64): changes a rolling upgrade (cluster admin, ADR 0127). Exactly one field is set. Answered with
+ * `Admin` once committed.
+ */
+export interface AlterUpgradeRequest {
+  readonly type: "AlterUpgrade";
+  /** Pause restart turns (`true`) or resume them (`false`). Tag 0. */
+  readonly hold?: boolean;
+  /** Give back the turn this node holds. Tag 1. */
+  readonly releaseTurn?: bigint;
+  /** Raise the cluster version to this, `major << 16 | minor`. Tag 2. */
+  readonly clusterVersion?: number;
+}
+/** `DescribeUpgrade` (key 65): where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
+export interface DescribeUpgradeRequest {
+  readonly type: "DescribeUpgrade";
+}
 /** `RequestCertificate` (key 55): asks for a certificate with a signing request (ADR 0092). Cluster admin. */
 export interface RequestCertificateRequest {
   readonly type: "RequestCertificate";
@@ -408,6 +425,8 @@ export type Request =
   | RevokeCertificateRequest
   | DescribeCertificatesRequest
   | DescribeSessionsRequest
+  | AlterUpgradeRequest
+  | DescribeUpgradeRequest
   | RenewCertificateRequest
   | RecordCertificatesRequest
   | RequestCertificateRequest
@@ -464,6 +483,8 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   RevokeCertificate: ApiKey.REVOKE_CERTIFICATE,
   DescribeCertificates: ApiKey.DESCRIBE_CERTIFICATES,
   DescribeSessions: ApiKey.DESCRIBE_SESSIONS,
+  AlterUpgrade: ApiKey.ALTER_UPGRADE,
+  DescribeUpgrade: ApiKey.DESCRIBE_UPGRADE,
   RenewCertificate: ApiKey.RENEW_CERTIFICATE,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
@@ -517,6 +538,11 @@ function readBinding(r: Reader) {
   return x;
 }
 
+// AlterUpgrade's tagged fields (ADR 0127).
+const TAG_UPGRADE_HOLD = 0;
+const TAG_UPGRADE_RELEASE_TURN = 1;
+const TAG_UPGRADE_CLUSTER_VERSION = 2;
+
 /** Writes a request's body (everything after the frame header). */
 export function writeRequest(w: Writer, req: Request): void {
   switch (req.type) {
@@ -525,6 +551,7 @@ export function writeRequest(w: Writer, req: Request): void {
     case "DescribeUsers":
     case "DescribeCertificates":
     case "DescribeSessions":
+    case "DescribeUpgrade":
     case "DescribeCertificateRequests":
     case "DescribeTenants":
     case "DescribeRoleBindings":
@@ -618,6 +645,20 @@ export function writeRequest(w: Writer, req: Request): void {
         m.putTagList(w, tags);
       }
       return;
+    case "AlterUpgrade": {
+      const tags: Tag[] = [];
+      if (req.hold !== undefined) {
+        tags.push({ tag: TAG_UPGRADE_HOLD, value: new Uint8Array([req.hold ? 1 : 0]) });
+      }
+      if (req.releaseTurn !== undefined) {
+        tags.push({ tag: TAG_UPGRADE_RELEASE_TURN, value: new Writer().u64(req.releaseTurn).toBytes() });
+      }
+      if (req.clusterVersion !== undefined) {
+        tags.push({ tag: TAG_UPGRADE_CLUSTER_VERSION, value: new Writer().u32(req.clusterVersion).toBytes() });
+      }
+      m.putTagList(w, tags);
+      return;
+    }
     case "Credit":
       w.u32(req.subscriptionId).u32(req.addMsgs).u32(req.addBytes).noTags();
       return;
@@ -1233,6 +1274,33 @@ export function readRequest(apiKey: number, r: Reader): Request {
     case ApiKey.DESCRIBE_SESSIONS:
       r.tags();
       return { type: "DescribeSessions" };
+    case ApiKey.DESCRIBE_UPGRADE:
+      r.tags();
+      return { type: "DescribeUpgrade" };
+    case ApiKey.ALTER_UPGRADE: {
+      let hold: boolean | undefined;
+      let releaseTurn: bigint | undefined;
+      let clusterVersion: number | undefined;
+      for (const t of r.tags()) {
+        const vr = new Reader(t.value);
+        if (t.tag === TAG_UPGRADE_HOLD) {
+          hold = vr.u8() !== 0;
+        } else if (t.tag === TAG_UPGRADE_RELEASE_TURN) {
+          releaseTurn = vr.u64();
+        } else if (t.tag === TAG_UPGRADE_CLUSTER_VERSION) {
+          clusterVersion = vr.u32();
+        } else {
+          continue; // from a newer version: skipped
+        }
+        vr.finish();
+      }
+      return {
+        type: "AlterUpgrade",
+        ...(hold === undefined ? {} : { hold }),
+        ...(releaseTurn === undefined ? {} : { releaseTurn }),
+        ...(clusterVersion === undefined ? {} : { clusterVersion }),
+      };
+    }
     case ApiKey.DESCRIBE_CERTIFICATE_REQUESTS:
       r.tags();
       return { type: "DescribeCertificateRequests" };

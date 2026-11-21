@@ -25,6 +25,7 @@ FILES = [
     ("INSTALL.md", PACKAGING / "tarball/INSTALL.md", 0o644),
     ("LICENSE", ROOT / "LICENSE", 0o644),
     ("cluster.toml.example", PACKAGING / "cluster.toml.example", 0o644),
+    ("restart-on-upgrade", PACKAGING / "restart-on-upgrade.sh", 0o755),
     ("openrc/lotse.confd", PACKAGING / "openrc/lotse.confd", 0o644),
     ("openrc/lotse.initd", PACKAGING / "openrc/lotse.initd", 0o755),
     ("systemd/lotse.sysusers", PACKAGING / "systemd/lotse.sysusers", 0o644),

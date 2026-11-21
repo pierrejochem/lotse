@@ -112,6 +112,12 @@ public readonly record struct ErrorCode(ushort Code)
     /// <summary>The queue holds as many messages, or bytes, as its length limit admits and refuses more (ADR 0118); nothing was written.</summary>
     public static readonly ErrorCode QueueFull = new(34);
 
+    /// <summary>
+    /// The cluster's restart turn is not to be had: another node holds it, turns are paused, a group would lose its
+    /// quorum, or the node is not one of the cluster (ADR 0127). Not retriable as such; wait and ask again.
+    /// </summary>
+    public static readonly ErrorCode TurnUnavailable = new(35);
+
     private static readonly string[] Names =
     {
         "NONE", "NOT_LEADER", "FENCED_LEADER_TERM", "UNKNOWN_RESOURCE", "OFFSET_OUT_OF_RANGE",
@@ -122,7 +128,7 @@ public readonly record struct ErrorCode(ushort Code)
         "UNKNOWN_SUBSCRIPTION", "ACK_TIMED_OUT", "UNSTABLE_OFFSET_COMMIT", "CONCURRENT_GROUP_CHANGE",
         "RESOURCE_EXISTS", "AUTHENTICATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
         "RESOURCE_NOT_EMPTY", "FENCED_INSTANCE_ID", "MESSAGE_NOT_HELD", "UNROUTABLE", "PRODUCER_LIMIT",
-        "QUEUE_FULL",
+        "QUEUE_FULL", "TURN_UNAVAILABLE",
     };
 
     /// <summary>Whether this is <see cref="None"/>.</summary>

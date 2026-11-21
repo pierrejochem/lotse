@@ -98,6 +98,16 @@ docker run -e LOTSE_NODE=1 -v /etc/lotse:/etc/lotse:ro -v lotse-1:/var/lib/lotse
 
 Any other Linux takes the tarball, whose `INSTALL.md` covers systemd, OpenRC and sysvinit. In the image and under every init script the data directory is `/var/lib/lotse`, so the cluster file's `data_dir` should be that path or one below it.
 
+### Upgrading
+
+Nodes upgrade one at a time while the cluster runs, one minor release at a time ([ADR 0127](adr/0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md)). A package upgrade restarts the node it had running once the node holds the cluster's restart turn; elsewhere take the turn yourself. When every node runs the new release, a cluster admin raises the cluster version. On Kubernetes, the Helm chart in `packaging/helm/lotse` does the same per pod ([ADR 0128](adr/0128-a-helm-chart-whose-pods-take-the-restart-turn.md)).
+
+```sh
+lotse turn take --config cluster.toml --node 2 && systemctl restart lotse@2   # by hand
+lotse upgrade status --config cluster.toml --node 1                           # where it stands
+lotse upgrade finalize --config cluster.toml --cert admin.pem --key admin.key # once every node runs it
+```
+
 ### Building and checking a release
 
 `packaging/` holds the Dockerfile, the init scripts, the package definition (`nfpm.yaml`) and the release script. A release builds on any Linux with the tools `packaging/release.env` pins:

@@ -377,7 +377,7 @@ fn main() {
             assert_eq!(decode_request(frame.clone()).expect("decodes").1, *req);
             format!("req-{i:03}-{} {}", variant(&format!("{req:?}")), hex(&frame))
         })
-        // Node-internal keys (43 to 46, 61 and 1000) are not part of the client protocol.
+        // Node-internal keys (43 to 46, 61 to 63 and 1000) are not part of the client protocol.
         .zip(samples::requests())
         .filter(|(_, req)| {
             !matches!(
@@ -388,6 +388,8 @@ fn main() {
                     | ApiKey::VERIFY_TXN
                     | ApiKey::CHECK_EMPTY
                     | ApiKey::REPORT_DISK
+                    | ApiKey::TURN
+                    | ApiKey::REPORT_VERSION
             )
         })
         .map(|(line, _)| line)
@@ -410,6 +412,8 @@ fn main() {
                     | ApiKey::VERIFY_TXN
                     | ApiKey::CHECK_EMPTY
                     | ApiKey::REPORT_DISK
+                    | ApiKey::TURN
+                    | ApiKey::REPORT_VERSION
             )
         })
         .map(|(i, (key, resp))| {
@@ -622,7 +626,7 @@ fn main() {
     }
     out.write("crc32c.txt", "CRC32C (Castagnoli).\nlabel input_hex crc", &crc);
 
-    let codes: Vec<String> = (0..=34u16)
+    let codes: Vec<String> = (0..=35u16)
         .map(|c| {
             let e = ErrorCode(c);
             format!("{c} {} {}", e.name(), e.retriable())

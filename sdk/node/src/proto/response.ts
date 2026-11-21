@@ -175,6 +175,36 @@ export interface RenewCertificateResponse {
   readonly notAfterMs: bigint;
   readonly leaderHint: m.LeaderHint | null;
 }
+/** The node holding the restart turn, in `DescribeUpgrade`. */
+export interface UpgradeTurn {
+  readonly nodeId: bigint;
+  /** When it got the turn, by the metadata leader's clock, ms since the Unix epoch. */
+  readonly sinceMs: bigint;
+}
+/** One node in `DescribeUpgrade`. */
+export interface UpgradeNode {
+  readonly nodeId: bigint;
+  /** Its release; empty until it reported, and then the versions mean nothing. */
+  readonly release: string;
+  /** The oldest cluster version it runs with, `major << 16 | minor`. */
+  readonly oldest: number;
+  /** The newest, its own. */
+  readonly newest: number;
+}
+/** `DescribeUpgrade` (key 65): where a rolling upgrade stands, from the metadata group's leader (ADR 0127). */
+export interface DescribeUpgradeResponse {
+  readonly type: "DescribeUpgrade";
+  readonly error: ErrorCodeValue;
+  readonly leaderHint: m.LeaderHint | null;
+  /** The cluster version in force, `major << 16 | minor`, or `null` while there is none yet; 0.0 is a version too. */
+  readonly clusterVersion: number | null;
+  /** Whether restart turns are paused. */
+  readonly held: boolean;
+  /** The node holding the restart turn, or `null`. */
+  readonly turn: UpgradeTurn | null;
+  /** Every node of the cluster, by id. */
+  readonly nodes: readonly UpgradeNode[];
+}
 /** `DescribeSessions` (key 59): a node's open client sessions, oldest first (ADR 0121). */
 export interface DescribeSessionsResponse {
   readonly type: "DescribeSessions";
@@ -268,6 +298,7 @@ export type Response =
   | DescribeUsersResponse
   | DescribeCertificatesResponse
   | DescribeSessionsResponse
+  | DescribeUpgradeResponse
   | RenewCertificateResponse
   | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
@@ -527,6 +558,22 @@ export function writeResponse(w: Writer, res: Response): void {
         .u64(res.notAfterMs);
       m.putHint(w, res.leaderHint);
       return;
+    case "DescribeUpgrade":
+      w.u16(res.error);
+      if (res.clusterVersion === null) {
+        w.u8(0);
+      } else {
+        w.u8(1).u32(res.clusterVersion);
+      }
+      w.bool(res.held);
+      if (res.turn === null) {
+        w.u8(0);
+      } else {
+        w.u8(1).u64(res.turn.nodeId).u64(res.turn.sinceMs);
+      }
+      w.array(res.nodes, (w1, n) => w1.u64(n.nodeId).string(n.release).u32(n.oldest).u32(n.newest));
+      m.putHint(w, res.leaderHint);
+      return;
     case "DescribeSessions":
       w.u16(res.error).u32(res.nodeId).u64(res.nowMs);
       w.array(res.sessions, (w1, s) => {
@@ -779,6 +826,7 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.REQUEST_CERTIFICATE:
     case ApiKey.RECORD_CERTIFICATE:
     case ApiKey.CREATE_PARTITIONS:
+    case ApiKey.ALTER_UPGRADE:
       return { type: "Admin", error: r.u16(), errorMsg: r.optString(), leaderHint: m.getHint(r) };
     case ApiKey.DESCRIBE_NODES: {
       const error = r.u16();
@@ -851,6 +899,15 @@ export function readResponse(apiKey: number, r: Reader): Response {
       const chain = r.array(4, (r1) => r1.bytes());
       const notAfterMs = r.u64();
       return { type: "RenewCertificate", error, errorMsg, chain, notAfterMs, leaderHint: m.getHint(r) };
+    }
+    case ApiKey.DESCRIBE_UPGRADE: {
+      const error = r.u16();
+      const clusterVersion = r.u8() === 0 ? null : r.u32();
+      const held = r.u8() !== 0;
+      const turn = r.u8() === 0 ? null : { nodeId: r.u64(), sinceMs: r.u64() };
+      // At least: id, release, two u32 (the bound the Rust codec uses).
+      const nodes = r.array(17, (r1) => ({ nodeId: r1.u64(), release: r1.string(), oldest: r1.u32(), newest: r1.u32() }));
+      return { type: "DescribeUpgrade", error, leaderHint: m.getHint(r), clusterVersion, held, turn, nodes };
     }
     case ApiKey.DESCRIBE_SESSIONS: {
       const error = r.u16();

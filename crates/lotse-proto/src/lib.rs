@@ -171,6 +171,16 @@ impl ApiKey {
     /// Internal, from a node: it tells the metadata leader that it went low
     /// on disk or back (ADR 0124).
     pub const REPORT_DISK: ApiKey = ApiKey(61);
+    /// Internal: takes or gives back the cluster's restart turn (ADR 0127).
+    pub const TURN: ApiKey = ApiKey(62);
+    /// Internal, from a node: its release and the cluster versions it
+    /// supports (ADR 0127).
+    pub const REPORT_VERSION: ApiKey = ApiKey(63);
+    /// Pauses or resumes restart turns, gives back a node's turn, or raises
+    /// the cluster version (cluster admin, ADR 0127).
+    pub const ALTER_UPGRADE: ApiKey = ApiKey(64);
+    /// Where a rolling upgrade stands (ADR 0127).
+    pub const DESCRIBE_UPGRADE: ApiKey = ApiKey(65);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -195,7 +205,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 61] = [
+    pub const SUPPORTED: [ApiVersionRange; 65] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -256,6 +266,10 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::DESCRIBE_SESSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::RENEW_CERTIFICATE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REPORT_DISK, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::TURN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::REPORT_VERSION, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ALTER_UPGRADE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_UPGRADE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -364,10 +378,14 @@ impl ErrorCode {
     /// written; the caller decides whether to try again once consumers have
     /// made room.
     pub const QUEUE_FULL: ErrorCode = ErrorCode(34);
+    /// The restart turn cannot be had now (ADR 0127): another node holds
+    /// it, turns are paused, or a group would lose its quorum without the
+    /// node. The message says which; the caller asks again later.
+    pub const TURN_UNAVAILABLE: ErrorCode = ErrorCode(35);
 
     /// The name used in documentation and logs.
     pub fn name(self) -> &'static str {
-        const NAMES: [&str; 35] = [
+        const NAMES: [&str; 36] = [
             "NONE",
             "NOT_LEADER",
             "FENCED_LEADER_TERM",
@@ -403,6 +421,7 @@ impl ErrorCode {
             "UNROUTABLE",
             "PRODUCER_LIMIT",
             "QUEUE_FULL",
+            "TURN_UNAVAILABLE",
         ];
         NAMES.get(usize::from(self.0)).copied().unwrap_or("UNKNOWN")
     }
@@ -579,6 +598,14 @@ pub enum Request {
     RenewCertificate(RenewCertificateRequest),
     /// [`ApiKey::REPORT_DISK`].
     ReportDisk(ReportDiskRequest),
+    /// [`ApiKey::TURN`].
+    Turn(TurnRequest),
+    /// [`ApiKey::REPORT_VERSION`].
+    ReportVersion(ReportVersionRequest),
+    /// [`ApiKey::ALTER_UPGRADE`].
+    AlterUpgrade(AlterUpgradeRequest),
+    /// [`ApiKey::DESCRIBE_UPGRADE`].
+    DescribeUpgrade(DescribeUpgradeRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -647,6 +674,10 @@ impl Request {
             Request::DescribeSessions(_) => ApiKey::DESCRIBE_SESSIONS,
             Request::RenewCertificate(_) => ApiKey::RENEW_CERTIFICATE,
             Request::ReportDisk(_) => ApiKey::REPORT_DISK,
+            Request::Turn(_) => ApiKey::TURN,
+            Request::ReportVersion(_) => ApiKey::REPORT_VERSION,
+            Request::AlterUpgrade(_) => ApiKey::ALTER_UPGRADE,
+            Request::DescribeUpgrade(_) => ApiKey::DESCRIBE_UPGRADE,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -701,6 +732,8 @@ pub enum Response {
     DescribeCertificates(DescribeCertificatesResponse),
     /// Answer to [`Request::DescribeSessions`].
     DescribeSessions(DescribeSessionsResponse),
+    /// To [`Request::DescribeUpgrade`].
+    DescribeUpgrade(DescribeUpgradeResponse),
     /// Answer to [`Request::RenewCertificate`].
     RenewCertificate(RenewCertificateResponse),
     /// Answer to [`Request::DescribeCertificateRequests`].
@@ -803,6 +836,10 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::DescribeSessions(r) => r.put(&mut w),
         Request::RenewCertificate(r) => r.put(&mut w),
         Request::ReportDisk(r) => r.put(&mut w),
+        Request::Turn(r) => r.put(&mut w),
+        Request::ReportVersion(r) => r.put(&mut w),
+        Request::AlterUpgrade(r) => r.put(&mut w),
+        Request::DescribeUpgrade(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -886,6 +923,10 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::DESCRIBE_SESSIONS => Request::DescribeSessions(DescribeSessionsRequest::get(&mut r)?),
         ApiKey::RENEW_CERTIFICATE => Request::RenewCertificate(RenewCertificateRequest::get(&mut r)?),
         ApiKey::REPORT_DISK => Request::ReportDisk(ReportDiskRequest::get(&mut r)?),
+        ApiKey::TURN => Request::Turn(TurnRequest::get(&mut r)?),
+        ApiKey::REPORT_VERSION => Request::ReportVersion(ReportVersionRequest::get(&mut r)?),
+        ApiKey::ALTER_UPGRADE => Request::AlterUpgrade(AlterUpgradeRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_UPGRADE => Request::DescribeUpgrade(DescribeUpgradeRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -922,6 +963,7 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::DescribeUsers(r) => r.put(&mut w),
         Response::DescribeCertificates(r) => r.put(&mut w),
         Response::DescribeSessions(r) => r.put(&mut w),
+        Response::DescribeUpgrade(r) => r.put(&mut w),
         Response::RenewCertificate(r) => r.put(&mut w),
         Response::DescribeCertificateRequests(r) => r.put(&mut w),
         Response::DescribeTenants(r) => r.put(&mut w),
@@ -1038,6 +1080,9 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::REVOKE_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATES
         | ApiKey::REPORT_DISK
+        | ApiKey::TURN
+        | ApiKey::REPORT_VERSION
+        | ApiKey::ALTER_UPGRADE
         | ApiKey::REQUEST_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATE
         | ApiKey::REASSIGN_PARTITION
@@ -1050,6 +1095,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::DESCRIBE_USERS => Response::DescribeUsers(DescribeUsersResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATES => Response::DescribeCertificates(DescribeCertificatesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_SESSIONS => Response::DescribeSessions(DescribeSessionsResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_UPGRADE => Response::DescribeUpgrade(DescribeUpgradeResponse::get(&mut r)?),
         ApiKey::RENEW_CERTIFICATE => Response::RenewCertificate(RenewCertificateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATE_REQUESTS => {
             Response::DescribeCertificateRequests(DescribeCertificateRequestsResponse::get(&mut r)?)

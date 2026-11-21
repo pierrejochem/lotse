@@ -1,0 +1,62 @@
+{{- if lt (int .Values.replicas) 1 }}
+{{- fail "replicas must be at least 1" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lotse.fullname" . }}
+  labels:
+    {{- include "lotse.labels" . | nindent 4 }}
+data:
+  cluster.toml: |
+    # Rendered by the Lotse chart; the same on every node (ADR 0047, ADR 0128).
+    [cluster]
+    data_dir = "/var/lib/lotse/data"
+
+    [tls]
+    ca = "/etc/lotse/tls/ca.pem"
+    cert = "/etc/lotse/tls/node-{id}.pem"
+    key = "/etc/lotse/tls/node-{id}.key"
+    {{- if .Values.tls.crl }}
+    crl = "/etc/lotse/tls/crl.pem"
+    {{- end }}
+    {{- if .Values.tls.renewalCa }}
+    renewal_ca = "/etc/lotse/tls/renewal-ca.pem"
+    renewal_ca_key = "/etc/lotse/tls/renewal-ca.key"
+    {{- end }}
+
+    [auth]
+    required = {{ .Values.auth.required }}
+    admins = [{{ range $i, $a := .Values.auth.admins }}{{ if $i }}, {{ end }}{{ $a | toJson }}{{ end }}]
+    {{- with .Values.auth.tenants }}
+    tenants = [{{ range $i, $t := . }}{{ if $i }}, {{ end }}{{ $t | toJson }}{{ end }}]
+    {{- end }}
+    {{- if .Values.disk.freeLimit }}
+
+    [disk]
+    free_limit = {{ .Values.disk.freeLimit | toJson }}
+    {{- end }}
+    {{- if or .Values.retention.ms .Values.retention.bytes }}
+
+    [retention]
+    {{- with .Values.retention.ms }}
+    ms = {{ int64 . }}
+    {{- end }}
+    {{- with .Values.retention.bytes }}
+    bytes = {{ int64 . }}
+    {{- end }}
+    {{- end }}
+    {{- range $i := until (int .Values.replicas) }}
+    {{- $host := include "lotse.podHost" (list $ $i) }}
+
+    [[node]]
+    id = {{ add1 $i }}
+    peer = "{{ $host }}:{{ $.Values.ports.peer }}"
+    client = "{{ $host }}:{{ $.Values.ports.client }}"
+    peer_bind = "0.0.0.0:{{ $.Values.ports.peer }}"
+    client_bind = "0.0.0.0:{{ $.Values.ports.client }}"
+    metrics = "127.0.0.1:{{ add $.Values.ports.metricsBase (add1 $i) }}"
+    {{- end }}
+    {{- with .Values.extraConfig }}
+    {{- . | nindent 4 }}
+    {{- end }}

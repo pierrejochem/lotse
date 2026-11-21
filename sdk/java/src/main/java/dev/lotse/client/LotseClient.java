@@ -217,20 +217,30 @@ public final class LotseClient implements AutoCloseable {
 
     /** Asks every known broker and merges what they know: per name, the newest resource any of them knows. */
     private List<ResourceMetadata> metadataFromAll(String... asked) {
+        return metadataFromEvery(asked).resources();
+    }
+
+    /** What every broker knows, as {@link #metadataFromAll}, and whether every broker answered. */
+    private record Merged(List<ResourceMetadata> resources, boolean allAnswered) {}
+
+    private Merged metadataFromEvery(String... asked) {
         Set<Address> sorted = new TreeSet<>(java.util.Comparator.comparing(Address::toString));
         sorted.addAll(candidates());
         List<ResourceMetadata> merged = new ArrayList<>();
+        boolean all = true;
         for (Address addr : sorted) {
             try {
                 if (call(addr, new Request.Metadata(List.of(asked))) instanceof Response.Metadata m) {
                     learn(m);
                     mergeNewest(merged, m.resources());
+                } else {
+                    all = false;
                 }
             } catch (CallFailure e) {
-                // a broker that does not answer knows nothing
+                all = false; // a broker that does not answer knows nothing
             }
         }
-        return merged;
+        return new Merged(merged, all);
     }
 
     /**
@@ -311,9 +321,12 @@ public final class LotseClient implements AutoCloseable {
             throw Attempt.fail(e);
         }
         List<ResourceMetadata> resources = m.resources();
+        boolean allAnswered = true;
         if (find(resources, stream) == null) {
             // A resource created a moment ago may not have reached that broker yet: any broker that knows it will do.
-            resources = metadataFromAll(stream);
+            Merged merged = metadataFromEvery(stream);
+            resources = merged.resources();
+            allAnswered = merged.allAnswered();
         }
         ResourceMetadata res = find(resources, stream);
         PartitionMetadata p = null;
@@ -325,6 +338,11 @@ public final class LotseClient implements AutoCloseable {
             }
         }
         if (p == null) {
+            // Only every broker saying so makes it unknown: the one that did not answer may be the metadata leader,
+            // the only one that has applied a creation just answered.
+            if (!allAnswered) {
+                throw Attempt.retry("no broker that answered knows " + stream + " yet");
+            }
             throw Attempt.fail(new ClientException.UnknownStream(stream, partition));
         }
         long leader = p.leader();
@@ -1685,6 +1703,53 @@ public final class LotseClient implements AutoCloseable {
         checkOpen();
         int kind = group ? Messages.SubjectKind.GROUP : Messages.SubjectKind.USER;
         adminChange(new Request.RevokeSessions(kind, subject, 0));
+    }
+
+    /**
+     * Pauses ({@code true}) or resumes ({@code false}) the cluster's restart turns (ADR 0127): while paused, no node
+     * takes the next turn, and the one that holds it keeps it. Needs the cluster-admin role.
+     */
+    public void holdUpgrade(boolean hold) {
+        checkOpen();
+        adminChange(new Request.AlterUpgrade(hold, null, null));
+    }
+
+    /**
+     * Gives back the restart turn {@code node} holds, for a node that will not come back to give it back itself (ADR
+     * 0127). Nothing happens if the node holds no turn. Needs the cluster-admin role.
+     */
+    public void releaseTurn(long node) {
+        checkOpen();
+        adminChange(new Request.AlterUpgrade(null, node, null));
+    }
+
+    /**
+     * Raises the cluster version to {@code major.minor} (ADR 0127), once every node runs a release that supports it;
+     * the metadata leader refuses it, naming the nodes that do not, otherwise. The version is never lowered. Needs
+     * the cluster-admin role.
+     */
+    public void raiseClusterVersion(int major, int minor) {
+        checkOpen();
+        if (major < 0 || major > 0xFFFF || minor < 0 || minor > 0xFFFF) {
+            throw new IllegalArgumentException("a cluster version's major and minor are 0 to 65535");
+        }
+        adminChange(new Request.AlterUpgrade(null, null, ((long) major << 16) | minor));
+    }
+
+    /**
+     * Where a rolling upgrade stands (ADR 0127): the cluster version, the restart turn, the pause and each node's
+     * versions. Needs the cluster-admin or cluster-viewer role.
+     */
+    public Response.DescribeUpgrade describeUpgrade() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeUpgrade());
+            if (!(r instanceof Response.DescribeUpgrade d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d;
+        });
     }
 
     /**

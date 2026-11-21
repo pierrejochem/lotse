@@ -14,4 +14,9 @@ if [ "$1" = "configure" ]; then
         install -d -o lotse -g lotse -m 0750 /var/log/lotse
         update-rc.d lotse defaults >/dev/null
     fi
+    # An upgrade ($2 is the version before): restart the running nodes, one
+    # at a time across the cluster (ADR 0127).
+    if [ -n "${2:-}" ]; then
+        /usr/lib/lotse/restart-on-upgrade || true
+    fi
 fi

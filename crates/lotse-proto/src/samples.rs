@@ -490,10 +490,24 @@ pub fn requests() -> Vec<Request> {
             resume: Some(0x8000_0000_0000_0001),
             held: Some(Vec::new()),
         }),
+        Request::AlterUpgrade(AlterUpgradeRequest::default()),
+        Request::AlterUpgrade(AlterUpgradeRequest {
+            hold: Some(true),
+            release_turn: Some(2),
+            cluster_version: Some(cluster_version::of(0, 5)),
+        }),
+        Request::DescribeUpgrade(DescribeUpgradeRequest),
         // Node-internal, left out of the client vectors: last, so that
         // the others keep their correlation ids.
         Request::ReportDisk(ReportDiskRequest { node_id: 3, low: true }),
         Request::ReportDisk(ReportDiskRequest { node_id: 3, low: false }),
+        Request::Turn(TurnRequest { node_id: 2, action: turn_action::CLAIM, instance: 0x8000_0000_0000_0007 }),
+        Request::ReportVersion(ReportVersionRequest {
+            node_id: 2,
+            release: "0.5.1".into(),
+            oldest: cluster_version::of(0, 4),
+            newest: cluster_version::of(0, 5),
+        }),
     ]
 }
 
@@ -1183,12 +1197,62 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
             }),
         ),
         (
+            ApiKey::ALTER_UPGRADE,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::INVALID_REQUEST,
+                error_msg: Some("node 3 supports cluster versions up to 0.4".into()),
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_UPGRADE,
+            Response::DescribeUpgrade(DescribeUpgradeResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                cluster_version: Some(cluster_version::of(0, 4)),
+                held: false,
+                turn: Some(UpgradeTurn { node_id: 2, since_ms: 1_795_000_000_000 }),
+                nodes: vec![
+                    UpgradeNode {
+                        node_id: 1,
+                        release: "0.5.1".into(),
+                        oldest: cluster_version::of(0, 4),
+                        newest: cluster_version::of(0, 5),
+                    },
+                    UpgradeNode { node_id: 2, release: String::new(), oldest: 0, newest: 0 },
+                ],
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_UPGRADE,
+            Response::DescribeUpgrade(DescribeUpgradeResponse {
+                error: ErrorCode::NOT_LEADER,
+                leader_hint: Some(LeaderHint { leader: 3, term: 7 }),
+                cluster_version: None,
+                held: true,
+                turn: None,
+                nodes: Vec::new(),
+            }),
+        ),
+        (
             ApiKey::REPORT_DISK,
             Response::Admin(AdminResponse {
                 error: ErrorCode::UNAUTHORIZED,
                 error_msg: Some("node 2 reports only for itself, not for node 3".into()),
                 leader_hint: None,
             }),
+        ),
+        (
+            ApiKey::TURN,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::TURN_UNAVAILABLE,
+                error_msg: Some("node 1 holds the restart turn".into()),
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::REPORT_VERSION,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
         ),
     ]
 }

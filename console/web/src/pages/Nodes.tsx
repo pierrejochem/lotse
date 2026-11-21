@@ -3,7 +3,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Progress from '@radix-ui/react-progress';
 import type { S } from '../api/client';
 import { ApiError } from '../api/client';
-import { useNodes, usePauseUpgrade } from '../api/queries';
+import { useNodes, usePauseUpgrade, useRaiseClusterVersion, useResumeUpgrade } from '../api/queries';
 import { useToast } from '../components/toast';
 import { Chip, DiskBar, Failed, Loading } from '../components/ui';
 import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, rate } from '../format';
@@ -12,7 +12,7 @@ import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, r
 function nodesLine(v: S['NodesView']) {
   const zones = new Set(v.nodes.map((n) => n.zone).filter(Boolean));
   const parts = [counted(v.nodes.length, 'broker node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
-  if (v.upgrade || v.events.length > 0) parts.push('managed by the Lotse operator');
+  if (v.events.length > 0) parts.push('managed by the Lotse operator');
   return parts.join(' · ');
 }
 
@@ -29,7 +29,7 @@ function PauseButton({ cluster, node }: { cluster: string; node: string }) {
             <div>
               <AlertDialog.Title className="h2">Pause the upgrade?</AlertDialog.Title>
               <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                The operator finishes <span className="mono">{node}</span> and then stops. The cluster keeps running with mixed versions until you resume.
+                <span className="mono">{node}</span> finishes its restart; no other node takes the next restart turn. The cluster keeps running with mixed versions until you resume.
               </AlertDialog.Description>
             </div>
           </div>
@@ -53,6 +53,73 @@ function PauseButton({ cluster, node }: { cluster: string; node: string }) {
   );
 }
 
+function ResumeButton({ cluster }: { cluster: string }) {
+  const resume = useResumeUpgrade(cluster);
+  const toast = useToast();
+  return (
+    <button
+      className="btn"
+      disabled={resume.isPending}
+      onClick={() =>
+        resume.mutate(undefined, {
+          onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+          onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not resume the upgrade.', error: true }),
+        })
+      }
+    >
+      Resume
+    </button>
+  );
+}
+
+function RaiseButton({ cluster, from, to }: { cluster: string; from: string | null | undefined; to: string }) {
+  const raise = useRaiseClusterVersion(cluster);
+  const toast = useToast();
+  return (
+    <AlertDialog.Root>
+      <AlertDialog.Trigger className="btn">Raise cluster version to {to}</AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="overlay" />
+        <AlertDialog.Content className="dialog" style={{ width: 'min(480px, calc(100vw - 32px))' }}>
+          <div className="dialog-head">
+            <div>
+              <AlertDialog.Title className="h2">Raise the cluster version to {to}?</AlertDialog.Title>
+              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
+                Every node runs with {to}. The nodes start writing its formats and turn on what needs them. A node can no longer go back to a release that runs only with {from ?? 'the version before'}.
+              </AlertDialog.Description>
+            </div>
+          </div>
+          <div className="dialog-foot">
+            <AlertDialog.Cancel className="btn">Not yet</AlertDialog.Cancel>
+            <AlertDialog.Action
+              className="btn dark"
+              onClick={() =>
+                raise.mutate(undefined, {
+                  onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+                  onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not raise the cluster version.', error: true }),
+                })
+              }
+            >
+              Raise to {to}
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  );
+}
+
+/** "Started 14:02 by pierre", where the operator says, else how the nodes take turns; and the cluster version. */
+function upgradeLine(u: S['Upgrade']) {
+  const parts = [
+    u.started_at && u.started_by ? `Started ${clock(u.started_at)} by ${u.started_by}` : 'Each node takes the cluster\'s restart turn',
+    'in place, same node ID and volume',
+    'one node at a time',
+  ];
+  if (u.cluster_version) parts.push(`cluster version ${u.cluster_version}`);
+  return parts.join(' · ');
+}
+
 function Upgrade({ u, cluster }: { u: S['Upgrade']; cluster: string }) {
   const current = u.steps.find((s) => s.phases.some((p) => p.state === 'running'));
   const partial = current ? current.phases.filter((p) => p.state === 'done').length / current.phases.length : 0;
@@ -65,10 +132,16 @@ function Upgrade({ u, cluster }: { u: S['Upgrade']; cluster: string }) {
     <section className="card stack" aria-labelledby="up-title" style={{ padding: 24, '--gap': '18px' } as React.CSSProperties}>
       <div className="between" style={{ alignItems: 'flex-start' }}>
         <div>
-          <h2 id="up-title" className="h2">Rolling upgrade <span className="mono" style={{ fontSize: 18 }}>{u.from} → {u.to}</span></h2>
-          <p className="sub" style={{ marginTop: 4 }}>Started {clock(u.started_at)} by {u.started_by} · in place, same node ID and volume · one node at a time</p>
+          <h2 id="up-title" className="h2">
+            Rolling upgrade{u.from !== u.to && <> <span className="mono" style={{ fontSize: 18 }}>{u.from} → {u.to}</span></>}
+          </h2>
+          <p className="sub" style={{ marginTop: 4 }}>{upgradeLine(u)}</p>
         </div>
-        {u.paused_after_current ? <Chip tone="info">Stops after {current?.node ?? 'this node'}</Chip> : current && <PauseButton cluster={cluster} node={current.node} />}
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {u.paused_after_current && current && <Chip tone="info">Stops after {current.node}</Chip>}
+          {u.paused_after_current ? <ResumeButton cluster={cluster} /> : current && <PauseButton cluster={cluster} node={current.node} />}
+          {u.raise_to && <RaiseButton cluster={cluster} from={u.cluster_version} to={u.raise_to} />}
+        </div>
       </div>
       <div className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
         <div className="between small">
