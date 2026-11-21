@@ -95,6 +95,33 @@ public sealed class RoutingTests : IDisposable
     }
 
     [Fact]
+    public async Task ANameTheBrokersThatAnswerDoNotKnowIsRetriedWhileAnotherBrokerDidNotAnswer()
+    {
+        // 1 and 2 have not applied the creation yet; 3, the metadata leader that has, does not answer at first.
+        using var c = new FakeNode(3);
+        FakeNode[] all = { _a, _b, c };
+        _a.On((n, r) => Fx.Metadata(all, Fx.Unknown("s")));
+        _b.On((n, r) => Fx.Metadata(all, Fx.Unknown("s")));
+        int asked = 0;
+        c.On((n, r) =>
+        {
+            if (r is Request.Metadata)
+            {
+                if (Interlocked.Increment(ref asked) <= 2)
+                {
+                    throw new FakeNode.Drop();
+                }
+                return Fx.Metadata(all, Fx.Stream("s", StreamId, Fx.Partition(0, 3, 1, 3)));
+            }
+            return Fx.Produced(StreamId, 0, 7);
+        });
+        LotseClient lotse = Client();
+        await lotse.MetadataAsync(); // learn the brokers from node 1
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        Assert.True(Volatile.Read(ref asked) >= 3, "asked again until 3 answered");
+    }
+
+    [Fact]
     public void TheMergeKeepsTheNewestResourcePerNameAndIgnoresErrors()
     {
         var merged = new List<Messages.ResourceMetadata> { Fx.Stream("s", 5) };

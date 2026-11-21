@@ -368,27 +368,37 @@ export class LotseClient {
 
   /** Asks every known broker and merges what they know: per name, the newest resource any of them knows. */
   private async metadataFromAll(asked: readonly string[]): Promise<ResourceMetadata[]> {
+    return (await this.metadataFromEvery(asked)).resources;
+  }
+
+  /** What every broker knows, as `metadataFromAll`, and whether every broker answered. */
+  private async metadataFromEvery(
+    asked: readonly string[],
+  ): Promise<{ resources: ResourceMetadata[]; allAnswered: boolean }> {
     const sorted = this.candidates().sort((a, b) => {
       const x = formatAddress(a);
       const y = formatAddress(b);
       return x < y ? -1 : x > y ? 1 : 0;
     });
     const merged: ResourceMetadata[] = [];
+    let allAnswered = true;
     for (const addr of sorted) {
       try {
         const m = await this.call(addr, { type: "Metadata", names: asked });
         if (m.type === "Metadata") {
           this.learn(m);
           mergeNewest(merged, m.resources);
+        } else {
+          allAnswered = false;
         }
       } catch (e) {
         if (!(e instanceof CallFailure)) {
           throw e;
         }
-        // a broker that does not answer knows nothing
+        allAnswered = false; // a broker that does not answer knows nothing
       }
     }
-    return merged;
+    return { resources: merged, allAnswered };
   }
 
   private learn(m: Extract<Response, { type: "Metadata" }>): void {
@@ -443,13 +453,19 @@ export class LotseClient {
       throw e;
     }
     let resources: readonly ResourceMetadata[] = m.resources;
+    let allAnswered = true;
     if (find(resources, stream) === undefined) {
       // A resource created a moment ago may not have reached that broker yet: any broker that knows it will do.
-      resources = await this.metadataFromAll([stream]);
+      ({ resources, allAnswered } = await this.metadataFromEvery([stream]));
     }
     const res = find(resources, stream);
     const p = res?.partitions.find((c) => c.partition === partition);
     if (res === undefined || p === undefined) {
+      // Only every broker saying so makes it unknown: the one that did not answer may be the metadata leader, the
+      // only one that has applied a creation just answered.
+      if (!allAnswered) {
+        throw Attempt.retry(`no broker that answered knows ${stream} yet`);
+      }
       throw Attempt.fail(new UnknownStreamError(stream, partition));
     }
     let leader = p.leader;
