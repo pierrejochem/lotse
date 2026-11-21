@@ -3772,6 +3772,255 @@ impl ReportDiskRequest {
     }
 }
 
+/// A cluster version, the `major.minor` of a release, as one number:
+/// `major << 16 | minor` (ADR 0127). Larger is newer.
+pub mod cluster_version {
+    /// The number for `major.minor`.
+    pub const fn of(major: u16, minor: u16) -> u32 {
+        (major as u32) << 16 | minor as u32
+    }
+    /// The major version.
+    pub const fn major(v: u32) -> u16 {
+        (v >> 16) as u16
+    }
+    /// The minor version.
+    pub const fn minor(v: u32) -> u16 {
+        v as u16
+    }
+}
+
+/// What a [`TurnRequest`] asks for.
+pub mod turn_action {
+    /// To the node about to restart, from `lotse turn take` on its machine:
+    /// the node checks that no group of its loses a quorum without it, then
+    /// claims the turn for itself.
+    pub const TAKE: u8 = 0;
+    /// To the metadata leader, from the node: give it the turn.
+    pub const CLAIM: u8 = 1;
+    /// To the metadata leader: give the turn back. From the node once it
+    /// restarted and is ready, or from `lotse turn release` on its machine.
+    pub const RELEASE: u8 = 2;
+}
+
+/// The cluster's restart turn (internal, ADR 0127): one node at a time
+/// restarts for an upgrade. A node asks only for itself. Answered with
+/// [`AdminResponse`]: [`ErrorCode::TURN_UNAVAILABLE`], with the reason,
+/// while the turn cannot be had now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnRequest {
+    /// The node restarting.
+    pub node_id: u32,
+    /// [`turn_action`].
+    pub action: u8,
+    /// With [`turn_action::CLAIM`]: the instance of the node's process, a
+    /// number it drew at start. The node gives the turn back only under
+    /// another instance, once it restarted.
+    pub instance: u64,
+}
+
+impl TurnRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.node_id);
+        w.u8(self.action);
+        w.u64(self.instance);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = TurnRequest { node_id: r.u32()?, action: r.u8()?, instance: r.u64()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// A node tells the metadata leader its release and the cluster versions
+/// it supports (internal, ADR 0127), at start and again while the metadata
+/// state says otherwise; a node reports only for itself. Answered with
+/// [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportVersionRequest {
+    /// The node reporting.
+    pub node_id: u32,
+    /// Its release, such as `0.5.2`.
+    pub release: String,
+    /// The oldest cluster version it runs with ([`cluster_version`]).
+    pub oldest: u32,
+    /// The newest, its own.
+    pub newest: u32,
+}
+
+impl ReportVersionRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u32(self.node_id);
+        w.string(&self.release);
+        w.u32(self.oldest);
+        w.u32(self.newest);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = ReportVersionRequest { node_id: r.u32()?, release: r.string()?, oldest: r.u32()?, newest: r.u32()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Changes a rolling upgrade (cluster admin, ADR 0127): pauses or resumes
+/// restart turns, gives back the turn a node holds, or raises the cluster
+/// version. Absent fields change nothing. Answered with [`AdminResponse`]
+/// once committed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlterUpgradeRequest {
+    /// Pause turns (`true`) or resume them (`false`). Tag 0.
+    pub hold: Option<bool>,
+    /// Give back the turn this node holds. Tag 1.
+    pub release_turn: Option<u64>,
+    /// Raise the cluster version to this ([`cluster_version`]). Tag 2.
+    pub cluster_version: Option<u32>,
+}
+
+const TAG_HOLD: u64 = 0;
+const TAG_RELEASE_TURN: u64 = 1;
+const TAG_CLUSTER_VERSION: u64 = 2;
+
+impl AlterUpgradeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        let mut tags = Vec::new();
+        if let Some(hold) = self.hold {
+            let mut v = Writer::new();
+            v.u8(u8::from(hold));
+            tags.push((TAG_HOLD, v.finish()));
+        }
+        if let Some(node) = self.release_turn {
+            let mut v = Writer::new();
+            v.u64(node);
+            tags.push((TAG_RELEASE_TURN, v.finish()));
+        }
+        if let Some(version) = self.cluster_version {
+            let mut v = Writer::new();
+            v.u32(version);
+            tags.push((TAG_CLUSTER_VERSION, v.finish()));
+        }
+        w.tags(&tags);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let mut req = AlterUpgradeRequest::default();
+        for (tag, value) in r.tags()? {
+            let mut v = Reader::new(value);
+            match tag {
+                TAG_HOLD => req.hold = Some(v.u8()? != 0),
+                TAG_RELEASE_TURN => req.release_turn = Some(v.u64()?),
+                TAG_CLUSTER_VERSION => req.cluster_version = Some(v.u32()?),
+                // Unknown tags come from newer versions: skipped.
+                _ => continue,
+            }
+            v.finish()?;
+        }
+        Ok(req)
+    }
+}
+
+/// Asks where a rolling upgrade stands (a cluster admin or viewer, ADR
+/// 0127).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescribeUpgradeRequest;
+
+impl DescribeUpgradeRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        r.tags()?;
+        Ok(DescribeUpgradeRequest)
+    }
+}
+
+/// One node in [`DescribeUpgradeResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpgradeNode {
+    /// Its id.
+    pub node_id: u64,
+    /// Its release; empty until it reported, and then the versions mean
+    /// nothing.
+    pub release: String,
+    /// The oldest cluster version it runs with.
+    pub oldest: u32,
+    /// The newest, its own.
+    pub newest: u32,
+}
+
+/// The node holding the restart turn, in [`DescribeUpgradeResponse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeTurn {
+    /// The node.
+    pub node_id: u64,
+    /// Millisecond it got the turn in, by the metadata leader's clock, since
+    /// the Unix epoch.
+    pub since_ms: u64,
+}
+
+/// Where a rolling upgrade stands, from the metadata group's leader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeUpgradeResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The cluster version in force ([`cluster_version`]); `None` while it
+    /// has none yet. Version 0.0 is a version too.
+    pub cluster_version: Option<u32>,
+    /// Whether turns are paused.
+    pub held: bool,
+    /// The node holding the turn, if any.
+    pub turn: Option<UpgradeTurn>,
+    /// Every node of the cluster, by id.
+    pub nodes: Vec<UpgradeNode>,
+}
+
+impl DescribeUpgradeResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        match self.cluster_version {
+            Some(v) => {
+                w.u8(1);
+                w.u32(v);
+            }
+            None => w.u8(0),
+        }
+        w.u8(u8::from(self.held));
+        match self.turn {
+            Some(t) => {
+                w.u8(1);
+                w.u64(t.node_id);
+                w.u64(t.since_ms);
+            }
+            None => w.u8(0),
+        }
+        w.array(&self.nodes, |w, n| {
+            w.u64(n.node_id);
+            w.string(&n.release);
+            w.u32(n.oldest);
+            w.u32(n.newest);
+        });
+        // The leader hint is the structure's block of tagged fields.
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let error = ErrorCode(r.u16()?);
+        let cluster_version = match r.u8()? {
+            0 => None,
+            _ => Some(r.u32()?),
+        };
+        let held = r.u8()? != 0;
+        let turn = match r.u8()? {
+            0 => None,
+            _ => Some(UpgradeTurn { node_id: r.u64()?, since_ms: r.u64()? }),
+        };
+        let nodes = r.array(17, |r| {
+            Ok(UpgradeNode { node_id: r.u64()?, release: r.string()?, oldest: r.u32()?, newest: r.u32()? })
+        })?;
+        Ok(DescribeUpgradeResponse { error, leader_hint: get_hint(r)?, cluster_version, held, turn, nodes })
+    }
+}
+
 /// A queue's leader forwards messages to its dead-letter queue (internal,
 /// from a node). Answered with [`OutcomeResponse`] once the queue's leader
 /// has them committed. Sending a message again is harmless: the receiving

@@ -129,6 +129,10 @@ public record ApiKey(int id) {
     public static final ApiKey DESCRIBE_SESSIONS = new ApiKey(59);
     /** Renews the client certificate the connection was made with (ADR 0123). */
     public static final ApiKey RENEW_CERTIFICATE = new ApiKey(60);
+    /** Changes a rolling upgrade: pauses or resumes restart turns, gives one back, raises the cluster version (ADR 0127). */
+    public static final ApiKey ALTER_UPGRADE = new ApiKey(64);
+    /** Where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
+    public static final ApiKey DESCRIBE_UPGRADE = new ApiKey(65);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -160,7 +164,7 @@ public record ApiKey(int id) {
             range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(DESCRIBE_CERTIFICATES),
             range(RECORD_CERTIFICATES), range(REQUEST_CERTIFICATE), range(DESCRIBE_CERTIFICATE_REQUESTS),
             range(RECORD_CERTIFICATE), range(REASSIGN_PARTITION), range(DESCRIBE_SESSIONS), range(RENEW_CERTIFICATE),
-            range(PUBLISH));
+            range(ALTER_UPGRADE), range(DESCRIBE_UPGRADE), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

@@ -369,3 +369,53 @@ pub fn admin_client(
     };
     Ok(lotse_client::Client::new(rt, cfg))
 }
+
+/// A client acting as node `id`, with its own certificate (ADR 0127): what
+/// `lotse turn` and `lotse upgrade status` use on the node's machine. The
+/// node's own address comes first.
+pub fn node_client(file: &ClusterFile, id: u64) -> Result<lotse_client::Client<TokioRuntime>, RunError> {
+    let rt = TokioRuntime::new(std::env::temp_dir());
+    let rt = match file.tls_paths(id) {
+        Some((ca, cert, key)) => rt.with_tls(TlsConfig::from_files(ca, Some((cert, key)))?),
+        None => rt.plaintext_on_loopback(),
+    };
+    let mut bootstrap: Vec<String> = file.nodes.iter().filter(|n| n.id == id).map(|n| n.client.clone()).collect();
+    bootstrap.extend(file.nodes.iter().filter(|n| n.id != id).map(|n| n.client.clone()));
+    let cfg = lotse_client::ClientConfig {
+        retry_for: std::time::Duration::from_secs(15),
+        ..lotse_client::ClientConfig::new(bootstrap)
+    };
+    Ok(lotse_client::Client::new(rt, cfg))
+}
+
+/// Asks node `id`'s operator endpoint for `path` on loopback, as an exec
+/// probe in a container without a shell does (ADR 0127): the status code
+/// and the body.
+pub fn probe(file: &ClusterFile, id: u64, path: &str) -> Result<(u16, String), String> {
+    use std::io::{Read, Write};
+    let node = file.node(id).map_err(|e| e.to_string())?;
+    let addr =
+        node.metrics.as_deref().ok_or_else(|| format!("node {id} has no metrics address in the cluster file"))?;
+    let target: std::net::SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(addr)
+        .map_err(|e| format!("{addr}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("{addr}: no address"))?;
+    if !target.ip().is_loopback() {
+        return Err(format!(
+            "node {id} serves its operator endpoint on {addr}, which is not loopback; a probe reads it on loopback, where it is plain HTTP"
+        ));
+    }
+    let timeout = std::time::Duration::from_secs(5);
+    let mut conn = std::net::TcpStream::connect_timeout(&target, timeout).map_err(|e| format!("{addr}: {e}"))?;
+    conn.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    write!(conn, "GET {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n").map_err(|e| format!("{addr}: {e}"))?;
+    let mut answer = String::new();
+    conn.read_to_string(&mut answer).map_err(|e| format!("{addr}: {e}"))?;
+    let status = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| format!("{addr}: not an HTTP answer"))?;
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+    Ok((status, body))
+}

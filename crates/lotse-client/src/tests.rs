@@ -120,3 +120,18 @@ fn a_leader_only_some_brokers_know_is_found() {
         assert_eq!(found.iter().map(|n| n.node_id).collect::<Vec<_>>(), vec![3]);
     });
 }
+
+/// A client with no broker address, such as a node's own client on a node
+/// that serves no clients, fails an admin request once `retry_for` runs out
+/// instead of panicking.
+#[test]
+fn an_admin_request_without_any_address_fails() {
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig { retry_for: std::time::Duration::from_secs(1), ..crate::ClientConfig::new(vec![]) },
+        );
+        let e = client.describe_nodes().await.expect_err("no broker to ask");
+        assert!(e.to_string().contains("no broker address"), "{e}");
+    });
+}

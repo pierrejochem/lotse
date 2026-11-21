@@ -299,4 +299,17 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
 
     /** Every node's open client sessions (ADR 0121); see [LotseClient.nodeSessions]. */
     public suspend fun nodeSessions(): List<NodeSessions> = io { java.nodeSessions() }
+
+    /** Pauses or resumes the cluster's restart turns (ADR 0127); see [LotseClient.holdUpgrade]. */
+    public suspend fun holdUpgrade(hold: Boolean): Unit = io { java.holdUpgrade(hold) }
+
+    /** Gives back the restart turn [node] holds (ADR 0127); see [LotseClient.releaseTurn]. */
+    public suspend fun releaseTurn(node: Long): Unit = io { java.releaseTurn(node) }
+
+    /** Raises the cluster version (ADR 0127); see [LotseClient.raiseClusterVersion]. */
+    public suspend fun raiseClusterVersion(major: Int, minor: Int): Unit =
+        io { java.raiseClusterVersion(major, minor) }
+
+    /** Where a rolling upgrade stands (ADR 0127); see [LotseClient.describeUpgrade]. */
+    public suspend fun describeUpgrade(): Response.DescribeUpgrade = io { java.describeUpgrade() }
 }

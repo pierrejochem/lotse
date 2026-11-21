@@ -1,6 +1,6 @@
 # Operations
 
-This chapter says what the code supports: where the data is, what a restart does, and how to read common failures. The repository documents no backup or upgrade procedure. Those are listed as open at the end, not invented.
+This chapter says what the code supports: where the data is, what a restart does, and how to read common failures. The repository documents no backup procedure. That is listed as open at the end, not invented; upgrades have [their own chapter](upgrades.md).
 
 ## What is in the data directory
 
@@ -69,16 +69,9 @@ The repository documents no backup procedure, and the code offers no snapshot or
 - How to restore a whole cluster, and whether a restored node may rejoin with its old id.
 - How to back up the CA key, the certificates and the cluster file. These are ordinary files and you hold them yourself; `ca.key` must stay off the nodes.
 
-## Open: upgrade
+## Upgrade
 
-The repository documents no upgrade procedure. These questions are open:
-
-- Whether nodes of different versions can run together, and so whether a rolling restart is supported.
-- Which versions can read each other's data directory, snapshots and node-to-node format.
-- Whether the native protocol versions across releases are compatible; `ApiVersions` lets a client ask a node which versions it speaks.
-- The order in which to restart nodes, and how to know a restarted node has caught up before the next goes down. `DescribeMetrics` reports every replica's `log_end` on the leader, which is a starting point but is not documented as a procedure.
-
-Until these are answered, test an upgrade on a copy of your cluster first.
+Nodes restart one at a time on a new release while the cluster runs; see [Upgrades](upgrades.md).
 
 ## Open: other gaps
 

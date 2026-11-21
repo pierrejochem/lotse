@@ -78,6 +78,8 @@ mod retire;
 mod session;
 mod sessions;
 mod stats;
+mod upgrade;
+pub(crate) use upgrade::TurnJob;
 mod verify;
 
 pub(crate) use admin::AdminView;
@@ -418,6 +420,8 @@ pub(crate) struct Clients {
     verify: verify::Verifying,
     /// Conditional deletes waiting for their partitions (ADR 0063).
     emptiness: empty::Emptiness,
+    /// Restart turns for the node to judge and claim (ADR 0127).
+    turn_jobs: Vec<upgrade::TurnJob>,
     /// Publishes waiting for their writes (ADR 0079).
     publishing: publish::Publishing,
     /// The group coordinator's clocks.
@@ -536,6 +540,10 @@ impl Clients {
             Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
             Request::ReportDisk(req) => self.report_disk(outbox, id, req, &principal, view, groups),
+            Request::Turn(req) => self.turn(outbox, id, req, &principal, view, groups),
+            Request::ReportVersion(req) => self.report_version(outbox, id, req, &principal, view, groups),
+            Request::AlterUpgrade(req) => self.alter_upgrade(outbox, id, req, view, groups),
+            Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,

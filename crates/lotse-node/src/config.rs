@@ -540,6 +540,7 @@ impl ClusterFile {
                 .disk
                 .check_interval_ms
                 .map_or(lotse_server::DEFAULT_DISK_CHECK_INTERVAL, Duration::from_millis),
+            versions: lotse_server::version::Versions::default(),
             auth,
             retention: lotse_server::RetentionConfig {
                 ms: pick(self.retention.ms, defaults.ms),

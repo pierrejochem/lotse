@@ -63,6 +63,10 @@ export const ApiKey = {
   DESCRIBE_SESSIONS: 59,
   /** Renews the client certificate the connection was made with (ADR 0123). */
   RENEW_CERTIFICATE: 60,
+  /** Changes a rolling upgrade: pauses or resumes restart turns, gives one back, raises the cluster version (ADR 0127). */
+  ALTER_UPGRADE: 64,
+  /** Where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
+  DESCRIBE_UPGRADE: 65,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -124,6 +128,8 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.REASSIGN_PARTITION,
   ApiKey.DESCRIBE_SESSIONS,
   ApiKey.RENEW_CERTIFICATE,
+  ApiKey.ALTER_UPGRADE,
+  ApiKey.DESCRIBE_UPGRADE,
   ApiKey.PUBLISH,
 ];
 

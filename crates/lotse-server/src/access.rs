@@ -153,6 +153,8 @@ impl Access {
                 | Request::SettleVoters(_)
                 | Request::RecordCertificates(_)
                 | Request::ReportDisk(_)
+                | Request::Turn(_)
+                | Request::ReportVersion(_)
                 | Request::DeadLetter(_)
                 | Request::VerifyTxn(_)
                 | Request::CheckEmpty(_),
@@ -162,6 +164,9 @@ impl Access {
             // A lagging node asks for the node list (ADR 0050); the metadata
             // leader asks for the nodes' metrics to weigh moves (ADR 0052).
             (Principal::Node(_), Request::DescribeNodes(_) | Request::DescribeMetrics(_)) => return Ok(()),
+            // `lotse upgrade status` on a node's machine, with its
+            // certificate (ADR 0127).
+            (Principal::Node(_), Request::DescribeUpgrade(_)) => return Ok(()),
             // A node writes what it was asked to publish, with an idempotent
             // producer of its own, once the publisher's roles allowed it
             // (ADR 0079); never in a transaction.
@@ -171,12 +176,18 @@ impl Access {
             (_, Request::SettleVoters(_)) => return Err("only broker nodes report a group's voters".into()),
             (_, Request::RecordCertificates(_)) => return Err("only broker nodes report client certificates".into()),
             (_, Request::ReportDisk(_)) => return Err("only broker nodes report their disk".into()),
+            (_, Request::Turn(_)) => {
+                return Err(
+                    "only broker nodes take restart turns; a cluster admin gives one back with AlterUpgrade".into()
+                );
+            }
+            (_, Request::ReportVersion(_)) => return Err("only broker nodes report their version".into()),
             (_, Request::DeadLetter(_)) => return Err("only broker nodes forward dead letters".into()),
             (_, Request::VerifyTxn(_)) => return Err("only broker nodes verify transactions".into()),
             (_, Request::CheckEmpty(_)) => return Err("only broker nodes ask whether a partition is empty".into()),
             (Principal::Node(id), _) => {
                 return Err(format!(
-                    "node {id} may only look up metadata, nodes and metrics, write markers, report voters, client certificates and its disk, forward dead letters, verify transactions, check partitions for a delete and write what it publishes"
+                    "node {id} may only look up metadata, nodes, metrics and upgrades, write markers, report voters, client certificates, its disk and its version, take restart turns, forward dead letters, verify transactions, check partitions for a delete and write what it publishes"
                 ));
             }
             (Principal::Anonymous, _) => return Ok(()),
@@ -277,7 +288,8 @@ impl Access {
             | Request::RevokeSessions(_)
             | Request::RevokeCertificate(_)
             | Request::DescribeCertificates(_)
-            | Request::RecordCertificate(_) => admin(),
+            | Request::RecordCertificate(_)
+            | Request::AlterUpgrade(_) => admin(),
             // A user asks in their own name and sees their own requests; a
             // cluster admin asks for anyone and sees all (ADR 0119).
             Request::RequestCertificate(r) => match p {
@@ -309,6 +321,13 @@ impl Access {
                     Err(format!("{p} may not see the cluster's nodes"))
                 }
             }
+            Request::DescribeUpgrade(_) => {
+                if self.sees_cluster(p) {
+                    Ok(())
+                } else {
+                    Err(format!("{p} may not see the cluster's upgrade"))
+                }
+            }
             Request::ApiVersions
             | Request::WhoAmI(_)
             | Request::Metadata(_)
@@ -317,6 +336,8 @@ impl Access {
             | Request::SettleVoters(_)
             | Request::RecordCertificates(_)
             | Request::ReportDisk(_)
+            | Request::Turn(_)
+            | Request::ReportVersion(_)
             | Request::DeadLetter(_)
             | Request::VerifyTxn(_)
             | Request::CheckEmpty(_)

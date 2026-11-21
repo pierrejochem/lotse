@@ -111,6 +111,34 @@ impl Shared {
 
 /// How long a TLS handshake may take before the connection is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a TCP connect may take. An address whose host is gone (a
+/// replaced Kubernetes pod's) answers nothing, and the kernel's own limit
+/// is about two minutes (ADR 0130).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long data written may stay unacknowledged before the connection
+/// fails, so that writes into an address nobody answers at fail within
+/// seconds rather than TCP's retransmission limit of many minutes
+/// (`TCP_USER_TIMEOUT`, Linux; ADR 0130).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNACKED_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connects to `addr` within [`CONNECT_TIMEOUT`], tuned like every
+/// connection.
+async fn tcp_connect(addr: &str) -> io::Result<tokio::net::TcpStream> {
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, format!("connecting to {addr} timed out")))??;
+    tune(&tcp)?;
+    Ok(tcp)
+}
+
+/// No delay for small frames, and a bound on unacknowledged data.
+fn tune(tcp: &tokio::net::TcpStream) -> io::Result<()> {
+    tcp.set_nodelay(true)?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    socket2::SockRef::from(tcp).set_tcp_user_timeout(Some(UNACKED_TIMEOUT))?;
+    Ok(())
+}
 
 /// Handshaken connections waiting for `accept`.
 const BACKLOG: usize = 128;
@@ -270,7 +298,7 @@ async fn accept_loop(
                 continue;
             }
         };
-        if stream.set_nodelay(true).is_err() {
+        if tune(&stream).is_err() {
             continue;
         }
         let peer = peer.to_string();
@@ -334,8 +362,7 @@ impl Net for TokioRuntime {
                 Security::Unset => Err(unset()),
                 Security::Plain => {
                     loopback_only(&addr).await?;
-                    let tcp = tokio::net::TcpStream::connect(&addr).await?;
-                    tcp.set_nodelay(true)?;
+                    let tcp = tcp_connect(&addr).await?;
                     Ok(TokioConn::new(tcp, None, None, None))
                 }
                 Security::Tls(t) => {
@@ -343,8 +370,7 @@ impl Net for TokioRuntime {
                     let host = host.trim_start_matches('[').trim_end_matches(']');
                     let name = ServerName::try_from(host.to_owned())
                         .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("{host}: {e}")))?;
-                    let tcp = tokio::net::TcpStream::connect(&addr).await?;
-                    tcp.set_nodelay(true)?;
+                    let tcp = tcp_connect(&addr).await?;
                     let connector = tokio_rustls::TlsConnector::from(t.current().client(link));
                     let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(name, tcp))
                         .await
@@ -430,3 +456,6 @@ impl TokioConn {
         Ok(Some(buf.freeze()))
     }
 }
+
+#[cfg(test)]
+mod tests;

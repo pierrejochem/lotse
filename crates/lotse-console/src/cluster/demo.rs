@@ -367,8 +367,10 @@ impl DemoCluster {
         Upgrade {
             from: "0.4.0".into(),
             to: "0.4.1".into(),
-            started_by: "pierre".into(),
-            started_at: rfc3339(now_ms() - (self.secs() as u64 + 24 * 60) * 1000),
+            started_by: Some("pierre".into()),
+            started_at: Some(rfc3339(now_ms() - (self.secs() as u64 + 24 * 60) * 1000)),
+            cluster_version: Some("0.4".into()),
+            raise_to: None,
             nodes_done: 1,
             nodes_total: 3,
             groups_catching_up: catching,
@@ -998,6 +1000,17 @@ impl Cluster for DemoCluster {
     async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
         self.lock().paused = true;
         Ok(())
+    }
+
+    async fn resume_upgrade(&self, _who: &Identity) -> ApiResult<()> {
+        self.lock().paused = false;
+        Ok(())
+    }
+
+    async fn raise_cluster_version(&self, _who: &Identity) -> ApiResult<String> {
+        Err(ApiError::BadRequest(
+            "The cluster refused the raise: broker-2 runs release 0.4.0, with cluster versions up to 0.4.".into(),
+        ))
     }
 
     async fn purge_queue(&self, who: &Identity, name: &str) -> ApiResult<u64> {
