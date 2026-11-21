@@ -217,20 +217,30 @@ public final class LotseClient implements AutoCloseable {
 
     /** Asks every known broker and merges what they know: per name, the newest resource any of them knows. */
     private List<ResourceMetadata> metadataFromAll(String... asked) {
+        return metadataFromEvery(asked).resources();
+    }
+
+    /** What every broker knows, as {@link #metadataFromAll}, and whether every broker answered. */
+    private record Merged(List<ResourceMetadata> resources, boolean allAnswered) {}
+
+    private Merged metadataFromEvery(String... asked) {
         Set<Address> sorted = new TreeSet<>(java.util.Comparator.comparing(Address::toString));
         sorted.addAll(candidates());
         List<ResourceMetadata> merged = new ArrayList<>();
+        boolean all = true;
         for (Address addr : sorted) {
             try {
                 if (call(addr, new Request.Metadata(List.of(asked))) instanceof Response.Metadata m) {
                     learn(m);
                     mergeNewest(merged, m.resources());
+                } else {
+                    all = false;
                 }
             } catch (CallFailure e) {
-                // a broker that does not answer knows nothing
+                all = false; // a broker that does not answer knows nothing
             }
         }
-        return merged;
+        return new Merged(merged, all);
     }
 
     /**
@@ -311,9 +321,12 @@ public final class LotseClient implements AutoCloseable {
             throw Attempt.fail(e);
         }
         List<ResourceMetadata> resources = m.resources();
+        boolean allAnswered = true;
         if (find(resources, stream) == null) {
             // A resource created a moment ago may not have reached that broker yet: any broker that knows it will do.
-            resources = metadataFromAll(stream);
+            Merged merged = metadataFromEvery(stream);
+            resources = merged.resources();
+            allAnswered = merged.allAnswered();
         }
         ResourceMetadata res = find(resources, stream);
         PartitionMetadata p = null;
@@ -325,6 +338,11 @@ public final class LotseClient implements AutoCloseable {
             }
         }
         if (p == null) {
+            // Only every broker saying so makes it unknown: the one that did not answer may be the metadata leader,
+            // the only one that has applied a creation just answered.
+            if (!allAnswered) {
+                throw Attempt.retry("no broker that answered knows " + stream + " yet");
+            }
             throw Attempt.fail(new ClientException.UnknownStream(stream, partition));
         }
         long leader = p.leader();

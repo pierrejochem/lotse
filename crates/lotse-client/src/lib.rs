@@ -448,19 +448,28 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Asks every known broker and merges what they know: per name, the
     /// newest resource any of them knows.
     async fn metadata_from_all(&self, names: &[&str]) -> MetadataResponse {
+        self.metadata_from_every(names).await.0
+    }
+
+    /// Like [`Self::metadata_from_all`], and whether every broker answered.
+    async fn metadata_from_every(&self, names: &[&str]) -> (MetadataResponse, bool) {
         let mut addrs: Vec<String> = self.brokers.lock().expect("brokers lock").values().cloned().collect();
         addrs.extend(self.cfg.bootstrap.iter().cloned());
         addrs.sort();
         addrs.dedup();
         let mut merged = MetadataResponse::default();
+        let mut all = true;
         for addr in addrs {
             let req = Request::Metadata(MetadataRequest { names: names.iter().map(|n| n.to_string()).collect() });
-            let Ok(Response::Metadata(m)) = self.call(&addr, &req).await else { continue };
+            let Ok(Response::Metadata(m)) = self.call(&addr, &req).await else {
+                all = false;
+                continue;
+            };
             self.learn(&m);
             merge_newest(&mut merged.resources, m.resources);
             merged.brokers = m.brokers;
         }
-        merged
+        (merged, all)
     }
 
     fn learn(&self, m: &MetadataResponse) {
@@ -516,13 +525,20 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             Some(r) if r.leader != 0 => r,
             _ => {
                 let mut m = self.metadata(&[stream]).await.map_err(Attempt::Fail)?;
+                let mut all_answered = true;
                 if !m.resources.iter().any(|r| r.name == stream && r.error == ErrorCode::NONE) {
                     // A resource created a moment ago may not have reached
                     // that broker yet: any broker that knows it will do.
-                    m = self.metadata_from_all(&[stream]).await;
+                    (m, all_answered) = self.metadata_from_every(&[stream]).await;
                 }
                 let res = m.resources.iter().find(|r| r.name == stream && r.error == ErrorCode::NONE);
                 let Some(p) = res.and_then(|r| r.partitions.iter().find(|p| p.partition == partition)) else {
+                    // Only every broker saying so makes it unknown: the one
+                    // that did not answer may be the metadata leader, the
+                    // only one that has applied a creation just answered.
+                    if !all_answered {
+                        return Err(Attempt::Retry(format!("no broker that answered knows {stream} yet")));
+                    }
                     return Err(Attempt::Fail(ClientError::UnknownStream(stream.into(), partition)));
                 };
                 let resource_id = res.expect("found").resource_id;

@@ -228,6 +228,23 @@ describe("routing against scripted brokers", () => {
     assert.ok(performance.now() - start < 1_500, "not retried");
   });
 
+  test("a name the brokers that answer do not know is retried while another broker did not answer", async () => {
+    // 1 and 2 have not applied the creation yet; 3, the metadata leader that has, does not answer at first.
+    a.on(() => fx.metadata(all, fx.unknown("s")));
+    b.on(() => fx.metadata(all, fx.unknown("s")));
+    let asked = 0;
+    c.on((_n, request) => {
+      if (request.type === "Metadata") {
+        asked += 1;
+        return asked <= 2 ? DROP : fx.metadata(all, fx.stream("s", fx.STREAM_ID, fx.partition(0, 3, 1, 3)));
+      }
+      return fx.produced(fx.STREAM_ID, 0, 7);
+    });
+    const lotse = open([a]);
+    assert.equal((await lotse.produce("s", 0, x)).baseOffset, 7n);
+    assert.ok(asked >= 3, "asked again until 3 answered");
+  });
+
   test("a partition that does not exist is an unknown stream", async () => {
     a.on(() => fx.metadata(all, fx.stream("s", fx.STREAM_ID, fx.partition(0, 1, 1, 1))));
     await assert.rejects(open([a]).produce("s", 5, x), (e: unknown) => {
