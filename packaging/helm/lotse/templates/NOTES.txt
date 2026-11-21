@@ -1,0 +1,10 @@
+Lotse: {{ .Values.replicas }} nodes in the StatefulSet {{ include "lotse.fullname" . }}.
+
+Clients bootstrap through {{ include "lotse.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.ports.client }}
+and need a certificate from the cluster's CA in {{ .Values.tls.secretName }}.
+
+Where a rolling upgrade stands, from inside a pod:
+  kubectl exec {{ include "lotse.fullname" . }}-0 -- lotse upgrade status
+
+Once every node runs the new release, an admin raises the cluster version:
+  lotse upgrade finalize --config cluster.toml --cert admin.pem --key admin.key

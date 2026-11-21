@@ -202,8 +202,16 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     /// <summary>Asks every known broker and merges what they know: per name, the newest resource any of them knows.</summary>
     private async Task<List<Messages.ResourceMetadata>> MetadataFromAllAsync(string[] asked, CancellationToken ct)
     {
+        return (await MetadataFromEveryAsync(asked, ct).ConfigureAwait(false)).Resources;
+    }
+
+    /// <summary>What every broker knows, as <see cref="MetadataFromAllAsync"/>, and whether every broker answered.</summary>
+    private async Task<(List<Messages.ResourceMetadata> Resources, bool AllAnswered)> MetadataFromEveryAsync(
+        string[] asked, CancellationToken ct)
+    {
         var sorted = Candidates().OrderBy(a => a.ToString(), StringComparer.Ordinal).ToList();
         var merged = new List<Messages.ResourceMetadata>();
+        bool all = true;
         foreach (Address addr in sorted)
         {
             try
@@ -213,13 +221,17 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                     Learn(m);
                     MergeNewest(merged, m.Resources);
                 }
+                else
+                {
+                    all = false;
+                }
             }
             catch (CallFailure)
             {
-                // a broker that does not answer knows nothing
+                all = false; // a broker that does not answer knows nothing
             }
         }
-        return merged;
+        return (merged, all);
     }
 
     /// <summary>
@@ -317,15 +329,24 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             throw Attempt.Fail(e);
         }
         IReadOnlyList<Messages.ResourceMetadata> resources = m.Resources;
+        bool allAnswered = true;
         if (Find(resources, stream) is null)
         {
             // A resource created a moment ago may not have reached that broker yet: any broker that knows it will do.
-            resources = await MetadataFromAllAsync(new[] { stream }, ct).ConfigureAwait(false);
+            (List<Messages.ResourceMetadata> merged, allAnswered) =
+                await MetadataFromEveryAsync(new[] { stream }, ct).ConfigureAwait(false);
+            resources = merged;
         }
         Messages.ResourceMetadata? res = Find(resources, stream);
         Messages.PartitionMetadata? p = res?.Partitions.FirstOrDefault(c => c.Partition == (uint)partition);
         if (res is null || p is null)
         {
+            // Only every broker saying so makes it unknown: the one that did not answer may be the metadata leader,
+            // the only one that has applied a creation just answered.
+            if (!allAnswered)
+            {
+                throw Attempt.Retry("no broker that answered knows " + stream + " yet");
+            }
             throw Attempt.Fail(new UnknownStreamException(stream, partition));
         }
         uint leader = p.Leader;

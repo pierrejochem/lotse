@@ -421,6 +421,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/upgrade/raise": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Raises the cluster version to the newest every node runs with (ADR
+         *     0127): new formats come into use, and no node can go back to the
+         *     previous release.
+         */
+        post: operations["raise_cluster_version"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/upgrade/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resumes a paused rolling upgrade (ADR 0127). */
+        post: operations["resume_upgrade"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/users": {
         parameters: {
             query?: never;
@@ -1632,8 +1670,16 @@ export interface components {
          * @enum {string}
          */
         TxnState: "none" | "committed" | "aborted" | "open" | "commit_marker" | "abort_marker";
-        /** @description A rolling upgrade run by the operator. */
+        /**
+         * @description A rolling upgrade (ADR 0127): run by the operator, or node by node
+         *     with the cluster's restart turn.
+         */
         Upgrade: {
+            /**
+             * @description The cluster version in force, `major.minor`: the formats every node
+             *     writes.
+             */
+            cluster_version?: string | null;
             /** @description Version before. */
             from: string;
             /**
@@ -1651,12 +1697,20 @@ export interface components {
              * @description Nodes in total.
              */
             nodes_total: number;
-            /** @description `true` once the operator stops after the current node. */
+            /**
+             * @description `true` once the upgrade stops after the current node: restart turns
+             *     are paused.
+             */
             paused_after_current: boolean;
-            /** @description Start, RFC 3339. */
-            started_at: string;
-            /** @description Who started it. */
-            started_by: string;
+            /**
+             * @description A newer cluster version every node runs with, which a cluster admin
+             *     may raise it to; `None` while some node does not.
+             */
+            raise_to?: string | null;
+            /** @description Start, RFC 3339, where known. */
+            started_at?: string | null;
+            /** @description Who started it, where known. */
+            started_by?: string | null;
             /** @description Steps, one per node in upgrade order. */
             steps: components["schemas"]["UpgradeStep"][];
             /** @description Version after. */
@@ -2701,6 +2755,79 @@ export interface operations {
         };
     };
     pause_upgrade: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    raise_cluster_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description Not every node runs with a newer version. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resume_upgrade: {
         parameters: {
             query?: never;
             header?: never;

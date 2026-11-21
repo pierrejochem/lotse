@@ -10,4 +10,9 @@ install -d -o lotse -g lotse -m 0750 /var/lib/lotse
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
 fi
+# An upgrade ($1 counts the installed versions): restart the running nodes,
+# one at a time across the cluster (ADR 0127).
+if [ "${1:-1}" -ge 2 ]; then
+    /usr/lib/lotse/restart-on-upgrade || true
+fi
 exit 0

@@ -943,6 +943,75 @@ public sealed interface Response {
     }
 
     /**
+     * {@code DescribeUpgrade} (65): where a rolling upgrade stands, from the metadata group's leader (ADR 0127). The
+     * leader hint is the structure's block of tagged fields.
+     *
+     * @param error the outcome
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param clusterVersion the cluster version in force, {@code major << 16 | minor}, or {@code null} while there is
+     *     none yet; version 0.0 is a version too
+     * @param held whether restart turns are paused
+     * @param turn the node holding the restart turn, or {@code null}
+     * @param nodes every node of the cluster, by id
+     */
+    record DescribeUpgrade(
+            ErrorCode error, LeaderHint leaderHint, Long clusterVersion, boolean held, UpgradeTurn turn,
+            List<UpgradeNode> nodes)
+            implements Response {
+        /** Creates the response. */
+        public DescribeUpgrade {
+            nodes = List.copyOf(nodes);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code());
+            if (clusterVersion == null) {
+                w.u8(0);
+            } else {
+                w.u8(1).u32(clusterVersion);
+            }
+            w.bool(held);
+            if (turn == null) {
+                w.u8(0);
+            } else {
+                w.u8(1).u64(turn.nodeId()).u64(turn.sinceMs());
+            }
+            w.array(nodes, (w1, n) -> w1.u64(n.nodeId()).string(n.release()).u32(n.oldest()).u32(n.newest()));
+            Messages.putHint(w, leaderHint);
+        }
+
+        static DescribeUpgrade read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            Long version = r.u8() == 0 ? null : r.u32();
+            boolean held = r.u8() != 0;
+            UpgradeTurn turn = r.u8() == 0 ? null : new UpgradeTurn(r.u64(), r.u64());
+            // at least: id, release, two u32 (the bound the Rust codec uses)
+            List<UpgradeNode> nodes =
+                    r.array(17, r1 -> new UpgradeNode(r1.u64(), r1.string(), r1.u32(), r1.u32()));
+            return new DescribeUpgrade(error, Messages.getHint(r), version, held, turn, nodes);
+        }
+    }
+
+    /**
+     * The node holding the restart turn, in {@link DescribeUpgrade}.
+     *
+     * @param nodeId the node
+     * @param sinceMs when it got the turn, by the metadata leader's clock, milliseconds since the Unix epoch
+     */
+    record UpgradeTurn(long nodeId, long sinceMs) {}
+
+    /**
+     * One node in {@link DescribeUpgrade}.
+     *
+     * @param nodeId its id
+     * @param release its release; empty until it reported, and then the versions mean nothing
+     * @param oldest the oldest cluster version it runs with, a {@code u32}
+     * @param newest the newest, its own, a {@code u32}
+     */
+    record UpgradeNode(long nodeId, String release, long oldest, long newest) {}
+
+    /**
      * {@code DescribeSessions} (59): a node's open client sessions, oldest first (ADR 0121).
      *
      * @param error the outcome

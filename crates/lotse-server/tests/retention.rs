@@ -157,6 +157,7 @@ impl World {
                         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
                         disk_free_limit: lotse_server::FreeLimit::default(),
                         disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+                        versions: Default::default(),
                         retention,
                         join: false,
                         auth: lotse_server::AuthConfig::none(),
@@ -306,13 +307,17 @@ async fn reader(rt: SimRuntime, n: u64, partition: u32, out: Arc<Mutex<Outcomes>
 }
 
 /// One member of a group reading both partitions, slowly, committing as it
-/// goes; then, once `stop` is set, until it has read `until` everywhere.
+/// goes; then, once `stop` is set, until it has got past `until`, a marker
+/// per partition and its offset, everywhere: it read the marker, or its
+/// position is beyond it because retention deleted the marker first. The
+/// limits are short and the member slow, so that can happen; it then goes on
+/// from the log start (ADR 0046).
 async fn member(
     rt: SimRuntime,
     n: u64,
     out: Arc<Mutex<Outcomes>>,
     stop: Arc<AtomicBool>,
-    until: Arc<Mutex<BTreeMap<u32, String>>>,
+    until: Arc<Mutex<BTreeMap<u32, (String, u64)>>>,
 ) {
     let client = Client::new(rt.clone(), client_config(n));
     let cfg = GroupConfig {
@@ -333,12 +338,19 @@ async fn member(
         loop {
             if stop.load(Ordering::Relaxed) {
                 let want = until.lock().unwrap().clone();
-                if want.len() == PARTITIONS as usize && want.values().all(|v| seen_after.contains(v)) {
+                let positions = consumer.positions();
+                let past = |(p, (marker, at)): (&u32, &(String, u64))| {
+                    seen_after.contains(marker) || positions.get(&(STREAM.to_string(), *p)).is_some_and(|pos| pos > at)
+                };
+                if want.len() == PARTITIONS as usize && want.iter().all(past) {
                     consumer.close().await;
                     return;
                 }
                 let at = *give_up.get_or_insert_with(deadline);
-                assert!(rt.now() < at, "the group never read what was written after healing: {want:?}");
+                assert!(
+                    rt.now() < at,
+                    "the group never got past what was written after healing: {want:?} at {positions:?}"
+                );
             }
             let records = match consumer.poll(TICK * 10).await {
                 Ok(r) => r,
@@ -441,8 +453,9 @@ async fn run(rt: SimRuntime) {
                 Err(e) => panic!("partition {p} made no progress after healing: {e}"),
             }
         }
-        markers.insert(p, at.unwrap_or_else(|| panic!("partition {p}: no produce settled after healing")));
-        until.lock().unwrap().insert(p, marker);
+        let at = at.unwrap_or_else(|| panic!("partition {p}: no produce settled after healing"));
+        markers.insert(p, at);
+        until.lock().unwrap().insert(p, (marker, at));
     }
     group.await;
 

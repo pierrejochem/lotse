@@ -1,0 +1,5 @@
+#!/bin/sh
+# After an upgrade: restart the running nodes, one at a time across the
+# cluster (ADR 0127).
+/usr/lib/lotse/restart-on-upgrade || true
+exit 0

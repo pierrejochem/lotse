@@ -120,3 +120,89 @@ fn a_leader_only_some_brokers_know_is_found() {
         assert_eq!(found.iter().map(|n| n.node_id).collect::<Vec<_>>(), vec![3]);
     });
 }
+
+/// A client with no broker address, such as a node's own client on a node
+/// that serves no clients, fails an admin request once `retry_for` runs out
+/// instead of panicking.
+#[test]
+fn an_admin_request_without_any_address_fails() {
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig { retry_for: std::time::Duration::from_secs(1), ..crate::ClientConfig::new(vec![]) },
+        );
+        let e = client.describe_nodes().await.expect_err("no broker to ask");
+        assert!(e.to_string().contains("no broker address"), "{e}");
+    });
+}
+
+/// A stream that the brokers which answer do not know yet, while another
+/// broker does not answer, is not unknown: the silent one may be the
+/// metadata leader, the only one that has applied the creation. The client
+/// tries again until it hears from that one (seed 2874 of the compaction
+/// simulation, where the leader was down right after creating the stream).
+#[test]
+fn a_stream_is_unknown_only_once_every_broker_says_so() {
+    use lotse_proto::{
+        MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceResourceResponse, ProduceResponse,
+        Request, Response,
+    };
+    use lotse_rt::{Clock as _, Spawn as _};
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let all = brokers(&[(1, "a"), (2, "b")]);
+        let behind = all.clone();
+        serve(&rt, "a", move |_| {
+            Response::Metadata(MetadataResponse {
+                brokers: behind.clone(),
+                resources: vec![ResourceMetadata { error: ErrorCode::UNKNOWN_RESOURCE, ..resource("s", 0) }],
+            })
+        });
+        // b, the one that knows the stream, comes up only after a second.
+        let late = rt.clone();
+        drop(rt.spawn(async move {
+            late.sleep(std::time::Duration::from_secs(1)).await;
+            serve(&late, "b", move |r| match r {
+                Request::Produce(_) => Response::Produce(ProduceResponse {
+                    throttle_ms: 0,
+                    resources: vec![ProduceResourceResponse {
+                        resource_id: 7,
+                        partitions: vec![ProducePartitionResponse {
+                            partition: 0,
+                            error: ErrorCode::NONE,
+                            base_offset: 41,
+                            append_ts: -1,
+                            error_msg: None,
+                            leader_hint: None,
+                        }],
+                    }],
+                }),
+                _ => Response::Metadata(MetadataResponse {
+                    brokers: all.clone(),
+                    resources: vec![ResourceMetadata {
+                        partitions: vec![PartitionMetadata {
+                            partition: 0,
+                            leader: 2,
+                            leader_term: 1,
+                            voters: vec![1, 2],
+                            pinned_leader: 0,
+                            placed: false,
+                        }],
+                        ..resource("s", 7)
+                    }],
+                }),
+            });
+        }));
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig {
+                retry_for: std::time::Duration::from_secs(5),
+                idempotent: false,
+                ..crate::ClientConfig::new(vec!["a:9000".into(), "b:9000".into()])
+            },
+        );
+        let mut b = lotse_record::BatchBuilder::new(lotse_record::BatchOptions::default());
+        b.push(0, None, Some(b"v"), &[]);
+        let offset = client.produce("s", 0, b.finish().unwrap()).await.expect("b answers in time");
+        assert_eq!(offset, 41);
+    });
+}

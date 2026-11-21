@@ -236,6 +236,27 @@ class RoutingTest {
     }
 
     @Test
+    void aNameTheBrokersThatAnswerDoNotKnowIsRetriedWhileAnotherBrokerDidNotAnswer() {
+        // 1 and 2 have not applied the creation yet; 3, the metadata leader that has, does not answer at first.
+        a.on((node, request) -> Fx.metadata(all, Fx.unknown("s")));
+        b.on((node, request) -> Fx.metadata(all, Fx.unknown("s")));
+        java.util.concurrent.atomic.AtomicInteger asked = new java.util.concurrent.atomic.AtomicInteger();
+        c.on((node, request) -> {
+            if (request instanceof Request.Metadata) {
+                if (asked.incrementAndGet() <= 2) {
+                    throw new FakeNode.Drop();
+                }
+                return Fx.metadata(all, Fx.stream("s", STREAM_ID, Fx.partition(0, 3, 1, 3L)));
+            }
+            return Fx.produced(STREAM_ID, 0, 7);
+        });
+        LotseClient lotse = client(a);
+
+        assertEquals(7, lotse.produce("s", 0, OutMessage.value("x")).baseOffset());
+        assertTrue(asked.get() >= 3, "asked again until 3 answered");
+    }
+
+    @Test
     void aPartitionThatDoesNotExistIsAnUnknownStream() {
         a.on((node, request) -> Fx.metadata(all, Fx.stream("s", STREAM_ID, Fx.partition(0, 1, 1, 1L))));
         LotseClient lotse = client(a);

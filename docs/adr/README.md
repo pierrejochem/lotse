@@ -29,7 +29,7 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0022 | [Brand: Lotse and the Fairway mark](0022-brand-lotse-and-the-fairway-mark.md) | Accepted |
 | 0023 | [Persist the hard state after the log](0023-persist-the-hard-state-after-the-log.md) | Accepted |
 | 0024 | [Tool-independent project memory and agent](0024-tool-independent-project-memory-and-agent.md) | Accepted |
-| 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted |
+| 0025 | [Frame-oriented network seam and Raft wire format](0025-frame-oriented-network-seam-and-raft-wire-format.md) | Accepted, in part changed by [0130](0130-node-links-notice-a-peer-that-went-away.md) |
 | 0026 | [Native protocol: the first cut](0026-native-protocol-first-cut.md) | Accepted |
 | 0027 | [Client simulation depth in CI](0027-client-simulation-depth-in-ci.md) | Accepted; job layout amended by 0030 |
 | 0028 | [Idempotent producers](0028-idempotent-producers.md) | Accepted, in part superseded by [0110](0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md) |
@@ -126,9 +126,13 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0120 | [Queue metrics per priority level and consumer state](0120-queue-metrics-per-priority-level-and-consumer-state.md) | Accepted |
 | 0121 | [The console places partitions and lists open sessions](0121-the-console-places-partitions-and-lists-open-sessions.md) | Accepted |
 | 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted, in part changed by [0124](0124-a-node-reports-a-low-disk-at-once.md) |
-| 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted |
+| 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted, in part changed by [0127](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) |
 | 0124 | [A node reports a low disk at once](0124-a-node-reports-a-low-disk-at-once.md) | Accepted |
-| 0125 | [A group change writes only the members it changes](0125-a-group-change-writes-only-the-members-it-changes.md) | Accepted |
+| 0125 | [A group change writes only the members it changes](0125-a-group-change-writes-only-the-members-it-changes.md) | Accepted, in part changed by [0127](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) |
 | 0126 | [Reproducible releases, built by one script, for every init system](0126-reproducible-releases-built-by-one-script-for-every-init-system.md) | Accepted |
+| 0127 | [Rolling upgrades with a cluster version and restart turns](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) | Accepted |
+| 0128 | [A Helm chart whose pods take the restart turn](0128-a-helm-chart-whose-pods-take-the-restart-turn.md) | Accepted |
+| 0129 | [A Kubernetes operator after the chart](0129-a-kubernetes-operator-after-the-chart.md) | Proposed |
+| 0130 | [Node links notice a peer that went away](0130-node-links-notice-a-peer-that-went-away.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

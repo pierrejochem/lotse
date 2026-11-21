@@ -23,12 +23,22 @@ usage:
   lotse node add    --config <cluster.toml> --node <id> [--peer <host:port> --client-addr <host:port> --zone <zone>] <admin>
   lotse node remove --config <cluster.toml> --node <id> <admin>
   lotse node list   --config <cluster.toml> <admin>
+  lotse turn take    --config <cluster.toml> --node <id> [--wait <time>]
+  lotse turn release --config <cluster.toml> --node <id>
+  lotse upgrade status   --config <cluster.toml> (--node <id> | <admin>)
+  lotse upgrade hold     --config <cluster.toml> <admin>
+  lotse upgrade resume   --config <cluster.toml> <admin>
+  lotse upgrade finalize --config <cluster.toml> [--version <major.minor>] <admin>
+  lotse upgrade release  --config <cluster.toml> --node <id> <admin>
+  lotse probe <healthz|readyz|safe-to-stop> --config <cluster.toml> --node <id>
   lotse --version
 
 run    runs the node; stops on Ctrl-C or SIGTERM. LOTSE_LOG sets the log
        filter (default info). --join: a new node joining a running cluster,
        after `lotse node add`. In a container or a systemd instance,
-       LOTSE_NODE, LOTSE_JOIN=1 and LOTSE_CONFIG stand in for the flags.
+       LOTSE_NODE, LOTSE_JOIN=1 and LOTSE_CONFIG stand in for the flags;
+       in a StatefulSet, LOTSE_NODE_INDEX (the pod index) makes the node
+       id the index plus one.
 certs  makes the cluster's CA and every node's certificate where [tls] says,
        keeping those that exist; with --client, a certificate for a
        principal, such as an admin named in auth.admins. New certificates
@@ -51,6 +61,20 @@ check  reads the file and says what it describes, and which certificates
        expire within 30 days.
 node   adds a node (addresses from its [[node]] entry unless given), drains
        and removes one, or lists them.
+turn   on a node's machine, with its certificate (ADR 0127): take waits
+       until the node holds the cluster's restart turn, which it gets once
+       no other node holds it, turns are not paused, and no group of its
+       would lose its quorum without it; then restart the node. The
+       restarted node gives the turn back once it is ready. --wait bounds
+       the wait (30m by default; s, m or h); exit 1 if it ends first.
+       release gives the turn back if the restart did not happen.
+upgrade shows the cluster version, the turn and each node's release;
+       pauses or resumes turns; raises the cluster version once every node
+       runs a release with it (--version, by default the newest all of
+       them run with); or gives back the turn a node holds.
+probe  asks the node's operator endpoint ([[node]] metrics, on loopback)
+       for /healthz, /readyz or /safe-to-stop; exit 0 for 200. For exec
+       probes in a container without a shell.
        <admin> is --cert <file> --key <file> (a client certificate) or
        --user <name> with the password in LOTSE_PASSWORD.";
 
@@ -75,6 +99,8 @@ struct Args {
     if_due: bool,
     request: Option<String>,
     yes: bool,
+    wait: Option<std::time::Duration>,
+    version: Option<String>,
 }
 
 fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -108,6 +134,11 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
             "--if-due" => a.if_due = true,
             "--request" => a.request = Some(value()?.to_lowercase()),
             "--yes" => a.yes = true,
+            "--wait" => {
+                let v = value()?;
+                a.wait = Some(duration(&v).ok_or_else(|| format!("--wait {v}: a time such as 90s, 30m or 2h"))?);
+            }
+            "--version" => a.version = Some(value()?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -122,16 +153,29 @@ fn load(a: &Args) -> Result<ClusterFile, String> {
     ClusterFile::load(&path).map_err(|e| e.to_string())
 }
 
-/// The node `run` starts: `--node`, else `LOTSE_NODE` (ADR 0049), and
+/// The node `run` starts: `--node`, else `LOTSE_NODE` (ADR 0049), else
+/// `LOTSE_NODE_INDEX` plus one (a StatefulSet's pod index, ADR 0128), and
 /// whether it joins: `--join`, else `LOTSE_JOIN` (`1` or `true`).
 fn node_and_join(a: &Args) -> Result<(u64, bool), String> {
-    let id = match (a.node, std::env::var("LOTSE_NODE")) {
-        (Some(id), _) => id,
-        (None, Ok(v)) => v.trim().parse().map_err(|_| format!("LOTSE_NODE={v}: a node id is a number"))?,
-        (None, Err(_)) => return Err("--node (or LOTSE_NODE) is missing".into()),
-    };
+    let id = node_id(a.node, std::env::var("LOTSE_NODE").ok(), std::env::var("LOTSE_NODE_INDEX").ok())?;
     let join = a.join || std::env::var("LOTSE_JOIN").is_ok_and(|v| matches!(v.trim(), "1" | "true"));
     Ok((id, join))
+}
+
+/// The node id from the flag, `LOTSE_NODE` or `LOTSE_NODE_INDEX`, in that
+/// order. Pod indexes count from 0 and node ids from 1, so index 0 is node 1.
+fn node_id(flag: Option<u64>, node: Option<String>, index: Option<String>) -> Result<u64, String> {
+    if let Some(id) = flag {
+        return Ok(id);
+    }
+    if let Some(v) = node {
+        return v.trim().parse().map_err(|_| format!("LOTSE_NODE={v}: a node id is a number"));
+    }
+    if let Some(v) = index {
+        let index: u64 = v.trim().parse().map_err(|_| format!("LOTSE_NODE_INDEX={v}: a pod index is a number"))?;
+        return index.checked_add(1).ok_or_else(|| format!("LOTSE_NODE_INDEX={v}: too large"));
+    }
+    Err("--node (or LOTSE_NODE, or LOTSE_NODE_INDEX) is missing".into())
 }
 
 fn main() -> ExitCode {
@@ -158,6 +202,34 @@ fn main() -> ExitCode {
                 parse(args).and_then(|a| node(&what, &a))
             }
             _ => Err(format!("lotse node needs add, remove or list\n\n{USAGE}")),
+        },
+        "turn" => match args.next().as_deref() {
+            Some(what @ ("take" | "release")) => {
+                let what = what.to_string();
+                parse(args).and_then(|a| turn(&what, &a))
+            }
+            _ => Err(format!("lotse turn needs take or release\n\n{USAGE}")),
+        },
+        "upgrade" => match args.next().as_deref() {
+            Some(what @ ("status" | "hold" | "resume" | "finalize" | "release")) => {
+                let what = what.to_string();
+                parse(args).and_then(|a| upgrade(&what, &a))
+            }
+            _ => Err(format!("lotse upgrade needs status, hold, resume, finalize or release\n\n{USAGE}")),
+        },
+        "probe" => match args.next().as_deref() {
+            Some(path @ ("healthz" | "readyz" | "safe-to-stop")) => {
+                let path = format!("/{path}");
+                return match parse(args).and_then(|a| probe(&path, &a)) {
+                    Ok(true) => ExitCode::SUCCESS,
+                    Ok(false) => ExitCode::FAILURE,
+                    Err(e) => {
+                        eprintln!("lotse: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            _ => Err(format!("lotse probe needs healthz, readyz or safe-to-stop\n\n{USAGE}")),
         },
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     };
@@ -501,4 +573,182 @@ fn node(what: &str, a: &Args) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// A time such as `90s`, `30m`, `2h`, or seconds.
+fn duration(v: &str) -> Option<std::time::Duration> {
+    let (n, unit) = match v.trim().char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => v.trim().split_at(i),
+        None => (v.trim(), "s"),
+    };
+    let n: u64 = n.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// A client certificate and key, and a SCRAM user and password.
+type AdminCredentials = (Option<(PathBuf, PathBuf)>, Option<(String, String)>);
+
+/// The admin a command acts as: a client certificate, or a SCRAM user.
+fn admin(a: &Args) -> Result<AdminCredentials, String> {
+    let identity = match (&a.cert, &a.key) {
+        (Some(c), Some(k)) => Some((c.clone(), k.clone())),
+        (None, None) => None,
+        _ => return Err("--cert and --key go together".into()),
+    };
+    let scram = match &a.user {
+        Some(u) => {
+            let password = std::env::var("LOTSE_PASSWORD").map_err(|_| "--user needs LOTSE_PASSWORD")?;
+            Some((u.clone(), password))
+        }
+        None => None,
+    };
+    Ok((identity, scram))
+}
+
+/// The node a command on a node's machine is for: `--node`, else
+/// `LOTSE_NODE`.
+fn this_node(a: &Args) -> Result<u64, String> {
+    node_and_join(a).map(|(id, _)| id)
+}
+
+fn turn(what: &str, a: &Args) -> Result<(), String> {
+    let file = load(a)?;
+    let id = this_node(a)?;
+    let node_id = u32::try_from(id).map_err(|_| format!("node {id}: too large an id"))?;
+    let client = lotse_node::node_client(&file, id).map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        if what == "release" {
+            client.release_turn(node_id).await.map_err(|e| e.to_string())?;
+            println!("node {id}: holds no restart turn");
+            return Ok(());
+        }
+        let wait = a.wait.unwrap_or(std::time::Duration::from_secs(30 * 60));
+        let said = std::sync::Mutex::new(String::new());
+        let waiting = async {
+            loop {
+                let why = match client.take_turn(node_id).await {
+                    Ok(()) => {
+                        println!("node {id}: holds the restart turn; restart it now");
+                        return Ok(());
+                    }
+                    Err(lotse_client::ClientError::Broker {
+                        code: lotse_proto::ErrorCode::TURN_UNAVAILABLE,
+                        message,
+                    }) => message.unwrap_or_else(|| "the turn is not free".into()),
+                    Err(lotse_client::ClientError::Broker { code, message }) if !code.retriable() => {
+                        return Err(message.unwrap_or_else(|| code.to_string()));
+                    }
+                    Err(e) => e.to_string(),
+                };
+                {
+                    let mut said = said.lock().expect("said lock");
+                    if why != *said {
+                        eprintln!("node {id}: waiting for the restart turn: {why}");
+                        *said = why;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        };
+        match tokio::time::timeout(wait, waiting).await {
+            Ok(done) => done,
+            Err(_) => {
+                let said = said.lock().expect("said lock");
+                Err(format!("node {id} did not get the restart turn within {}s: {said}", wait.as_secs()))
+            }
+        }
+    })
+}
+
+fn upgrade(what: &str, a: &Args) -> Result<(), String> {
+    let file = load(a)?;
+    let (identity, scram) = admin(a)?;
+    let client = if what == "status" && identity.is_none() && scram.is_none() {
+        lotse_node::node_client(&file, this_node(a)?)
+    } else {
+        lotse_node::admin_client(&file, identity, scram)
+    }
+    .map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let show = lotse_server::version::display;
+    rt.block_on(async {
+        let change = match what {
+            "status" => {
+                let d = client.describe_upgrade().await.map_err(|e| e.to_string())?;
+                let version = d.cluster_version.map_or_else(|| "none yet".to_string(), show);
+                println!("cluster version: {version}");
+                match d.turn {
+                    Some(t) => println!("restart turn:    node {}", t.node_id),
+                    None => println!("restart turn:    free"),
+                }
+                println!("turns:           {}", if d.held { "paused" } else { "running" });
+                println!("{:<6} {:<12} cluster versions", "node", "release");
+                for n in d.nodes {
+                    let (release, range) = if n.release.is_empty() {
+                        ("-".to_string(), "not reported".to_string())
+                    } else {
+                        (n.release, format!("{} to {}", show(n.oldest), show(n.newest)))
+                    };
+                    println!("{:<6} {release:<12} {range}", n.node_id);
+                }
+                return Ok(());
+            }
+            "hold" => lotse_proto::AlterUpgradeRequest { hold: Some(true), ..Default::default() },
+            "resume" => lotse_proto::AlterUpgradeRequest { hold: Some(false), ..Default::default() },
+            "release" => {
+                let id = a.node.ok_or("--node is missing")?;
+                lotse_proto::AlterUpgradeRequest { release_turn: Some(id), ..Default::default() }
+            }
+            _ => {
+                let target = match &a.version {
+                    Some(v) => lotse_server::version::parse(v).ok_or_else(|| format!("--version {v}: major.minor"))?,
+                    None => {
+                        let d = client.describe_upgrade().await.map_err(|e| e.to_string())?;
+                        if d.nodes.iter().any(|n| n.release.is_empty()) {
+                            return Err(
+                                "not every node has reported its version yet; `lotse upgrade status` shows which"
+                                    .to_string(),
+                            );
+                        }
+                        d.nodes.iter().map(|n| n.newest).min().ok_or("the cluster lists no nodes")?
+                    }
+                };
+                println!("raising the cluster version to {}", show(target));
+                lotse_proto::AlterUpgradeRequest { cluster_version: Some(target), ..Default::default() }
+            }
+        };
+        client.alter_upgrade(change).await.map_err(|e| e.to_string())?;
+        println!("done");
+        Ok(())
+    })
+}
+
+fn probe(path: &str, a: &Args) -> Result<bool, String> {
+    let file = load(a)?;
+    let (status, body) = lotse_node::probe(&file, this_node(a)?, path)?;
+    print!("{body}");
+    Ok(status == 200)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_id;
+
+    #[test]
+    fn the_flag_then_lotse_node_then_the_pod_index_name_the_node() {
+        assert_eq!(node_id(Some(4), Some("5".into()), Some("6".into())), Ok(4));
+        assert_eq!(node_id(None, Some(" 5 ".into()), Some("6".into())), Ok(5));
+        assert_eq!(node_id(None, None, Some("0".into())), Ok(1), "pod index 0 is node 1");
+        assert_eq!(node_id(None, None, Some("2".into())), Ok(3));
+        assert!(node_id(None, None, Some("x".into())).unwrap_err().contains("LOTSE_NODE_INDEX=x"));
+        assert!(node_id(None, None, Some(u64::MAX.to_string())).is_err());
+        assert!(node_id(None, None, None).unwrap_err().contains("missing"));
+    }
 }
