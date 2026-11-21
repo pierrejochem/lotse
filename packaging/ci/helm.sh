@@ -8,7 +8,25 @@ set -eu
 
 chart=packaging/helm/lotse
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# On failure, everything needed to see why: the pods, the upgrade state and
+# each node's log.
+diagnose() {
+    status=$?
+    if [ "$status" -ne 0 ] && kind get clusters 2>/dev/null | grep -q lotse-ci; then
+        kubectl get pods -o wide || true
+        kubectl describe statefulset lotse || true
+        kubectl exec lotse-0 -- lotse upgrade status || true
+        for pod in lotse-0 lotse-1 lotse-2; do
+            echo "== $pod"
+            kubectl exec "$pod" -- lotse probe readyz || true
+            kubectl logs "$pod" --tail 300 || true
+            kubectl logs "$pod" --previous --tail 300 || true
+        done
+    fi
+    rm -rf "$work"
+    exit "$status"
+}
+trap diagnose EXIT
 set -- --set image.repository=lotse --set image.tag=ci --set image.pullPolicy=Never \
     --set 'auth.admins={ci-admin}' --set turnWait=2m --set persistence.size=1Gi
 
