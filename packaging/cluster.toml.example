@@ -3,7 +3,9 @@
 #
 #   lotse certs --config /etc/lotse/cluster.toml
 #
-# and start each node with `systemctl enable --now lotse@<id>`.
+# and start each node: `systemctl enable --now lotse@<id>` under systemd,
+# `rc-service lotse.<id> start` under OpenRC, or LOTSE_NODE in
+# /etc/default/lotse and `/etc/init.d/lotse start` under sysvinit.
 
 [cluster]
 data_dir = "/var/lib/lotse"

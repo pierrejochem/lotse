@@ -82,6 +82,7 @@ Until these are answered, test an upgrade on a copy of your cluster first.
 
 ## Open: other gaps
 
-- Releases and the image are built only by GitHub Actions. The package targets systemd systems.
+- The packages are not signed. Check them against `SHA256SUMS`, or rebuild the release and compare ([ADR 0126](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0126-reproducible-releases-built-by-one-script-for-every-init-system.md)).
+- sysvinit runs one node per machine.
 - A drained node must join under a new id to come back.
 - Certificate revocation is a file you copy to every node; there is no OCSP.

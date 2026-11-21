@@ -52,25 +52,31 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  # The packaging (ADR 0049): the image builds from source and the binary in
-  # it starts; the Debian package builds and holds the unit.
+  # The packaging (ADR 0049, ADR 0126): the release script builds the x86_64
+  # release with the pinned tools; the .deb installs and holds the units on
+  # this systemd runner, and runs a node under sysvinit in a Debian
+  # container, the .apk under OpenRC in an Alpine container, the .rpm in a
+  # Fedora container; the image builds from source and its binary starts.
+  # Reproducibility is checked in the release workflow.
   packaging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release
-          # No nightly run fills the release cache any more: main's packaging does.
+          shared-key: release-dist
+          workspaces: ". -> target/release-dist"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb
-      - run: cargo deb -p lotse-node
-      - run: sudo dpkg -i target/debian/*.deb
+      - run: packaging/tools.sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: packaging/release.sh --arch amd64 0.0.0-ci
+      - run: tar -tzf dist/lotse-0.0.0-ci-linux-amd64.tar.gz
+      - run: sudo apt-get install -y ./dist/lotse_*_amd64.deb
       - run: lotse --version && getent passwd lotse
-      - run: systemd-analyze verify /lib/systemd/system/lotse@.service
+      - run: systemd-analyze verify /usr/lib/systemd/system/lotse@.service
+      - run: test "$(systemctl is-enabled lotse.service || true)" = masked
+      - run: docker run --rm -v "$PWD:/src" -w /src debian:12 sh packaging/ci/sysvinit.sh
+      - run: docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh packaging/ci/openrc.sh
+      - run: docker run --rm -v "$PWD:/src" -w /src fedora:42 sh packaging/ci/rpm.sh
       - run: docker build -f packaging/Dockerfile -t lotse:ci .
       - run: docker run --rm lotse:ci --version
 

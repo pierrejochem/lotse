@@ -1,0 +1,86 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          lotse
+# Required-Start:    $network $remote_fs $syslog
+# Required-Stop:     $network $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Lotse message broker node
+# Description:       Runs one node of a Lotse cluster, the one LOTSE_NODE in
+#                    /etc/default/lotse names.
+### END INIT INFO
+
+# One Lotse node under sysvinit (ADR 0126), for systems without systemd.
+# Set LOTSE_NODE in /etc/default/lotse to the node's id in the cluster file;
+# until then the script starts nothing. The node writes its log to
+# /var/log/lotse/lotse.log. On systemd, use lotse@<id>.service instead.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+NAME=lotse
+DAEMON=/usr/bin/lotse
+PIDFILE=/run/lotse.pid
+LOG=/var/log/lotse/lotse.log
+LOTSE_NODE=
+LOTSE_CONFIG=/etc/lotse/cluster.toml
+LOTSE_JOIN=
+LOTSE_LOG=
+# Seconds the node gets to hand its groups over on SIGTERM.
+STOP_TIMEOUT=60
+
+[ -x "$DAEMON" ] || exit 0
+[ -r /etc/default/lotse ] && . /etc/default/lotse
+
+running() {
+    [ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+do_start() {
+    if [ -z "$LOTSE_NODE" ]; then
+        echo "$NAME: not started, LOTSE_NODE is not set in /etc/default/lotse"
+        return 0
+    fi
+    if running; then
+        echo "$NAME: node $LOTSE_NODE already running"
+        return 0
+    fi
+    install -d -o lotse -g lotse -m 0750 /var/lib/lotse /var/log/lotse
+    echo "$NAME: starting node $LOTSE_NODE"
+    # start-stop-daemon --background closes the output, so a shell under
+    # the lotse user keeps it in the log and replaces itself with the node.
+    ulimit -n 1048576 2>/dev/null || true
+    LOTSE_NODE=$LOTSE_NODE LOTSE_CONFIG=$LOTSE_CONFIG LOTSE_JOIN=$LOTSE_JOIN LOTSE_LOG=${LOTSE_LOG:-info} \
+        start-stop-daemon --start --quiet --background --make-pidfile --pidfile "$PIDFILE" \
+        --chuid lotse:lotse --chdir /var/lib/lotse --umask 027 \
+        --startas /bin/sh -- -c "exec $DAEMON run >>$LOG 2>&1"
+}
+
+do_stop() {
+    if ! running; then
+        echo "$NAME: not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    echo "$NAME: stopping"
+    start-stop-daemon --stop --quiet --pidfile "$PIDFILE" --retry "TERM/$STOP_TIMEOUT/KILL/5"
+    status=$?
+    rm -f "$PIDFILE"
+    return $status
+}
+
+case "$1" in
+    start) do_start ;;
+    stop) do_stop ;;
+    restart | force-reload) do_stop && do_start ;;
+    status)
+        if running; then
+            echo "$NAME: node $LOTSE_NODE running, pid $(cat "$PIDFILE")"
+        else
+            echo "$NAME: not running"
+            exit 3
+        fi
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|force-reload|status}" >&2
+        exit 2
+        ;;
+esac

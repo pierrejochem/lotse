@@ -2,7 +2,9 @@
 set -e
 # Data and configuration stay, even on purge: a broker's log is not
 # something a package manager should delete.
+if [ "$1" = "purge" ] && command -v update-rc.d >/dev/null; then
+    update-rc.d lotse remove >/dev/null || true
+fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
 fi
-#DEBHELPER#

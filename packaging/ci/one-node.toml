@@ -1,0 +1,16 @@
+# A cluster of one node on loopback, without TLS: what CI starts under each
+# init system to see the packages run a node (ADR 0126). Not for real use.
+[cluster]
+data_dir = "/var/lib/lotse"
+
+[[node]]
+id = 1
+peer = "127.0.0.1:7000"
+client = "127.0.0.1:9000"
+metrics = "127.0.0.1:9464"
+
+[tls]
+plaintext_on_loopback = true
+
+[auth]
+required = false

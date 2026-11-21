@@ -1,0 +1,12 @@
+# Settings of the Lotse nodes under OpenRC (ADR 0126). This file holds what
+# every node on the machine shares; /etc/conf.d/lotse.<id> holds one node's.
+
+# The cluster file.
+#LOTSE_CONFIG=/etc/lotse/cluster.toml
+
+# The log filter, for instance info or lotse_server=debug.
+#LOTSE_LOG=info
+
+# Set to 1 in /etc/conf.d/lotse.<id> for the first start of a node that joins
+# a running cluster, then remove it.
+#LOTSE_JOIN=1

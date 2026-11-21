@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+# Without systemd, stop the node the init script started while its binary is
+# still there. Under systemd the instances are left as they are.
+if [ "$1" = "remove" ] && [ ! -d /run/systemd/system ] && [ -x /etc/init.d/lotse ]; then
+    if command -v invoke-rc.d >/dev/null; then
+        invoke-rc.d lotse stop || true
+    else
+        /etc/init.d/lotse stop || true
+    fi
+fi

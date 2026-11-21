@@ -1,0 +1,15 @@
+# Settings of the Lotse node under sysvinit (ADR 0126). On systemd these are
+# not read: run lotse@<id>.service instead.
+
+# The node's id in the cluster file. Nothing starts until it is set.
+LOTSE_NODE=
+
+# The cluster file.
+LOTSE_CONFIG=/etc/lotse/cluster.toml
+
+# Set to 1 for the first start of a node that joins a running cluster, then
+# set it back to empty.
+LOTSE_JOIN=
+
+# The log filter, for instance info or lotse_server=debug.
+LOTSE_LOG=
