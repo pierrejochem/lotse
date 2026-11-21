@@ -50,6 +50,16 @@ update-rc.d lotse defaults             # or chkconfig --add lotse
 
 The script uses `start-stop-daemon`. The log is in `/var/log/lotse/lotse.log`.
 
+## Upgrading
+
+Replace the binary, then restart each node only once it holds the cluster's restart turn, so that one node restarts at a time:
+
+```sh
+lotse turn take --config /etc/lotse/cluster.toml --node 1 && systemctl restart lotse@1
+```
+
+`./restart-on-upgrade` in this tarball does that for every node running on the machine, under systemd, OpenRC or sysvinit, after you installed the new `bin/lotse` as `/usr/bin/lotse`; the packages run it after an upgrade. Once every node runs the new release, a cluster admin raises the cluster version with `lotse upgrade finalize`.
+
 ## Checking the download
 
 Every release has a `SHA256SUMS` file. The build is reproducible: built again from its tag with the tools in `packaging/release.env`, a release gives the same bytes. `packaging/release.sh --verify SHA256SUMS <version>` in the repository does that check.

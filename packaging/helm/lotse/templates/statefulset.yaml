@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "lotse.fullname" . }}
+  labels:
+    {{- include "lotse.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "lotse.headless" . }}
+  replicas: {{ .Values.replicas }}
+  # Every node of a new cluster must run before any group has a quorum, so
+  # pods start together. Updates still go one pod at a time.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "lotse.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lotse.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed cluster file rolls the nodes, one turn at a time.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: lotse
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [run]
+          env:
+            - name: LOTSE_CONFIG
+              value: /etc/lotse/cluster.toml
+            # The node id is the pod index plus one (ADR 0128).
+            - name: LOTSE_NODE_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+          ports:
+            - name: peer
+              containerPort: {{ .Values.ports.peer }}
+            - name: client
+              containerPort: {{ .Values.ports.client }}
+          # The probes and the hook run the lotse executable in the pod, which
+          # reads the node's operator endpoint on loopback (ADR 0127).
+          startupProbe:
+            exec:
+              command: [lotse, probe, healthz]
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: [lotse, probe, healthz]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Ready: every group it is in led with a quorum or followed without
+          # lag. A rolling update waits for it before the next pod.
+          readinessProbe:
+            exec:
+              command: [lotse, probe, readyz]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                # Waits for the cluster's restart turn, so this restart is the
+                # only one in the cluster; the restarted node gives it back once
+                # it is ready. Past the wait, the pod stops anyway.
+                command: [lotse, turn, take, --wait, {{ .Values.turnWait | quote }}]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/lotse
+            - name: config
+              mountPath: /etc/lotse/cluster.toml
+              subPath: cluster.toml
+              readOnly: true
+            - name: tls
+              mountPath: /etc/lotse/tls
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "lotse.fullname" . }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            defaultMode: 0440
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

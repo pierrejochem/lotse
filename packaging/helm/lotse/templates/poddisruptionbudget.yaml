@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# A node drain stops one Lotse node at a time; the restart turn (ADR 0127)
+# also keeps it from stopping one whose groups would lose their quorum.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lotse.fullname" . }}
+  labels:
+    {{- include "lotse.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "lotse.selectorLabels" . | nindent 6 }}
+{{- end }}

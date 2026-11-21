@@ -488,6 +488,66 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
+    /// Pauses (<c>true</c>) or resumes (<c>false</c>) the cluster's restart turns (ADR 0127): while paused, no node
+    /// takes the next turn, and the one that holds it keeps it. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="hold">Whether to pause.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task HoldUpgradeAsync(bool hold, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return AdminChangeAsync(new Request.AlterUpgrade(Hold: hold), cancellationToken);
+    }
+
+    /// <summary>
+    /// Gives back the restart turn a node holds, for a node that will not come back to give it back itself (ADR
+    /// 0127). Nothing happens if the node holds no turn. Needs the cluster-admin role.
+    /// </summary>
+    /// <param name="node">The node.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task ReleaseTurnAsync(ulong node, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return AdminChangeAsync(new Request.AlterUpgrade(ReleaseTurn: node), cancellationToken);
+    }
+
+    /// <summary>
+    /// Raises the cluster version to <c>major.minor</c> (ADR 0127), once every node runs a release that supports it;
+    /// the metadata leader refuses it, naming the nodes that do not, otherwise. The version is never lowered. Needs
+    /// the cluster-admin role.
+    /// </summary>
+    /// <param name="major">The major version.</param>
+    /// <param name="minor">The minor version.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task RaiseClusterVersionAsync(ushort major, ushort minor, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return AdminChangeAsync(new Request.AlterUpgrade(ClusterVersion: ((uint)major << 16) | minor), cancellationToken);
+    }
+
+    /// <summary>
+    /// Where a rolling upgrade stands (ADR 0127): the cluster version, the restart turn, the pause and each node's
+    /// versions. Needs the cluster-admin or cluster-viewer role.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<Response.DescribeUpgrade> DescribeUpgradeAsync(CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return await RetryingAsync<Response.DescribeUpgrade>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(new Request.DescribeUpgrade(), cancellationToken).ConfigureAwait(false);
+                if (r is not Response.DescribeUpgrade d)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(d.Error, d.LeaderHint, null);
+                return d;
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Puts a certificate on the cluster's revocation list: every node refuses it in a handshake and ends its open
     /// connections once it has the entry. Needs the cluster-admin role.
     /// </summary>

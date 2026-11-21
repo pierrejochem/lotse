@@ -69,6 +69,8 @@ public sealed class AdminTests : IDisposable
             Request.DescribeTenants => new Response.DescribeTenants(ErrorCode.NotLeader, hint, Array.Empty<Messages.TenantEntry>()),
             Request.DescribeRoleBindings => new Response.DescribeRoleBindings(ErrorCode.NotLeader, hint, Array.Empty<Messages.SourcedBinding>()),
             Request.DescribeNodes => new Response.DescribeNodes(ErrorCode.NotLeader, hint, Array.Empty<Messages.NodeEntry>()),
+            Request.DescribeUpgrade => new Response.DescribeUpgrade(
+                ErrorCode.NotLeader, hint, null, false, null, Array.Empty<Response.UpgradeNode>()),
             Request.WhoAmI => new Response.WhoAmI(Messages.PrincipalKind.User, "node 1", Array.Empty<string>(), Array.Empty<Messages.RoleBinding>()),
             _ => new Response.Admin(ErrorCode.NotLeader, null, hint),
         };
@@ -330,6 +332,44 @@ public sealed class AdminTests : IDisposable
         await _client!.DeleteUserAsync("alice");
         Assert.Null(_b.Requests<Request.AlterUser>()[2].Credential);
         Assert.Equal("alice", _b.Requests<Request.AlterUser>()[2].User);
+    }
+
+    [Fact]
+    public async Task TheUpgradeStateComesFromTheLeaderAndKeepsVersionZeroZero()
+    {
+        var nodes = new[] { new Response.UpgradeNode(1, "0.0.1", 0, 0), new Response.UpgradeNode(2, "", 0, 0) };
+        Serve((n, r) => r switch
+        {
+            Request.DescribeUpgrade => new Response.DescribeUpgrade(
+                ErrorCode.None, null, 0u, true, new Response.UpgradeTurn(2, 15), nodes),
+            _ => throw new InvalidOperationException("unexpected " + r),
+        });
+        Response.DescribeUpgrade got = await _client!.DescribeUpgradeAsync();
+        Assert.Equal(0u, got.ClusterVersion); // version 0.0 is a version, not none
+        Assert.True(got.Held);
+        Assert.Equal(new Response.UpgradeTurn(2, 15), got.Turn);
+        Assert.Equal(nodes, got.Nodes);
+        // Node 1 answered NOT_LEADER with a hint to node 2 the first time.
+        Assert.Equal(1, _a.Count<Request.DescribeUpgrade>());
+    }
+
+    [Fact]
+    public async Task TheUpgradeCallsSetOneFieldEach()
+    {
+        Serve((n, r) => Ok());
+        await _client!.HoldUpgradeAsync(true);
+        await _client!.HoldUpgradeAsync(false);
+        await _client!.ReleaseTurnAsync(3);
+        await _client!.RaiseClusterVersionAsync(1, 2);
+        Assert.Equal(
+            new[]
+            {
+                new Request.AlterUpgrade(Hold: true),
+                new Request.AlterUpgrade(Hold: false),
+                new Request.AlterUpgrade(ReleaseTurn: 3),
+                new Request.AlterUpgrade(ClusterVersion: 0x1_0002u),
+            },
+            _b.Requests<Request.AlterUpgrade>());
     }
 
     [Fact]

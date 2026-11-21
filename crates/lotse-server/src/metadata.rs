@@ -144,6 +144,24 @@ pub(crate) enum Change {
     /// `DescribeMetrics` says; while a group has a voter here, its leader
     /// takes no new data.
     DiskLow { node: NodeId, low: bool },
+    /// A node's release and the cluster versions it supports (ADR 0127).
+    /// `cluster_default` is the version the metadata leader found for a
+    /// cluster that has none yet, once every node has reported: the lowest
+    /// of their newest versions.
+    ReportVersion { node: NodeId, release: String, oldest: u32, newest: u32, cluster_default: Option<u32> },
+    /// A node takes the cluster's restart turn (ADR 0127), if no other node
+    /// holds it and turns are not paused. A node that holds it already
+    /// keeps the instance that took it, so that the restarted process, not
+    /// the one that asked, gives it back. `at_ms` is the leader's clock.
+    ClaimTurn { node: NodeId, instance: u64, at_ms: u64 },
+    /// A node gives the restart turn back, or an admin gives it back for
+    /// the node (ADR 0127).
+    ReleaseTurn { node: NodeId },
+    /// A cluster admin raises the cluster version (ADR 0127); it never goes
+    /// down.
+    SetClusterVersion { version: u32 },
+    /// A cluster admin pauses restart turns, or resumes them (ADR 0127).
+    HoldTurns { held: bool },
     /// The metadata leader renewed a client certificate with the renewal CA
     /// (ADR 0123). A certificate an intermediate issued works only while it
     /// is recorded here; a renewal of the same certificate replaces an
@@ -539,6 +557,34 @@ pub(crate) struct MetadataState {
     pub(crate) disk_low: BTreeSet<NodeId>,
     /// Certificates the renewal CA issued, until they expire (ADR 0123).
     pub(crate) renewed: BTreeMap<CertKey, RenewedCert>,
+    /// The cluster version in force (ADR 0127); `None` until every node has
+    /// reported its versions.
+    pub(crate) cluster_version: Option<u32>,
+    /// Each node's release and supported cluster versions, as it reported
+    /// them (ADR 0127).
+    pub(crate) versions: BTreeMap<NodeId, NodeVersion>,
+    /// The node holding the restart turn (ADR 0127).
+    pub(crate) turn: Option<Turn>,
+    /// Whether restart turns are paused (ADR 0127).
+    pub(crate) turns_held: bool,
+}
+
+/// A node's release and the cluster versions it runs with (ADR 0127).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeVersion {
+    pub(crate) release: String,
+    pub(crate) oldest: u32,
+    pub(crate) newest: u32,
+}
+
+/// The cluster's restart turn (ADR 0127).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Turn {
+    pub(crate) node: NodeId,
+    /// The instance of the node's process that took it.
+    pub(crate) instance: u64,
+    /// When, by the metadata leader's clock.
+    pub(crate) since_ms: u64,
 }
 
 const VERSION: u8 = 4;
@@ -843,6 +889,10 @@ impl MetadataState {
                 self.gone.insert(id);
                 self.disk_low.remove(&id);
                 self.pins.retain(|_, n| *n != id);
+                self.versions.remove(&id);
+                if self.turn.is_some_and(|t| t.node == id) {
+                    self.turn = None;
+                }
             }
             Change::SetVoters { group, voters } => self.set_voters(index, group, voters),
             Change::SetReplication { resource_id, replication } => {
@@ -884,6 +934,35 @@ impl MetadataState {
                     self.disk_low.remove(&node);
                 }
             }
+            Change::ReportVersion { node, release, oldest, newest, cluster_default } => {
+                if !self.gone.contains(&node) {
+                    self.versions.insert(node, NodeVersion { release, oldest, newest });
+                }
+                if self.cluster_version.is_none() {
+                    self.cluster_version = cluster_default;
+                }
+            }
+            Change::ClaimTurn { node, instance, at_ms } => {
+                // The one rule a rolling restart rests on: one turn at a
+                // time. Two claims committed before either applied both
+                // passed the leader's check; only the first takes it. A
+                // claim by the node holding it changes nothing, so the
+                // instance that took it stays.
+                if self.turn.is_none() && !self.turns_held && !self.gone.contains(&node) {
+                    self.turn = Some(Turn { node, instance, since_ms: at_ms });
+                }
+            }
+            Change::ReleaseTurn { node } => {
+                if self.turn.is_some_and(|t| t.node == node) {
+                    self.turn = None;
+                }
+            }
+            Change::SetClusterVersion { version } => {
+                if self.cluster_version.is_none_or(|v| version > v) {
+                    self.cluster_version = Some(version);
+                }
+            }
+            Change::HoldTurns { held } => self.turns_held = held,
             Change::Reassign { group, voters } => {
                 if self.runtime_voters_mut(group).is_none() {
                     return Ok(());
@@ -1157,41 +1236,44 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections = if !self.renewed.is_empty() {
-            17
-        } else if !self.disk_low.is_empty() {
-            16
-        } else if !lengths.is_empty() {
-            15
-        } else if !self.replication.is_empty() || !self.placed.is_empty() {
-            14
-        } else if !windows.is_empty() {
-            13
-        } else if !self.moved_off.is_empty() {
-            12
-        } else if !zoned.is_empty() {
-            11
-        } else if !self.deleted.is_empty() {
-            10
-        } else if !self.cert_requests.is_empty() {
-            9
-        } else if !self.certs.is_empty() {
-            8
-        } else if !self.revoked_certs.is_empty() {
-            7
-        } else if !levels.is_empty() {
-            6
-        } else if !single.is_empty() {
-            5
-        } else if !self.revocations.is_empty() {
-            4
-        } else if !self.incarnations.is_empty() {
-            3
-        } else if !compacting.is_empty() {
-            2
-        } else {
-            usize::from(!self.pins.is_empty())
-        };
+        let sections =
+            if self.cluster_version.is_some() || !self.versions.is_empty() || self.turn.is_some() || self.turns_held {
+                18
+            } else if !self.renewed.is_empty() {
+                17
+            } else if !self.disk_low.is_empty() {
+                16
+            } else if !lengths.is_empty() {
+                15
+            } else if !self.replication.is_empty() || !self.placed.is_empty() {
+                14
+            } else if !windows.is_empty() {
+                13
+            } else if !self.moved_off.is_empty() {
+                12
+            } else if !zoned.is_empty() {
+                11
+            } else if !self.deleted.is_empty() {
+                10
+            } else if !self.cert_requests.is_empty() {
+                9
+            } else if !self.certs.is_empty() {
+                8
+            } else if !self.revoked_certs.is_empty() {
+                7
+            } else if !levels.is_empty() {
+                6
+            } else if !single.is_empty() {
+                5
+            } else if !self.revocations.is_empty() {
+                4
+            } else if !self.incarnations.is_empty() {
+                3
+            } else if !compacting.is_empty() {
+                2
+            } else {
+                usize::from(!self.pins.is_empty())
+            };
         if sections >= 1 {
             b.put_u32_le(self.pins.len() as u32);
             for (g, n) in &self.pins {
@@ -1319,6 +1401,28 @@ impl MetadataState {
                 put_str(&mut b, &r.principal);
                 b.put_u64_le(r.not_after_ms);
                 put_cert_key(&mut b, &r.renews);
+            }
+        }
+        if sections >= 18 {
+            // Version 0.0 is a version: whether there is one is a flag.
+            b.put_u8(u8::from(self.cluster_version.is_some()));
+            b.put_u32_le(self.cluster_version.unwrap_or(0));
+            b.put_u8(u8::from(self.turns_held));
+            match self.turn {
+                Some(t) => {
+                    b.put_u8(1);
+                    b.put_u64_le(t.node);
+                    b.put_u64_le(t.instance);
+                    b.put_u64_le(t.since_ms);
+                }
+                None => b.put_u8(0),
+            }
+            b.put_u32_le(self.versions.len() as u32);
+            for (n, v) in &self.versions {
+                b.put_u64_le(*n);
+                put_str(&mut b, &v.release);
+                b.put_u32_le(v.oldest);
+                b.put_u32_le(v.newest);
             }
         }
         b.freeze()
@@ -1558,6 +1662,24 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            need(b, 7)?;
+            let set = b.get_u8() != 0;
+            let version = b.get_u32_le();
+            s.cluster_version = set.then_some(version);
+            s.turns_held = b.get_u8() != 0;
+            if b.get_u8() != 0 {
+                need(b, 24)?;
+                s.turn = Some(Turn { node: b.get_u64_le(), instance: b.get_u64_le(), since_ms: b.get_u64_le() });
+            }
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let node = b.get_u64_le();
+                let release = get_str(b)?;
+                need(b, 8)?;
+                s.versions.insert(node, NodeVersion { release, oldest: b.get_u32_le(), newest: b.get_u32_le() });
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1733,6 +1855,33 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u8(28);
             b.put_u64_le(*node);
             b.put_u8(u8::from(*low));
+        }
+        Change::ReportVersion { node, release, oldest, newest, cluster_default } => {
+            b.put_u8(30);
+            b.put_u64_le(*node);
+            put_str(&mut b, release);
+            b.put_u32_le(*oldest);
+            b.put_u32_le(*newest);
+            b.put_u8(u8::from(cluster_default.is_some()));
+            b.put_u32_le(cluster_default.unwrap_or(0));
+        }
+        Change::ClaimTurn { node, instance, at_ms } => {
+            b.put_u8(31);
+            b.put_u64_le(*node);
+            b.put_u64_le(*instance);
+            b.put_u64_le(*at_ms);
+        }
+        Change::ReleaseTurn { node } => {
+            b.put_u8(32);
+            b.put_u64_le(*node);
+        }
+        Change::SetClusterVersion { version } => {
+            b.put_u8(33);
+            b.put_u32_le(*version);
+        }
+        Change::HoldTurns { held } => {
+            b.put_u8(34);
+            b.put_u8(u8::from(*held));
         }
         Change::Reassign { group, voters } => {
             b.put_u8(26);
@@ -2074,6 +2223,30 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             let renews = get_cert_key(b)?;
             need(b, 8)?;
             Change::RenewCertificate { cert, principal, not_before_ms, not_after_ms, renews, at_ms: b.get_u64_le() }
+        }
+        30 => {
+            need(b, 8)?;
+            let node = b.get_u64_le();
+            let release = get_str(b)?;
+            need(b, 13)?;
+            let (oldest, newest, set, default) = (b.get_u32_le(), b.get_u32_le(), b.get_u8() != 0, b.get_u32_le());
+            Change::ReportVersion { node, release, oldest, newest, cluster_default: set.then_some(default) }
+        }
+        31 => {
+            need(b, 24)?;
+            Change::ClaimTurn { node: b.get_u64_le(), instance: b.get_u64_le(), at_ms: b.get_u64_le() }
+        }
+        32 => {
+            need(b, 8)?;
+            Change::ReleaseTurn { node: b.get_u64_le() }
+        }
+        33 => {
+            need(b, 4)?;
+            Change::SetClusterVersion { version: b.get_u32_le() }
+        }
+        34 => {
+            need(b, 1)?;
+            Change::HoldTurns { held: b.get_u8() != 0 }
         }
         _ => return Err("unknown metadata change".into()),
     };

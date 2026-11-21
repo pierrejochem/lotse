@@ -65,6 +65,7 @@ The image `ghcr.io/pierrejochem/lotse` is a static build on a distroless base. A
 | `LOTSE_NODE` | `--node` | the node's id |
 | `LOTSE_CONFIG` | `--config` | the cluster file |
 | `LOTSE_JOIN` | `--join` | `1` or `true`: a new node joining a running cluster |
+| `LOTSE_NODE_INDEX` | | without `LOTSE_NODE`: a StatefulSet pod index; the node id is the index plus one |
 
 ```sh
 docker run -e LOTSE_NODE=1 \
@@ -73,6 +74,10 @@ docker run -e LOTSE_NODE=1 \
 ```
 
 Mount the cluster file and the certificates read-only and the data in a volume. In the image the data directory is `/var/lib/lotse`, so `data_dir` in the cluster file should be that path or one below it. The image sets `LOTSE_CONFIG=/etc/lotse/cluster.toml`, so mount the cluster file there. It exposes ports 7000 and 9000.
+
+## Kubernetes
+
+The Helm chart in `packaging/helm/lotse` runs a cluster as a StatefulSet, one node per pod, and rolls upgrades one node at a time ([ADR 0128](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0128-a-helm-chart-whose-pods-take-the-restart-turn.md)). Its [README](https://github.com/pierrejochem/lotse/blob/main/packaging/helm/lotse/README.md) shows the install: render the cluster file, make the certificates for it, store them in a Secret, `helm install`. It needs Kubernetes 1.28 or later.
 
 ## Build from source
 

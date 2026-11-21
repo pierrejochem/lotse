@@ -16,7 +16,7 @@ The overview shows the cluster at a glance: nodes, groups, throughput and latenc
 
 ## Nodes
 
-The nodes page lists each node with its state, replicas and leaders, and shows a rolling upgrade while one runs.
+The nodes page lists each node with its state, replicas and leaders, and shows a rolling upgrade while one runs: the cluster version, which node holds the restart turn, and each node's release. A cluster admin pauses and resumes turns there and raises the cluster version once every node runs the new release ([Upgrades](../admin/upgrades.md)).
 
 ![Nodes](../images/nodes.png)
 

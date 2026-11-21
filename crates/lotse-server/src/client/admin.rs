@@ -125,6 +125,10 @@ pub(crate) enum AdminThen {
     /// A renewed certificate was recorded (ADR 0123): the answer carries
     /// its chain.
     Renewed { cert: crate::metadata::CertKey, chain: Vec<bytes::Bytes>, not_after_ms: u64 },
+    /// A claim of the restart turn (ADR 0127), which holds only if the
+    /// node has the turn once it applied: another claim may have come
+    /// first.
+    Turn { node: lotse_raft::NodeId },
 }
 
 impl AdminThen {
@@ -136,6 +140,7 @@ impl AdminThen {
             AdminThen::Deleted { .. }
             | AdminThen::Altered { .. }
             | AdminThen::AlteredQueue { .. }
+            | AdminThen::Turn { .. }
             | AdminThen::Changed => admin_response(code, None, h),
             AdminThen::Renewed { chain, not_after_ms, .. } => renewed_response(code, None, h, chain, *not_after_ms),
         }
@@ -1289,6 +1294,11 @@ impl Clients {
                         AdminThen::Renewed { cert, .. } if !state.renewed.contains_key(cert) => {
                             let why = "a later renewal of the same certificate replaced this one; renew again";
                             renewed_response(ErrorCode::INVALID_REQUEST, Some(why), None, &[], 0)
+                        }
+                        AdminThen::Turn { node } if !state.turn.is_some_and(|t| t.node == *node) => {
+                            let why = super::upgrade::turn_refused(state, *node)
+                                .unwrap_or_else(|| "another claim came first".into());
+                            admin_response(ErrorCode::TURN_UNAVAILABLE, Some(&why), None)
                         }
                         AdminThen::Deleted { resource_id } if state.queues.contains_key(resource_id) => {
                             let why = "a queue dead-letters into it; change that setting first";

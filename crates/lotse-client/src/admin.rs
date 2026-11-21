@@ -501,6 +501,82 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::ReportDisk(lotse_proto::ReportDiskRequest { node_id, low })).await
     }
 
+    /// Takes the cluster's restart turn for node `node_id` (ADR 0127), asked
+    /// of that node itself, once: it checks that no group of its loses a
+    /// quorum without it, then claims the turn. `Ok` once it holds the
+    /// turn; [`ErrorCode::TURN_UNAVAILABLE`] with the reason while it cannot
+    /// have it. The caller asks again later; `lotse turn take` does.
+    pub async fn take_turn(&self, node_id: u32) -> Result<(), ClientError> {
+        let m = self.metadata(&[]).await?;
+        let b = m.brokers.iter().find(|b| b.node_id == node_id).ok_or_else(|| ClientError::Broker {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Some(format!("the cluster's metadata names no node {node_id}")),
+        })?;
+        let addr = format!("{}:{}", b.host, b.port);
+        let req =
+            Request::Turn(lotse_proto::TurnRequest { node_id, action: lotse_proto::turn_action::TAKE, instance: 0 });
+        match self.call(&addr, &req).await {
+            Ok(Response::Admin(a)) if a.error == ErrorCode::NONE => Ok(()),
+            Ok(Response::Admin(a)) => Err(ClientError::Broker { code: a.error, message: a.error_msg }),
+            Ok(Response::Error(code)) => Err(ClientError::Broker { code, message: None }),
+            Ok(other) => Err(ClientError::NoAnswer(node_id, format!("unexpected response {other:?}"))),
+            Err(e) => Err(ClientError::NoAnswer(node_id, format!("{addr}: {e}"))),
+        }
+    }
+
+    /// Internal, for nodes: claims the restart turn for `node_id`, this
+    /// node, under the instance of its process (ADR 0127).
+    pub async fn claim_turn(&self, node_id: u32, instance: u64) -> Result<(), ClientError> {
+        let action = lotse_proto::turn_action::CLAIM;
+        self.admin_change(Request::Turn(lotse_proto::TurnRequest { node_id, action, instance })).await
+    }
+
+    /// Gives back the restart turn node `node_id` holds (ADR 0127): asked
+    /// by the node itself, once it restarted and is ready, or with its
+    /// certificate from its machine (`lotse turn release`). A cluster admin
+    /// gives back any node's turn with [`Client::alter_upgrade`].
+    pub async fn release_turn(&self, node_id: u32) -> Result<(), ClientError> {
+        let action = lotse_proto::turn_action::RELEASE;
+        self.admin_change(Request::Turn(lotse_proto::TurnRequest { node_id, action, instance: 0 })).await
+    }
+
+    /// Internal, for nodes: reports this node's release and the cluster
+    /// versions it runs with (ADR 0127).
+    pub async fn report_version(
+        &self,
+        node_id: u32,
+        release: &str,
+        oldest: u32,
+        newest: u32,
+    ) -> Result<(), ClientError> {
+        let req = lotse_proto::ReportVersionRequest { node_id, release: release.to_string(), oldest, newest };
+        self.admin_change(Request::ReportVersion(req)).await
+    }
+
+    /// Pauses or resumes restart turns, gives back the turn a node holds, or
+    /// raises the cluster version (ADR 0127); one of them per call. Needs
+    /// the cluster-admin role.
+    pub async fn alter_upgrade(&self, change: lotse_proto::AlterUpgradeRequest) -> Result<(), ClientError> {
+        self.admin_change(Request::AlterUpgrade(change)).await
+    }
+
+    /// Where a rolling upgrade stands (ADR 0127): the cluster version, the
+    /// turn, the pause and each node's versions. Needs the cluster-admin or
+    /// cluster-viewer role.
+    pub async fn describe_upgrade(&self) -> Result<lotse_proto::DescribeUpgradeResponse, ClientError> {
+        let req = Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest);
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeUpgrade(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
     /// Internal, for nodes: reports client certificates the node accepted
     /// (ADR 0091).
     pub async fn record_certificates(
