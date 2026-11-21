@@ -1,0 +1,7 @@
+#!/bin/sh
+# Data and configuration stay: a broker's log is not something a package
+# manager should delete.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0

@@ -2,7 +2,7 @@
 ADDR ?= 127.0.0.1:8080
 
 .DEFAULT_GOAL := help
-.PHONY: help dev stop build web test lint fmt check clean sdk-test sdk-csharp-test sdk-node-test sdk-vectors sdk-vectors-check
+.PHONY: help dev stop build web test lint fmt check clean release release-tools release-verify sdk-test sdk-csharp-test sdk-node-test sdk-vectors sdk-vectors-check
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-18s %s\n", $$1, $$2}'
@@ -38,6 +38,17 @@ fmt: ## Format the code
 check: ## What CI checks first: format, clippy, tests
 	cargo fmt --all --check
 	$(MAKE) lint test
+
+release-tools: ## Install the pinned release tools of packaging/release.env
+	packaging/tools.sh
+
+release: ## Build a reproducible release into dist/ (VERSION=1.2.3, ARCH=all|amd64|arm64)
+	@test -n "$(VERSION)" || { echo "make release VERSION=1.2.3 [ARCH=amd64]"; exit 2; }
+	packaging/release.sh --arch $(or $(ARCH),all) $(VERSION)
+
+release-verify: ## Rebuild a published release and compare (VERSION=1.2.3 SUMS=path/to/SHA256SUMS)
+	@test -n "$(VERSION)" -a -n "$(SUMS)" || { echo "make release-verify VERSION=1.2.3 SUMS=SHA256SUMS"; exit 2; }
+	packaging/release.sh --arch $(or $(ARCH),all) --verify $(SUMS) $(VERSION)
 
 VECTORS = cargo run -q -p lotse-proto --features samples --example vectors --
 
