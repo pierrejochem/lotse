@@ -38,6 +38,12 @@ contents:
     dst: /usr/share/doc/lotse/LICENSE
     file_info:
       mode: 0644
+  # Restarts the running nodes after an upgrade, each with the cluster's
+  # restart turn (ADR 0127).
+  - src: packaging/restart-on-upgrade.sh
+    dst: /usr/lib/lotse/restart-on-upgrade
+    file_info:
+      mode: 0755
 
   # systemd: deb and rpm.
   - src: packaging/systemd/lotse@.service
@@ -98,6 +104,12 @@ contents:
 # runner's package different; a fixed one keeps it reproducible.
 rpm:
   buildhost: lotse
+
+# An upgrade of the .apk restarts the running nodes, each with the cluster's
+# restart turn (ADR 0127); the .deb and .rpm do it in their postinstall.
+apk:
+  scripts:
+    postupgrade: packaging/apk/post-upgrade
 
 overrides:
   deb:

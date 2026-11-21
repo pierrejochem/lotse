@@ -60,6 +60,7 @@ fn config(id: NodeId) -> NodeConfig {
         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
         disk_free_limit: lotse_server::FreeLimit::default(),
         disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+        versions: Default::default(),
         retention: lotse_server::RetentionConfig::keep(),
         join: false,
         auth: lotse_server::AuthConfig::none(),

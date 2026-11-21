@@ -67,6 +67,8 @@ function notLeader(r: Request): Response {
       return { type: "DescribeRoleBindings", error, leaderHint, bindings: [] };
     case "DescribeNodes":
       return { type: "DescribeNodes", error, leaderHint, nodes: [] };
+    case "DescribeUpgrade":
+      return { type: "DescribeUpgrade", error, leaderHint, clusterVersion: null, held: false, turn: null, nodes: [] };
     case "QueueAction":
       return { type: "QueueAction", error, errorMsg: null, count: 0n, upTo: 0n, more: false, leaderHint };
     default:
@@ -118,6 +120,44 @@ describe("admin calls against scripted brokers", () => {
   afterEach(async () => {
     client?.close();
     await closeAll(all);
+  });
+
+  test("describeUpgrade follows the hint to the metadata leader and keeps version 0.0", async () => {
+    const state: Response = {
+      type: "DescribeUpgrade",
+      error: ErrorCode.NONE,
+      leaderHint: null,
+      clusterVersion: 0,
+      held: true,
+      turn: { nodeId: 2n, sinceMs: 15n },
+      nodes: [
+        { nodeId: 1n, release: "0.0.1", oldest: 0, newest: 0 },
+        { nodeId: 2n, release: "", oldest: 0, newest: 0 },
+      ],
+    };
+    serve((r) => (r.type === "DescribeUpgrade" ? state : ok()));
+    const got = await client.describeUpgrade();
+    assert.deepEqual(got, state);
+    assert.equal(got.clusterVersion, 0, "version 0.0 is a version, not none");
+    assert.equal(b.requests().filter((r) => r.type === "DescribeUpgrade").length, 1, "node 1 pointed to the leader");
+  });
+
+  test("the upgrade calls set one field each", async () => {
+    serve(() => ok());
+    await client.holdUpgrade(true);
+    await client.holdUpgrade(false);
+    await client.releaseTurn(3);
+    await client.raiseClusterVersion(1, 2);
+    assert.deepEqual(
+      b.requests().filter((r) => r.type === "AlterUpgrade"),
+      [
+        { type: "AlterUpgrade", hold: true },
+        { type: "AlterUpgrade", hold: false },
+        { type: "AlterUpgrade", releaseTurn: 3n },
+        { type: "AlterUpgrade", clusterVersion: 0x1_0002 },
+      ],
+    );
+    await assert.rejects(client.raiseClusterVersion(0x1_0000, 0), RangeError);
   });
 
   test("a delete is done once the resource is gone, and keeps the broker's reason when it is refused", async () => {

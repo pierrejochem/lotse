@@ -75,6 +75,8 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/overview", get(api::overview))
         .route("/clusters/{cluster}/nodes", get(api::nodes))
         .route("/clusters/{cluster}/upgrade/pause", post(api::pause_upgrade))
+        .route("/clusters/{cluster}/upgrade/resume", post(api::resume_upgrade))
+        .route("/clusters/{cluster}/upgrade/raise", post(api::raise_cluster_version))
         .route("/clusters/{cluster}/streams", get(api::streams))
         .route("/clusters/{cluster}/streams/{name}", get(api::stream))
         .route("/clusters/{cluster}/streams/{name}/records", get(api::read_records))

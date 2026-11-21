@@ -116,6 +116,9 @@ pub struct NodeConfig {
     /// How often this node reads its data volume's free space for that
     /// limit (ADR 0124; [`crate::DEFAULT_DISK_CHECK_INTERVAL`] by default).
     pub disk_check_interval: Duration,
+    /// This node's release and the cluster versions it runs with (ADR
+    /// 0127); the build's own by default. Simulations give nodes others.
+    pub versions: crate::version::Versions,
     /// How clients authenticate.
     pub auth: AuthConfig,
     /// What streams keep unless they say otherwise (ADR 0046).
@@ -420,6 +423,93 @@ fn report_disk<R: Runtime>(
     });
 }
 
+/// Tells the metadata leader this node's release and the cluster versions
+/// it runs with (ADR 0127), while the metadata state says otherwise.
+fn report_version<R: Runtime>(
+    rt: &R,
+    cfg: &NodeConfig,
+    known: &Known,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+    reporting: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let v = &cfg.versions;
+    let Ok(node_id) = u32::try_from(cfg.id) else { return };
+    let same = known
+        .state
+        .versions
+        .get(&cfg.id)
+        .is_some_and(|r| r.release == v.release && r.oldest == v.oldest && r.newest == v.newest);
+    // Reported, and the cluster has its version: nothing to say. Until the
+    // cluster has one, each report may be the last one missing.
+    if same && known.state.cluster_version.is_some() || reporting.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let (client, stop, reporting, v) = (client.clone(), shared.stop.clone(), reporting.clone(), v.clone());
+    jobs.spawn(rt, async move {
+        let _ = race(client.report_version(node_id, &v.release, v.oldest, v.newest), &[&stop]).await;
+        reporting.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// Gives back the restart turn this node holds under its previous process
+/// (ADR 0127).
+fn release_turn<R: Runtime>(
+    rt: &R,
+    id: NodeId,
+    client: &Arc<lotse_client::Client<R>>,
+    shared: &Arc<Shared>,
+    jobs: &Live,
+    releasing: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Ok(node_id) = u32::try_from(id) else { return };
+    if releasing.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let (client, stop, releasing) = (client.clone(), shared.stop.clone(), releasing.clone());
+    jobs.spawn(rt, async move {
+        let _ = race(client.release_turn(node_id), &[&stop]).await;
+        releasing.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// `lotse turn take` asked this node for the restart turn (ADR 0127): it
+/// claims it only if no group it votes in loses its quorum without it, as
+/// `/safe-to-stop` judges, from every node's answer.
+async fn take_turn<R: Runtime>(
+    me: NodeId,
+    instance: u64,
+    mine: BTreeMap<GroupId, lotse_raft::Membership>,
+    client: Arc<lotse_client::Client<R>>,
+    job: crate::client::TurnJob,
+    stop: Signal,
+) {
+    use lotse_proto::ErrorCode;
+    let refuse = |why: String| (ErrorCode::TURN_UNAVAILABLE, Some(why));
+    let (code, why) = match race(client.node_metrics(), &[&stop]).await {
+        None => return,
+        Some(Err(e)) => refuse(format!("node {me} could not ask the nodes whether it may stop: {e}")),
+        Some(Ok(nodes)) => {
+            let reports: Vec<_> = nodes.into_iter().filter_map(|(_, m)| m.ok()).collect();
+            let critical = crate::ops::quorum_critical(me, &mine, &reports);
+            if !critical.is_empty() {
+                let groups: Vec<String> = critical.iter().map(|c| c.group.to_string()).collect();
+                refuse(format!("groups {} would be left without a quorum if node {me} stopped now", groups.join(", ")))
+            } else {
+                let Ok(node_id) = u32::try_from(me) else { return };
+                match race(client.claim_turn(node_id, instance), &[&stop]).await {
+                    None => return,
+                    Some(Ok(())) => (ErrorCode::NONE, None),
+                    Some(Err(lotse_client::ClientError::Broker { code, message })) => (code, message),
+                    Some(Err(e)) => refuse(format!("node {me} could not claim the turn: {e}")),
+                }
+            }
+        }
+    };
+    job.answer(code, why.as_deref());
+}
+
 /// Tells the metadata group which client certificates this node accepted
 /// since the last report, leaving out what it already holds (ADR 0091).
 fn report_certificates<R: Runtime>(
@@ -588,6 +678,9 @@ struct Shared {
     learned: Mutex<BTreeMap<NodeId, String>>,
     /// Set when the node stopped because it was drained (ADR 0051).
     removed: std::sync::atomic::AtomicBool,
+    /// Why the node stopped because the cluster runs at a cluster version
+    /// it does not run with (ADR 0127).
+    refused: Mutex<Option<String>>,
     /// Set when an answer of the metadata leader at least as new as this
     /// node's own metadata state left out this node, which that state lists:
     /// the cluster forgot it (ADR 0105).
@@ -703,6 +796,13 @@ impl NodeHandle {
     /// counts it any more, and the cluster forgets it (ADR 0051).
     pub fn removed(&self) -> bool {
         self.shared.removed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Why the node stopped by itself because the cluster runs at a
+    /// cluster version this release does not run with (ADR 0127), if it
+    /// did.
+    pub fn refused(&self) -> Option<String> {
+        self.shared.refused.lock().expect("refused lock").clone()
     }
 }
 
@@ -1097,6 +1197,16 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // volume, every `disk_check_interval` (ADR 0124).
     let mut disk = crate::disk::DiskWatch::default();
     let (mut next_disk, reporting_disk) = (started, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    // The instance of this process (ADR 0127): a turn it takes is given
+    // back by the next process, once that one is ready, never by this one.
+    let instance = loop {
+        match rt.next_u64() {
+            0 => continue,
+            n => break n,
+        }
+    };
+    let reporting_version = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let releasing_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut next_retain = started + RETAIN_EVERY;
     // Compacted partitions take turns at the node's one sweep (ADR 0098):
     // the next one to start is the first after this group.
@@ -1197,6 +1307,29 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             }
             if !follower_current(raft.hears_leader(), caught_up.get(&g).copied(), now, cfg.follower_max_lag) {
                 lagging.insert(g);
+            }
+        }
+        // Rolling upgrades (ADR 0127): stop if the cluster runs at a version
+        // this release does not run with; report this node's versions; give
+        // back a turn the previous process took, once every group is ready.
+        if let Some(why) = known.state.cluster_version.and_then(|v| cfg.versions.refuses(v)) {
+            *shared.refused.lock().expect("refused lock") = Some(why);
+            shared.stop.set();
+        }
+        report_version(rt, cfg, &known, &marker_client, shared, jobs, &reporting_version);
+        if known.state.turn.is_some_and(|t| t.node == cfg.id && t.instance != instance) {
+            let ready = groups.iter().all(|(g, r)| {
+                let raft = r.raft_ref();
+                crate::ops::GroupState::of(
+                    raft.role() == Role::Leader,
+                    raft.leads_with_quorum(),
+                    raft.hears_leader(),
+                    lagging.contains(g),
+                )
+                .ready()
+            });
+            if ready {
+                release_turn(rt, cfg.id, &marker_client, shared, jobs, &releasing_turn);
             }
         }
         // Nodes low on disk: as the metadata group recorded them, and this
@@ -1345,6 +1478,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         for job in clients.take_empty_jobs() {
             jobs.spawn(rt, check_empty(marker_client.clone(), job, shared.clone()));
+        }
+        for job in clients.take_turn_jobs() {
+            let mine = groups.iter().map(|(g, r)| (*g, r.raft_ref().membership().clone())).collect();
+            jobs.spawn(rt, take_turn(cfg.id, instance, mine, marker_client.clone(), job, shared.stop.clone()));
         }
         for job in clients.take_publish_jobs() {
             jobs.spawn(rt, publish(rt.clone(), publish_client.clone(), job, shared.clone()));

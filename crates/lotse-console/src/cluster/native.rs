@@ -251,6 +251,116 @@ fn node_name(id: u32) -> String {
     format!("node-{id}")
 }
 
+/// A cluster version as `major.minor` (ADR 0127).
+fn display(v: u32) -> String {
+    format!("{}.{}", lotse_proto::cluster_version::major(v), lotse_proto::cluster_version::minor(v))
+}
+
+/// A release's numbers, for ordering releases: `0.10.1` after `0.9.3`.
+fn release_order(release: &str) -> Vec<u64> {
+    release.split(['.', '-', '+']).map_while(|p| p.parse().ok()).collect()
+}
+
+/// The newest cluster version every node runs with, if it is newer than
+/// the one in force (ADR 0127).
+fn raise_to(d: &lotse_proto::DescribeUpgradeResponse) -> Option<u32> {
+    if d.nodes.is_empty() || d.nodes.iter().any(|n| n.release.is_empty()) {
+        return None;
+    }
+    let target = d.nodes.iter().map(|n| n.newest).min()?;
+    let oldest = d.nodes.iter().map(|n| n.oldest).max()?;
+    (target >= oldest && d.cluster_version.is_none_or(|v| target > v)).then_some(target)
+}
+
+/// The rolling upgrade a cluster is in (ADR 0127), from where its nodes'
+/// releases, the restart turn and the cluster version stand; `None` while
+/// every node runs one release, no turn is held or paused, and the
+/// version cannot go up.
+fn upgrade_view(d: &lotse_proto::DescribeUpgradeResponse) -> Option<Upgrade> {
+    let releases: BTreeSet<&str> = d.nodes.iter().map(|n| n.release.as_str()).filter(|r| !r.is_empty()).collect();
+    let from = releases.iter().min_by_key(|r| release_order(r))?.to_string();
+    let to = releases.iter().max_by_key(|r| release_order(r))?.to_string();
+    let raise = raise_to(d);
+    if from == to && d.turn.is_none() && !d.held && raise.is_none() {
+        return None;
+    }
+    let p = |name: String, state| UpgradePhase { name, state };
+    use PhaseState::{Done as D, Pending as P, Running as R};
+    let phases = |s: [PhaseState; 3]| {
+        vec![
+            p("Takes the restart turn".into(), s[0]),
+            p(format!("Restarts on {to}"), s[1]),
+            p("Catches up and gives the turn back".into(), s[2]),
+        ]
+    };
+    let mut steps: Vec<UpgradeStep> = d
+        .nodes
+        .iter()
+        .map(|n| {
+            let name = node_name(n.node_id as u32);
+            let holds = d.turn.is_some_and(|t| t.node_id == n.node_id);
+            if holds {
+                let since = d.turn.map(|t| rfc3339(t.since_ms)).unwrap_or_default();
+                UpgradeStep {
+                    node: name,
+                    status: chip(Tone::Warn, "Restarting"),
+                    phases: phases([D, R, P]),
+                    note: format!(
+                        "Holds the restart turn since {since}. It gives the turn back once all its groups are ready."
+                    ),
+                }
+            } else if n.release.is_empty() {
+                UpgradeStep {
+                    node: name,
+                    status: chip(Tone::Info, "Not reported"),
+                    phases: phases([P, P, P]),
+                    note: "The node has not reported its release yet.".into(),
+                }
+            } else if n.release == to {
+                UpgradeStep {
+                    node: name,
+                    status: chip(Tone::Ok, "Done"),
+                    phases: phases([D, D, D]),
+                    note: format!("Runs {to}, with cluster versions {} to {}.", display(n.oldest), display(n.newest)),
+                }
+            } else {
+                UpgradeStep {
+                    node: name,
+                    status: chip(Tone::Info, if d.held { "Paused" } else { "Waiting" }),
+                    phases: phases([P, P, P]),
+                    note: if d.held {
+                        format!("Runs {}. Restart turns are paused; resume to go on.", n.release)
+                    } else {
+                        format!(
+                            "Runs {}. It restarts once it takes the turn: after the node holding it is ready, and only while its groups keep a quorum without it.",
+                            n.release
+                        )
+                    },
+                }
+            }
+        })
+        .collect();
+    // The node restarting first, then those done, then those waiting.
+    steps.sort_by_key(|s| match s.status.text.as_str() {
+        "Restarting" => 1,
+        "Done" => 0,
+        _ => 2,
+    });
+    Some(Upgrade {
+        nodes_done: d.nodes.iter().filter(|n| n.release == to).count() as u32,
+        nodes_total: d.nodes.len() as u32,
+        from,
+        to,
+        started_by: None,
+        started_at: None,
+        cluster_version: d.cluster_version.map(display),
+        raise_to: raise.map(display),
+        groups_catching_up: 0,
+        steps,
+        paused_after_current: d.held,
+    })
+}
+
 /// The node a partition's leader is pinned to, if any (ADR 0121).
 fn pinned(p: &lotse_proto::PartitionMetadata) -> Option<String> {
     (p.pinned_leader != 0).then(|| node_name(p.pinned_leader))
@@ -646,7 +756,9 @@ impl Cluster for NativeCluster {
     async fn nodes(&self, who: &Identity) -> ApiResult<NodesView> {
         let (s, base) = self.seat(who).window().await?;
         let nodes = self.nodes_of(Window { now: &s, base: base.as_deref() });
-        Ok(NodesView { nodes, upgrade: None, events: Vec::new() })
+        // Only a cluster admin or viewer sees the upgrade (ADR 0127).
+        let upgrade = self.seat(who).client.describe_upgrade().await.ok().and_then(|d| upgrade_view(&d));
+        Ok(NodesView { nodes, upgrade, events: Vec::new() })
     }
 
     async fn streams(&self, who: &Identity) -> ApiResult<Vec<StreamRow>> {
@@ -1244,8 +1356,24 @@ impl Cluster for NativeCluster {
         self.seat(who).client.revoke_sessions(subject, group).await.map_err(|e| refused("the revocation", e))
     }
 
-    async fn pause_upgrade(&self, _who: &Identity) -> ApiResult<()> {
-        Err(ApiError::BadRequest(format!("No upgrade is running on {}: it has no operator yet.", self.id)))
+    async fn pause_upgrade(&self, who: &Identity) -> ApiResult<()> {
+        let hold = lotse_proto::AlterUpgradeRequest { hold: Some(true), ..Default::default() };
+        self.seat(who).client.alter_upgrade(hold).await.map_err(|e| refused("the pause", e))
+    }
+
+    async fn resume_upgrade(&self, who: &Identity) -> ApiResult<()> {
+        let resume = lotse_proto::AlterUpgradeRequest { hold: Some(false), ..Default::default() };
+        self.seat(who).client.alter_upgrade(resume).await.map_err(|e| refused("the resume", e))
+    }
+
+    async fn raise_cluster_version(&self, who: &Identity) -> ApiResult<String> {
+        let client = &self.seat(who).client;
+        let d = client.describe_upgrade().await.map_err(|e| refused("the raise", e))?;
+        let target = raise_to(&d)
+            .ok_or_else(|| ApiError::BadRequest("No newer cluster version runs on every node yet.".into()))?;
+        let raise = lotse_proto::AlterUpgradeRequest { cluster_version: Some(target), ..Default::default() };
+        client.alter_upgrade(raise).await.map_err(|e| refused("the raise", e))?;
+        Ok(display(target))
     }
 }
 
@@ -1393,5 +1521,56 @@ mod tests {
         assert_eq!(p99(&b), Some(64.0));
         b[2] = 1000;
         assert_eq!(p99(&b), Some(4.0));
+    }
+
+    fn upgrade_of(
+        nodes: &[(u64, &str, u32, u32)],
+        turn: Option<u64>,
+        version: Option<u32>,
+    ) -> lotse_proto::DescribeUpgradeResponse {
+        lotse_proto::DescribeUpgradeResponse {
+            error: ErrorCode::NONE,
+            leader_hint: None,
+            cluster_version: version,
+            held: false,
+            turn: turn.map(|node_id| lotse_proto::UpgradeTurn { node_id, since_ms: 1_795_000_000_000 }),
+            nodes: nodes
+                .iter()
+                .map(|(id, release, oldest, newest)| lotse_proto::UpgradeNode {
+                    node_id: *id,
+                    release: release.to_string(),
+                    oldest: *oldest,
+                    newest: *newest,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_upgrade_shows_from_the_nodes_releases_and_the_turn() {
+        use lotse_proto::cluster_version::of;
+        let (old, new) = ((of(0, 9), of(0, 9)), (of(0, 9), of(0, 10)));
+        // One release everywhere, nothing to raise: no upgrade.
+        let same = upgrade_of(&[(1, "0.9.3", old.0, old.1), (2, "0.9.3", old.0, old.1)], None, Some(of(0, 9)));
+        assert!(upgrade_view(&same).is_none());
+        // Mixed, node 2 restarting: 0.10 orders after 0.9, by number.
+        let mixed = upgrade_of(
+            &[(1, "0.10.0", new.0, new.1), (2, "0.9.3", old.0, old.1), (3, "0.9.3", old.0, old.1)],
+            Some(2),
+            Some(of(0, 9)),
+        );
+        let u = upgrade_view(&mixed).expect("an upgrade");
+        assert_eq!((u.from.as_str(), u.to.as_str()), ("0.9.3", "0.10.0"));
+        assert_eq!((u.nodes_done, u.nodes_total), (1, 3));
+        assert_eq!(u.raise_to, None, "nodes 2 and 3 do not run with 0.10");
+        let order: Vec<(&str, &str)> = u.steps.iter().map(|s| (s.node.as_str(), s.status.text.as_str())).collect();
+        assert_eq!(order, [("node-1", "Done"), ("node-2", "Restarting"), ("node-3", "Waiting")]);
+        // Every node on the new release: the version may go up.
+        let done = upgrade_of(&[(1, "0.10.0", new.0, new.1), (2, "0.10.0", new.0, new.1)], None, Some(of(0, 9)));
+        let u = upgrade_view(&done).expect("the version may go up");
+        assert_eq!(u.raise_to.as_deref(), Some("0.10"));
+        assert_eq!(u.cluster_version.as_deref(), Some("0.9"));
+        let raised = upgrade_of(&[(1, "0.10.0", new.0, new.1), (2, "0.10.0", new.0, new.1)], None, Some(of(0, 10)));
+        assert!(upgrade_view(&raised).is_none(), "nothing left to do");
     }
 }

@@ -1393,6 +1393,86 @@ public sealed interface Request {
     }
 
     /**
+     * {@code AlterUpgrade} (64): changes a rolling upgrade (cluster admin, ADR 0127). Exactly one field is set; the
+     * others are {@code null}. Answered with {@link Response.Admin} once committed.
+     *
+     * @param hold pause restart turns ({@code true}) or resume them ({@code false}); tag 0
+     * @param releaseTurn give back the turn this node holds; tag 1
+     * @param clusterVersion raise the cluster version to this, {@code major << 16 | minor}, a {@code u32}; tag 2
+     */
+    record AlterUpgrade(Boolean hold, Long releaseTurn, Long clusterVersion) implements Request {
+        static final int TAG_HOLD = 0;
+        static final int TAG_RELEASE_TURN = 1;
+        static final int TAG_CLUSTER_VERSION = 2;
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.ALTER_UPGRADE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            List<Tag> tags = new java.util.ArrayList<>();
+            if (hold != null) {
+                tags.add(new Tag(TAG_HOLD, ByteString.copyOf(new byte[] {(byte) (hold ? 1 : 0)})));
+            }
+            if (releaseTurn != null) {
+                Writer v = new Writer();
+                v.u64(releaseTurn);
+                tags.add(new Tag(TAG_RELEASE_TURN, ByteString.copyOf(v.toByteArray())));
+            }
+            if (clusterVersion != null) {
+                Writer v = new Writer();
+                v.u32(clusterVersion);
+                tags.add(new Tag(TAG_CLUSTER_VERSION, ByteString.copyOf(v.toByteArray())));
+            }
+            if (tags.isEmpty()) {
+                w.noTags();
+            } else {
+                w.tags(tags);
+            }
+        }
+
+        static AlterUpgrade read(Reader r) {
+            Boolean hold = null;
+            Long release = null;
+            Long version = null;
+            for (Tag t : r.tags()) {
+                Reader vr = new Reader(t.value().toByteArray());
+                if (t.tag() == TAG_HOLD) {
+                    hold = vr.u8() != 0;
+                } else if (t.tag() == TAG_RELEASE_TURN) {
+                    release = vr.u64();
+                } else if (t.tag() == TAG_CLUSTER_VERSION) {
+                    version = vr.u32();
+                } else {
+                    continue; // from a newer version: skipped
+                }
+                vr.finish();
+            }
+            return new AlterUpgrade(hold, release, version);
+        }
+    }
+
+    /** {@code DescribeUpgrade} (65): where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
+    record DescribeUpgrade() implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_UPGRADE;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.noTags();
+        }
+
+        static DescribeUpgrade read(Reader r) {
+            r.tags();
+            return new DescribeUpgrade();
+        }
+    }
+
+    /**
      * {@code RequestCertificate} (55): asks the CA holder for a client certificate (cluster admin, ADR 0092). The
      * request's id is the SHA-256 of {@code csr}, so the same request twice is one request. Answered with
      * {@link Response.Admin}.

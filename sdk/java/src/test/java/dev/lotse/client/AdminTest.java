@@ -89,6 +89,9 @@ class AdminTest {
         if (r instanceof Request.DescribeCertificateRequests) {
             return new Response.DescribeCertificateRequests(ErrorCode.NOT_LEADER, hint, 0L, List.of());
         }
+        if (r instanceof Request.DescribeUpgrade) {
+            return new Response.DescribeUpgrade(ErrorCode.NOT_LEADER, hint, null, false, null, List.of());
+        }
         return new Response.Admin(ErrorCode.NOT_LEADER, null, hint);
     }
 
@@ -264,6 +267,35 @@ class AdminTest {
         assertEquals(1, b.requests(Request.DescribeCertificateRequests.class).size(), "node 1 pointed to the leader");
         assertEquals(15L, requests.nowMs());
         assertEquals(List.of(entry), requests.requests());
+    }
+
+    @Test
+    void describeUpgradeFollowsTheHintAndKeepsVersionZeroZero() {
+        Response.DescribeUpgrade state = new Response.DescribeUpgrade(
+                ErrorCode.NONE, null, 0L, true, new Response.UpgradeTurn(2, 15L),
+                List.of(new Response.UpgradeNode(1, "0.0.1", 0, 0), new Response.UpgradeNode(2, "", 0, 0)));
+        serve((n, r) -> r instanceof Request.DescribeUpgrade ? state : ok());
+        Response.DescribeUpgrade got = client.describeUpgrade();
+        assertEquals(1, b.requests(Request.DescribeUpgrade.class).size(), "node 1 pointed to the leader");
+        assertEquals(state, got);
+        assertEquals(0L, got.clusterVersion(), "version 0.0 is a version, not none");
+    }
+
+    @Test
+    void upgradeCallsSetOneFieldEach() {
+        serve((n, r) -> ok());
+        client.holdUpgrade(true);
+        client.holdUpgrade(false);
+        client.releaseTurn(3);
+        client.raiseClusterVersion(1, 2);
+        assertEquals(
+                List.of(
+                        new Request.AlterUpgrade(true, null, null),
+                        new Request.AlterUpgrade(false, null, null),
+                        new Request.AlterUpgrade(null, 3L, null),
+                        new Request.AlterUpgrade(null, null, 0x1_0002L)),
+                b.requests(Request.AlterUpgrade.class));
+        assertThrows(IllegalArgumentException.class, () -> client.raiseClusterVersion(0x1_0000, 0));
     }
 
     @Test

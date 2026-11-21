@@ -1385,6 +1385,96 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/upgrade/raise": {
+      "post": {
+        "tags": [],
+        "summary": "Raises the cluster version to the newest every node runs with (ADR\n0127): new formats come into use, and no node can go back to the\nprevious release.",
+        "operationId": "raise_cluster_version",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not every node runs with a newer version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/upgrade/resume": {
+      "post": {
+        "tags": [],
+        "summary": "Resumes a paused rolling upgrade (ADR 0127).",
+        "operationId": "resume_upgrade",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/users": {
       "get": {
         "tags": [],
@@ -3982,12 +4072,10 @@
       },
       "Upgrade": {
         "type": "object",
-        "description": "A rolling upgrade run by the operator.",
+        "description": "A rolling upgrade (ADR 0127): run by the operator, or node by node\nwith the cluster's restart turn.",
         "required": [
           "from",
           "to",
-          "started_by",
-          "started_at",
           "nodes_done",
           "nodes_total",
           "groups_catching_up",
@@ -3995,6 +4083,13 @@
           "paused_after_current"
         ],
         "properties": {
+          "cluster_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cluster version in force, `major.minor`: the formats every node\nwrites."
+          },
           "from": {
             "type": "string",
             "description": "Version before."
@@ -4019,15 +4114,28 @@
           },
           "paused_after_current": {
             "type": "boolean",
-            "description": "`true` once the operator stops after the current node."
+            "description": "`true` once the upgrade stops after the current node: restart turns\nare paused."
+          },
+          "raise_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A newer cluster version every node runs with, which a cluster admin\nmay raise it to; `None` while some node does not."
           },
           "started_at": {
-            "type": "string",
-            "description": "Start, RFC 3339."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Start, RFC 3339, where known."
           },
           "started_by": {
-            "type": "string",
-            "description": "Who started it."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who started it, where known."
           },
           "steps": {
             "type": "array",

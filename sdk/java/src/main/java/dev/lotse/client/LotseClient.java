@@ -1688,6 +1688,53 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
+     * Pauses ({@code true}) or resumes ({@code false}) the cluster's restart turns (ADR 0127): while paused, no node
+     * takes the next turn, and the one that holds it keeps it. Needs the cluster-admin role.
+     */
+    public void holdUpgrade(boolean hold) {
+        checkOpen();
+        adminChange(new Request.AlterUpgrade(hold, null, null));
+    }
+
+    /**
+     * Gives back the restart turn {@code node} holds, for a node that will not come back to give it back itself (ADR
+     * 0127). Nothing happens if the node holds no turn. Needs the cluster-admin role.
+     */
+    public void releaseTurn(long node) {
+        checkOpen();
+        adminChange(new Request.AlterUpgrade(null, node, null));
+    }
+
+    /**
+     * Raises the cluster version to {@code major.minor} (ADR 0127), once every node runs a release that supports it;
+     * the metadata leader refuses it, naming the nodes that do not, otherwise. The version is never lowered. Needs
+     * the cluster-admin role.
+     */
+    public void raiseClusterVersion(int major, int minor) {
+        checkOpen();
+        if (major < 0 || major > 0xFFFF || minor < 0 || minor > 0xFFFF) {
+            throw new IllegalArgumentException("a cluster version's major and minor are 0 to 65535");
+        }
+        adminChange(new Request.AlterUpgrade(null, null, ((long) major << 16) | minor));
+    }
+
+    /**
+     * Where a rolling upgrade stands (ADR 0127): the cluster version, the restart turn, the pause and each node's
+     * versions. Needs the cluster-admin or cluster-viewer role.
+     */
+    public Response.DescribeUpgrade describeUpgrade() {
+        checkOpen();
+        return retrying(() -> {
+            Response r = callAdmin(new Request.DescribeUpgrade());
+            if (!(r instanceof Response.DescribeUpgrade d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d;
+        });
+    }
+
+    /**
      * Adds a certificate to the cluster's revocation list: every node refuses it from then on and ends its
      * connections. Needs the cluster-admin role.
      *

@@ -126,9 +126,12 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0120 | [Queue metrics per priority level and consumer state](0120-queue-metrics-per-priority-level-and-consumer-state.md) | Accepted |
 | 0121 | [The console places partitions and lists open sessions](0121-the-console-places-partitions-and-lists-open-sessions.md) | Accepted |
 | 0122 | [A node low on disk stops new data in its groups](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) | Accepted, in part changed by [0124](0124-a-node-reports-a-low-disk-at-once.md) |
-| 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted |
+| 0123 | [Client certificates are renewed over a connection made with them](0123-client-certificates-are-renewed-over-a-connection-made-with-them.md) | Accepted, in part changed by [0127](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) |
 | 0124 | [A node reports a low disk at once](0124-a-node-reports-a-low-disk-at-once.md) | Accepted |
-| 0125 | [A group change writes only the members it changes](0125-a-group-change-writes-only-the-members-it-changes.md) | Accepted |
+| 0125 | [A group change writes only the members it changes](0125-a-group-change-writes-only-the-members-it-changes.md) | Accepted, in part changed by [0127](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) |
 | 0126 | [Reproducible releases, built by one script, for every init system](0126-reproducible-releases-built-by-one-script-for-every-init-system.md) | Accepted |
+| 0127 | [Rolling upgrades with a cluster version and restart turns](0127-rolling-upgrades-with-a-cluster-version-and-restart-turns.md) | Accepted |
+| 0128 | [A Helm chart whose pods take the restart turn](0128-a-helm-chart-whose-pods-take-the-restart-turn.md) | Accepted |
+| 0129 | [A Kubernetes operator after the chart](0129-a-kubernetes-operator-after-the-chart.md) | Proposed |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

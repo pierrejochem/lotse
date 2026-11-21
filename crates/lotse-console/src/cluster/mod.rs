@@ -122,8 +122,16 @@ pub trait Cluster: Send + Sync + 'static {
     /// Revokes the sessions of a user or an IdP group (ADR 0070).
     async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()>;
 
-    /// Asks the operator to stop after the node it is upgrading.
+    /// Stops the upgrade after the node it is on: restart turns pause
+    /// (ADR 0127).
     async fn pause_upgrade(&self, who: &Identity) -> ApiResult<()>;
+
+    /// Resumes a paused upgrade.
+    async fn resume_upgrade(&self, who: &Identity) -> ApiResult<()>;
+
+    /// Raises the cluster version to the newest every node runs with
+    /// (ADR 0127); the version it went to.
+    async fn raise_cluster_version(&self, who: &Identity) -> ApiResult<String>;
 
     /// One sample for chart history, as `who` sees the cluster.
     async fn chart_sample(&self, who: &Identity) -> ApiResult<ChartSample>;

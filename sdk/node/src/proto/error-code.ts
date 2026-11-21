@@ -36,6 +36,11 @@ export const ErrorCode = {
   PRODUCER_LIMIT: 33,
   /** The queue holds as many messages, or bytes, as its length limit admits and refuses more (ADR 0118); nothing was written. */
   QUEUE_FULL: 34,
+  /**
+   * The cluster's restart turn is not to be had: another node holds it, turns are paused, a group would lose its quorum,
+   * or the node is not one of the cluster (ADR 0127). Not retriable as such; wait and ask again.
+   */
+  TURN_UNAVAILABLE: 35,
 } as const;
 
 /** An error code as it travels: a `u16`. Known codes are the values of `ErrorCode`. */

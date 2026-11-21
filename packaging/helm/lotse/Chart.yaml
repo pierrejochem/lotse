@@ -1,0 +1,11 @@
+apiVersion: v2
+name: lotse
+description: A Lotse cluster as a StatefulSet, with rolling upgrades that take the cluster's restart turn (ADR 0128)
+type: application
+# The chart's own version; appVersion is the Lotse release it runs by default.
+version: 0.1.0
+appVersion: "0.0.1"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/pierrejochem/lotse
+sources:
+  - https://github.com/pierrejochem/lotse

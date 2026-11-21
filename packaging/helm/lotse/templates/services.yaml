@@ -1,0 +1,42 @@
+# The headless Service gives every pod its name, which the cluster file uses
+# for its peer and client addresses. Names resolve before a pod is ready, so
+# nodes of a new cluster find each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lotse.headless" . }}
+  labels:
+    {{- include "lotse.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "lotse.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: peer
+      port: {{ .Values.ports.peer }}
+      targetPort: peer
+    - name: client
+      port: {{ .Values.ports.client }}
+      targetPort: client
+---
+# Clients bootstrap through this Service, then talk to each leader by its pod
+# name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lotse.fullname" . }}
+  labels:
+    {{- include "lotse.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "lotse.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.ports.client }}
+      targetPort: client

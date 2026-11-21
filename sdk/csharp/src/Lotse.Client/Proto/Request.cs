@@ -1146,6 +1146,98 @@ public abstract record Request
         }
     }
 
+    /// <summary>
+    /// <c>AlterUpgrade</c> (64): changes a rolling upgrade (cluster admin, ADR 0127). Exactly one field is set; the
+    /// others are <c>null</c>. Answered with <see cref="Response.Admin"/> once committed.
+    /// </summary>
+    /// <param name="Hold">Pause restart turns (<c>true</c>) or resume them (<c>false</c>); tag 0.</param>
+    /// <param name="ReleaseTurn">Give back the turn this node holds; tag 1.</param>
+    /// <param name="ClusterVersion">Raise the cluster version to this, <c>major &lt;&lt; 16 | minor</c>; tag 2.</param>
+    public sealed record AlterUpgrade(bool? Hold = null, ulong? ReleaseTurn = null, uint? ClusterVersion = null) : Request
+    {
+        private const long TagHold = 0;
+        private const long TagReleaseTurn = 1;
+        private const long TagClusterVersion = 2;
+
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.AlterUpgrade;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            var tags = new List<Tag>();
+            if (Hold is bool hold)
+            {
+                tags.Add(new Tag(TagHold, ByteString.CopyOf(new byte[] { hold ? (byte)1 : (byte)0 })));
+            }
+            if (ReleaseTurn is ulong node)
+            {
+                var v = new Writer();
+                v.U64(node);
+                tags.Add(new Tag(TagReleaseTurn, ByteString.CopyOf(v.ToByteArray())));
+            }
+            if (ClusterVersion is uint version)
+            {
+                var v = new Writer();
+                v.U32(version);
+                tags.Add(new Tag(TagClusterVersion, ByteString.CopyOf(v.ToByteArray())));
+            }
+            if (tags.Count == 0)
+            {
+                w.NoTags();
+            }
+            else
+            {
+                w.Tags(tags);
+            }
+        }
+
+        internal static AlterUpgrade Read(Reader r)
+        {
+            bool? hold = null;
+            ulong? release = null;
+            uint? version = null;
+            foreach (Tag t in r.Tags())
+            {
+                var vr = new Reader(t.Value.ToByteArray());
+                if (t.Number == TagHold)
+                {
+                    hold = vr.U8() != 0;
+                }
+                else if (t.Number == TagReleaseTurn)
+                {
+                    release = vr.U64();
+                }
+                else if (t.Number == TagClusterVersion)
+                {
+                    version = vr.U32();
+                }
+                else
+                {
+                    continue; // from a newer version: skipped
+                }
+                vr.Finish();
+            }
+            return new AlterUpgrade(hold, release, version);
+        }
+    }
+
+    /// <summary><c>DescribeUpgrade</c> (65): where a rolling upgrade stands (cluster admin or viewer, ADR 0127).</summary>
+    public sealed record DescribeUpgrade : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeUpgrade;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.NoTags();
+
+        internal static DescribeUpgrade Read(Reader r)
+        {
+            r.Tags();
+            return new DescribeUpgrade();
+        }
+    }
+
     /// <summary>Lists the client certificates the cluster has seen or had revoked (cluster admin, ADR 0091).</summary>
     public sealed record DescribeCertificates : Request
     {

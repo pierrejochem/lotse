@@ -1,0 +1,96 @@
+# Values for the Lotse chart (ADR 0128). The cluster file every node reads is
+# rendered from these; `helm template` shows it.
+
+image:
+  repository: ghcr.io/pierrejochem/lotse
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The nodes the cluster starts with. Node ids are the pod index plus one:
+# lotse-0 is node 1. Every node is a voter of the metadata and coordinator
+# groups, so give an odd number, three or five. Changing it later is not a
+# Helm upgrade: see the guide's chapter on adding nodes.
+replicas: 3
+
+ports:
+  peer: 7000
+  client: 9000
+  # Each node's operator endpoint listens on 127.0.0.1 at this port plus its
+  # id, inside its own pod, for the probes and the preStop hook.
+  metricsBase: 9464
+
+# A Secret with the cluster's CA and every node's certificate and key, made
+# with `lotse certs` against the cluster file this chart renders: ca.pem,
+# node-<id>.pem and node-<id>.key. Every pod mounts the whole Secret.
+tls:
+  secretName: lotse-tls
+  # Optional keys in the same Secret.
+  crl: false
+  renewalCa: false
+
+auth:
+  required: true
+  # Principals with the cluster-admin role from the start, such as the common
+  # name of an admin's client certificate.
+  admins: []
+  tenants: []
+
+# Free space a node keeps on its data volume (bytes, or a share such as
+# "5%"); empty keeps the default, the larger of 1 GiB and 5 %.
+disk:
+  freeLimit: ""
+
+retention:
+  # Node defaults for streams; empty keeps Lotse's defaults.
+  ms: ""
+  bytes: ""
+
+# Extra TOML appended to the cluster file, for settings this chart does not name.
+extraConfig: ""
+
+persistence:
+  size: 20Gi
+  storageClassName: ""
+  accessModes: [ReadWriteOnce]
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Spread nodes over zones; each node names its zone to clients only through
+# extraConfig today.
+topologySpreadConstraints: []
+podAnnotations: {}
+podLabels: {}
+
+# How long a stopping pod waits for the cluster's restart turn before it
+# stops anyway, and how long Kubernetes gives it in all. The turn waits for
+# the node before it to be ready again, and for every group to keep a quorum
+# without this one; a node stopping hands its groups over first (ADR 0114).
+turnWait: 10m
+terminationGracePeriodSeconds: 900
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+service:
+  # The Service clients reach the cluster by. A client asks any node for
+  # metadata and then talks to each partition's leader by its pod name, so
+  # clients must run in the cluster or resolve the pods' names.
+  type: ClusterIP
+  annotations: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
