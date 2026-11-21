@@ -919,7 +919,19 @@ fn a_conditional_delete_takes_only_what_holds_nothing() {
 
             // Nothing written: gone.
             admin.delete_if_empty("empty").await.expect("an empty stream");
-            assert!(matches!(admin.produce("empty", 0, message("late")).await, Err(e) if coming_and_going(&e)));
+            // The delete is answered once the metadata leader applied it; the
+            // partition's leader may apply it a moment later (ADR 0035), and
+            // the client still holds the route. Within a few seconds no node
+            // takes a write for it.
+            let mut late = admin.produce("empty", 0, message("late")).await;
+            for _ in 0..50 {
+                if matches!(&late, Err(e) if coming_and_going(e)) {
+                    break;
+                }
+                rt.sleep(TICK * 10).await;
+                late = admin.produce("empty", 0, message("late")).await;
+            }
+            assert!(matches!(&late, Err(e) if coming_and_going(e)), "a deleted stream still takes writes: {late:?}");
             admin.delete_if_empty("x").await.expect("an exchange holds no messages");
 
             // One record in the last partition is enough to keep a stream.
