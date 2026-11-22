@@ -15,6 +15,7 @@ import {
 } from '../api/queries';
 import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
+import { Tokens } from './Tokens';
 import { Chip, Failed, Loading, Select } from '../components/ui';
 
 const failure = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
@@ -610,18 +611,20 @@ export function UsersAccess() {
     <main className="page">
       <div>
         <h1 className="h1">Users and access</h1>
-        <p className="sub">Passwords, role bindings and sessions. Every change is made as you, and the cluster checks your roles.</p>
+        <p className="sub">Passwords, role bindings, sessions and access tokens. Every change is made as you, and the cluster checks your roles.</p>
       </div>
       <Tabs.Root defaultValue="users">
         <Tabs.List className="tabs-list" aria-label="Users and access">
           <Tabs.Trigger value="users">Users</Tabs.Trigger>
           <Tabs.Trigger value="bindings">Role bindings</Tabs.Trigger>
           <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
+          <Tabs.Trigger value="tokens">Tokens</Tabs.Trigger>
           <CertificatesTab cluster={cluster} />
         </Tabs.List>
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
+        <Tabs.Content value="tokens" className="tabs-content"><Tokens cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="certificates" className="tabs-content">
           <div className="stack" style={{ gap: 32 }}>
             <CertificateRequests cluster={cluster} />

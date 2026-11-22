@@ -12,6 +12,7 @@
 | Queue detail | ![Queue detail](queue-detail.png) |
 | Message browser | ![Message browser](messages.png) |
 | Tenants and access | ![Tenants](tenants.png) |
+| Access tokens (*Users and access*, *Tokens*) | Screenshot to be taken |
 
 ## Against a real cluster
 
