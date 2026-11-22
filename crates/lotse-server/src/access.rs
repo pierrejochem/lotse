@@ -290,6 +290,14 @@ impl Access {
             | Request::DescribeCertificates(_)
             | Request::RecordCertificate(_)
             | Request::AlterUpgrade(_) => admin(),
+            // A token acts as a user (ADR 0133): any user creates, lists and
+            // revokes their own, and the handler checks the owner, which
+            // only the metadata state knows for a revoke; a cluster admin
+            // acts for anyone, and a cluster viewer lists all.
+            Request::CreateToken(_) | Request::DescribeTokens(_) | Request::RevokeToken(_) => match p {
+                Principal::User { .. } => Ok(()),
+                _ => admin(),
+            },
             // A user asks in their own name and sees their own requests; a
             // cluster admin asks for anyone and sees all (ADR 0119).
             Request::RequestCertificate(r) => match p {

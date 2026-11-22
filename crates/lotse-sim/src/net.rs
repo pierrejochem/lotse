@@ -405,6 +405,8 @@ impl lotse_rt::Conn for SimConn {
         std::future::ready(res)
     }
 
+    // Cancel-safe, as the trait asks: a frame leaves the pipe only in the
+    // synchronous step that returns it; the awaits in between take nothing.
     async fn recv(&self) -> io::Result<Option<Bytes>> {
         loop {
             let wait_until = {

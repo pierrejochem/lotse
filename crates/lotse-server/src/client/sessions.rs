@@ -40,6 +40,7 @@ fn entry(p: &Principal, s: &OpenSession) -> SessionEntry {
         connected_ms: s.connected_ms,
         credential_ms: s.credential_ms,
         expires_ms: s.expires_ms,
+        token_id: s.token_id,
     }
 }
 

@@ -48,6 +48,8 @@ const TAG_IN_FLIGHT_BYTES: u64 = 5;
 /// `DescribeMetrics`: the node's free disk limit and whether it is below it
 /// (ADR 0122).
 const TAG_DISK: u64 = 6;
+/// `DescribeSessions`: the access token a session signed in with.
+const TAG_TOKEN_ID: u64 = 0;
 
 /// The tenant that always exists, and the one a request means when it names
 /// none.
@@ -4360,6 +4362,9 @@ pub mod session_mechanism {
     pub const SCRAM_SHA_512: u8 = 2;
     /// SASL OAUTHBEARER.
     pub const OAUTHBEARER: u8 = 3;
+    /// An access token (`lotse_auth::token`); the entry names it in
+    /// `token_id`.
+    pub const TOKEN: u8 = 4;
 }
 
 /// One open client session on a node.
@@ -4384,6 +4389,9 @@ pub struct SessionEntry {
     /// When the session ends unless renewed, ms since the Unix epoch; 0 for
     /// one that lasts as long as the connection.
     pub expires_ms: u64,
+    /// The id of the access token the session signed in with; absent for
+    /// every other mechanism (tag 0).
+    pub token_id: Option<u64>,
 }
 
 /// A node's open client sessions, oldest first.
@@ -4413,7 +4421,14 @@ impl DescribeSessionsResponse {
             w.u64(s.connected_ms);
             w.u64(s.credential_ms);
             w.u64(s.expires_ms);
-            w.no_tags();
+            match s.token_id {
+                Some(id) => {
+                    let mut v = Writer::new();
+                    v.u64(id);
+                    w.tags(&[(TAG_TOKEN_ID, v.finish())]);
+                }
+                None => w.no_tags(),
+            }
         });
         w.no_tags();
     }
@@ -4421,7 +4436,7 @@ impl DescribeSessionsResponse {
         let (error, node_id, now_ms) = (ErrorCode(r.u16()?), r.u32()?, r.u64()?);
         // kind, name, no groups, mechanism, peer, three times, no tags.
         let sessions = r.array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, |r| {
-            let s = SessionEntry {
+            let mut s = SessionEntry {
                 principal_kind: r.u8()?,
                 name: r.string()?,
                 groups: r.array(2, Reader::string)?,
@@ -4430,8 +4445,15 @@ impl DescribeSessionsResponse {
                 connected_ms: r.u64()?,
                 credential_ms: r.u64()?,
                 expires_ms: r.u64()?,
+                token_id: None,
             };
-            r.tags()?;
+            for (tag, value) in r.tags()? {
+                if tag == TAG_TOKEN_ID {
+                    let mut v = Reader::new(value);
+                    s.token_id = Some(v.u64()?);
+                    v.finish()?;
+                }
+            }
             Ok(s)
         })?;
         r.tags()?;
@@ -4711,6 +4733,174 @@ impl RenewCertificateResponse {
         let chain = r.array(4, |r| r.bytes())?;
         let not_after_ms = r.u64()?;
         Ok(RenewCertificateResponse { error, error_msg, leader_hint: get_hint(r)?, chain, not_after_ms })
+    }
+}
+
+/// `CreateToken`: records an access token. The client makes the secret and
+/// sends only its hash, so no node ever sees the secret. Answered with
+/// [`CreateTokenResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTokenRequest {
+    /// A label for the owner's own use.
+    pub name: String,
+    /// The user the token acts as.
+    pub owner: String,
+    /// The lifetime class the server maps to a duration.
+    pub lifetime: u8,
+    /// SHA-256 of the secret (32 bytes); the server checks the length, the
+    /// codec does not.
+    pub secret_hash: Bytes,
+}
+
+impl CreateTokenRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.string(&self.owner);
+        w.u8(self.lifetime);
+        w.bytes(&self.secret_hash);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req =
+            CreateTokenRequest { name: r.string()?, owner: r.string()?, lifetime: r.u8()?, secret_hash: r.bytes()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// Answer to [`CreateTokenRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreateTokenResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// Why, for a refusal.
+    pub error_msg: Option<String>,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The token's id; 0 on a refusal.
+    pub id: u64,
+    /// Millisecond the token stops being valid in, since the Unix epoch.
+    pub expires_at_ms: u64,
+}
+
+impl CreateTokenResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.opt_string(self.error_msg.as_deref());
+        w.u64(self.id);
+        w.u64(self.expires_at_ms);
+        // The leader hint is the structure's block of tagged fields.
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let error = ErrorCode(r.u16()?);
+        let error_msg = r.opt_string()?;
+        let (id, expires_at_ms) = (r.u64()?, r.u64()?);
+        Ok(CreateTokenResponse { error, error_msg, leader_hint: get_hint(r)?, id, expires_at_ms })
+    }
+}
+
+/// `DescribeTokens`: lists access tokens, never their secrets. A cluster
+/// admin sees everyone's; anyone else only their own. Answered with
+/// [`DescribeTokensResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DescribeTokensRequest {
+    /// Only this owner's tokens; absent for all the asker may see.
+    pub owner: Option<String>,
+}
+
+impl DescribeTokensRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.opt_string(self.owner.as_deref());
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DescribeTokensRequest { owner: r.opt_string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// One access token in [`DescribeTokensResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenEntry {
+    /// The token's id.
+    pub id: u64,
+    /// Its label.
+    pub name: String,
+    /// The user it acts as.
+    pub owner: String,
+    /// When it was created, ms since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it stops being valid, ms since the Unix epoch.
+    pub expires_at_ms: u64,
+    /// Who created it.
+    pub created_by: String,
+}
+
+/// Answer to [`DescribeTokensRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DescribeTokensResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// The tokens the asker may see.
+    pub tokens: Vec<TokenEntry>,
+}
+
+impl DescribeTokensResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        w.array(&self.tokens, |w, t| {
+            w.u64(t.id);
+            w.string(&t.name);
+            w.string(&t.owner);
+            w.u64(t.created_at_ms);
+            w.u64(t.expires_at_ms);
+            w.string(&t.created_by);
+            w.no_tags();
+        });
+        // The leader hint is the structure's block of tagged fields.
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let error = ErrorCode(r.u16()?);
+        // id, name, owner, two times, created_by, no tags.
+        let tokens = r.array(8 + 2 + 2 + 8 + 8 + 2 + 1, |r| {
+            let t = TokenEntry {
+                id: r.u64()?,
+                name: r.string()?,
+                owner: r.string()?,
+                created_at_ms: r.u64()?,
+                expires_at_ms: r.u64()?,
+                created_by: r.string()?,
+            };
+            r.tags()?;
+            Ok(t)
+        })?;
+        Ok(DescribeTokensResponse { error, leader_hint: get_hint(r)?, tokens })
+    }
+}
+
+/// `RevokeToken`: ends an access token by id; every node refuses it from
+/// the moment it applies the entry and ends the sessions that used it.
+/// Answered with [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeTokenRequest {
+    /// The token's id.
+    pub id: u64,
+}
+
+impl RevokeTokenRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u64(self.id);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = RevokeTokenRequest { id: r.u64()? };
+        r.tags()?;
+        Ok(req)
     }
 }
 

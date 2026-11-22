@@ -23,7 +23,7 @@ bytes = "1"
 | `transactional_id` | `None` | Needed for `begin_transaction`. One client instance per id. |
 | `producer_name` | `None` | A stable name for an idempotent producer ([ADR 0071](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0071-named-idempotent-producers.md)). |
 | `txn_timeout` | 60 s | How long a transaction may stay open before the coordinator aborts it. |
-| `credentials` | `None` | `Credentials::Scram { user, password }` or `Credentials::OAuthBearer(..)`. |
+| `credentials` | `None` | `Credentials::Scram { user, password }`, `Credentials::OAuthBearer(..)` or `Credentials::Token(text)`. |
 | `tenant` | `default` | Where created resources, transactional ids and group ids live. |
 | `zone` | none | The zone the client runs in. Fetches and offset lookups (`list_offset`) go to a replica of the partition in that zone, which serves the committed data it has and may lag the leader a little; to the leader if none is there, that replica fails, or it lags too far (ADR 0116). Everything else goes to the leader. Nodes name their zone in the cluster file ([ADR 0104](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0104-followers-serve-fetches-in-their-zone.md)). |
 
@@ -142,7 +142,7 @@ The admin calls are methods of `Client`, in `crates/lotse-client/src/admin.rs`:
 
 - Resources: `create_stream`, `create_stream_with`, `create_queue`, `create_queue_in`, `declare_exchange`, `bind`, `unbind`, `delete`, `delete_if_empty`, `create_partitions`.
 - Queues: `purge`, `requeue`, `alter_configs`, `describe_configs`.
-- Access: `set_user_password`, `delete_user`, `describe_users`, `create_tenant`, `delete_tenant`, `describe_tenants`, `alter_role_bindings`, `describe_role_bindings`, `who_am_i`, `revoke_sessions`.
+- Access: `set_user_password`, `delete_user`, `describe_users`, `create_tenant`, `delete_tenant`, `describe_tenants`, `alter_role_bindings`, `describe_role_bindings`, `who_am_i`, `revoke_sessions`, `create_token`, `describe_tokens`, `revoke_token`.
 - Cluster: `add_node`, `remove_node`, `describe_nodes`, `move_leader`, `reassign_partition`, `node_metrics`.
 
 Each is checked against the signed-in principal's roles on the broker ([ADR 0039](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0039-tenants-and-roles.md)).
@@ -161,6 +161,34 @@ let renewal = client.keep_certificate_renewed(files, lotse_client::RENEW_CHECK);
 ```
 
 The client looks at the certificate at once and then every hour, and once the window is open renews it and writes the new key, then the new chain, over the files; connections made from then on show the new certificate. A failure is tried again a minute later; `renewal.failure()` says why the last look failed, and `renewal.renewals()` how many renewals were written. Keep `renewal` and the client: dropping either stops the renewal.
+
+### Access tokens
+
+A token signs in without a password or certificate ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md), [Access tokens](../admin/access-tokens.md)). Sign in with its text:
+
+```rust,ignore
+let mut config = ClientConfig::new(vec!["broker-1:9092".into()]);
+config.credentials = Some(Credentials::Token(std::env::var("LOTSE_TOKEN")?));
+```
+
+The client acts as the token's owner, authenticates again with the same text before each session ends, and fails with the broker's refusal once the token has expired or been revoked. Its `Debug` output leaves the text out.
+
+Three calls manage tokens:
+
+```rust,ignore
+use lotse_client::Lifetime;
+
+// The secret is drawn here and only its hash is sent: `text` is the one copy.
+let made = client.create_token("ci-pipeline", None, Lifetime::Quarter).await?;
+println!("{} expires at {} ms", made.text, made.expires_at_ms);
+
+for t in client.describe_tokens(None).await? {
+    println!("{:016x} {} owner {} until {}", t.id, t.name, t.owner, t.expires_at_ms);
+}
+client.revoke_token(made.id).await?;
+```
+
+`create_token(name, owner, lifetime)` takes `None` for the caller; only a cluster admin names another owner. `Lifetime` is `Week`, `Month`, `Quarter`, `Half` or `Year` (7, 30, 90, 180 and 365 days). `describe_tokens(owner)` lists the caller's own tokens, or for a cluster admin or viewer all of them or one owner's. A client signed in with a token cannot make tokens. A create retried after a lost answer may leave a second token under a later id: list and revoke it. On a cluster below version 0.1 the calls fail with `UNSUPPORTED_VERSION`, except that listing answers nothing.
 
 ## Testing against the simulation
 

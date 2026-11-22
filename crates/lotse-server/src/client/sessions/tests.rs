@@ -15,6 +15,7 @@ fn session(p: Option<Principal>, expires_ms: u64) -> OpenSession {
         connected_ms: 10,
         credential_ms: 20,
         expires_ms,
+        token_id: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn an_entry_says_who_how_and_until_when() {
             connected_ms: 10,
             credential_ms: 20,
             expires_ms: 9_000,
+            token_id: None,
         }
     );
     assert_eq!((v[1].principal_kind, v[1].name.as_str()), (session_principal::NODE, "7"));

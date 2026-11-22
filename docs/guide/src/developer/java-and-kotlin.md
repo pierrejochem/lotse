@@ -9,7 +9,7 @@ The Java client is in `sdk/java` (Java 17, Gradle). It follows `lotse-client` ru
 | `dev.lotse.proto` | Field codec, frames, every client-facing request and response, error codes. |
 | `dev.lotse.record` | Record batch, `BatchBuilder`, in-place edits, control batches. |
 | `dev.lotse.net` | Connections, TLS 1.3 (`TlsConfig`), pipelining, pushes, session renewal. |
-| `dev.lotse.auth` | `Credentials`: SCRAM-SHA-512 and OAUTHBEARER. |
+| `dev.lotse.auth` | `Credentials`: SCRAM-SHA-512, OAUTHBEARER and access tokens; `AccessToken` (a token's text and hash) and `TokenLifetime`. |
 | `dev.lotse.client` | `LotseClient`, `QueueConsumer`, `GroupConsumer`, `Transaction` and the admin calls. |
 
 The client has no runtime dependencies. Reading and writing zstd and lz4 batches needs zstd-jni and lz4-java, which are optional; their absence is named in the error ([ADR 0061](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0061-optional-codecs-in-the-java-sdk.md)).
@@ -71,7 +71,21 @@ The example below creates a stream, writes ten messages and reads them back. It 
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`.
+The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `createToken`, `describeTokens`, `revokeToken`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`.
+
+### Access tokens
+
+A token signs a script or tool in as the user who made it ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md), [Access tokens](../admin/access-tokens.md)). `createToken(name, owner, lifetime)` draws the secret, sends only its SHA-256 and returns a `CreatedToken` whose `text()` is the only copy of the token: keep it, nobody can show it again. `owner` is `null` for yourself; only a cluster admin names someone else. `describeTokens(owner)` lists tokens without secrets, and `revokeToken(id)` ends one and the sessions it opened. Tokens need cluster version 0.1.
+
+```java
+CreatedToken t = admin.createToken("nightly-export", null, TokenLifetime.MONTH);
+LotseClient script = new LotseClient(ClientConfig.builder("10.0.0.1:9000")
+        .tls(TlsConfig.fromFiles(ca))
+        .credentials(Credentials.token(t.text()))     // LOTSE-TOKEN: acts as the owner until the token ends
+        .build());
+```
+
+A session signed in with a token cannot make tokens. `CreatedToken.toString()` and `Credentials.token(...).toString()` leave the text out.
 
 ### Renewing the client certificate
 

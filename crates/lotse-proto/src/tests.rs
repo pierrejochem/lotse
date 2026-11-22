@@ -470,3 +470,123 @@ fn the_smallest_resources_decode() {
     let resp = Response::Metadata(MetadataResponse { brokers: vec![], resources: vec![r; 7] });
     assert_eq!(decode_response(encode_response(1, &resp), ApiKey::METADATA).unwrap().1, resp);
 }
+
+#[test]
+fn token_messages_round_trip() {
+    let create = Request::CreateToken(CreateTokenRequest {
+        name: "ci".into(),
+        owner: "alice".into(),
+        lifetime: 2,
+        secret_hash: Bytes::from(vec![0xab; 32]),
+    });
+    let list_all = Request::DescribeTokens(DescribeTokensRequest { owner: None });
+    let list_one = Request::DescribeTokens(DescribeTokensRequest { owner: Some("alice".into()) });
+    let revoke = Request::RevokeToken(RevokeTokenRequest { id: u64::MAX - 1 });
+    for (i, req) in [create, list_all, list_one, revoke].into_iter().enumerate() {
+        let key = req.api_key();
+        assert!([ApiKey::CREATE_TOKEN, ApiKey::DESCRIBE_TOKENS, ApiKey::REVOKE_TOKEN].contains(&key));
+        let (header, back) = decode_request(encode_request(i as u32, &req)).unwrap();
+        assert_eq!((back, header.api_key), (req, key));
+    }
+    assert_eq!((ApiKey::CREATE_TOKEN.0, ApiKey::DESCRIBE_TOKENS.0, ApiKey::REVOKE_TOKEN.0), (66, 67, 68));
+    for key in [ApiKey::CREATE_TOKEN, ApiKey::DESCRIBE_TOKENS, ApiKey::REVOKE_TOKEN] {
+        assert!(ApiKey::SUPPORTED.iter().any(|r| r.api_key == key), "{key:?} is advertised");
+    }
+
+    let responses = [
+        (
+            ApiKey::CREATE_TOKEN,
+            Response::CreateToken(CreateTokenResponse {
+                error: ErrorCode::NONE,
+                error_msg: None,
+                leader_hint: None,
+                id: 41,
+                expires_at_ms: 1_800_000_000_000,
+            }),
+        ),
+        (
+            ApiKey::CREATE_TOKEN,
+            Response::CreateToken(CreateTokenResponse {
+                error: ErrorCode::NOT_LEADER,
+                error_msg: Some("ask the leader".into()),
+                leader_hint: Some(LeaderHint { leader: 2, term: 7 }),
+                id: 0,
+                expires_at_ms: 0,
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_TOKENS,
+            Response::DescribeTokens(DescribeTokensResponse {
+                error: ErrorCode::NONE,
+                leader_hint: Some(LeaderHint { leader: 1, term: 3 }),
+                tokens: vec![
+                    TokenEntry {
+                        id: 41,
+                        name: "ci".into(),
+                        owner: "alice".into(),
+                        created_at_ms: 1_790_000_000_000,
+                        expires_at_ms: 1_800_000_000_000,
+                        created_by: "admin".into(),
+                    },
+                    TokenEntry {
+                        id: 42,
+                        name: String::new(),
+                        owner: "bob".into(),
+                        created_at_ms: 0,
+                        expires_at_ms: u64::MAX,
+                        created_by: "bob".into(),
+                    },
+                ],
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_TOKENS,
+            Response::DescribeTokens(DescribeTokensResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                tokens: vec![],
+            }),
+        ),
+        (
+            ApiKey::REVOKE_TOKEN,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+    ];
+    for (i, (key, resp)) in responses.into_iter().enumerate() {
+        let frame = encode_response(i as u32, &resp);
+        assert_eq!(decode_response(frame, key).unwrap(), (i as u32, resp));
+    }
+}
+
+#[test]
+fn a_session_names_its_token() {
+    let entry = |mechanism, token_id| SessionEntry {
+        principal_kind: session_principal::USER,
+        name: "alice".into(),
+        groups: vec![],
+        mechanism,
+        peer: "10.0.0.7:51234".into(),
+        connected_ms: 1,
+        credential_ms: 2,
+        expires_ms: 3,
+        token_id,
+    };
+    let answer = |e: SessionEntry| {
+        Response::DescribeSessions(DescribeSessionsResponse {
+            error: ErrorCode::NONE,
+            node_id: 1,
+            now_ms: 5,
+            sessions: vec![e],
+        })
+    };
+    assert_eq!(session_mechanism::TOKEN, 4);
+    let plain = encode_response(1, &answer(entry(session_mechanism::SCRAM_SHA_512, None)));
+    let token = encode_response(1, &answer(entry(session_mechanism::TOKEN, Some(41))));
+    // Only the tag differs in size: its number, its length and a u64.
+    assert_eq!(token.len(), plain.len() + 1 + 4 + 8);
+    for (frame, e) in
+        [(plain, entry(session_mechanism::SCRAM_SHA_512, None)), (token, entry(session_mechanism::TOKEN, Some(41)))]
+    {
+        assert_eq!(decode_response(frame, ApiKey::DESCRIBE_SESSIONS).unwrap().1, answer(e));
+    }
+}

@@ -48,6 +48,11 @@ public final class Authenticator {
             client.verify(fin.authBytes().toByteArray());
             return fin.sessionLifetimeMs();
         }
+        if (credentials instanceof Credentials.Token token) {
+            // The node reads the token's text as the whole initial response.
+            byte[] text = token.text().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            return step(exchange, text).sessionLifetimeMs();
+        }
         Credentials.OAuthBearer bearer = (Credentials.OAuthBearer) credentials;
         return step(exchange, Credentials.OAuthBearer.initialResponse(bearer.token().get())).sessionLifetimeMs();
     }

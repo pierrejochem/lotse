@@ -310,6 +310,11 @@ pub trait Conn: Send + Sync + 'static {
     fn send(&self, frame: Bytes) -> impl Future<Output = io::Result<()>> + Send;
 
     /// The next frame; `Ok(None)` once the peer closed the connection cleanly.
+    ///
+    /// Cancel-safe: dropping a pending `recv` loses no data, and the next
+    /// `recv` returns the frame it would have, whole. Callers race it
+    /// against timers and signals, so every implementation must keep a
+    /// partly read frame outside the future.
     fn recv(&self) -> impl Future<Output = io::Result<Option<Bytes>>> + Send;
 
     /// Who the other end proved to be; `None` if it showed no certificate or

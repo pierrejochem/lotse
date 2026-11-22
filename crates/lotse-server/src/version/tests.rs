@@ -30,3 +30,16 @@ fn a_node_refuses_a_cluster_outside_its_window() {
     let older = v.refuses(cluster_version::of(0, 3)).expect("a skipped release");
     assert!(older.contains("skipped") && older.contains("0.4"), "{older}");
 }
+
+#[test]
+fn the_token_format_waits_for_cluster_version_0_1() {
+    use crate::metadata::MetadataState;
+    let mut state = MetadataState::default();
+    assert!(!state.writes(TOKENS_SINCE), "no cluster version yet");
+    state.cluster_version = Some(cluster_version::of(0, 0));
+    assert!(!state.writes(TOKENS_SINCE), "the previous release's version");
+    state.cluster_version = Some(cluster_version::of(0, 1));
+    assert!(state.writes(TOKENS_SINCE));
+    assert_eq!(OLDEST_CLUSTER_VERSION, cluster_version::of(0, 0));
+    assert_eq!(CLUSTER_VERSION, cluster_version::of(0, 1));
+}

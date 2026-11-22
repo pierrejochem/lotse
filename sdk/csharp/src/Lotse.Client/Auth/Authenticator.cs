@@ -60,6 +60,13 @@ public static class Authenticator
             client.Verify(final.AuthBytes.ToByteArray());
             return final.SessionLifetimeMs;
         }
+        if (credentials is Credentials.TokenLogin login)
+        {
+            // The node reads the token's text as the whole initial response.
+            Response.SaslAuthenticate signedIn =
+                await StepAsync(exchange, Encoding.UTF8.GetBytes(login.Text)).ConfigureAwait(false);
+            return signedIn.SessionLifetimeMs;
+        }
         var bearer = (Credentials.OAuthBearerLogin)credentials;
         string token = await bearer.Token(cancellationToken).ConfigureAwait(false);
         Response.SaslAuthenticate done =

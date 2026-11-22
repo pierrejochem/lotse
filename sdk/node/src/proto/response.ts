@@ -205,6 +205,25 @@ export interface DescribeUpgradeResponse {
   /** Every node of the cluster, by id. */
   readonly nodes: readonly UpgradeNode[];
 }
+/** `CreateToken` (key 66): the token the metadata leader recorded (ADR 0133). */
+export interface CreateTokenResponse {
+  readonly type: "CreateToken";
+  readonly error: ErrorCodeValue;
+  /** Why, for a refusal. */
+  readonly errorMsg: string | null;
+  /** The token's id, a `u64`; 0 on a refusal. */
+  readonly id: bigint;
+  /** When the token stops being valid, ms since the Unix epoch; 0 on a refusal. */
+  readonly expiresAtMs: bigint;
+  readonly leaderHint: m.LeaderHint | null;
+}
+/** `DescribeTokens` (key 67): the access tokens the asker may see, never a secret or hash (ADR 0133). */
+export interface DescribeTokensResponse {
+  readonly type: "DescribeTokens";
+  readonly error: ErrorCodeValue;
+  readonly leaderHint: m.LeaderHint | null;
+  readonly tokens: readonly m.TokenEntry[];
+}
 /** `DescribeSessions` (key 59): a node's open client sessions, oldest first (ADR 0121). */
 export interface DescribeSessionsResponse {
   readonly type: "DescribeSessions";
@@ -299,6 +318,8 @@ export type Response =
   | DescribeCertificatesResponse
   | DescribeSessionsResponse
   | DescribeUpgradeResponse
+  | CreateTokenResponse
+  | DescribeTokensResponse
   | RenewCertificateResponse
   | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
@@ -574,6 +595,18 @@ export function writeResponse(w: Writer, res: Response): void {
       w.array(res.nodes, (w1, n) => w1.u64(n.nodeId).string(n.release).u32(n.oldest).u32(n.newest));
       m.putHint(w, res.leaderHint);
       return;
+    case "CreateToken":
+      w.u16(res.error).optString(res.errorMsg).u64(res.id).u64(res.expiresAtMs);
+      m.putHint(w, res.leaderHint);
+      return;
+    case "DescribeTokens":
+      w.u16(res.error);
+      w.array(res.tokens, (w1, t) => {
+        w1.u64(t.id).string(t.name).string(t.owner).u64(t.createdAtMs).u64(t.expiresAtMs).string(t.createdBy);
+        w1.noTags();
+      });
+      m.putHint(w, res.leaderHint);
+      return;
     case "DescribeSessions":
       w.u16(res.error).u32(res.nodeId).u64(res.nowMs);
       w.array(res.sessions, (w1, s) => {
@@ -581,7 +614,11 @@ export function writeResponse(w: Writer, res: Response): void {
         w1.array(s.groups, (w2, g) => w2.string(g));
         w1.u8(s.mechanism).string(s.peer);
         w1.u64(s.connectedMs).u64(s.credentialMs).u64(s.expiresMs);
-        w1.noTags();
+        if (s.tokenId === undefined) {
+          w1.noTags();
+        } else {
+          w1.tags([{ tag: m.TAG_SESSION_TOKEN_ID, value: new Writer().u64(s.tokenId).toBytes() }]);
+        }
       });
       w.noTags();
       return;
@@ -827,6 +864,7 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.RECORD_CERTIFICATE:
     case ApiKey.CREATE_PARTITIONS:
     case ApiKey.ALTER_UPGRADE:
+    case ApiKey.REVOKE_TOKEN:
       return { type: "Admin", error: r.u16(), errorMsg: r.optString(), leaderHint: m.getHint(r) };
     case ApiKey.DESCRIBE_NODES: {
       const error = r.u16();
@@ -909,6 +947,30 @@ export function readResponse(apiKey: number, r: Reader): Response {
       const nodes = r.array(17, (r1) => ({ nodeId: r1.u64(), release: r1.string(), oldest: r1.u32(), newest: r1.u32() }));
       return { type: "DescribeUpgrade", error, leaderHint: m.getHint(r), clusterVersion, held, turn, nodes };
     }
+    case ApiKey.CREATE_TOKEN: {
+      const error = r.u16();
+      const errorMsg = r.optString();
+      const id = r.u64();
+      const expiresAtMs = r.u64();
+      return { type: "CreateToken", error, errorMsg, id, expiresAtMs, leaderHint: m.getHint(r) };
+    }
+    case ApiKey.DESCRIBE_TOKENS: {
+      const error = r.u16();
+      // id, name, owner, two times, created by, no tags.
+      const tokens = r.array(8 + 2 + 2 + 8 + 8 + 2 + 1, (r1) => {
+        const t = {
+          id: r1.u64(),
+          name: r1.string(),
+          owner: r1.string(),
+          createdAtMs: r1.u64(),
+          expiresAtMs: r1.u64(),
+          createdBy: r1.string(),
+        };
+        r1.tags();
+        return t;
+      });
+      return { type: "DescribeTokens", error, leaderHint: m.getHint(r), tokens };
+    }
     case ApiKey.DESCRIBE_SESSIONS: {
       const error = r.u16();
       const nodeId = r.u32();
@@ -925,8 +987,15 @@ export function readResponse(apiKey: number, r: Reader): Response {
           credentialMs: r1.u64(),
           expiresMs: r1.u64(),
         };
-        r1.tags();
-        return s;
+        let tokenId: bigint | undefined;
+        for (const t of r1.tags()) {
+          if (t.tag === m.TAG_SESSION_TOKEN_ID) {
+            const vr = new Reader(t.value);
+            tokenId = vr.u64();
+            vr.finish();
+          } // any other tag is from a newer version: skipped
+        }
+        return tokenId === undefined ? s : { ...s, tokenId };
       });
       r.tags();
       return { type: "DescribeSessions", error, nodeId, nowMs, sessions };

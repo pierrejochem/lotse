@@ -62,6 +62,10 @@ export async function authenticate(
     client.verify(fin.authBytes);
     return fin.sessionLifetimeMs;
   }
+  if (credentials.type === "TOKEN") {
+    // The node reads the token's text as the whole initial response.
+    return (await step(exchange, Buffer.from(credentials.text, "utf8"))).sessionLifetimeMs;
+  }
   const token = await credentials.token();
   return (await step(exchange, oauthBearerInitialResponse(token))).sessionLifetimeMs;
 }

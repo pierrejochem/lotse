@@ -36,6 +36,10 @@ pub const CLUSTER_VERSION: u32 = cluster_version::of(MAJOR, MINOR);
 pub const OLDEST_CLUSTER_VERSION: u32 =
     if MINOR == 0 { CLUSTER_VERSION } else { cluster_version::of(MAJOR, MINOR - 1) };
 
+/// The cluster version that introduced access tokens: they are written only
+/// while the cluster version in force is at least this (ADR 0127).
+pub const TOKENS_SINCE: u32 = cluster_version::of(0, 1);
+
 // The window of ADR 0127: one minor release back, never more. A release
 // whose window is wrong does not build.
 const _: () = assert!(

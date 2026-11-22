@@ -133,6 +133,12 @@ public record ApiKey(int id) {
     public static final ApiKey ALTER_UPGRADE = new ApiKey(64);
     /** Where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
     public static final ApiKey DESCRIBE_UPGRADE = new ApiKey(65);
+    /** Records an access token whose secret the client drew; only its hash is sent (ADR 0133). */
+    public static final ApiKey CREATE_TOKEN = new ApiKey(66);
+    /** Lists access tokens, never their secrets (ADR 0133). */
+    public static final ApiKey DESCRIBE_TOKENS = new ApiKey(67);
+    /** Revokes an access token: its sessions end on every node (ADR 0133). */
+    public static final ApiKey REVOKE_TOKEN = new ApiKey(68);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -164,7 +170,8 @@ public record ApiKey(int id) {
             range(CREATE_PARTITIONS), range(REVOKE_CERTIFICATE), range(DESCRIBE_CERTIFICATES),
             range(RECORD_CERTIFICATES), range(REQUEST_CERTIFICATE), range(DESCRIBE_CERTIFICATE_REQUESTS),
             range(RECORD_CERTIFICATE), range(REASSIGN_PARTITION), range(DESCRIBE_SESSIONS), range(RENEW_CERTIFICATE),
-            range(ALTER_UPGRADE), range(DESCRIBE_UPGRADE), range(PUBLISH));
+            range(ALTER_UPGRADE), range(DESCRIBE_UPGRADE), range(CREATE_TOKEN), range(DESCRIBE_TOKENS),
+            range(REVOKE_TOKEN), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

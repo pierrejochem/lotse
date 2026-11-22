@@ -207,6 +207,7 @@ Every call takes a `CancellationToken` and follows `lotse-client` and the Java S
 | `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync` | A tenant that holds resources is not deleted. Describe lists the tenants the client has a role in. |
 | `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync` | Removals are applied before additions. A principal does not see resources outside its binding's prefix: they are `UnknownStreamException` to it, not a refusal. |
 | `RevokeSessionsAsync(subject, group)` | Ends the subject's sessions that began before now (ADR 0070). A SCRAM user who still has the password logs in again. Cluster admin. |
+| `CreateTokenAsync(name, owner, lifetime)`, `DescribeTokensAsync(owner)`, `RevokeTokenAsync(id)` | Access tokens (ADR 0133). The secret is drawn with `RandomNumberGenerator` and only its SHA-256 is sent; `CreatedToken.Text` is the only copy. `owner` `null` is the caller; only a cluster admin names another. Sign in with `Credentials.Token(text)` (`LOTSE-TOKEN`); such a session cannot make tokens. |
 | `RequestCertificateAsync`, `DescribeCertificateRequestsAsync`, `RecordCertificateAsync` | Certificate requests (ADR 0092): ask with a PKCS#10 signing request, list the requests with their state (`CertificateRequestState.Pending`, `Signed`, `Expired`), and record the certificate the CA holder signed. Cluster admin. |
 | `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync` | ADR 0048. |
 | `MoveLeaderAsync(name, partition, node)` | Pins a leader to a voter; `null` unpins (ADR 0065). Cluster admin. |

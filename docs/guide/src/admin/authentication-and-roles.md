@@ -2,13 +2,14 @@
 
 ## Ways in
 
-A client signs in in one of three ways ([ADR 0038](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0038-authentication.md)). Each can be switched off in `[auth]`.
+A client signs in in one of four ways ([ADR 0038](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0038-authentication.md)). Each can be switched off in `[auth]`.
 
 | Way | Key | How the principal is named |
 | --- | --- | --- |
 | Client certificate | `mtls` | The certificate's common name. |
 | SASL SCRAM-SHA-512 | `scram` | The user name. Users and passwords are set at runtime. |
 | SASL OAUTHBEARER | `[auth.oidc]` | The token's `principal_claim` (default `sub`). |
+| SASL LOTSE-TOKEN | `tokens` | The owner of the access token, with no IdP groups. |
 
 With `auth.required = true`, the default, a connection may send nothing but `ApiVersions` until it has authenticated. With `required = false`, clients act as anonymous and may do everything; this needs `plaintext_on_loopback` and is for trying Lotse on one machine.
 
@@ -32,6 +33,10 @@ Set `[auth.oidc]` with the `issuer` and the `audience`. A node fetches the issue
 - carry the principal in `principal_claim`.
 
 The groups in `groups_claim` (default `groups`) go with the principal for authorization. A token with an unknown key id makes a node fetch the key set again, at most every 30 s.
+
+### Access tokens
+
+A user makes an access token for themselves, and a cluster admin for anyone. It signs in as its owner for 7 days to a year, and can be listed and revoked. See [Access tokens](access-tokens.md).
 
 ### Sessions
 
