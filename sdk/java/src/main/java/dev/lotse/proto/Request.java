@@ -1473,6 +1473,88 @@ public sealed interface Request {
     }
 
     /**
+     * {@code CreateToken} (66): records an access token (ADR 0133). The client draws the secret and sends only its
+     * SHA-256, so no node ever sees it. Answered with {@link Response.CreateToken}.
+     *
+     * @param name a label for the owner's own use, 1 to 64 bytes
+     * @param owner the user the token acts as; empty for the caller (only a cluster admin names someone else)
+     * @param lifetime the lifetime's code, a {@code u8}: 1 is 7 days, 2 is 30, 3 is 90, 4 is 180, 5 is 365
+     * @param secretHash SHA-256 of the 32 secret bytes; the node checks that it is 32 bytes, the codec does not
+     */
+    record CreateToken(String name, String owner, int lifetime, ByteString secretHash) implements Request {
+        /** Creates the request. */
+        public CreateToken {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(owner, "owner");
+            Objects.requireNonNull(secretHash, "secretHash");
+        }
+
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.CREATE_TOKEN;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.string(name).string(owner).u8(lifetime).bytes(secretHash).noTags();
+        }
+
+        static CreateToken read(Reader r) {
+            CreateToken x = new CreateToken(r.string(), r.string(), r.u8(), r.bytes());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
+     * {@code DescribeTokens} (67): lists access tokens, never their secrets (ADR 0133). A user sees their own; a
+     * cluster admin or viewer sees all. Answered with {@link Response.DescribeTokens}.
+     *
+     * @param owner only this owner's tokens, or {@code null} for all the asker may see
+     */
+    record DescribeTokens(String owner) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_TOKENS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.optString(owner).noTags();
+        }
+
+        static DescribeTokens read(Reader r) {
+            DescribeTokens x = new DescribeTokens(r.optString());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
+     * {@code RevokeToken} (68): ends an access token by id (ADR 0133); every node ends the sessions it opened.
+     * Answered with {@link Response.Admin}.
+     *
+     * @param id the token's id, a {@code u64}
+     */
+    record RevokeToken(long id) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.REVOKE_TOKEN;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u64(id).noTags();
+        }
+
+        static RevokeToken read(Reader r) {
+            RevokeToken x = new RevokeToken(r.u64());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code RequestCertificate} (55): asks the CA holder for a client certificate (cluster admin, ADR 0092). The
      * request's id is the SHA-256 of {@code csr}, so the same request twice is one request. Answered with
      * {@link Response.Admin}.
