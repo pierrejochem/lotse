@@ -90,6 +90,8 @@ impl Listen {
                  <file> --tls-key <file> to serve HTTPS"
             ));
         }
+        // A browser's Origin has no spaces around it.
+        let allow_origins = allow_origins.iter().map(|o| o.trim().to_string()).collect();
         Ok(Listen { addr, tls, allow_origins })
     }
 }
@@ -101,6 +103,7 @@ impl Listen {
     pub fn warnings(&self) -> Vec<String> {
         self.allow_origins
             .iter()
+            .map(|o| o.trim())
             .filter(|o| match o.split_once("://") {
                 Some((scheme, rest)) => scheme.is_empty() || rest.is_empty() || rest.contains('/'),
                 None => true,

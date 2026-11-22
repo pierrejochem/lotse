@@ -53,3 +53,19 @@ fn origins_that_can_never_match_are_warned_about() {
         assert!(warnings.iter().any(|w| w.contains(bad) && w.contains("never match")), "{bad}: {warnings:?}");
     }
 }
+
+#[test]
+fn origins_are_taken_trimmed() {
+    let l = Listen::new(
+        "127.0.0.1:1".into(),
+        None,
+        None,
+        vec![" https://a.example ".into(), " https://b.example/ ".into()],
+        false,
+    )
+    .unwrap();
+    assert_eq!(l.allow_origins, ["https://a.example", "https://b.example/"]);
+    let warnings = l.warnings();
+    assert_eq!(warnings.len(), 1, "only the one with a path: {warnings:?}");
+    assert!(warnings[0].contains("https://b.example/"));
+}

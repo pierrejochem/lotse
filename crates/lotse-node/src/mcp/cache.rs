@@ -41,8 +41,9 @@ pub const MAX_PENDING: usize = 256;
 /// opens a TLS connection and, for a password, computes a SCRAM proof.
 pub const MAX_SIGN_INS: usize = 32;
 
-/// How long a sign-in waits for its turn before the request is refused as
-/// busy. Long enough to ride out a burst of real agents (a sign-in takes
+/// How long a request waits for its turn to sign in, in all (behind
+/// another request for the same credential and for a permit), before it is
+/// refused as busy. Long enough to ride out a burst of real agents (a sign-in takes
 /// milliseconds, 32 run at once), short enough that a flood of made-up
 /// credentials gets a quick 503 instead of piling up open requests.
 pub const SIGN_IN_WAIT: Duration = Duration::from_secs(5);
@@ -245,6 +246,20 @@ async fn still_signed_in(client: &Client<TokioRuntime>) -> Result<(), SignInErro
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Busy;
 
+/// Where a request stands once it has waited.
+enum Turn<T> {
+    /// The key has a value.
+    Held(Arc<T>),
+    /// Too many keys wait already.
+    Busy,
+    /// This request makes the value, holding the key's gate and a permit.
+    Make {
+        gate: Arc<tokio::sync::Mutex<()>>,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    },
+}
+
 /// The cache's bounds; tests use smaller ones.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
@@ -254,7 +269,7 @@ pub(crate) struct Limits {
     pub(crate) pending: usize,
     /// Sign-ins running at once.
     pub(crate) signing: usize,
-    /// How long a sign-in waits for its turn.
+    /// How long a request waits for its turn in all.
     pub(crate) wait: Duration,
 }
 
@@ -298,16 +313,59 @@ impl<T> Cache<T> {
     /// for it gets its value. A failed `make` holds nothing, and the next
     /// waiter makes its own. The flag says whether the value was just made.
     ///
-    /// A key without a value waits for one of [`Limits::signing`] turns, at
-    /// most [`Limits::wait`], and only [`Limits::pending`] keys may wait or
-    /// make at once; otherwise the answer is [`Busy`]. Only held values are
-    /// evicted to make room, so made-up keys never push out a working one.
+    /// A key without a value waits for its turn, behind the request
+    /// already signing in for it and for one of [`Limits::signing`] permits,
+    /// at most [`Limits::wait`] in all for the request, and only
+    /// [`Limits::pending`] keys may wait or make at once; otherwise the
+    /// answer is [`Busy`]. Only held values are evicted to make room, so
+    /// made-up keys never push out a working one.
     pub(crate) async fn get_or_insert<E, F, Fut>(&self, key: CredentialKey, make: F) -> Result<(Arc<T>, bool), E>
     where
         E: From<Busy>,
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
+        // One deadline for the whole wait (the key's gate and a permit), not
+        // one per attempt: a waiter that starts over after the attempt
+        // before it failed still answers within one bound.
+        let turn = match tokio::time::timeout(self.limits.wait, self.turn(key)).await {
+            Ok(t) => t,
+            Err(_) => {
+                self.abandon(&key);
+                return Err(Busy.into());
+            }
+        };
+        let (gate, _guard, _permit) = match turn {
+            Turn::Held(v) => return Ok((v, false)),
+            Turn::Busy => return Err(Busy.into()),
+            Turn::Make { gate, guard, permit } => (gate, guard, permit),
+        };
+        let made = make().await;
+        let mut entries = self.lock();
+        let ours = entries.get_mut(&key).filter(|e| Arc::ptr_eq(&e.gate, &gate));
+        match made {
+            Ok(v) => {
+                let v = Arc::new(v);
+                // An entry evicted meanwhile is not put back.
+                if let Some(e) = ours {
+                    e.value = Some(v.clone());
+                    e.used = (self.now)();
+                    evict(&mut entries, key, self.limits.held);
+                }
+                Ok((v, true))
+            }
+            Err(err) => {
+                if ours.is_some() {
+                    entries.remove(&key);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Waits until `key` has a value, or this request holds the key's gate
+    /// and a permit to make one.
+    async fn turn(&self, key: CredentialKey) -> Turn<T> {
         loop {
             let gate = {
                 let mut entries = self.lock();
@@ -317,13 +375,13 @@ impl<T> Cache<T> {
                     Some(e) => {
                         e.used = now;
                         if let Some(v) = &e.value {
-                            return Ok((v.clone(), false));
+                            return Turn::Held(v.clone());
                         }
                         e.gate.clone()
                     }
                     None => {
                         if entries.values().filter(|e| e.value.is_none()).count() >= self.limits.pending {
-                            return Err(Busy.into());
+                            return Turn::Busy;
                         }
                         let gate = Arc::new(tokio::sync::Mutex::new(()));
                         entries.insert(key, Entry { gate: gate.clone(), value: None, used: now });
@@ -331,48 +389,30 @@ impl<T> Cache<T> {
                     }
                 }
             };
-            let _turn = gate.lock().await;
+            let guard = gate.clone().lock_owned().await;
             {
                 let entries = self.lock();
                 match entries.get(&key) {
                     // Made while this request waited.
                     Some(e) if Arc::ptr_eq(&e.gate, &gate) && e.value.is_some() => {
-                        return Ok((e.value.clone().expect("checked"), false));
+                        return Turn::Held(e.value.clone().expect("checked"));
                     }
                     Some(e) if Arc::ptr_eq(&e.gate, &gate) => {}
                     // The one before failed, or the entry went: start over.
                     _ => continue,
                 }
             }
-            let permit = tokio::time::timeout(self.limits.wait, self.signing.clone().acquire_owned()).await;
-            let Ok(Ok(_permit)) = permit else {
-                let mut entries = self.lock();
-                if entries.get(&key).is_some_and(|e| Arc::ptr_eq(&e.gate, &gate) && e.value.is_none()) {
-                    entries.remove(&key);
-                }
-                return Err(Busy.into());
-            };
-            let made = make().await;
-            let mut entries = self.lock();
-            let ours = entries.get_mut(&key).filter(|e| Arc::ptr_eq(&e.gate, &gate));
-            return match made {
-                Ok(v) => {
-                    let v = Arc::new(v);
-                    // An entry evicted meanwhile is not put back.
-                    if let Some(e) = ours {
-                        e.value = Some(v.clone());
-                        e.used = (self.now)();
-                        evict(&mut entries, key, self.limits.held);
-                    }
-                    Ok((v, true))
-                }
-                Err(err) => {
-                    if ours.is_some() {
-                        entries.remove(&key);
-                    }
-                    Err(err)
-                }
-            };
+            let permit = self.signing.clone().acquire_owned().await.expect("the semaphore is never closed");
+            return Turn::Make { gate, guard, permit };
+        }
+    }
+
+    /// A request ran out of time: its key's pending entry goes unless
+    /// another request holds the gate, which then cleans up after itself.
+    fn abandon(&self, key: &CredentialKey) {
+        let mut entries = self.lock();
+        if entries.get(key).is_some_and(|e| e.value.is_none() && e.gate.try_lock().is_ok()) {
+            entries.remove(key);
         }
     }
 
