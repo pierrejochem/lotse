@@ -67,6 +67,12 @@ export const ApiKey = {
   ALTER_UPGRADE: 64,
   /** Where a rolling upgrade stands (cluster admin or viewer, ADR 0127). */
   DESCRIBE_UPGRADE: 65,
+  /** Records an access token whose secret the client drew; only its hash is sent (ADR 0133). */
+  CREATE_TOKEN: 66,
+  /** Lists access tokens, never their secrets (ADR 0133). */
+  DESCRIBE_TOKENS: 67,
+  /** Revokes an access token: its sessions end on every node (ADR 0133). */
+  REVOKE_TOKEN: 68,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -130,6 +136,9 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.RENEW_CERTIFICATE,
   ApiKey.ALTER_UPGRADE,
   ApiKey.DESCRIBE_UPGRADE,
+  ApiKey.CREATE_TOKEN,
+  ApiKey.DESCRIBE_TOKENS,
+  ApiKey.REVOKE_TOKEN,
   ApiKey.PUBLISH,
 ];
 

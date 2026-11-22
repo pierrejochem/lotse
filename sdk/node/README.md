@@ -11,7 +11,7 @@ Phase 7 of 8 is done: the examples, on top of the admin calls, transactions, pub
 | `src/proto` | Field codec (`Reader`, `Writer`), frames and pushes, every client request and response, one codec per message, error codes |
 | `src/record` | Record batch: parse, build, in-place edits (`stamp`, `setProducer`, `setTransactional`, `setBaseTimestamp`), control batches, CRC32C, varints |
 | `src/net` | `Connection` (TLS 1.3 or plain TCP on loopback, pipelining, pushes, session state), `ConnectionPool`, `TlsConfig`, `Address`, errors |
-| `src/auth` | `ScramClient` (SCRAM-SHA-512), `ScramCredential` (the `AlterUser` credential), OAUTHBEARER messages, `authenticate` |
+| `src/auth` | `ScramClient` (SCRAM-SHA-512), `ScramCredential` (the `AlterUser` credential), OAUTHBEARER messages, `AccessToken` and `TokenLifetime` (access tokens), `authenticate` |
 | `src/client` | `LotseClient`: metadata routing with leader hints, idempotent `produce`, read_committed `fetch`, `listOffset`, `createStream`, `createQueue`, `readRecords`, `subscribe`, `beginTransaction`, `publish`, `declareExchange`, `bind`, `unbind`, `joinGroup`, the admin calls (see "Administration"); `Transaction`, `GroupConsumer`, `QueueConsumer`, `Delivery`, `QueueOptions`, `SubscribeOptions`, `GroupConfig`, `Fetched`, `OffsetAt`, `OutMessage`, `Published`, `NodeMetrics`, the errors; the client-side exchange routing (`exchange.ts`) |
 
 ## Connections
@@ -201,7 +201,7 @@ Every call takes `{ signal }` last, as the stream calls do, and follows `lotse-c
 
 ## Authentication
 
-`scramCredentials(user, password)` and `oauthBearerCredentials(() => token)` (the function is called for every authentication, renewals included, and may be async). A client certificate is part of `TlsConfig`.
+`scramCredentials(user, password)`, `oauthBearerCredentials(() => token)` (the function is called for every authentication, renewals included, and may be async) and `tokenCredentials(text)` for an access token (ADR 0133; `createToken`, `describeTokens` and `revokeToken` manage them). A client certificate is part of `TlsConfig`.
 
 SCRAM-SHA-512 follows RFC 5802 and RFC 7677 with the particulars in [`../PROTOCOL.md`](../PROTOCOL.md): the password is its UTF-8 bytes with no SASLprep, the server nonce must strictly extend the client's, iteration counts outside 4096 to 1 048 576 are refused, and the server's final signature is always verified; a node that cannot prove it knows the credential is refused with `ScramError` of kind `SERVER_NOT_VERIFIED`. PBKDF2 runs off the event loop. A wrong password and an unknown user are refused alike by the node (`AUTHENTICATION_FAILED`), and the node closes the connection.
 

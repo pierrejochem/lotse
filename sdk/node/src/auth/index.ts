@@ -1,3 +1,5 @@
+export { AccessToken } from "./access-token.js";
+export { TokenLifetime, tokenLifetimeDays } from "./token-lifetime.js";
 export { authenticate, type Exchange, makeNonce } from "./authenticator.js";
 export {
   type Credentials,
@@ -9,6 +11,9 @@ export {
   SCRAM_MECHANISM,
   type ScramCredentials,
   scramCredentials,
+  TOKEN_MECHANISM,
+  type TokenCredentials,
+  tokenCredentials,
 } from "./credentials.js";
 export { AuthenticationError, ScramError, type ScramErrorKind } from "./errors.js";
 export { MAX_ITERATIONS, MIN_ITERATIONS, ScramClient } from "./scram-client.js";
