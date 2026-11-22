@@ -18,6 +18,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lotse-sim.workspace = true
+rcgen.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true

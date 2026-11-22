@@ -34,7 +34,7 @@ fn the_newest_resource_of_a_name_wins() {
 }
 
 /// A scripted broker: answers each request with what `script` returns.
-fn serve(
+pub(crate) fn serve(
     rt: &lotse_sim::SimRuntime,
     host: &str,
     script: impl Fn(&lotse_proto::Request) -> lotse_proto::Response + Send + Sync + 'static,
@@ -61,7 +61,7 @@ fn serve(
     }));
 }
 
-fn brokers(ids: &[(u32, &str)]) -> Vec<lotse_proto::Broker> {
+pub(crate) fn brokers(ids: &[(u32, &str)]) -> Vec<lotse_proto::Broker> {
     ids.iter()
         .map(|(id, host)| lotse_proto::Broker { node_id: *id, host: (*host).into(), port: 9000, rack: String::new() })
         .collect()

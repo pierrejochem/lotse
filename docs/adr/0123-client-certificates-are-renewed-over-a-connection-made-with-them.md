@@ -41,7 +41,7 @@ The certificate a connection showed already proves who the client is. A renewal 
   - Every client has a call that makes a new P-256 key, renews, and returns the key and chain. A second form writes them over the certificate and key files: the key first, each through a file beside it moved into place whole.
   - The Java, Kotlin, C# and Node.js clients can renew by themselves. Given the files, the client looks at the certificate at start and every hour (configurable), and renews once the window opens. A failure is tried again a minute later and is reported by the client.
   - TLS configured from files reads them again for the next connection once either file changed. It takes the pair only when the key matches the certificate, so a connection made between the two writes keeps the old pair.
-  - The Rust client has `renew_certificate_if_due`, and `lotse certs --renew [--if-due] --cert <file> --key <file>` renews from the command line. With `--if-due` it does nothing before the window, for a timer to run daily.
+  - The Rust client renews by itself too, through a certificate store on the runtime seam ([ADR 0132](0132-the-rust-client-renews-its-certificate-through-a-store-on-the-runtime-seam.md)). It also has `renew_certificate_if_due`, and `lotse certs --renew [--if-due] --cert <file> --key <file>` renews from the command line. With `--if-due` it does nothing before the window, for a timer to run daily.
 
 Rejected options:
 
