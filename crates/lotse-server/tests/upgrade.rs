@@ -402,3 +402,44 @@ async fn restarts_at_new_addresses(rt: SimRuntime) {
 fn a_rolling_restart_survives_old_connections_that_vanish() {
     check_few_seeds(3, |seed| Sim::new(seed).run(restarts_at_new_addresses));
 }
+
+/// While the cluster has no version, a node reports again at most once a
+/// second, not in every round of its loop: here node 3 never starts, so the
+/// version never comes. Reporting in every round sent thousands of requests
+/// per simulated minute and made the queue simulation take twice as long.
+async fn reports_wait_while_a_node_stays_away(rt: SimRuntime) {
+    let hosts: BTreeMap<NodeId, SimRuntime> = (1..=NODES).map(|i| (i, rt.node(&format!("n{i}")))).collect();
+    let cluster = Arc::new(Cluster { hosts, running: Mutex::new(BTreeMap::new()), down_for_upgrade: Mutex::default() });
+    cluster.start(1, old()).await;
+    cluster.start(2, old()).await;
+    let client = Client::new(rt.node("c1"), client_config());
+    until!(rt, "nodes 1 and 2 have reported", Duration::from_secs(30), {
+        client
+            .describe_upgrade()
+            .await
+            .ok()
+            .filter(|u| u.nodes.iter().filter(|n| !n.release.is_empty()).count() == 2)
+            .map(|_| ())
+    });
+    // What clients, the nodes' own among them, sent the two nodes.
+    let received = || async {
+        let nodes = client.node_metrics().await.ok()?;
+        Some(nodes.into_iter().filter_map(|(_, m)| m.ok()).map(|m| m.client_in_bytes).sum::<u64>())
+    };
+    let start = received().await.expect("the nodes' metrics");
+    rt.sleep(Duration::from_secs(30)).await;
+    let end = received().await.expect("the nodes' metrics");
+    let u = client.describe_upgrade().await.expect("the upgrade state");
+    assert_eq!(u.cluster_version, None, "node 3 never reported");
+    // About a hundred bytes a report, two nodes, one report a second each,
+    // and the metrics asked for here: some kilobytes. In every round it was
+    // over 200 KB.
+    assert!(end - start <= 20_000, "{} bytes sent to the nodes in 30 s", end - start);
+    cluster.kill(1).await;
+    cluster.kill(2).await;
+}
+
+#[test]
+fn version_reports_wait_while_a_node_stays_away() {
+    check_few_seeds(3, |seed| Sim::new(seed).run(reports_wait_while_a_node_stays_away));
+}
