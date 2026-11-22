@@ -1025,7 +1025,9 @@ dependencies = [
  "lotse-route",
  "lotse-rt",
  "lotse-sim",
+ "rcgen",
  "thiserror",
+ "time",
 ]
 
 [[package]]

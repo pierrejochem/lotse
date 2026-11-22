@@ -15,7 +15,7 @@ None known. Report one as an issue.
 ### Not built yet
 
 - **Raft:** followers serve `Fetch` and `ListOffsets` in a client's zone and stop when they lag (ADR 0104, ADR 0116); committed offsets and admin reads still go to their leaders, and a reader sent to the leader returns to its zone only at its next metadata refresh.
-- **Certificates and sessions:** automatic renewal in the Rust client (it has `renew_certificate_if_due`, ADR 0123); a notice to the CA holder other than the `/metrics` gauge and the console's count; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
+- **Certificates and sessions:** a notice to the CA holder other than the `/metrics` gauge and the console's count; OCSP; revoking a node certificate other than through the CRL file; revoking a session per token (they go per user or IdP group, ADR 0070).
 - **Metadata:** a stream's partitions only go up (ADR 0074); streams from the node configuration take the node's defaults and cannot be changed at runtime, and only runtime streams can be compacted.
 - **Kubernetes:** the Helm chart (ADR 0128) runs the node list it was installed with; adding or removing nodes there is a manual procedure. Every pod mounts every node's key, and the operator endpoint is reachable only inside each pod, so Prometheus cannot scrape it. The operator that does these is proposed, not built (ADR 0129).
 - **Packages:** they are not signed: `SHA256SUMS` and a reproducible build are the checks (ADR 0126), and Alpine installs the `.apk` with `--allow-untrusted`. sysvinit runs one node per machine. There is no Arch, Nix or Homebrew package.
