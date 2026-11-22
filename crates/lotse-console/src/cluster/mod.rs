@@ -16,9 +16,9 @@ use crate::auth::Identity;
 use crate::error::ApiResult;
 use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
-    BindingRow, BindingsView, CertificateRequestsView, CertificatesView, ClusterRef, CreateQueue, Credential,
-    Isolation, MoveLeader, NodesView, Overview, PlacePartition, QueueDetail, QueueRow, RecordView, SessionsView,
-    SetReplication, StreamDetail, StreamRow, TenantsView, UsersView,
+    BindingRow, BindingsView, CertificateRequestsView, CertificatesView, ClusterRef, CreateQueue, CreateTokenBody,
+    CreatedTokenView, Credential, Isolation, MoveLeader, NodesView, Overview, PlacePartition, QueueDetail, QueueRow,
+    RecordView, SessionsView, SetReplication, StreamDetail, StreamRow, TenantsView, TokensView, UsersView,
 };
 
 /// One managed cluster.
@@ -121,6 +121,17 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Revokes the sessions of a user or an IdP group (ADR 0070).
     async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()>;
+
+    /// The access tokens the user may see: their own, or `owner`'s when the
+    /// broker lets them (ADR 0133).
+    async fn tokens(&self, who: &Identity, owner: Option<&str>) -> ApiResult<TokensView>;
+
+    /// Makes an access token as the user; the text in the answer is the
+    /// only copy there will be.
+    async fn create_token(&self, who: &Identity, req: CreateTokenBody) -> ApiResult<CreatedTokenView>;
+
+    /// Revokes an access token by id.
+    async fn revoke_token(&self, who: &Identity, id: u64) -> ApiResult<()>;
 
     /// Stops the upgrade after the node it is on: restart turns pause
     /// (ADR 0127).

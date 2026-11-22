@@ -165,6 +165,11 @@ pub fn revoke_sessions(subject: &str, group: bool) -> String {
     format!("lotse-cli session revoke {}{subject}", if group { "--group " } else { "" })
 }
 
+/// `lotse-cli token revoke <id>`.
+pub fn revoke_token(id: u64) -> String {
+    format!("lotse-cli token revoke {id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
