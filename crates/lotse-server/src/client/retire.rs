@@ -79,6 +79,11 @@ pub(super) struct Retiring {
     /// A forward job is running.
     forwarding: bool,
     retry_at: Option<Instant>,
+    /// How many messages the next forward job carries at most: halved
+    /// after the dead-letter queue refused one as full, so a queue with
+    /// room for fewer than are owed still takes what fits (ADR 0118),
+    /// doubled again after one is taken.
+    forward_max: usize,
     /// The Unix time (ms) before which the TTL scan has nothing to find.
     scan_at_ms: i64,
     /// The TTL the scan time was computed for.
@@ -93,6 +98,7 @@ impl Retiring {
             finishing: BTreeSet::new(),
             forwarding: false,
             retry_at: None,
+            forward_max: FORWARD_MESSAGES,
             scan_at_ms: 0,
             scan_ttl_ms: 0,
         }
@@ -256,8 +262,7 @@ impl Clients {
         if st.forwarding || st.retry_at.is_some_and(|t| view.now < t) {
             return Ok(());
         }
-        let owed: Vec<(u64, Owed)> =
-            q.owed().filter(|(o, _)| !st.finishing.contains(o)).take(FORWARD_MESSAGES).collect();
+        let owed: Vec<(u64, Owed)> = q.owed().filter(|(o, _)| !st.finishing.contains(o)).take(st.forward_max).collect();
         let Some(&(_, first)) = owed.first() else { return Ok(()) };
         let target = first.target;
         let floor = q.retention_floor();
@@ -321,23 +326,30 @@ impl Clients {
     }
 
     /// A forward job ended: with `ok` the dead-letter queue has the messages
-    /// committed, and the debt can be cleared.
+    /// committed, and the debt can be cleared; `full` says it refused them
+    /// as full, all or nothing, so the next job carries fewer.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forwarded<R: Runtime, S: StateMachine>(
         &mut self,
         group: GroupId,
         term: u64,
         offsets: Vec<u64>,
         ok: bool,
+        full: bool,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
         let Some(st) = self.retiring.get_mut(&group).filter(|r| r.term == term) else { return };
         st.forwarding = false;
         if !ok {
+            if full {
+                st.forward_max = (offsets.len() / 2).max(1);
+            }
             st.retry_at = Some(view.now + RETRY_AFTER);
             return;
         }
         st.retry_at = None;
+        st.forward_max = (st.forward_max * 2).min(FORWARD_MESSAGES);
         let Some(replica) = groups.get_mut(&group) else { return };
         let q = replica.queue().expect("a queue group");
         let owed_now: BTreeSet<u64> = q.owed().map(|(o, _)| o).collect();

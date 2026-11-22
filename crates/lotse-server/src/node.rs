@@ -425,6 +425,7 @@ fn report_disk<R: Runtime>(
 
 /// Tells the metadata leader this node's release and the cluster versions
 /// it runs with (ADR 0127), while the metadata state says otherwise.
+#[allow(clippy::too_many_arguments)]
 fn report_version<R: Runtime>(
     rt: &R,
     cfg: &NodeConfig,
@@ -433,7 +434,13 @@ fn report_version<R: Runtime>(
     shared: &Arc<Shared>,
     jobs: &Live,
     reporting: &Arc<std::sync::atomic::AtomicBool>,
+    last: &mut Option<lotse_rt::Instant>,
 ) {
+    // Without a metadata group there is no cluster version, and nobody to
+    // tell: a report would only fail again in the next round.
+    if cfg.metadata.is_none() {
+        return;
+    }
     let v = &cfg.versions;
     let Ok(node_id) = u32::try_from(cfg.id) else { return };
     let same = known
@@ -442,10 +449,20 @@ fn report_version<R: Runtime>(
         .get(&cfg.id)
         .is_some_and(|r| r.release == v.release && r.oldest == v.oldest && r.newest == v.newest);
     // Reported, and the cluster has its version: nothing to say. Until the
-    // cluster has one, each report may be the last one missing.
-    if same && known.state.cluster_version.is_some() || reporting.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    // cluster has one, each report may be the last one missing, so it goes
+    // again, but at most every REPORT_AGAIN: while a node stays away or the
+    // metadata leader cannot be reached, every round would otherwise add one.
+    if same && known.state.cluster_version.is_some() {
         return;
     }
+    let now = rt.now();
+    if same && last.is_some_and(|t| now.saturating_duration_since(t) < REPORT_AGAIN) {
+        return;
+    }
+    if reporting.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    *last = Some(now);
     let (client, stop, reporting, v) = (client.clone(), shared.stop.clone(), reporting.clone(), v.clone());
     jobs.spawn(rt, async move {
         let _ = race(client.report_version(node_id, &v.release, v.oldest, v.newest), &[&stop]).await;
@@ -550,6 +567,10 @@ fn report_certificates<R: Runtime>(
 /// How often each replica looks whether retention lets something go.
 const RETAIN_EVERY: Duration = Duration::from_secs(1);
 
+/// How soon a node reports versions the metadata state already has again,
+/// while the cluster has no version yet (ADR 0127).
+const REPORT_AGAIN: Duration = Duration::from_secs(1);
+
 /// What group `g` may delete: the metadata and coordinator groups hold
 /// everything in their state; a queue what is settled; a stream by age and
 /// size.
@@ -646,6 +667,8 @@ enum Command {
         term: u64,
         offsets: Vec<u64>,
         ok: bool,
+        /// The dead-letter queue refused them as full.
+        full: bool,
     },
     /// The operator's endpoint asks what the node sees of itself (ADR 0117).
     Observe {
@@ -1048,6 +1071,8 @@ async fn forward_dead_letters<R: Runtime>(
         term,
         offsets,
         ok: result.is_ok(),
+        full: matches!(&result, Err(lotse_client::ClientError::Broker { code, .. })
+            if *code == lotse_proto::ErrorCode::QUEUE_FULL),
     });
     shared.work.set();
 }
@@ -1206,6 +1231,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
     };
     let reporting_version = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut version_reported: Option<lotse_rt::Instant> = None;
     let releasing_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut next_retain = started + RETAIN_EVERY;
     // Compacted partitions take turns at the node's one sweep (ADR 0098):
@@ -1316,7 +1342,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             *shared.refused.lock().expect("refused lock") = Some(why);
             shared.stop.set();
         }
-        report_version(rt, cfg, &known, &marker_client, shared, jobs, &reporting_version);
+        report_version(rt, cfg, &known, &marker_client, shared, jobs, &reporting_version, &mut version_reported);
         if known.state.turn.is_some_and(|t| t.node == cfg.id && t.instance != instance) {
             let ready = groups.iter().all(|(g, r)| {
                 let raft = r.raft_ref();
@@ -1386,8 +1412,8 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.markers_written(&txn_id, term, &view, groups);
                     continue;
                 }
-                Command::Forwarded { group, term, offsets, ok } => {
-                    clients.forwarded(group, term, offsets, ok, &view, groups);
+                Command::Forwarded { group, term, offsets, ok, full } => {
+                    clients.forwarded(group, term, offsets, ok, full, &view, groups);
                     continue;
                 }
                 Command::Verified { key, error } => {
