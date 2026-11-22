@@ -524,7 +524,12 @@ export const SessionMechanism = {
   SCRAM_SHA_512: 2,
   /** SASL OAUTHBEARER. */
   OAUTHBEARER: 3,
+  /** An access token (`LOTSE-TOKEN`, ADR 0133); the entry names it in {@link SessionEntry.tokenId}. */
+  TOKEN: 4,
 } as const;
+
+/** The tag of {@link SessionEntry.tokenId} in a session entry's block. */
+export const TAG_SESSION_TOKEN_ID = 0;
 
 /** One open client session on a node (`DescribeSessions`, ADR 0121). */
 export interface SessionEntry {
@@ -544,6 +549,24 @@ export interface SessionEntry {
   readonly credentialMs: bigint;
   /** When the session ends unless renewed; 0 for one that lasts the connection. */
   readonly expiresMs: bigint;
+  /** The id of the access token the session signed in with; absent for every other mechanism (tag 0, ADR 0133). */
+  readonly tokenId?: bigint;
+}
+
+/** One access token in `DescribeTokens` (ADR 0133): only what describes it, never a secret or hash. */
+export interface TokenEntry {
+  /** The token's id, a `u64`. */
+  readonly id: bigint;
+  /** Its label. */
+  readonly name: string;
+  /** The user it acts as. */
+  readonly owner: string;
+  /** When it was created, ms since the Unix epoch. */
+  readonly createdAtMs: bigint;
+  /** When it stops being valid, ms since the Unix epoch. */
+  readonly expiresAtMs: bigint;
+  /** Who created it. */
+  readonly createdBy: string;
 }
 
 /** One client certificate in the inventory (`DescribeCertificates`). */

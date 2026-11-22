@@ -18,7 +18,7 @@ LOTSE_BIN=/path/to/lotse make sdk-node-test          # adds the TLS and real-nod
 | `src/proto` | Field codec, frames, every client-facing request and response, error codes. |
 | `src/record` | Record batch: parse, build, in-place edits, control batches, CRC32C, varints, the codecs. |
 | `src/net` | `Connection`, `ConnectionPool`, `TlsConfig`, `Address`, the errors. |
-| `src/auth` | `scramCredentials`, `oauthBearerCredentials`, `ScramCredential`. |
+| `src/auth` | `scramCredentials`, `oauthBearerCredentials`, `tokenCredentials`, `ScramCredential`, `AccessToken` (a token's text and hash) and `TokenLifetime`. |
 | `src/client` | `LotseClient`, `QueueConsumer`, `GroupConsumer`, `Transaction` and the admin calls. |
 
 Values of 64 bits are `bigint`. A `u64` is held as its signed 64-bit bit pattern, as in Java, so "no offset" is `-1n`. Compare, add and print such values with `compareU64`, `addU64Exact` and `u64ToString`, not with `<` or `String`.
@@ -126,7 +126,22 @@ await group.close();                          // commits the positions and leave
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call rejects with `ResourceExistsError` and the id.
+The admin calls are methods of `LotseClient`: `delete`, `deleteIfEmpty`, `purge`, `requeue`, `alterConfigs`, `describeConfigs`, `setUserPassword`, `deleteUser`, `describeUsers`, `createTenant`, `deleteTenant`, `describeTenants`, `alterRoleBindings`, `describeRoleBindings`, `whoAmI`, `revokeSessions`, `createToken`, `describeTokens`, `revokeToken`, `addNode`, `removeNode`, `describeNodes`, `moveLeader`, `reassignPartition`, `createPartitions` and `nodeMetrics`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call rejects with `ResourceExistsError` and the id.
+
+### Access tokens
+
+A token signs a script or tool in as the user who made it ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md), [Access tokens](../admin/access-tokens.md)). `createToken(name, owner, lifetime)` draws the secret, sends only its SHA-256 and returns a `CreatedToken` whose `text()` is the only copy of the token: keep it, nobody can show it again. `owner` is `null` for yourself; only a cluster admin names someone else. `describeTokens(owner)` lists tokens without secrets, and `revokeToken(id)` ends one and the sessions it opened.
+
+```ts
+const t = await admin.createToken("nightly-export", null, TokenLifetime.MONTH);
+const script = new LotseClient({
+  bootstrap: ["10.0.0.1:9000"],
+  tls: await TlsConfig.fromFiles("ca.pem"),
+  credentials: tokenCredentials(t.text()), // LOTSE-TOKEN: acts as the owner until the token ends
+});
+```
+
+A session signed in with a token cannot make tokens. `CreatedToken` and `tokenCredentials(...)` leave the text out of `toString`, `toJSON` and `util.inspect`. `AccessToken.parse` reads a token's text as the node does, ASCII whitespace around it ignored, and returns `null` for anything else.
 
 ### Renewing the client certificate
 

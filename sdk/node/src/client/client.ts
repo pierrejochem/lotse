@@ -1,5 +1,8 @@
+import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { AccessToken } from "../auth/access-token.js";
 import { AuthenticationError } from "../auth/errors.js";
+import { tokenLifetimeDays } from "../auth/token-lifetime.js";
 import { ScramCredential } from "../auth/scram-credential.js";
 import { type Address, addressKey, formatAddress } from "../net/address.js";
 import type { Connection } from "../net/connection.js";
@@ -21,6 +24,7 @@ import {
   type UserEntry,
   type CertificateEntry,
   type CertificateRequestEntry,
+  type TokenEntry,
   type PublishEntry,
   type PublishResult,
   type ResourceMetadata,
@@ -39,6 +43,7 @@ import { RecordFormatError } from "../record/errors.js";
 import type { BatchRecord, Header } from "../record/types.js";
 import { compareU64, U32_MAX, u64ToString } from "../record/unsigned.js";
 import { Attempt, CallFailure } from "./attempt.js";
+import { CreatedToken } from "./created-token.js";
 import { type ClientConfig, type ClientOptions, resolveClientOptions } from "./config.js";
 import {
   BrokerResponseError,
@@ -2045,6 +2050,72 @@ export class LotseClient {
     this.checkOpen();
     const subjectKind = group ? SubjectKind.GROUP : SubjectKind.USER;
     return this.adminChange({ type: "RevokeSessions", subjectKind, subject, beforeMs: 0n }, options.signal);
+  }
+
+  /**
+   * Creates an access token (ADR 0133) for `owner`, or for the caller with `null`; only a cluster admin names someone
+   * else. The secret is drawn here and only its SHA-256 is sent, so the returned text is the only place it exists: keep
+   * it, nobody can show it again. A retry after a lost answer may have made a token the caller never sees;
+   * `describeTokens` lists it.
+   *
+   * @param lifetime a `TokenLifetime`
+   * @throws BrokerResponseError with `UNAUTHORIZED` on a session signed in with a token or for another owner without
+   *   the cluster-admin role, `INVALID_REQUEST` for a bad name or a full owner or cluster, `UNSUPPORTED_VERSION` below
+   *   cluster version 0.1; the message says which
+   * @throws RangeError for a lifetime that is not one of the five
+   */
+  async createToken(name: string, owner: string | null, lifetime: number, options: CallOptions = {}): Promise<CreatedToken> {
+    this.checkOpen();
+    tokenLifetimeDays(lifetime);
+    const secret = randomBytes(32);
+    try {
+      // The id is the cluster's, so the text is built from its answer; the hash does not depend on the id.
+      const secretHash = new AccessToken(0n, secret).hash();
+      const req: Request = { type: "CreateToken", name, owner: owner ?? "", lifetime, secretHash };
+      const r = await this.retrying(async () => {
+        const resp = await this.callAdmin(req);
+        if (resp.type !== "CreateToken") {
+          throw Attempt.retry(`unexpected response ${resp.type}`);
+        }
+        this.adminAnswer(resp.error, resp.leaderHint, resp.errorMsg);
+        return resp;
+      }, options.signal);
+      return new CreatedToken(r.id, new AccessToken(r.id, secret).text(), r.expiresAtMs);
+    } finally {
+      secret.fill(0);
+    }
+  }
+
+  /**
+   * Lists access tokens (ADR 0133): the caller's own, or with `owner` that user's, which only a cluster admin or viewer
+   * may see; `null` lists all the caller may see. Only what describes them: no secret is kept anywhere to list. Below
+   * cluster version 0.1 the list is empty.
+   */
+  async describeTokens(owner: string | null = null, options: CallOptions = {}): Promise<readonly TokenEntry[]> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeTokens", owner });
+        if (r.type !== "DescribeTokens") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r.tokens;
+      },
+      options.signal,
+    );
+  }
+
+  /**
+   * Revokes an access token (ADR 0133): every node ends the sessions it opened and refuses it from then on. A user
+   * revokes their own tokens, a cluster admin anyone's.
+   *
+   * @throws BrokerResponseError with `UNKNOWN_RESOURCE` for a token that is not the caller's to revoke, does not exist
+   *   or has expired
+   */
+  async revokeToken(id: bigint | number, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    return this.adminChange({ type: "RevokeToken", id: BigInt(id) }, options.signal);
   }
 
   /**
