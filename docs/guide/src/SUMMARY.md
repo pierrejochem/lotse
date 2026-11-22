@@ -13,6 +13,7 @@
 
 - [The cluster file](admin/cluster-file.md)
 - [Certificates](admin/certificates.md)
+- [Access tokens](admin/access-tokens.md)
 - [Authentication and roles](admin/authentication-and-roles.md)
 - [Nodes](admin/nodes.md)
 - [Retention and compaction](admin/retention-and-compaction.md)

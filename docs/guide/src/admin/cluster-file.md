@@ -135,6 +135,7 @@ Both must be at least 1.
 | `required` | boolean | true | Clients must authenticate. With `false`, everyone may do everything. |
 | `mtls` | boolean | true | A client certificate names its principal. |
 | `scram` | boolean | true | SASL SCRAM-SHA-512, with users set at runtime. |
+| `tokens` | boolean | true | SASL `LOTSE-TOKEN`: access tokens made at runtime sign in ([Access tokens](access-tokens.md)). |
 | `admins` | list of strings | empty | Principals that are cluster admins from the start. Must not be empty while `required` is true. |
 | `tenants` | list of strings | empty | Tenants besides `default` that exist from the start. |
 | `max_session_s` | integer, s | 3600 | A session ends after this at the latest. |
