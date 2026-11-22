@@ -1,6 +1,7 @@
 name: release
 # On a version tag (ADR 0049, ADR 0126): first every simulation at full
-# depth, 5,000 seeds each (ADR 0088); only when all of them pass, the release
+# depth, 5,000 seeds each (ADR 0088), the longest split by seed range over
+# parallel jobs (LOTSE_SIM_SHARD, ADR 0131); only when all of them pass, the release
 # is built twice, by packaging/release.sh on two runners in two directories,
 # and the two must match byte for byte: static `lotse` binaries for x86_64
 # and aarch64, tarballs, .deb, .rpm and .apk packages, BUILDINFO and
@@ -9,7 +10,8 @@ name: release
 # that were compared. Run by hand on any branch, it runs the simulations and
 # both reproducibility checks, and publishes nothing.
 # A failing simulation prints the seed; reproduce it with
-# LOTSE_SIM_SEED=<seed> cargo test -p <crate> --release --test <file>.
+# LOTSE_SIM_SEED=<seed> cargo test -p <crate> --release --test <file>
+# (the seed is the same with or without shards).
 on:
   push:
     tags: ["v*"]
@@ -24,6 +26,11 @@ env:
 
 jobs:
   simulation:
+    name: simulation (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -31,12 +38,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
-          save-if: true
+          save-if: ${{ matrix.shard == '1/2' }}
       # Many more seeds than the default test run. A failure prints the seed;
       # reproduce it locally with LOTSE_SIM_SEED=<seed> cargo test -p lotse-sim.
       - run: cargo test -p lotse-sim -p lotse-server --release -- --skip clients_see_only_committed_data --skip queues_lose_nothing --skip a_consumer_group_processes --skip resources_created_changed_and_deleted --skip nothing_is_allowed_that_no_binding_allowed --skip retention_deletes_only_what_it_may --skip nodes_come_and_go_without_losing_anything --skip compaction_keeps_each_keys_newest_record
         env:
           LOTSE_SIM_SEEDS: "5000"
+          LOTSE_SIM_SHARD: ${{ matrix.shard }}
 
   # The client simulation is the slowest, so it runs next to the others in a
   # job of its own (ADR 0030).
@@ -55,6 +63,11 @@ jobs:
 
   # The queue simulation (ADR 0031).
   queue-simulation:
+    name: queue-simulation (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -66,6 +79,7 @@ jobs:
       - run: cargo test -p lotse-server --release --test queues
         env:
           LOTSE_SIM_SEEDS: "5000"
+          LOTSE_SIM_SHARD: ${{ matrix.shard }}
 
   # The consumer group simulation (ADR 0033), the slowest per seed.
   group-simulation:
@@ -83,6 +97,11 @@ jobs:
 
   # The metadata simulation (ADR 0034): creating, changing and deleting.
   metadata-simulation:
+    name: metadata-simulation (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -94,6 +113,7 @@ jobs:
       - run: cargo test -p lotse-server --release --test metadata
         env:
           LOTSE_SIM_SEEDS: "5000"
+          LOTSE_SIM_SHARD: ${{ matrix.shard }}
 
   # The access simulation (ADR 0039): role bindings change under load on a
   # faulty cluster.
@@ -128,6 +148,11 @@ jobs:
   # The compaction simulation (ADR 0067): compacted streams under faults,
   # every replica read in turn.
   compaction-simulation:
+    name: compaction-simulation (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -139,6 +164,7 @@ jobs:
       - run: cargo test -p lotse-server --release --test compaction
         env:
           LOTSE_SIM_SEEDS: "5000"
+          LOTSE_SIM_SHARD: ${{ matrix.shard }}
 
   # The membership simulation (ADR 0048): nodes added and drained under load
   # and faults.
