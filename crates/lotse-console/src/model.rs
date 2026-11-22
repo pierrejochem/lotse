@@ -1000,9 +1000,9 @@ pub struct TokenRow {
     /// The user it acts as.
     pub owner: String,
     /// When it was made, ms since the Unix epoch.
-    pub created_at: u64,
+    pub created_ms: u64,
     /// When it stops being valid, ms since the Unix epoch.
-    pub expires_at: u64,
+    pub expires_ms: u64,
     /// Who made it: the owner, or a cluster admin.
     pub created_by: String,
 }
@@ -1054,7 +1054,7 @@ pub struct CreatedTokenView {
     /// The text to give to scripts and tools. Shown once.
     pub text: String,
     /// When it stops being valid, ms since the Unix epoch.
-    pub expires_at: u64,
+    pub expires_ms: u64,
 }
 
 // By hand, so that a log line or a failed assertion never carries the text.
@@ -1063,7 +1063,7 @@ impl std::fmt::Debug for CreatedTokenView {
         f.debug_struct("CreatedTokenView")
             .field("id", &self.id)
             .field("text", &"<hidden>")
-            .field("expires_at", &self.expires_at)
+            .field("expires_ms", &self.expires_ms)
             .finish()
     }
 }

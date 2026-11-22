@@ -835,7 +835,7 @@ export interface components {
              * Format: int64
              * @description When it stops being valid, ms since the Unix epoch.
              */
-            expires_at: number;
+            expires_ms: number;
             /**
              * Format: int64
              * @description The token's id, to revoke it by.
@@ -1736,18 +1736,18 @@ export interface components {
          *     which is never the secret.
          */
         TokenRow: {
-            /**
-             * Format: int64
-             * @description When it was made, ms since the Unix epoch.
-             */
-            created_at: number;
             /** @description Who made it: the owner, or a cluster admin. */
             created_by: string;
             /**
              * Format: int64
+             * @description When it was made, ms since the Unix epoch.
+             */
+            created_ms: number;
+            /**
+             * Format: int64
              * @description When it stops being valid, ms since the Unix epoch.
              */
-            expires_at: number;
+            expires_ms: number;
             /**
              * Format: int64
              * @description The token's id.
@@ -2862,16 +2862,17 @@ export interface operations {
     };
     tokens: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description A user whose tokens to list. Only cluster admins and viewers see
+                 *     anyone's but their own; for everyone else the list is empty.
+                 */
+                owner?: string;
+            };
             header?: never;
             path: {
                 /** @description Cluster ID */
                 cluster: string;
-                /**
-                 * @description A user whose tokens to list; only cluster admins and viewers may ask
-                 *     for anyone but themselves.
-                 */
-                owner: string | null;
             };
             cookie?: never;
         };

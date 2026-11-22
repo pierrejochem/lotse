@@ -193,7 +193,7 @@ async fn the_console_creates_lists_and_revokes_tokens_as_the_user() {
     assert!(text.starts_with("lotse_tok_"), "{text}");
     let id = made["id"].as_u64().unwrap();
     let month = 30 * 24 * 3600 * 1000;
-    let ends = made["expires_at"].as_u64().unwrap();
+    let ends = made["expires_ms"].as_u64().unwrap();
     assert!(ends >= before + month && ends <= before + month + 60_000, "30 days from now: {ends} {before}");
 
     let (st, list) = call(&alice, "GET", TOKENS, None).await;
@@ -202,7 +202,7 @@ async fn the_console_creates_lists_and_revokes_tokens_as_the_user() {
     assert_eq!(rows.len(), 1, "{list}");
     assert_eq!((rows[0]["id"].as_u64(), rows[0]["name"].as_str()), (Some(id), Some("ci")));
     assert_eq!((rows[0]["owner"].as_str(), rows[0]["created_by"].as_str()), (Some("alice"), Some("alice")));
-    assert_eq!(rows[0]["expires_at"].as_u64(), Some(ends));
+    assert_eq!(rows[0]["expires_ms"].as_u64(), Some(ends));
 
     // The token is a credential for alice, and for nobody else.
     let with_token = s.client(Credentials::Token(text.clone()));
@@ -243,7 +243,7 @@ async fn a_created_token_text_is_returned_once_and_never_listed() {
         let (st, v) = call(&alice, "POST", TOKENS, Some(json!({"name": lifetime, "lifetime": lifetime}))).await;
         assert_eq!(st, StatusCode::OK, "{lifetime}: {v}");
         let (created, ends) =
-            (TokioRuntime::new(&s.root).unix_time().as_millis() as u64, v["expires_at"].as_u64().unwrap());
+            (TokioRuntime::new(&s.root).unix_time().as_millis() as u64, v["expires_ms"].as_u64().unwrap());
         assert!(ends.abs_diff(created + days * 86_400_000) < 120_000, "{lifetime}: {ends}");
     }
     for bad in ["2w", "", "30d", "1Y", "1 y"] {
