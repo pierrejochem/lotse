@@ -327,9 +327,12 @@ describe("transactions, publishing and groups against three real nodes", { skip 
     const c = await lotse.subscribe("eq-in", { credit: 3 });
     let aborted = 0;
     const done = new Set<string>();
+    // What happened, for a failure: each delivery with its offset and count, and how its transaction ended.
+    const trail: string[] = [];
     while (done.size < 6) {
       const d = await take(c);
       const v = d.text() as string;
+      trail.push(`${v}@${d.offset}#${d.deliveryCount}`);
       const txn = await lotse.beginTransaction();
       try {
         await txn.produce("eq-out", 0, { value: `done-${v}` });
@@ -341,8 +344,9 @@ describe("transactions, publishing and groups against three real nodes", { skip 
         // with the leader where it was is a failure.
         const notHeld = e instanceof BrokerResponseError && e.code === ErrorCode.MESSAGE_NOT_HELD;
         if (!(isNotLeader(e) || (notHeld && (await steady.moved())))) {
-          throw e;
+          throw new Error(`${(e as Error).message} after ${trail.join(" ")}`, { cause: e });
         }
+        trail.push("(gave up)");
         await txn.abort().catch(() => undefined);
         await steady.watch("eq-in");
         continue;
@@ -350,6 +354,7 @@ describe("transactions, publishing and groups against three real nodes", { skip 
       if (aborted === 0 && done.size === 2) {
         aborted++;
         await txn.abort(); // the message goes back, and the output with it is hidden
+        trail.push("(aborted)");
         continue;
       }
       await txn.commit();
