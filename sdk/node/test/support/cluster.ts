@@ -40,7 +40,7 @@ export class PlainCluster {
   private static async make(dir: string, attempt: number, bin: string, nodes: number): Promise<PlainCluster> {
     const config = join(dir, `cluster-${attempt}.toml`);
     const addresses: Address[] = [];
-    let text = `[cluster]\ndata_dir = "${dir}/data-${attempt}/node-{id}"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n`;
+    let text = `[cluster]\ndata_dir = "${dir}/data-${attempt}/node-{id}"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\nrequired = false\n`;
     for (let id = 1; id <= nodes; id++) {
       const peer = await freePort();
       const client = await freePort();

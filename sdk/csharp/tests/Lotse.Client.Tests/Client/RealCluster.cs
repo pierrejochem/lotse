@@ -51,7 +51,7 @@ public sealed class RealCluster : IAsyncLifetime
         {
             Config = Path.Combine(Dir, $"cluster-{_attempt}.toml");
             ClientAddresses.Clear();
-            var text = new StringBuilder($"[cluster]\ndata_dir = \"{Dir}/data-{_attempt}/node-{{id}}\"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[auth]\nrequired = false\n");
+            var text = new StringBuilder($"[cluster]\ndata_dir = \"{Dir}/data-{_attempt}/node-{{id}}\"\n\n[tls]\nplaintext_on_loopback = true\n\n[retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\nrequired = false\n");
             for (int id = 1; id <= Nodes; id++)
             {
                 int peer = Lotse.Client.Tests.Net.Certs.FreePort();

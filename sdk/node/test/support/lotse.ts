@@ -216,7 +216,7 @@ export async function makePlainCluster(): Promise<{ dir: string; config: string;
   writeFileSync(
     config,
     `[cluster]\ndata_dir = "${dir}/data/node-{id}"\n\n[tls]\nplaintext_on_loopback = true\n\n` +
-      `[retention]\nms = -1\n\n[auth]\nrequired = false\n\n` +
+      `[retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\nrequired = false\n\n` +
       `[[node]]\nid = 1\npeer = "127.0.0.1:${peer}"\nclient = "127.0.0.1:${client}"\n`,
   );
   return { dir, config, address: address("127.0.0.1", client) };
