@@ -143,6 +143,11 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         self.principal.as_ref()
     }
 
+    /// How the session signed in, [`lotse_proto::session_mechanism`].
+    pub(super) fn mechanism(&self) -> u8 {
+        self.mechanism
+    }
+
     /// Whether a revocation ended this session (ADR 0070): the connection
     /// closes, and the client authenticates afresh on a new one.
     pub(super) fn revoked(&self) -> bool {
