@@ -1034,7 +1034,13 @@ public sealed interface Response {
                 w1.array(s.groups(), Writer::string);
                 w1.u8(s.mechanism()).string(s.peer());
                 w1.u64(s.connectedMs()).u64(s.credentialMs()).u64(s.expiresMs());
-                w1.noTags();
+                if (s.tokenId() == null) {
+                    w1.noTags();
+                } else {
+                    Writer v = new Writer();
+                    v.u64(s.tokenId());
+                    w1.tags(List.of(new Tag(Messages.TAG_TOKEN_ID, ByteString.copyOf(v.toByteArray()))));
+                }
             });
             w.noTags();
         }
@@ -1045,17 +1051,25 @@ public sealed interface Response {
             long nowMs = r.u64();
             // kind, name, no groups, mechanism, peer, three u64, no tags
             List<SessionEntry> sessions = r.array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, r1 -> {
-                SessionEntry s = new SessionEntry(
-                        r1.u8(),
-                        r1.string(),
-                        r1.array(2, Reader::string),
-                        r1.u8(),
-                        r1.string(),
-                        r1.u64(),
-                        r1.u64(),
-                        r1.u64());
-                r1.tags();
-                return s;
+                int principalKind = r1.u8();
+                String name = r1.string();
+                List<String> groups = r1.array(2, Reader::string);
+                int mechanism = r1.u8();
+                String peer = r1.string();
+                long connectedMs = r1.u64();
+                long credentialMs = r1.u64();
+                long expiresMs = r1.u64();
+                Long tokenId = null;
+                for (Tag t : r1.tags()) {
+                    if (t.tag() == Messages.TAG_TOKEN_ID) {
+                        Reader v = new Reader(t.value().toByteArray());
+                        tokenId = v.u64();
+                        v.finish();
+                    }
+                    // any other tag is from a newer version: skipped
+                }
+                return new SessionEntry(
+                        principalKind, name, groups, mechanism, peer, connectedMs, credentialMs, expiresMs, tokenId);
             });
             r.tags();
             return new DescribeSessions(error, nodeId, nowMs, sessions);
@@ -1487,6 +1501,71 @@ public sealed interface Response {
             List<ByteString> chain = r.array(4, Reader::bytes);
             long notAfterMs = r.u64();
             return new RenewCertificate(error, errorMsg, chain, notAfterMs, Messages.getHint(r));
+        }
+    }
+
+    /**
+     * {@code CreateToken} (66): the token the metadata leader recorded (ADR 0133). The leader hint is the structure's
+     * block of tagged fields.
+     *
+     * @param error the outcome
+     * @param errorMsg why, for a refusal, or {@code null}
+     * @param id the token's id, a {@code u64}; 0 on a refusal
+     * @param expiresAtMs when the token stops being valid, milliseconds since the Unix epoch, a {@code u64}; 0 on a
+     *     refusal
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     */
+    record CreateToken(ErrorCode error, String errorMsg, long id, long expiresAtMs, LeaderHint leaderHint)
+            implements Response {
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code()).optString(errorMsg).u64(id).u64(expiresAtMs);
+            Messages.putHint(w, leaderHint);
+        }
+
+        static CreateToken read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            String errorMsg = r.optString();
+            long id = r.u64();
+            long expiresAtMs = r.u64();
+            return new CreateToken(error, errorMsg, id, expiresAtMs, Messages.getHint(r));
+        }
+    }
+
+    /**
+     * {@code DescribeTokens} (67): the access tokens the asker may see, never a secret or hash (ADR 0133). The leader
+     * hint is the structure's block of tagged fields, after the tokens.
+     *
+     * @param error the outcome
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param tokens the tokens
+     */
+    record DescribeTokens(ErrorCode error, LeaderHint leaderHint, List<TokenEntry> tokens) implements Response {
+        /** Creates the response. */
+        public DescribeTokens {
+            tokens = List.copyOf(tokens);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code());
+            w.array(tokens, (w1, t) -> {
+                w1.u64(t.id()).string(t.name()).string(t.owner());
+                w1.u64(t.createdAtMs()).u64(t.expiresAtMs()).string(t.createdBy());
+                w1.noTags();
+            });
+            Messages.putHint(w, leaderHint);
+        }
+
+        static DescribeTokens read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            // id, name, owner, two times, created by, no tags
+            List<TokenEntry> tokens = r.array(8 + 2 + 2 + 8 + 8 + 2 + 1, r1 -> {
+                TokenEntry t = new TokenEntry(r1.u64(), r1.string(), r1.string(), r1.u64(), r1.u64(), r1.string());
+                r1.tags();
+                return t;
+            });
+            return new DescribeTokens(error, Messages.getHint(r), tokens);
         }
     }
 }

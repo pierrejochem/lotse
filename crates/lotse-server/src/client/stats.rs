@@ -55,6 +55,8 @@ pub(crate) struct NodeView<'a> {
     pub(crate) host: HostStats,
     /// The node's open client sessions (ADR 0121).
     pub(crate) sessions: &'a crate::auth::OpenSessions,
+    /// Its token sign-ins so far (ADR 0133).
+    pub(crate) token_sign_ins: &'a crate::auth::TokenSignIns,
     /// Its free disk limit and whether it is below it (ADR 0122); `None`
     /// until the host was read.
     pub(crate) disk: Option<lotse_proto::DiskMetrics>,
@@ -66,6 +68,8 @@ pub(crate) struct NodeView<'a> {
 static NO_LOW: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
 
 static NO_SESSIONS: crate::auth::OpenSessions = crate::auth::OpenSessions::new();
+
+static NO_SIGN_INS: crate::auth::TokenSignIns = crate::auth::TokenSignIns::new();
 
 static NO_NET: NetStats = NetStats {
     client_in: AtomicU64::new(0),
@@ -83,6 +87,7 @@ impl Default for NodeView<'_> {
             net: &NO_NET,
             host: HostStats::default(),
             sessions: &NO_SESSIONS,
+            token_sign_ins: &NO_SIGN_INS,
             disk: None,
             disk_low: &NO_LOW,
         }
@@ -367,15 +372,20 @@ impl Clients {
                 (g, GroupHealth { membership: raft.membership().clone(), state })
             })
             .collect();
-        let certificate_requests_pending = view.admin.metadata.and_then(|g| groups.get(&g)).map(|replica| {
-            replica.metadata().cert_requests.values().filter(|r| r.pending(view.unix_ms)).count() as u64
-        });
+        let metadata = view.admin.metadata.and_then(|g| groups.get(&g)).map(|replica| replica.metadata());
+        let certificate_requests_pending =
+            metadata.map(|state| state.cert_requests.values().filter(|r| r.pending(view.unix_ms)).count() as u64);
+        let tokens = metadata.map(|state| state.live_tokens(view.unix_ms) as u64);
+        let (token_sign_ins_ok, token_sign_ins_failed) = view.node.token_sign_ins.get();
         crate::ops::Observation {
             node_id: view.node.id,
             metrics: self.metrics(view, groups),
             resources,
             groups: health,
             certificate_requests_pending,
+            tokens,
+            token_sign_ins_ok,
+            token_sign_ins_failed,
             may_scrape: false,
         }
     }

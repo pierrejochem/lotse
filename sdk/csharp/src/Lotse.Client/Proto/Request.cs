@@ -1046,6 +1046,72 @@ public abstract record Request
         }
     }
 
+    /// <summary>
+    /// <c>CreateToken</c> (66): records an access token (ADR 0133). The client draws the secret and sends only its
+    /// SHA-256, so no node ever sees it. Answered with <see cref="Response.CreateToken"/>.
+    /// </summary>
+    /// <param name="Name">A label for the owner's own use, 1 to 64 bytes.</param>
+    /// <param name="Owner">The user the token acts as; empty for the caller (only a cluster admin names someone else).</param>
+    /// <param name="Lifetime">The lifetime's code (see <see cref="Lotse.Auth.TokenLifetime"/>): 1 is 7 days, 2 is 30, 3 is 90, 4 is 180, 5 is 365.</param>
+    /// <param name="SecretHash">SHA-256 of the 32 secret bytes; the node checks that it is 32 bytes, the codec does not.</param>
+    public sealed record CreateToken(string Name, string Owner, byte Lifetime, ByteString SecretHash) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.CreateToken;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.String(Name).String(Owner).U8(Lifetime).Bytes(SecretHash).NoTags();
+
+        internal static CreateToken Read(Reader r)
+        {
+            var x = new CreateToken(r.String(), r.String(), r.U8(), r.Bytes());
+            r.Tags();
+            return x;
+        }
+    }
+
+    /// <summary>
+    /// <c>DescribeTokens</c> (67): lists access tokens, never their secrets (ADR 0133). A user sees their own; a cluster
+    /// admin or viewer sees all. Answered with <see cref="Response.DescribeTokens"/>.
+    /// </summary>
+    /// <param name="Owner">Only this owner's tokens, or <c>null</c> for all the asker may see.</param>
+    public sealed record DescribeTokens(string? Owner) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeTokens;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.OptString(Owner).NoTags();
+
+        internal static DescribeTokens Read(Reader r)
+        {
+            var x = new DescribeTokens(r.OptString());
+            r.Tags();
+            return x;
+        }
+    }
+
+    /// <summary>
+    /// <c>RevokeToken</c> (68): ends an access token by id (ADR 0133); every node ends the sessions it opened. Answered
+    /// with <see cref="Response.Admin"/>.
+    /// </summary>
+    /// <param name="Id">The token's id.</param>
+    public sealed record RevokeToken(ulong Id) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.RevokeToken;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.U64(Id).NoTags();
+
+        internal static RevokeToken Read(Reader r)
+        {
+            var x = new RevokeToken(r.U64());
+            r.Tags();
+            return x;
+        }
+    }
+
     /// <summary>Adds a certificate to the cluster's revocation list.</summary>
     /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian, as the certificate has it.</param>

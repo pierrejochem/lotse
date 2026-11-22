@@ -1,7 +1,9 @@
 package dev.lotse.client;
 
+import dev.lotse.auth.AccessToken;
 import dev.lotse.auth.AuthenticationException;
 import dev.lotse.auth.ScramCredential;
+import dev.lotse.auth.TokenLifetime;
 import dev.lotse.net.Address;
 import dev.lotse.net.BrokerException;
 import dev.lotse.net.Connection;
@@ -1703,6 +1705,69 @@ public final class LotseClient implements AutoCloseable {
         checkOpen();
         int kind = group ? Messages.SubjectKind.GROUP : Messages.SubjectKind.USER;
         adminChange(new Request.RevokeSessions(kind, subject, 0));
+    }
+
+    /**
+     * Creates an access token (ADR 0133) for {@code owner}, or for the caller with {@code null}; only a cluster admin
+     * names someone else. The secret is drawn here and only its SHA-256 is sent, so the returned text is the only
+     * place it exists: keep it, nobody can show it again. A retry after a lost answer may have made a token the
+     * caller never sees; {@link #describeTokens} lists it.
+     *
+     * @throws ClientException.Broker with {@code UNAUTHORIZED} on a session signed in with a token or for another
+     *     owner without the cluster-admin role, {@code INVALID_REQUEST} for a bad name or a full owner or cluster,
+     *     {@code UNSUPPORTED_VERSION} below cluster version 0.1; the message says which
+     */
+    public CreatedToken createToken(String name, String owner, TokenLifetime lifetime) {
+        checkOpen();
+        java.util.Objects.requireNonNull(name, "name");
+        java.util.Objects.requireNonNull(lifetime, "lifetime");
+        byte[] secret = new byte[32];
+        new SecureRandom().nextBytes(secret);
+        // The id is the cluster's, so the text is built from its answer; the hash does not depend on the id.
+        byte[] hash = new AccessToken(0, secret).hash();
+        Request req = new Request.CreateToken(
+                name, owner == null ? "" : owner, lifetime.code(), ByteString.copyOf(hash));
+        Response.CreateToken r = retrying(() -> {
+            Response resp = callAdmin(req);
+            if (!(resp instanceof Response.CreateToken c)) {
+                throw Attempt.retry("unexpected response " + resp);
+            }
+            adminAnswer(c.error(), c.leaderHint(), c.errorMsg());
+            return c;
+        });
+        String text = new AccessToken(r.id(), secret).text();
+        java.util.Arrays.fill(secret, (byte) 0);
+        return new CreatedToken(r.id(), text, r.expiresAtMs());
+    }
+
+    /**
+     * Lists access tokens (ADR 0133): the caller's own, or with {@code owner} that user's, which only a cluster admin
+     * or viewer may see; {@code null} lists all the caller may see. Only what describes them: no secret is kept
+     * anywhere to list. Below cluster version 0.1 the list is empty.
+     */
+    public List<Messages.TokenEntry> describeTokens(String owner) {
+        checkOpen();
+        Request req = new Request.DescribeTokens(owner);
+        return retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.DescribeTokens d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d.tokens();
+        });
+    }
+
+    /**
+     * Revokes an access token (ADR 0133): every node ends the sessions it opened and refuses it from then on. A user
+     * revokes their own tokens, a cluster admin anyone's.
+     *
+     * @throws ClientException.Broker with {@code UNKNOWN_RESOURCE} for a token that is not the caller's to revoke,
+     *     does not exist or has expired
+     */
+    public void revokeToken(long id) {
+        checkOpen();
+        adminChange(new Request.RevokeToken(id));
     }
 
     /**

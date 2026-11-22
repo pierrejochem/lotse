@@ -95,7 +95,7 @@ fn salted_password(password: &str, salt: &[u8], iterations: u32) -> Vec<u8> {
 }
 
 /// Equality that takes as long for every input of one length.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

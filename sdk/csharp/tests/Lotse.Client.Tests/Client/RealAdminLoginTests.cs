@@ -37,6 +37,9 @@ public sealed class AdminNodeFixture : IAsyncLifetime
     internal LotseClient As(string user, string password, string? tenant = null) =>
         Build(AnonymousTls, Credentials.Scram(user, password), tenant);
 
+    /// <summary>A client with no certificate that signs in with <paramref name="credentials"/>.</summary>
+    internal LotseClient With(Credentials credentials) => Build(AnonymousTls, credentials, null);
+
     private LotseClient Build(TlsConfig tls, Credentials? credentials, string? tenant)
     {
         ClientConfig.Builder b = ClientConfig.CreateBuilder(Address.ToString())
@@ -460,5 +463,106 @@ public sealed class RealAdminLoginTests : IClassFixture<AdminNodeFixture>
             }
         });
         await RefusedAsync("wes", "wes-pw");
+    }
+
+    // ---- access tokens ----
+
+    /// <summary>
+    /// Access tokens (ADR 0133): the admin, signed in with a certificate, makes a token; a client with no certificate
+    /// signs in with it as the admin, the node lists the session with the token's id, and once the token is revoked the
+    /// open session ends and the token signs no one in.
+    /// </summary>
+    [LotseFact]
+    public async Task ATokenSignsInAsItsOwnerUntilItIsRevoked()
+    {
+        using LotseClient admin = _f.Admin();
+        // A fresh cluster takes the version its node runs once the node has reported it (ADR 0127); tokens need 0.1.
+        await RealWaits.UntilAsync(
+            "the cluster to take version 0.1", async () => (await admin.DescribeUpgradeAsync()).ClusterVersion is >= 1u);
+        CreatedToken created = await admin.CreateTokenAsync("laptop", null, TokenLifetime.Week);
+        Assert.NotEqual(0UL, created.Id);
+        Assert.StartsWith("lotse_tok_", created.Text);
+        long days = ((long)created.ExpiresAtMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 86_400_000L;
+        Assert.Equal(6L, days); // 7 days from now, less the moments since
+
+        Response.WhoAmI? who = null;
+        await RealWaits.UntilAsync("the token to sign in", async () =>
+        {
+            using LotseClient c = _f.With(Credentials.Token(created.Text));
+            try
+            {
+                who = await c.WhoAmIAsync();
+                return true;
+            }
+            catch (ClientAuthenticationException)
+            {
+                return false;
+            }
+        });
+        Assert.Equal("alice", who!.Name);
+
+        // A pasted token with a newline signs in as well: the node trims it.
+        using LotseClient viaToken = _f.With(Credentials.Token(created.Text + "\n"));
+        Assert.Equal("alice", (await viaToken.WhoAmIAsync()).Name);
+        Messages.TokenEntry listed = Assert.Single(await viaToken.DescribeTokensAsync(), t => t.Id == created.Id);
+        Assert.Equal(("laptop", "alice", "alice"), (listed.Name, listed.Owner, listed.CreatedBy));
+        // A session signed in with a token makes no tokens.
+        await RefusedCallAsync(() => viaToken.CreateTokenAsync("more", null, TokenLifetime.Week));
+
+        // The node lists the session by its token, never the secret.
+        bool seen = false;
+        foreach (NodeSessions n in await admin.NodeSessionsAsync())
+        {
+            Assert.Null(n.Error);
+            foreach (Messages.SessionEntry s in n.Sessions!.Sessions)
+            {
+                if (s.Mechanism == Messages.SessionMechanism.Token)
+                {
+                    Assert.Equal(created.Id, s.TokenId);
+                    Assert.Equal("alice", s.Name);
+                    seen = true;
+                }
+                else
+                {
+                    Assert.Null(s.TokenId);
+                }
+            }
+        }
+        Assert.True(seen, "the token's session is listed");
+
+        // The same id with another secret is not the token.
+        string text = created.Text;
+        string forged = text.Substring(0, text.Length - 1) + (text.EndsWith('A') ? "Q" : "A");
+        using (LotseClient forger = _f.With(Credentials.Token(forged)))
+        {
+            await Assert.ThrowsAsync<ClientAuthenticationException>(() => forger.WhoAmIAsync());
+        }
+
+        // Revoked, it ends the open session and signs no one in.
+        await admin.RevokeTokenAsync(created.Id);
+        var again = await Assert.ThrowsAsync<BrokerErrorException>(() => admin.RevokeTokenAsync(created.Id));
+        Assert.Equal(ErrorCode.UnknownResource, again.Code);
+        await RealWaits.UntilAsync("the revoked token's session to end", async () =>
+        {
+            try
+            {
+                await viaToken.WhoAmIAsync();
+                await Task.Delay(100);
+                return false;
+            }
+            catch (ClientAuthenticationException)
+            {
+                return true;
+            }
+            catch (BrokerErrorException e) when (e.Code.Equals(ErrorCode.Unauthorized))
+            {
+                return true;
+            }
+        });
+        using (LotseClient late = _f.With(Credentials.Token(created.Text)))
+        {
+            await Assert.ThrowsAsync<ClientAuthenticationException>(() => late.WhoAmIAsync());
+        }
+        Assert.DoesNotContain(await admin.DescribeTokensAsync(), t => t.Id == created.Id); // a revoked token is not listed
     }
 }

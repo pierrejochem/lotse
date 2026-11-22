@@ -1,5 +1,7 @@
 package dev.lotse.kotlin
 
+import dev.lotse.auth.AccessToken
+import dev.lotse.auth.TokenLifetime
 import dev.lotse.client.ClientException
 import dev.lotse.proto.ErrorCode
 import dev.lotse.proto.Messages
@@ -200,5 +202,33 @@ class LotseTest {
         val m = message("v", key = "k", headers = mapOf("x-lotse-priority" to "2"))
         assertEquals("k", m.key().toUtf8())
         assertEquals("2", m.headers()[0].value().toUtf8())
+    }
+
+    @Test
+    fun aTokenIsCreatedListedAndRevokedFromACoroutine() = runBlocking {
+        val tokens = listOf(Messages.TokenEntry(42, "ci", "alice", 1, 2, "alice"))
+        FakeBroker { r ->
+            when (r) {
+                is Request.CreateToken -> Response.CreateToken(ErrorCode.NONE, null, 42, 9_000, null)
+                is Request.DescribeTokens -> Response.DescribeTokens(ErrorCode.NONE, null, tokens)
+                is Request.RevokeToken -> Response.Admin(ErrorCode.NONE, null, null)
+                else -> throw AssertionError("unexpected $r")
+            }
+        }.use { b ->
+            client(b).use { lotse ->
+                val created = lotse.createToken("ci", null, TokenLifetime.QUARTER)
+                assertEquals(42L, created.id())
+                assertEquals(9_000L, created.expiresAtMs())
+                val token = AccessToken.parse(created.text()).orElseThrow()
+                assertEquals(42L, token.id())
+                val sent = b.requests<Request.CreateToken>().single()
+                assertEquals(3, sent.lifetime())
+                assertEquals("", sent.owner())
+                assertTrue(token.hash().contentEquals(sent.secretHash().toByteArray()), "only the hash is sent")
+                assertEquals(tokens, lotse.describeTokens())
+                lotse.revokeToken(42)
+                assertEquals(42L, b.requests<Request.RevokeToken>().single().id())
+            }
+        }
     }
 }

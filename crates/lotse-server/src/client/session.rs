@@ -1,6 +1,6 @@
 //! Who one connection acts as, and how it gets there: a certificate, SASL
-//! SCRAM-SHA-512 or SASL OAUTHBEARER, and authenticating again before the
-//! session ends.
+//! SCRAM-SHA-512, SASL OAUTHBEARER or an access token (`LOTSE-TOKEN`, ADR
+//! 0133), and authenticating again before the session ends.
 //!
 //! All of this runs in the connection's own task. The main loop only ever
 //! sees requests together with the principal they act as.
@@ -11,6 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_auth::oauth;
 use lotse_auth::scram::{self, ScramServer};
+use lotse_auth::token::{self, Token};
 use lotse_proto::{
     ErrorCode, SaslAuthenticateRequest, SaslAuthenticateResponse, SaslHandshakeRequest, SaslHandshakeResponse,
     session_mechanism,
@@ -61,7 +62,17 @@ pub(super) struct Session<R> {
     connected_ms: u64,
     /// When the session ends, ms since the Unix epoch; 0 for never.
     expires_ms: u64,
+    /// The access token the session signed in with (ADR 0133): it lasts
+    /// only while the metadata group holds the token.
+    token_id: Option<u64>,
+    /// When that token expires: the connection closes then, also while it
+    /// waits.
+    token_ends: Option<Instant>,
 }
+
+/// What every failed token sign-in says, whatever the reason, so a guesser
+/// learns nothing (ADR 0133).
+const TOKEN_FAILED: &str = "authentication failed";
 
 impl<R> Drop for Session<R> {
     fn drop(&mut self) {
@@ -117,6 +128,8 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             peer,
             connected_ms: now_ms,
             expires_ms: 0,
+            token_id: None,
+            token_ends: None,
         };
         session.slot = session.auth.sessions.open(session.open());
         session
@@ -131,6 +144,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             connected_ms: self.connected_ms,
             credential_ms: self.since_ms,
             expires_ms: self.expires_ms,
+            token_id: self.token_id,
         }
     }
 
@@ -143,14 +157,35 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         self.principal.as_ref()
     }
 
-    /// Whether a revocation ended this session (ADR 0070): the connection
-    /// closes, and the client authenticates afresh on a new one.
-    pub(super) fn revoked(&self) -> bool {
+    /// How the session signed in, [`lotse_proto::session_mechanism`].
+    pub(super) fn mechanism(&self) -> u8 {
+        self.mechanism
+    }
+
+    /// Whether a revocation ended this session (ADR 0070), or the access
+    /// token it signed in with is gone or expired at `now_ms` (ms since the
+    /// Unix epoch): the connection closes, and the client authenticates
+    /// afresh on a new one.
+    pub(super) fn revoked(&self, now_ms: u64) -> bool {
         // A certificate a cluster admin revoked ends the connection whoever
         // it then authenticates as (ADR 0090).
         self.cert.as_ref().is_some_and(|c| self.auth.cert_revoked(c))
             || self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
             || self.unrecorded()
+            // A revoked token, or one whose owner was deleted, is gone from
+            // the metadata state (ADR 0133). An expired one ends the session
+            // by the wall clock too: the monotonic deadline armed at sign-in
+            // misses a forward step of the wall clock (an NTP step, a
+            // resumed virtual machine), which would let the session outlive
+            // the token.
+            || self.token_id.is_some_and(|id| !self.auth.token_live(id, now_ms))
+    }
+
+    /// When the connection closes by itself: when the token it signed in
+    /// with expires. `None` for every other session, which only stops
+    /// serving requests when it ends.
+    pub(super) fn closes_at(&self) -> Option<Instant> {
+        self.token_ends
     }
 
     /// The renewal CA issued the connection's certificate, and the metadata
@@ -190,6 +225,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         let chosen = match req.mechanism.as_str() {
             scram::MECHANISM if self.auth.cfg.scram => Some(scram::MECHANISM),
             oauth::MECHANISM if self.auth.cfg.oidc.is_some() => Some(oauth::MECHANISM),
+            token::MECHANISM if self.auth.cfg.tokens => Some(token::MECHANISM),
             _ => None,
         };
         match chosen {
@@ -221,10 +257,16 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
             Sasl::Scram(mut server) => match server.last(&req.auth_bytes) {
                 Ok((name, last)) => {
                     let since = unix_ms(rt);
-                    self.established(rt, session_mechanism::SCRAM_SHA_512, name, Vec::new(), None, since, last.into())
+                    let how = session_mechanism::SCRAM_SHA_512;
+                    self.established(rt, how, name, Vec::new(), None, since, last.into(), None)
                 }
                 Err(_) => failed("authentication failed"),
             },
+            Sasl::Chosen(token::MECHANISM) => {
+                let step = self.with_token(rt, &req.auth_bytes);
+                self.auth.token_sign_ins.count(!step.close);
+                step
+            }
             Sasl::Chosen(_) => {
                 let token = match oauth::token_of(&req.auth_bytes) {
                     Ok(t) => t,
@@ -237,7 +279,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
                         // any revocation of its principal covers it.
                         let issued = v.issued_at.unwrap_or(0).saturating_mul(1000);
                         let how = session_mechanism::OAUTHBEARER;
-                        self.established(rt, how, v.principal, v.groups, Some(left), issued, Bytes::new())
+                        self.established(rt, how, v.principal, v.groups, Some(left), issued, Bytes::new(), None)
                     }
                     Err(e) => failed(&e.to_string()),
                 }
@@ -245,8 +287,41 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         }
     }
 
+    /// Signs in with an access token's text (ADR 0133): the session acts
+    /// as the token's owner with no groups, so only roles bound to the
+    /// owner's name count, and dates from the token's creation, so the
+    /// owner's revoked sessions cover it.
+    fn with_token(&mut self, rt: &R, text: &[u8]) -> Step {
+        let now_ms = unix_ms(rt);
+        let presented = std::str::from_utf8(text).ok().and_then(Token::parse);
+        let found = presented.and_then(|t| {
+            let stored = self.auth.token(t.id)?;
+            // Expired tokens stay in the state until the next token is created.
+            (stored.expires_at_ms > now_ms && token::matches(&stored.hash, &t)).then_some((t.id, stored))
+        });
+        let Some((id, stored)) = found else { return failed(TOKEN_FAILED) };
+        let left = Duration::from_millis(stored.expires_at_ms - now_ms);
+        let how = session_mechanism::TOKEN;
+        let step = self.established(
+            rt,
+            how,
+            stored.owner,
+            Vec::new(),
+            Some(left),
+            stored.created_at_ms,
+            Bytes::new(),
+            Some(id),
+        );
+        if step.close {
+            return failed(TOKEN_FAILED);
+        }
+        self.token_ends = Some(rt.now() + left);
+        step
+    }
+
     /// A SASL login succeeded for `name`: the session runs until
-    /// `max_session`, or until `left` if that is sooner.
+    /// `max_session`, or until `left` if that is sooner. `token_id` names
+    /// the access token it signed in with, if it did.
     #[allow(clippy::too_many_arguments)]
     fn established(
         &mut self,
@@ -257,6 +332,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         left: Option<Duration>,
         since_ms: u64,
         bytes: Bytes,
+        token_id: Option<u64>,
     ) -> Step {
         // Authenticating again renews the session; it cannot change who
         // the connection is.
@@ -278,6 +354,8 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         let ms = u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX);
         self.mechanism = mechanism;
         self.expires_ms = unix_ms(rt).saturating_add(ms);
+        self.token_id = token_id;
+        self.token_ends = None;
         self.auth.sessions.update(self.slot, self.open());
         Step { response: answer(ErrorCode::NONE, None, bytes, ms), close: false }
     }

@@ -2,11 +2,14 @@ package dev.lotse.client;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.lotse.auth.AccessToken;
 import dev.lotse.auth.ScramCredential;
+import dev.lotse.auth.TokenLifetime;
 import dev.lotse.proto.ErrorCode;
 import dev.lotse.proto.LeaderHint;
 import dev.lotse.proto.Messages;
@@ -18,6 +21,7 @@ import dev.lotse.proto.Response;
 import dev.lotse.record.ByteString;
 import dev.lotse.record.Header;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +95,12 @@ class AdminTest {
         }
         if (r instanceof Request.DescribeUpgrade) {
             return new Response.DescribeUpgrade(ErrorCode.NOT_LEADER, hint, null, false, null, List.of());
+        }
+        if (r instanceof Request.CreateToken) {
+            return new Response.CreateToken(ErrorCode.NOT_LEADER, null, 0, 0, hint);
+        }
+        if (r instanceof Request.DescribeTokens) {
+            return new Response.DescribeTokens(ErrorCode.NOT_LEADER, hint, List.of());
         }
         return new Response.Admin(ErrorCode.NOT_LEADER, null, hint);
     }
@@ -345,6 +355,78 @@ class AdminTest {
         assertEquals(4, b.requests(Request.RemoveNode.class).get(0).nodeId());
         client.deleteTenant("t");
         assertEquals("t", b.requests(Request.DeleteTenant.class).get(0).name());
+    }
+
+    private static boolean contains(byte[] hay, byte[] needle) {
+        outer:
+        for (int i = 0; i + needle.length <= hay.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * What {@code createToken} sends is the hash of the secret and nothing else of it: the cluster never sees the
+     * secret, and the text the caller gets carries the id the cluster chose (ADR 0133).
+     */
+    @Test
+    void createTokenSendsOnlyTheHash() {
+        serve((n, r) -> new Response.CreateToken(ErrorCode.NONE, null, 0x2a, 5_000, null));
+        CreatedToken created = client.createToken("laptop", null, TokenLifetime.MONTH);
+        assertEquals(0x2a, created.id());
+        assertEquals(5_000, created.expiresAtMs());
+        AccessToken token = AccessToken.parse(created.text()).orElseThrow();
+        assertEquals(0x2a, token.id(), "the id is the cluster's");
+
+        List<Request.CreateToken> sent = b.requests(Request.CreateToken.class);
+        assertEquals(1, sent.size(), "the leader, after node 1 pointed to it");
+        assertEquals(1, a.requests(Request.CreateToken.class).size(), "node 1 got the same request first");
+        for (Request.CreateToken req : List.of(a.requests(Request.CreateToken.class).get(0), sent.get(0))) {
+            assertEquals("laptop", req.name());
+            assertEquals("", req.owner(), "no owner: the caller");
+            assertEquals(TokenLifetime.MONTH.code(), req.lifetime());
+            assertEquals(32, req.secretHash().size());
+            assertArrayEquals(token.hash(), req.secretHash().toByteArray(), "the hash of the secret");
+            byte[] frame = dev.lotse.proto.Frames.encodeRequest(1, req);
+            assertFalse(contains(frame, token.secret()), "the secret is in the frame");
+            assertFalse(contains(frame, created.text().getBytes(StandardCharsets.UTF_8)), "the text is in the frame");
+        }
+        assertFalse(created.toString().contains(created.text()), created.toString());
+
+        client.createToken("ci", "bob", TokenLifetime.YEAR);
+        Request.CreateToken forBob = b.requests(Request.CreateToken.class).get(1);
+        assertEquals("bob", forBob.owner());
+        assertEquals(5, forBob.lifetime());
+        assertFalse(java.util.Arrays.equals(token.hash(), forBob.secretHash().toByteArray()), "a new secret each");
+    }
+
+    @Test
+    void aRefusedTokenSaysWhy() {
+        String why = "tokens need cluster version 0.1; raise it with `lotse upgrade finalize`";
+        serve((n, r) -> new Response.CreateToken(ErrorCode.UNSUPPORTED_VERSION, why, 0, 0, null));
+        ClientException.Broker e = assertThrows(
+                ClientException.Broker.class, () -> client.createToken("early", null, TokenLifetime.WEEK));
+        assertEquals(ErrorCode.UNSUPPORTED_VERSION, e.code());
+        assertTrue(e.getMessage().contains(why), e.getMessage());
+    }
+
+    @Test
+    void tokensAreListedAndRevokedOnTheMetadataLeader() {
+        List<Messages.TokenEntry> tokens = List.of(new Messages.TokenEntry(41, "ci", "alice", 1, 2, "admin"));
+        serve((n, r) -> r instanceof Request.DescribeTokens
+                ? new Response.DescribeTokens(ErrorCode.NONE, null, tokens)
+                : ok());
+        assertEquals(tokens, client.describeTokens("alice"));
+        assertEquals("alice", b.requests(Request.DescribeTokens.class).get(0).owner());
+        assertEquals(tokens, client.describeTokens(null));
+        assertNull(b.requests(Request.DescribeTokens.class).get(1).owner());
+        client.revokeToken(41);
+        assertEquals(41, b.requests(Request.RevokeToken.class).get(0).id());
     }
 
     @Test

@@ -53,6 +53,7 @@ fn a_cluster_file_becomes_each_nodes_configuration() {
     assert_eq!(c.retention.ms, lotse_server::RetentionConfig::default().ms, "the default age");
     assert_eq!(c.retention.bytes, Some(1 << 30));
     assert!(c.auth.required && c.auth.mtls && c.auth.scram, "secure unless the file says otherwise");
+    assert!(c.auth.tokens, "access tokens sign in unless the file says otherwise");
     assert_eq!(c.auth.admins, vec!["alice".to_string()]);
     assert_eq!(f.data_dir(2), PathBuf::from("/var/lib/lotse/node-2"));
     let (ca, cert, key) = f.tls_paths(3).unwrap();
@@ -181,4 +182,12 @@ fn hosts_and_ports() {
     assert_eq!(host_of("broker"), None);
     assert_eq!(host_of(":7000"), None);
     assert!(is_loopback("[::1]:1") && is_loopback("127.0.0.2:1") && !is_loopback("0.0.0.0:1"));
+}
+
+#[test]
+fn access_tokens_can_be_switched_off() {
+    let f = ClusterFile::parse(&THREE.replace("[auth]", "[auth]\ntokens = false"), "test.toml").unwrap();
+    let c = f.node_config(1).unwrap();
+    assert!(!c.auth.tokens);
+    assert!(!c.auth.mechanisms().contains(&"LOTSE-TOKEN".to_string()));
 }

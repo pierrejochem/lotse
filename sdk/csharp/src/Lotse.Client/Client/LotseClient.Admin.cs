@@ -12,9 +12,9 @@ namespace Lotse.Client;
 
 // The admin calls after creating and binding (ADR 0034): deleting, settings, purge and requeue (ADR 0035, 0063, 0064),
 // users, tenants and role bindings (ADR 0038, 0039, 0043), nodes (ADR 0048), pins (ADR 0065), partitions (ADR 0074),
-// revoking sessions (ADR 0070) and metrics (ADR 0036). Creates and binds are in LotseClient.cs and
-// LotseClient.Publish.cs. Every request goes to the metadata group's leader, except purge and requeue, which go to the
-// queue's leader, and metrics, which are asked of each node.
+// revoking sessions (ADR 0070), access tokens (ADR 0133) and metrics (ADR 0036). Creates and binds are in
+// LotseClient.cs and LotseClient.Publish.cs. Every request goes to the metadata group's leader, except purge and
+// requeue, which go to the queue's leader, and metrics, which are asked of each node.
 public sealed partial class LotseClient
 {
     // ---- deleting ----
@@ -485,6 +485,97 @@ public sealed partial class LotseClient
         ArgumentNullException.ThrowIfNull(subject);
         byte kind = group ? Messages.SubjectKind.Group : Messages.SubjectKind.User;
         return AdminChangeAsync(new Request.RevokeSessions(kind, subject, 0), cancellationToken);
+    }
+
+    // ---- access tokens ----
+
+    /// <summary>
+    /// Creates an access token (ADR 0133) for <paramref name="owner"/>, or for the caller with <c>null</c>; only a
+    /// cluster admin names someone else. The secret is drawn here and only its SHA-256 is sent, so the returned text is
+    /// the only place it exists: keep it, nobody can show it again. A retry after a lost answer may have made a token
+    /// the caller never sees; <see cref="DescribeTokensAsync"/> lists it.
+    /// </summary>
+    /// <param name="name">A label for the owner's own use, 1 to 64 bytes.</param>
+    /// <param name="owner">The user the token acts as, or <c>null</c> for the caller.</param>
+    /// <param name="lifetime">How long it lives.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    /// <exception cref="BrokerErrorException">
+    /// <c>UNAUTHORIZED</c> on a session signed in with a token or for another owner without the cluster-admin role,
+    /// <c>INVALID_REQUEST</c> for a bad name or a full owner or cluster, <c>UNSUPPORTED_VERSION</c> below cluster
+    /// version 0.1; the message says which.
+    /// </exception>
+    public async Task<CreatedToken> CreateTokenAsync(
+        string name, string? owner, TokenLifetime lifetime, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        ArgumentNullException.ThrowIfNull(name);
+        byte code = (byte)lifetime;
+        _ = TokenLifetimes.FromCode(code); // refuses a value outside the five steps before anything is sent
+        byte[] secret = new byte[32];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(secret);
+        try
+        {
+            // The id is the cluster's, so the text is built from its answer; the hash does not depend on the id.
+            byte[] hash = new AccessToken(0, secret).Hash();
+            var req = new Request.CreateToken(name, owner ?? string.Empty, code, ByteString.CopyOf(hash));
+            Response.CreateToken created = await RetryingAsync<Response.CreateToken>(
+                async () =>
+                {
+                    Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                    if (r is not Response.CreateToken c)
+                    {
+                        throw Attempt.Retry("unexpected response " + r);
+                    }
+                    AdminAnswer(c.Error, c.LeaderHint, c.ErrorMsg);
+                    return c;
+                },
+                cancellationToken).ConfigureAwait(false);
+            string text = new AccessToken(created.Id, secret).Text();
+            return new CreatedToken(created.Id, text, created.ExpiresAtMs);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+        }
+    }
+
+    /// <summary>
+    /// Lists access tokens (ADR 0133): the caller's own, or with <paramref name="owner"/> that user's, which only a
+    /// cluster admin or viewer may see; <c>null</c> lists all the caller may see. Only what describes them: no secret is
+    /// kept anywhere to list. Below cluster version 0.1 the list is empty.
+    /// </summary>
+    /// <param name="owner">Only this owner's tokens, or <c>null</c>.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<IReadOnlyList<Messages.TokenEntry>> DescribeTokensAsync(
+        string? owner = null, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        var req = new Request.DescribeTokens(owner);
+        return await RetryingAsync<IReadOnlyList<Messages.TokenEntry>>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                if (r is not Response.DescribeTokens d)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(d.Error, d.LeaderHint, null);
+                return d.Tokens;
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Revokes an access token (ADR 0133): every node ends the sessions it opened and refuses it from then on. A user
+    /// revokes their own tokens, a cluster admin anyone's.
+    /// </summary>
+    /// <param name="id">The token's id.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    /// <exception cref="BrokerErrorException"><c>UNKNOWN_RESOURCE</c> for a token that is not the caller's to revoke, does not exist or has expired.</exception>
+    public Task RevokeTokenAsync(ulong id, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return AdminChangeAsync(new Request.RevokeToken(id), cancellationToken);
     }
 
     /// <summary>

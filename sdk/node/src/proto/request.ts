@@ -288,6 +288,32 @@ export interface AlterUpgradeRequest {
 export interface DescribeUpgradeRequest {
   readonly type: "DescribeUpgrade";
 }
+/**
+ * `CreateToken` (key 66): records an access token (ADR 0133). The client draws the secret and sends only its SHA-256,
+ * so no node ever sees it. Answered with `CreateToken`.
+ */
+export interface CreateTokenRequest {
+  readonly type: "CreateToken";
+  /** A label for the owner's own use, 1 to 64 bytes. */
+  readonly name: string;
+  /** The user the token acts as; empty for the caller (only a cluster admin names someone else). */
+  readonly owner: string;
+  /** The lifetime's code, a `u8`: 1 is 7 days, 2 is 30, 3 is 90, 4 is 180, 5 is 365. */
+  readonly lifetime: number;
+  /** SHA-256 of the 32 secret bytes; the node checks that it is 32 bytes, the codec does not. */
+  readonly secretHash: Uint8Array;
+}
+/** `DescribeTokens` (key 67): lists access tokens, never their secrets (ADR 0133). */
+export interface DescribeTokensRequest {
+  readonly type: "DescribeTokens";
+  /** Only this owner's tokens, or `null` for all the asker may see. */
+  readonly owner: string | null;
+}
+/** `RevokeToken` (key 68): ends an access token by id (ADR 0133). Answered with `Admin`. */
+export interface RevokeTokenRequest {
+  readonly type: "RevokeToken";
+  readonly id: bigint;
+}
 /** `RequestCertificate` (key 55): asks for a certificate with a signing request (ADR 0092). Cluster admin. */
 export interface RequestCertificateRequest {
   readonly type: "RequestCertificate";
@@ -427,6 +453,9 @@ export type Request =
   | DescribeSessionsRequest
   | AlterUpgradeRequest
   | DescribeUpgradeRequest
+  | CreateTokenRequest
+  | DescribeTokensRequest
+  | RevokeTokenRequest
   | RenewCertificateRequest
   | RecordCertificatesRequest
   | RequestCertificateRequest
@@ -485,6 +514,9 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   DescribeSessions: ApiKey.DESCRIBE_SESSIONS,
   AlterUpgrade: ApiKey.ALTER_UPGRADE,
   DescribeUpgrade: ApiKey.DESCRIBE_UPGRADE,
+  CreateToken: ApiKey.CREATE_TOKEN,
+  DescribeTokens: ApiKey.DESCRIBE_TOKENS,
+  RevokeToken: ApiKey.REVOKE_TOKEN,
   RenewCertificate: ApiKey.RENEW_CERTIFICATE,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
@@ -774,6 +806,15 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RevokeSessions":
       w.u8(req.subjectKind).string(req.subject).u64(req.beforeMs).noTags();
+      return;
+    case "CreateToken":
+      w.string(req.name).string(req.owner).u8(req.lifetime).bytes(req.secretHash).noTags();
+      return;
+    case "DescribeTokens":
+      w.optString(req.owner).noTags();
+      return;
+    case "RevokeToken":
+      w.u64(req.id).noTags();
       return;
     case "RevokeCertificate":
       w.bytes(req.issuer).bytes(req.serial).u64(req.notAfterMs).string(req.reason).noTags();
@@ -1160,6 +1201,27 @@ export function readRequest(apiKey: number, r: Reader): Request {
         subject: r.string(),
         beforeMs: r.u64(),
       };
+      r.tags();
+      return x;
+    }
+    case ApiKey.CREATE_TOKEN: {
+      const x: CreateTokenRequest = {
+        type: "CreateToken",
+        name: r.string(),
+        owner: r.string(),
+        lifetime: r.u8(),
+        secretHash: r.bytes(),
+      };
+      r.tags();
+      return x;
+    }
+    case ApiKey.DESCRIBE_TOKENS: {
+      const x: DescribeTokensRequest = { type: "DescribeTokens", owner: r.optString() };
+      r.tags();
+      return x;
+    }
+    case ApiKey.REVOKE_TOKEN: {
+      const x: RevokeTokenRequest = { type: "RevokeToken", id: r.u64() };
       r.tags();
       return x;
     }

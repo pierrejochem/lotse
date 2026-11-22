@@ -8,6 +8,7 @@
 //! against the issuer's keys, fetched through the runtime and cached.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use lotse_auth::scram::ScramCredential;
 use lotse_raft::NodeId;
 use lotse_rt::{CertInfo, Clock, Http, Instant};
 
-use crate::metadata::{CertKey, RevokedCert, SeenCert};
+use crate::metadata::{CertKey, RevokedCert, SeenCert, StoredToken};
 use crate::signal::Signal;
 
 /// How long a session lasts at most before the client must authenticate
@@ -43,6 +44,9 @@ pub struct AuthConfig {
     pub scram: bool,
     /// SASL OAUTHBEARER with tokens from this issuer.
     pub oidc: Option<OidcConfig>,
+    /// SASL `LOTSE-TOKEN` with access tokens from the metadata group
+    /// (ADR 0133); on unless switched off.
+    pub tokens: bool,
     /// Sessions end after this at the latest (and a token's at its expiry):
     /// a removed user or revoked token is cut off by then.
     pub max_session: Duration,
@@ -124,6 +128,7 @@ impl AuthConfig {
             mtls: false,
             scram: false,
             oidc: None,
+            tokens: true,
             max_session: DEFAULT_MAX_SESSION,
             users: BTreeMap::new(),
             admins: Vec::new(),
@@ -142,6 +147,9 @@ impl AuthConfig {
         }
         if self.oidc.is_some() {
             m.push(oauth::MECHANISM.to_owned());
+        }
+        if self.tokens {
+            m.push(lotse_auth::token::MECHANISM.to_owned());
         }
         m
     }
@@ -234,7 +242,38 @@ pub(crate) struct Auth<R> {
     /// the metadata group last applied them (ADR 0123). A change wakes the
     /// revocations' signal: a replaced one ends its connections.
     renewed: Mutex<BTreeMap<CertKey, String>>,
+    /// Access tokens as the metadata group last applied them (ADR 0133). A
+    /// change wakes the revocations' signal: a revoked token, or one whose
+    /// owner was deleted, ends its connections.
+    tokens: Mutex<BTreeMap<u64, StoredToken>>,
+    /// Token sign-ins on this node, for `/metrics`.
+    pub(crate) token_sign_ins: TokenSignIns,
     oidc: Option<Oidc<R>>,
+}
+
+/// Token sign-ins since the node started, by outcome.
+#[derive(Debug, Default)]
+pub(crate) struct TokenSignIns {
+    ok: AtomicU64,
+    failed: AtomicU64,
+}
+
+impl TokenSignIns {
+    /// None yet, usable in a `static`.
+    pub(crate) const fn new() -> TokenSignIns {
+        TokenSignIns { ok: AtomicU64::new(0), failed: AtomicU64::new(0) }
+    }
+
+    /// Counts one sign-in.
+    pub(crate) fn count(&self, ok: bool) {
+        let c = if ok { &self.ok } else { &self.failed };
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Those that succeeded and those that failed.
+    pub(crate) fn get(&self) -> (u64, u64) {
+        (self.ok.load(Ordering::Relaxed), self.failed.load(Ordering::Relaxed))
+    }
 }
 
 /// One open client session, as its connection last told it (ADR 0121).
@@ -252,6 +291,8 @@ pub(crate) struct OpenSession {
     pub(crate) credential_ms: u64,
     /// When it ends unless renewed, ms since the Unix epoch; 0 for never.
     pub(crate) expires_ms: u64,
+    /// The access token it signed in with (ADR 0133).
+    pub(crate) token_id: Option<u64>,
 }
 
 /// A node's open client sessions, each under the number its connection
@@ -303,6 +344,8 @@ impl<R: Clock + Http + Clone> Auth<R> {
             seen: Mutex::new(BTreeMap::new()),
             sessions: OpenSessions::new(),
             renewed: Mutex::new(BTreeMap::new()),
+            tokens: Mutex::new(BTreeMap::new()),
+            token_sign_ins: TokenSignIns::new(),
             oidc,
         })
     }
@@ -321,6 +364,29 @@ impl<R: Clock + Http + Clone> Auth<R> {
     pub(crate) fn renewed_for(&self, cert: &CertInfo, principal: &str) -> bool {
         let key = CertKey { issuer: cert.issuer, serial: cert.serial.clone() };
         self.renewed.lock().expect("renewed lock").get(&key).is_some_and(|p| p == principal)
+    }
+
+    /// Publishes the access tokens the metadata group applied, and wakes
+    /// every connection to check its own if they changed.
+    pub(crate) fn set_tokens(&self, tokens: &BTreeMap<u64, StoredToken>) {
+        let mut t = self.tokens.lock().expect("tokens lock");
+        if *t != *tokens {
+            t.clone_from(tokens);
+            std::mem::take(&mut self.revocations.lock().expect("revocations lock").1).set();
+        }
+    }
+
+    /// Whether token `id` still signs a session in at `now_ms` (ms since
+    /// the Unix epoch): the metadata group, as last applied, holds it and
+    /// it has not expired by the node's wall clock. Checked for every
+    /// frame, so it copies nothing.
+    pub(crate) fn token_live(&self, id: u64, now_ms: u64) -> bool {
+        self.tokens.lock().expect("tokens lock").get(&id).is_some_and(|t| t.expires_at_ms > now_ms)
+    }
+
+    /// Token `id` as the metadata group last applied it, expired or not.
+    pub(crate) fn token(&self, id: u64) -> Option<StoredToken> {
+        self.tokens.lock().expect("tokens lock").get(&id).cloned()
     }
 
     /// Publishes the runtime users the metadata group applied.

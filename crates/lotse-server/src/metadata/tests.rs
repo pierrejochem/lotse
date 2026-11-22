@@ -998,3 +998,125 @@ fn nodes_low_on_disk_are_recorded_cleared_and_survive_a_snapshot() {
     empty.apply(2, &payload(&low(2, false))).unwrap();
     assert_eq!(empty.encode(), before);
 }
+
+fn token_change(name: &str, owner: &str, created_at_ms: u64, expires_at_ms: u64) -> Change {
+    Change::CreateToken {
+        id: 0,
+        name: name.into(),
+        owner: owner.into(),
+        hash: [7; 32],
+        created_at_ms,
+        expires_at_ms,
+        created_by: owner.into(),
+    }
+}
+
+#[test]
+fn a_created_token_is_kept_and_revoked() {
+    let mut s = MetadataState::default();
+    s.apply(10, &payload(&token_change("ci", "alice", 1_000, 5_000))).unwrap();
+    // The id is the index the change applied at, never the proposal's 0.
+    let t = s.live_token(10, 2_000).expect("kept under its index");
+    assert_eq!((t.name.as_str(), t.owner.as_str(), t.hash, t.created_by.as_str()), ("ci", "alice", [7; 32], "alice"));
+    assert_eq!((t.created_at_ms, t.expires_at_ms), (1_000, 5_000));
+    assert!(s.live_token(10, 5_000).is_none(), "an expired token is not live");
+    assert!(s.live_token(0, 2_000).is_none());
+    s.apply(11, &payload(&Change::RevokeToken { id: 10 })).unwrap();
+    assert!(s.live_token(10, 2_000).is_none());
+    assert!(s.tokens.is_empty());
+    // Revoking what is not there changes nothing.
+    s.apply(12, &payload(&Change::RevokeToken { id: 10 })).unwrap();
+}
+
+#[test]
+fn expired_tokens_go_when_the_next_token_change_applies() {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&token_change("a", "alice", 1_000, 2_000))).unwrap();
+    s.apply(2, &payload(&token_change("b", "alice", 1_000, 9_000))).unwrap();
+    assert_eq!(s.tokens.len(), 2, "nothing prunes before a token change");
+    s.apply(3, &payload(&token_change("c", "bob", 3_000, 9_000))).unwrap();
+    assert!(!s.tokens.contains_key(&1), "the expired one is dropped");
+    assert!(s.tokens.contains_key(&2) && s.tokens.contains_key(&3));
+}
+
+#[test]
+fn room_for_tokens_is_limited_per_owner_and_in_all() {
+    use crate::metadata::{MAX_TOKENS, MAX_TOKENS_PER_OWNER};
+    let mut s = MetadataState::default();
+    for i in 0..MAX_TOKENS_PER_OWNER as u64 {
+        assert!(s.token_room("alice", 100).is_ok());
+        s.tokens.insert(i, stored("alice", 1_000));
+    }
+    assert!(s.token_room("alice", 100).is_err(), "a 51st token for one owner");
+    assert!(s.token_room("bob", 100).is_ok(), "another owner is not affected");
+    assert!(s.token_room("alice", 1_000).is_ok(), "expired tokens do not count");
+    // The whole state.
+    let mut full = MetadataState::default();
+    for i in 0..MAX_TOKENS as u64 {
+        full.tokens.insert(i, stored(&format!("user{}", i / 10), 1_000));
+    }
+    assert!(full.token_room("fresh", 100).is_err(), "the 10,001st token");
+    assert!(full.token_room("fresh", 1_000).is_ok());
+}
+
+fn stored(owner: &str, expires_at_ms: u64) -> crate::metadata::StoredToken {
+    crate::metadata::StoredToken {
+        name: "t".into(),
+        owner: owner.into(),
+        hash: [1; 32],
+        created_at_ms: 0,
+        expires_at_ms,
+        created_by: owner.into(),
+    }
+}
+
+fn tokens_state() -> MetadataState {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&Change::SetClusterVersion { version: crate::version::TOKENS_SINCE })).unwrap();
+    s.apply(2, &payload(&token_change("ci", "alice", 1_000, 5_000))).unwrap();
+    s.apply(3, &payload(&token_change("dev", "bob", 1_000, 6_000))).unwrap();
+    s
+}
+
+#[test]
+fn tokens_survive_a_snapshot() {
+    let s = tokens_state();
+    assert!(s.writes(crate::version::TOKENS_SINCE));
+    let decoded = MetadataState::decode(&s.encode()).unwrap();
+    assert_eq!(decoded, s);
+    assert_eq!(decoded.tokens.len(), 2);
+    assert_eq!(decoded.tokens[&3].owner, "bob");
+}
+
+#[test]
+fn a_snapshot_without_section_19_reads_with_no_tokens() {
+    let mut s = tokens_state();
+    s.tokens.clear();
+    let bytes = s.encode();
+    let decoded = MetadataState::decode(&bytes).unwrap();
+    assert!(decoded.tokens.is_empty());
+    assert_eq!(decoded, s);
+    // Before the cluster version allows it, tokens are not written, so a
+    // node of the previous release reads the snapshot.
+    let mut old = tokens_state();
+    old.cluster_version = Some(0);
+    let decoded = MetadataState::decode(&old.encode()).unwrap();
+    assert!(decoded.tokens.is_empty());
+    assert_eq!(decoded.encode(), old.encode(), "the same 18 sections");
+}
+
+#[test]
+fn deleting_a_user_drops_their_tokens() {
+    let mut s = tokens_state();
+    s.apply(4, &payload(&Change::SetUser { user: "alice".into(), credential: None })).unwrap();
+    assert!(!s.tokens.contains_key(&2), "alice's token is gone");
+    assert!(s.tokens.contains_key(&3), "bob's stays");
+}
+
+#[test]
+fn token_changes_round_trip_through_their_record() {
+    for change in [token_change("ci", "alice", 1, 2), Change::RevokeToken { id: 77 }] {
+        assert_eq!(decode_change(&payload(&change)).unwrap(), change);
+    }
+    assert!(decode_change(&payload(&Change::RevokeToken { id: 77 })[..5]).is_err());
+}

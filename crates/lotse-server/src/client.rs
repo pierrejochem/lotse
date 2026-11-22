@@ -58,7 +58,7 @@ use lotse_rt::{Conn, Instant, Runtime};
 use crate::access::Access;
 use crate::auth::{Auth, Principal};
 use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
-use crate::signal::{Signal, race};
+use crate::signal::{Signal, before, race};
 use crate::wire::GroupId;
 
 mod actions;
@@ -78,6 +78,7 @@ mod retire;
 mod session;
 mod sessions;
 mod stats;
+mod tokens;
 mod upgrade;
 pub(crate) use upgrade::TurnJob;
 mod verify;
@@ -135,6 +136,8 @@ pub(crate) struct ClientRequest {
     request: Request,
     /// Who the request acts as.
     principal: Principal,
+    /// How its session signed in, [`lotse_proto::session_mechanism`].
+    mechanism: u8,
 }
 
 /// Reads requests from one connection and writes its responses. Requests
@@ -163,14 +166,40 @@ pub(crate) async fn serve<R: Runtime>(
         // A revoked session ends the connection, also while it waits
         // (ADR 0070); the client then authenticates afresh.
         let changed = session.revocations_changed();
-        if session.revoked() {
+        if session.revoked(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX)) {
             break;
         }
-        let frame = match race(conn.recv(), &[&stop, &changed]).await {
-            Some(Ok(Some(frame))) => frame,
+        // A session signed in with an access token ends with the token,
+        // and the connection with it, also while it waits (ADR 0133). It
+        // wakes at least every `TOKEN_RECHECK` to compare the token's
+        // expiry with the wall clock, which may have stepped forward
+        // past it while monotonic time did not.
+        let closes_at = session.closes_at();
+        if closes_at.is_some_and(|t| rt.now() >= t) {
+            break;
+        }
+        let ends = async {
+            match closes_at {
+                Some(t) => rt.sleep(t.saturating_duration_since(rt.now()).min(TOKEN_RECHECK)).await,
+                None => std::future::pending().await,
+            }
+        };
+        let frame = match race(before(conn.recv(), ends), &[&stop, &changed]).await {
+            Some(Some(Ok(Some(frame)))) => frame,
+            // The token expired, or it is time to compare its expiry with
+            // the wall clock: the checks above end the connection if so.
+            Some(None) => continue,
             None if !stop.is_set() => continue,
             _ => break,
         };
+        // The wall clock may have stepped past the token's expiry while the
+        // connection waited, less than a `TOKEN_RECHECK` ago: such a frame
+        // is not served.
+        if session.revoked(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX))
+            || session.closes_at().is_some_and(|t| rt.now() >= t)
+        {
+            break;
+        }
         NetStats::add(&net.client_in, frame.len());
         if rt.now() - noted >= NOTE_CERT_EVERY {
             noted = rt.now();
@@ -188,12 +217,22 @@ pub(crate) async fn serve<R: Runtime>(
                 }
             }
             Ok((header, request)) => match session.principal(rt.now()) {
-                Some(p) => commands(ClientRequest { outbox: outbox.clone(), header, request, principal: p.clone() }),
+                Some(p) => commands(ClientRequest {
+                    outbox: outbox.clone(),
+                    header,
+                    request,
+                    principal: p.clone(),
+                    mechanism: session.mechanism(),
+                }),
                 // Which versions a node speaks is no secret: a client asks
                 // before it knows how to authenticate.
-                None if matches!(request, Request::ApiVersions) => {
-                    commands(ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous })
-                }
+                None if matches!(request, Request::ApiVersions) => commands(ClientRequest {
+                    outbox: outbox.clone(),
+                    header,
+                    request,
+                    principal: Principal::Anonymous,
+                    mechanism: lotse_proto::session_mechanism::NONE,
+                }),
                 None => outbox.push(header.correlation_id, &Response::Error(ErrorCode::UNAUTHORIZED)),
             },
             // The client may retry with a version this node speaks.
@@ -264,11 +303,16 @@ struct PendingInit {
     term: u64,
 }
 
-/// How long the coordinator waits for an allocation to commit.
 /// A connection that stays open tells the certificate inventory again after
 /// this (ADR 0091).
 const NOTE_CERT_EVERY: Duration = Duration::from_secs(600);
 
+/// How often a waiting token session compares its token's expiry with the
+/// wall clock (ADR 0133). Nothing signals a step of the wall clock, and a
+/// timer a second per token connection costs little.
+const TOKEN_RECHECK: Duration = Duration::from_secs(1);
+
+/// How long the coordinator waits for an allocation to commit.
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PendingFetch {
@@ -461,7 +505,7 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, mut request, principal } = req;
+        let ClientRequest { outbox, header, mut request, principal, mechanism } = req;
         let id = header.correlation_id;
         if let Err(why) = view.access.check(&principal, &request) {
             outbox.push(id, &Response::Refused { code: ErrorCode::UNAUTHORIZED, message: why });
@@ -544,6 +588,9 @@ impl Clients {
             Request::ReportVersion(req) => self.report_version(outbox, id, req, &principal, view, groups),
             Request::AlterUpgrade(req) => self.alter_upgrade(outbox, id, req, view, groups),
             Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, view, groups),
+            Request::CreateToken(req) => self.create_token(outbox, id, req, (&principal, mechanism), view, groups),
+            Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, view, groups),
+            Request::RevokeToken(req) => self.revoke_token(outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,

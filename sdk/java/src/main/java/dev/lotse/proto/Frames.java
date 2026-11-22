@@ -148,6 +148,9 @@ public final class Frames {
             case 60 -> request = Request.RenewCertificate.read(r);
             case 64 -> request = Request.AlterUpgrade.read(r);
             case 65 -> request = Request.DescribeUpgrade.read(r);
+            case 66 -> request = Request.CreateToken.read(r);
+            case 67 -> request = Request.DescribeTokens.read(r);
+            case 68 -> request = Request.RevokeToken.read(r);
             case 9 -> request = Request.Publish.read(r);
             default -> throw new IllegalStateException("checked against the implemented keys");
         }
@@ -210,7 +213,8 @@ public final class Frames {
             case 10 -> response = Response.Subscribe.read(r);
             case 13, 14, 15, 24, 28, 44 -> response = Response.Outcome.read(r);
             case 21, 22, 23 -> response = Response.Create.read(r);
-            case 25, 27, 32, 34, 35, 37, 40, 41, 43, 49, 50, 51, 52, 54, 55, 57, 58, 64 -> response = Response.Admin.read(r);
+            case 25, 27, 32, 34, 35, 37, 40, 41, 43, 49, 50, 51, 52, 54, 55, 57, 58, 64, 68 -> response =
+                    Response.Admin.read(r);
             case 42 -> response = Response.DescribeNodes.read(r);
             case 26 -> response = Response.DescribeConfigs.read(r);
             case 29 -> response = Response.DescribeMetrics.read(r);
@@ -221,6 +225,8 @@ public final class Frames {
             case 59 -> response = Response.DescribeSessions.read(r);
             case 60 -> response = Response.RenewCertificate.read(r);
             case 65 -> response = Response.DescribeUpgrade.read(r);
+            case 66 -> response = Response.CreateToken.read(r);
+            case 67 -> response = Response.DescribeTokens.read(r);
             case 56 -> response = Response.DescribeCertificateRequests.read(r);
             case 36 -> response = Response.DescribeTenants.read(r);
             case 38 -> response = Response.DescribeRoleBindings.read(r);

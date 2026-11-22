@@ -129,6 +129,9 @@ pub(crate) enum AdminThen {
     /// node has the turn once it applied: another claim may have come
     /// first.
     Turn { node: lotse_raft::NodeId },
+    /// An access token (ADR 0133): its id is the record's index, and the
+    /// answer carries it with the expiry.
+    Token { id: u64, expires_at_ms: u64 },
 }
 
 impl AdminThen {
@@ -143,6 +146,7 @@ impl AdminThen {
             | AdminThen::Turn { .. }
             | AdminThen::Changed => admin_response(code, None, h),
             AdminThen::Renewed { chain, not_after_ms, .. } => renewed_response(code, None, h, chain, *not_after_ms),
+            AdminThen::Token { id, expires_at_ms } => super::tokens::created(code, None, h, *id, *expires_at_ms),
         }
     }
 }
@@ -451,6 +455,8 @@ impl Clients {
                     AdminThen::Created { name, tenant, .. } => {
                         AdminThen::Created { name, tenant, id: metadata::resource_id(last) }
                     }
+                    // A token's id is the index its record applies at.
+                    AdminThen::Token { expires_at_ms, .. } => AdminThen::Token { id: last, expires_at_ms },
                     t => t,
                 };
                 self.admin_writes.push(AdminWrite { reply, deadline: now + WRITE_TIMEOUT, last, term, then });

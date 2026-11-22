@@ -43,10 +43,11 @@ mod group;
 mod publish;
 mod renewal;
 
-pub use admin::RenewedCertificate;
+pub use admin::{CreatedToken, RenewedCertificate};
 pub use auth::Credentials;
 pub use consumer::{Consumer, Message};
 pub use group::{GroupConfig, GroupConsumer, GroupRecord};
+pub use lotse_auth::token::Lifetime;
 pub use publish::{OutMessage, Published};
 pub use renewal::{CertificateRenewal, RENEW_CHECK, RENEW_RETRY};
 
