@@ -40,6 +40,8 @@ fn entry(p: &Principal, s: &OpenSession) -> SessionEntry {
         connected_ms: s.connected_ms,
         credential_ms: s.credential_ms,
         expires_ms: s.expires_ms,
+        // Task 5 fills it from the session's token.
+        token_id: None,
     }
 }
 
