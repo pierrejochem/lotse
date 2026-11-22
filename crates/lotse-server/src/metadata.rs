@@ -175,6 +175,22 @@ pub(crate) enum Change {
         renews: CertKey,
         at_ms: u64,
     },
+    /// An access token was created (ADR 0133). Only the SHA-256 hash of its
+    /// secret is kept. `id` is 0 in the proposal and becomes the index the
+    /// change applies at, so every replica derives the same one; tokens
+    /// that expired before `created_at_ms` are dropped. Proposed only once
+    /// the cluster version allows it.
+    CreateToken {
+        id: u64,
+        name: String,
+        owner: String,
+        hash: [u8; 32],
+        created_at_ms: u64,
+        expires_at_ms: u64,
+        created_by: String,
+    },
+    /// An access token was revoked; one that is not there stays absent.
+    RevokeToken { id: u64 },
 }
 
 /// Which runtime resources a node knows to be deleted: those with a
@@ -557,6 +573,9 @@ pub(crate) struct MetadataState {
     pub(crate) disk_low: BTreeSet<NodeId>,
     /// Certificates the renewal CA issued, until they expire (ADR 0123).
     pub(crate) renewed: BTreeMap<CertKey, RenewedCert>,
+    /// Access tokens by id, which is the index of the change that created
+    /// them (ADR 0133); never a secret, only its hash.
+    pub(crate) tokens: BTreeMap<u64, StoredToken>,
     /// The cluster version in force (ADR 0127); `None` until every node has
     /// reported its versions.
     pub(crate) cluster_version: Option<u32>,
@@ -567,6 +586,20 @@ pub(crate) struct MetadataState {
     pub(crate) turn: Option<Turn>,
     /// Whether restart turns are paused (ADR 0127).
     pub(crate) turns_held: bool,
+}
+
+/// An access token as the state keeps it (ADR 0133): the SHA-256 hash of
+/// its secret, never the secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredToken {
+    pub(crate) name: String,
+    /// The user the token acts as.
+    pub(crate) owner: String,
+    pub(crate) hash: [u8; 32],
+    pub(crate) created_at_ms: u64,
+    pub(crate) expires_at_ms: u64,
+    /// Who asked for it: the owner, or a cluster admin for them.
+    pub(crate) created_by: String,
 }
 
 /// A node's release and the cluster versions it runs with (ADR 0127).
@@ -593,9 +626,6 @@ impl MetadataState {
     /// Whether a format introduced by cluster version `since` may be
     /// written (ADR 0127): only once the cluster version in force is at
     /// least that, so it is not before every node has reported.
-    // Unused until the first format that waits for a raised cluster version
-    // is written (access tokens); remove this then.
-    #[allow(dead_code)]
     pub(crate) fn writes(&self, since: u32) -> bool {
         self.cluster_version.is_some_and(|v| v >= since)
     }
@@ -607,6 +637,30 @@ impl MetadataState {
     pub(crate) fn room_for_renewal(&self, renews: &CertKey, now_ms: u64) -> bool {
         self.renewed.values().any(|r| r.renews == *renews)
             || self.renewed.values().filter(|r| r.not_after_ms > now_ms).count() < MAX_RENEWED
+    }
+
+    /// Whether `owner` may get one more token at `now_ms`: at most
+    /// [`MAX_TOKENS_PER_OWNER`] live ones each and [`MAX_TOKENS`] in all.
+    /// Expired ones are pruned only when a token is created, so they must
+    /// not count.
+    // Unused until the token requests are served; remove this then.
+    #[allow(dead_code)]
+    pub(crate) fn token_room(&self, owner: &str, now_ms: u64) -> Result<(), String> {
+        let live = || self.tokens.values().filter(|t| t.expires_at_ms > now_ms);
+        if live().count() >= MAX_TOKENS {
+            return Err(format!("the cluster holds {MAX_TOKENS} tokens; revoke some first"));
+        }
+        if live().filter(|t| t.owner == owner).count() >= MAX_TOKENS_PER_OWNER {
+            return Err(format!("{owner} holds {MAX_TOKENS_PER_OWNER} tokens; revoke one first"));
+        }
+        Ok(())
+    }
+
+    /// The token `id`, if it exists and has not expired at `now_ms`.
+    // Unused until the token requests are served; remove this then.
+    #[allow(dead_code)]
+    pub(crate) fn live_token(&self, id: u64, now_ms: u64) -> Option<&StoredToken> {
+        self.tokens.get(&id).filter(|t| t.expires_at_ms > now_ms)
     }
 
     /// Applies the voters a group is to have, from the planner or an
@@ -857,6 +911,9 @@ impl MetadataState {
             }
             Change::SetUser { user, credential: None } => {
                 self.users.remove(&user);
+                // A token acts as its owner; without the user it must not
+                // outlive them.
+                self.tokens.retain(|_, t| t.owner != user);
             }
             Change::CreateTenant { name, incarnated } => {
                 self.deleted_tenants.remove(&name);
@@ -935,6 +992,13 @@ impl MetadataState {
                     self.certs.entry(cert.clone()).or_insert(seen);
                     self.renewed.insert(cert, RenewedCert { principal, not_after_ms, renews });
                 }
+            }
+            Change::CreateToken { id: _, name, owner, hash, created_at_ms, expires_at_ms, created_by } => {
+                self.tokens.retain(|_, t| t.expires_at_ms > created_at_ms);
+                self.tokens.insert(index, StoredToken { name, owner, hash, created_at_ms, expires_at_ms, created_by });
+            }
+            Change::RevokeToken { id } => {
+                self.tokens.remove(&id);
             }
             Change::DiskLow { node, low } => {
                 // A node that is gone has no disk to speak of.
@@ -1223,7 +1287,8 @@ impl MetadataState {
         // runtime (ADR 0104), the nodes moved off each group (ADR 0108),
         // queues' resume windows (ADR 0109), replication factors and placed
         // groups (ADR 0115), queues' length limits (ADR 0118), nodes low on
-        // disk (ADR 0122), renewed certificates (ADR 0123). A later
+        // disk (ADR 0122), renewed certificates (ADR 0123), access tokens (ADR
+        // 0133, written only once the cluster version allows). A later
         // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -1246,44 +1311,46 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections =
-            if self.cluster_version.is_some() || !self.versions.is_empty() || self.turn.is_some() || self.turns_held {
-                18
-            } else if !self.renewed.is_empty() {
-                17
-            } else if !self.disk_low.is_empty() {
-                16
-            } else if !lengths.is_empty() {
-                15
-            } else if !self.replication.is_empty() || !self.placed.is_empty() {
-                14
-            } else if !windows.is_empty() {
-                13
-            } else if !self.moved_off.is_empty() {
-                12
-            } else if !zoned.is_empty() {
-                11
-            } else if !self.deleted.is_empty() {
-                10
-            } else if !self.cert_requests.is_empty() {
-                9
-            } else if !self.certs.is_empty() {
-                8
-            } else if !self.revoked_certs.is_empty() {
-                7
-            } else if !levels.is_empty() {
-                6
-            } else if !single.is_empty() {
-                5
-            } else if !self.revocations.is_empty() {
-                4
-            } else if !self.incarnations.is_empty() {
-                3
-            } else if !compacting.is_empty() {
-                2
-            } else {
-                usize::from(!self.pins.is_empty())
-            };
+        let sections = if !self.tokens.is_empty() && self.writes(crate::version::TOKENS_SINCE) {
+            19
+        } else if self.cluster_version.is_some() || !self.versions.is_empty() || self.turn.is_some() || self.turns_held
+        {
+            18
+        } else if !self.renewed.is_empty() {
+            17
+        } else if !self.disk_low.is_empty() {
+            16
+        } else if !lengths.is_empty() {
+            15
+        } else if !self.replication.is_empty() || !self.placed.is_empty() {
+            14
+        } else if !windows.is_empty() {
+            13
+        } else if !self.moved_off.is_empty() {
+            12
+        } else if !zoned.is_empty() {
+            11
+        } else if !self.deleted.is_empty() {
+            10
+        } else if !self.cert_requests.is_empty() {
+            9
+        } else if !self.certs.is_empty() {
+            8
+        } else if !self.revoked_certs.is_empty() {
+            7
+        } else if !levels.is_empty() {
+            6
+        } else if !single.is_empty() {
+            5
+        } else if !self.revocations.is_empty() {
+            4
+        } else if !self.incarnations.is_empty() {
+            3
+        } else if !compacting.is_empty() {
+            2
+        } else {
+            usize::from(!self.pins.is_empty())
+        };
         if sections >= 1 {
             b.put_u32_le(self.pins.len() as u32);
             for (g, n) in &self.pins {
@@ -1433,6 +1500,18 @@ impl MetadataState {
                 put_str(&mut b, &v.release);
                 b.put_u32_le(v.oldest);
                 b.put_u32_le(v.newest);
+            }
+        }
+        if sections >= 19 {
+            b.put_u32_le(self.tokens.len() as u32);
+            for (id, t) in &self.tokens {
+                b.put_u64_le(*id);
+                put_str(&mut b, &t.name);
+                put_str(&mut b, &t.owner);
+                b.put_slice(&t.hash);
+                b.put_u64_le(t.created_at_ms);
+                b.put_u64_le(t.expires_at_ms);
+                put_str(&mut b, &t.created_by);
             }
         }
         b.freeze()
@@ -1690,6 +1769,20 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 8)?;
+                let id = b.get_u64_le();
+                let name = get_str(b)?;
+                let owner = get_str(b)?;
+                need(b, 48)?;
+                let mut hash = [0u8; 32];
+                b.copy_to_slice(&mut hash);
+                let (created_at_ms, expires_at_ms) = (b.get_u64_le(), b.get_u64_le());
+                let created_by = get_str(b)?;
+                s.tokens.insert(id, StoredToken { name, owner, hash, created_at_ms, expires_at_ms, created_by });
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1892,6 +1985,20 @@ fn change_bytes(change: &Change) -> Bytes {
         Change::HoldTurns { held } => {
             b.put_u8(34);
             b.put_u8(u8::from(*held));
+        }
+        Change::CreateToken { id, name, owner, hash, created_at_ms, expires_at_ms, created_by } => {
+            b.put_u8(35);
+            b.put_u64_le(*id);
+            put_str(&mut b, name);
+            put_str(&mut b, owner);
+            b.put_slice(hash);
+            b.put_u64_le(*created_at_ms);
+            b.put_u64_le(*expires_at_ms);
+            put_str(&mut b, created_by);
+        }
+        Change::RevokeToken { id } => {
+            b.put_u8(36);
+            b.put_u64_le(*id);
         }
         Change::Reassign { group, voters } => {
             b.put_u8(26);
@@ -2258,6 +2365,21 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
             need(b, 1)?;
             Change::HoldTurns { held: b.get_u8() != 0 }
         }
+        35 => {
+            need(b, 8)?;
+            let id = b.get_u64_le();
+            let name = get_str(b)?;
+            let owner = get_str(b)?;
+            need(b, 48)?;
+            let mut hash = [0u8; 32];
+            b.copy_to_slice(&mut hash);
+            let (created_at_ms, expires_at_ms) = (b.get_u64_le(), b.get_u64_le());
+            Change::CreateToken { id, name, owner, hash, created_at_ms, expires_at_ms, created_by: get_str(b)? }
+        }
+        36 => {
+            need(b, 8)?;
+            Change::RevokeToken { id: b.get_u64_le() }
+        }
         _ => return Err("unknown metadata change".into()),
     };
     if b.has_remaining() {
@@ -2473,6 +2595,16 @@ pub(crate) struct CertKey {
 /// (ADR 0123): each certificate has at most one, so this bounds a flood, not
 /// normal use.
 pub(crate) const MAX_RENEWED: usize = 4096;
+
+/// Most live access tokens one owner holds (ADR 0133).
+// Unused until the token requests are served; remove this then.
+#[allow(dead_code)]
+pub const MAX_TOKENS_PER_OWNER: usize = 50;
+
+/// Most live access tokens the state holds at once (ADR 0133).
+// Unused until the token requests are served; remove this then.
+#[allow(dead_code)]
+pub const MAX_TOKENS: usize = 10_000;
 
 /// A certificate the renewal CA issued (ADR 0123).
 #[derive(Debug, Clone, PartialEq, Eq)]
