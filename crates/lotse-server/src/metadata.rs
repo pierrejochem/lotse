@@ -590,6 +590,16 @@ pub(crate) struct Turn {
 const VERSION: u8 = 4;
 
 impl MetadataState {
+    /// Whether a format introduced by cluster version `since` may be
+    /// written (ADR 0127): only once the cluster version in force is at
+    /// least that, so it is not before every node has reported.
+    // Unused until the first format that waits for a raised cluster version
+    // is written (access tokens); remove this then.
+    #[allow(dead_code)]
+    pub(crate) fn writes(&self, since: u32) -> bool {
+        self.cluster_version.is_some_and(|v| v >= since)
+    }
+
     /// Whether a renewal of `renews` may be signed at `now_ms`: it replaces
     /// an earlier one, or fewer than [`MAX_RENEWED`] renewed certificates
     /// are still valid. Expired ones are pruned only when a renewal applies,
