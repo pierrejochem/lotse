@@ -667,6 +667,8 @@ enum Command {
         term: u64,
         offsets: Vec<u64>,
         ok: bool,
+        /// The dead-letter queue refused them as full.
+        full: bool,
     },
     /// The operator's endpoint asks what the node sees of itself (ADR 0117).
     Observe {
@@ -1069,6 +1071,8 @@ async fn forward_dead_letters<R: Runtime>(
         term,
         offsets,
         ok: result.is_ok(),
+        full: matches!(&result, Err(lotse_client::ClientError::Broker { code, .. })
+            if *code == lotse_proto::ErrorCode::QUEUE_FULL),
     });
     shared.work.set();
 }
@@ -1408,8 +1412,8 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                     clients.markers_written(&txn_id, term, &view, groups);
                     continue;
                 }
-                Command::Forwarded { group, term, offsets, ok } => {
-                    clients.forwarded(group, term, offsets, ok, &view, groups);
+                Command::Forwarded { group, term, offsets, ok, full } => {
+                    clients.forwarded(group, term, offsets, ok, full, &view, groups);
                     continue;
                 }
                 Command::Verified { key, error } => {

@@ -2581,6 +2581,44 @@ fn a_full_dead_letter_queue_takes_no_more_and_its_source_waits() {
     });
 }
 
+/// `cut` owes four at once, twice what `pit` takes at all: they go in
+/// parts, each part what `pit` has room for (ADR 0118).
+#[test]
+fn dead_letters_owed_beyond_the_limit_go_in_parts() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let mut w = World::new(rt.clone(), Scenario::lengths()).await;
+            let c = Client::new(rt.node("p"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+            // One batch of five: `cut` keeps c4 and retires four in one claim.
+            let mut b = BatchBuilder::new(BatchOptions::default());
+            for i in 0..5 {
+                b.push(i, None, Some(format!("c{i}").as_bytes()), &[]);
+            }
+            c.produce("cut", 0, b.finish().unwrap()).await.expect("drop-head never refuses");
+            let deadline = rt.now() + Duration::from_secs(10);
+            while ready(&rt, &c, PIT).await < 2 {
+                assert!(rt.now() < deadline, "pit never filled to its limit");
+                rt.sleep(Duration::from_millis(100)).await;
+            }
+            rt.sleep(Duration::from_secs(1)).await;
+            assert_eq!(ready(&rt, &c, PIT).await, 2, "pit holds what its limit allows");
+            let mut sub = c.subscribe("pit", 1).await.unwrap();
+            let mut got = BTreeSet::new();
+            while got.len() < 4 {
+                let m = sub.next(Duration::from_secs(5)).await.unwrap().expect("what cut owes arrives");
+                got.insert(value_of(&m));
+                sub.ack(&m).await.unwrap();
+            }
+            assert_eq!(got, (0..4).map(|i| format!("c{i}")).collect());
+            sub.close().await;
+            for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+                handle.stop();
+                let _ = node.join().await;
+            }
+        })
+    });
+}
+
 // ---------------------------------------------------------------------------
 // What `DescribeMetrics` says of priority levels and single active
 // consumers (ADR 0120).

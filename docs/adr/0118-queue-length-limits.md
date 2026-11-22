@@ -37,6 +37,7 @@ Quorum queues support both. Kafka has no per-topic length limit beyond retention
 - **`reject-publish`.** A produce, a node-routed publish, a transaction's batch or a dead letter that would pass the limit is refused:
   - The first three fail with the new error code `QUEUE_FULL` (34), not retriable; nothing is written.
   - A dead letter stays owed in its source queue, which sends it again later (ADR 0055); nothing is lost.
+  - The queue takes a forwarded part whole or not at all, so after a refusal the source sends half as many next time, down to one, and twice as many again after one is taken: a queue with room for fewer messages than are owed still fills to its limit.
   - The replica asks the limit only about a batch that is new to it (`Replica::propose_admitted`). A retry of a batch it already took is answered as written, never refused: otherwise its producer would take the batch's sequence as free.
 - **A refusal after a lost answer.** An earlier attempt whose answer was lost may still commit at a leader that has it in its log, and a refusal says nothing about that attempt. So a client that gets `QUEUE_FULL` after such an attempt reports the outcome as unknown and starts a new producer, as it does for an authentication failure then. The Rust client and the Java, C# and Node.js SDKs all do this.
 - **`drop-head`.** The queue takes every write. Each round its leader retires the oldest waiting messages until the queue fits, through the RETIRE path of ADR 0055, with the new reason `max-length`:
