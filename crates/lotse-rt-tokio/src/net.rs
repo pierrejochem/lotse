@@ -180,7 +180,24 @@ impl Drop for TokioListener {
     }
 }
 
-type Reader = Box<dyn AsyncRead + Send + Unpin>;
+/// The read half of a connection and the frame it is part way through.
+/// The partial frame lives here, behind the connection's mutex, and not in
+/// the `recv` future, so a `recv` dropped mid-frame (callers race it against
+/// timers and signals) loses no bytes: the next `recv` goes on where it
+/// stopped.
+struct Reader {
+    stream: Box<dyn AsyncRead + Send + Unpin>,
+    /// The length prefix, `head_read` bytes of it read.
+    head: [u8; 4],
+    head_read: usize,
+    /// The payload once the prefix is complete, `body_read` bytes of it read.
+    body: BytesMut,
+    body_read: usize,
+    /// A read failed: the stream is out of step and every later `recv`
+    /// fails too.
+    failed: bool,
+}
+
 type Writer = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// A connection carrying length-prefixed frames, over TLS or plain TCP.
@@ -209,7 +226,14 @@ impl TokioConn {
     ) -> Self {
         let (rd, wr) = tokio::io::split(stream);
         TokioConn {
-            rd: tokio::sync::Mutex::new(Box::new(rd)),
+            rd: tokio::sync::Mutex::new(Reader {
+                stream: Box::new(rd),
+                head: [0; 4],
+                head_read: 0,
+                body: BytesMut::new(),
+                body_read: 0,
+                failed: false,
+            }),
             wr: tokio::sync::Mutex::new(Box::new(wr)),
             peer,
             cert,
@@ -431,29 +455,61 @@ impl Conn for TokioConn {
 }
 
 impl TokioConn {
+    /// The next frame. Cancel-safe: every await is a `read`, which takes
+    /// nothing when dropped, and what each read returns is kept in the
+    /// [`Reader`] at once.
     async fn recv_frame(&self) -> io::Result<Option<Bytes>> {
-        let mut rd = self.rd.lock().await;
-        let mut len = [0u8; 4];
-        // A clean close lands between frames; anywhere else it is an error.
-        // A TLS peer that goes away without close_notify ends the stream
-        // with UnexpectedEof: between frames that is a close like TCP's FIN,
-        // and a frame cut short still fails below.
-        let n = match rd.read(&mut len).await {
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => 0,
-            Err(e) => return Err(e),
-        };
-        if n == 0 {
-            return Ok(None);
+        let mut guard = self.rd.lock().await;
+        let rd = &mut *guard;
+        if rd.failed {
+            return Err(io::Error::new(ErrorKind::BrokenPipe, "an earlier read on this connection failed"));
         }
-        rd.read_exact(&mut len[n..]).await?;
-        let len = u32::from_be_bytes(len) as usize;
-        if len > MAX_FRAME {
-            return Err(io::Error::new(ErrorKind::InvalidData, format!("frame of {len} bytes exceeds the limit")));
+        let res = rd.next_frame().await;
+        if res.is_err() {
+            rd.failed = true;
         }
-        let mut buf = BytesMut::zeroed(len);
-        rd.read_exact(&mut buf).await?;
-        Ok(Some(buf.freeze()))
+        res
+    }
+}
+
+impl Reader {
+    async fn next_frame(&mut self) -> io::Result<Option<Bytes>> {
+        let cut_short = || io::Error::new(ErrorKind::UnexpectedEof, "the connection closed inside a frame");
+        while self.head_read < 4 {
+            // A clean close lands between frames; anywhere else it is an
+            // error. A TLS peer that goes away without close_notify ends the
+            // stream with UnexpectedEof: between frames that is a close like
+            // TCP's FIN, and a frame cut short still fails.
+            let n = match self.stream.read(&mut self.head[self.head_read..]).await {
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof && self.head_read == 0 => 0,
+                Err(e) => return Err(e),
+            };
+            if n == 0 {
+                return if self.head_read == 0 { Ok(None) } else { Err(cut_short()) };
+            }
+            self.head_read += n;
+            if self.head_read == 4 {
+                let len = u32::from_be_bytes(self.head) as usize;
+                if len > MAX_FRAME {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("frame of {len} bytes exceeds the limit"),
+                    ));
+                }
+                self.body = BytesMut::zeroed(len);
+                self.body_read = 0;
+            }
+        }
+        while self.body_read < self.body.len() {
+            let n = self.stream.read(&mut self.body[self.body_read..]).await?;
+            if n == 0 {
+                return Err(cut_short());
+            }
+            self.body_read += n;
+        }
+        self.head_read = 0;
+        Ok(Some(std::mem::take(&mut self.body).freeze()))
     }
 }
 
