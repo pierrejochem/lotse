@@ -36,7 +36,8 @@ final class RealCluster implements AutoCloseable {
         } else {
             text.append("[tls]\nplaintext_on_loopback = true\n\n");
         }
-        text.append("[retention]\nms = -1\n\n[auth]\n");
+        // A test on a real disk sets no free space limit: a runner low on disk would refuse new data (ADR 0122).
+        text.append("[retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\n");
         text.append(tls ? "admins = [\"alice\"]\n" : "required = false\n");
         for (int id = 1; id <= nodes; id++) {
             int peer = LotseBinary.freePort();
