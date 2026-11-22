@@ -67,7 +67,7 @@ The session ends:
 - when the token expires;
 - at once when the token is revoked, on every node;
 - when the owner's sessions are revoked ([Revoking sessions](authentication-and-roles.md#revoking-sessions)): a token made before the revocation is refused, a token made after it works;
-- when the token is removed for any other reason.
+- when the token's owner is deleted, which removes the owner's tokens with them.
 
 `DescribeSessions` lists a token's session with its mechanism and the token's id, never the secret.
 

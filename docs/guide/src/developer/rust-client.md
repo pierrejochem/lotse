@@ -188,7 +188,7 @@ for t in client.describe_tokens(None).await? {
 client.revoke_token(made.id).await?;
 ```
 
-`create_token(name, owner, lifetime)` takes `None` for the caller; only a cluster admin names another owner. `Lifetime` is `Week`, `Month`, `Quarter`, `Half` or `Year` (7, 30, 90, 180 and 365 days). `describe_tokens(owner)` lists the caller's own tokens, or for a cluster admin or viewer all of them or one owner's. A client signed in with a token cannot make tokens. A create retried after a lost answer may leave a second token under an earlier id: list and revoke it. On a cluster below version 0.1 the calls fail with `UNSUPPORTED_VERSION`, except that listing answers nothing.
+`create_token(name, owner, lifetime)` takes `None` for the caller; only a cluster admin names another owner. `Lifetime` is `Week`, `Month`, `Quarter`, `Half` or `Year` (7, 30, 90, 180 and 365 days). `describe_tokens(owner)` lists the caller's own tokens, or for a cluster admin or viewer all of them or one owner's. A client signed in with a token cannot make tokens. A create retried after a lost answer may leave a second token under a later id: list and revoke it. On a cluster below version 0.1 the calls fail with `UNSUPPORTED_VERSION`, except that listing answers nothing.
 
 ## Testing against the simulation
 

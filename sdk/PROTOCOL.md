@@ -132,7 +132,7 @@ One TCP connection per broker address, kept open. Every connection is TLS 1.3 wi
 
 ## Authentication
 
-Two SASL mechanisms, chosen by name in `SaslHandshake`. A node offers the ones its configuration enables; asking for another gives `UNSUPPORTED_SASL_MECHANISM` (28) with the node's list in the same response.
+Three SASL mechanisms, chosen by name in `SaslHandshake`. A node offers the ones its configuration enables; asking for another gives `UNSUPPORTED_SASL_MECHANISM` (28) with the node's list in the same response.
 
 ```text
 SaslHandshake(mechanism)  ->  error u16 | mechanisms array<string>        (no tagged fields)
@@ -143,7 +143,7 @@ An unsuccessful `SaslAuthenticate` carries `AUTHENTICATION_FAILED` (27) and a me
 
 **OAUTHBEARER** is one round: `n,,\x01auth=Bearer <token>\x01\x01`. Ask for the token on every authentication, including renewals.
 
-**LOTSE-TOKEN** (ADR 0133) is one round: the message is the token's text, `lotse_tok_<id>_<secret>` (16 lower-case hex digits, then 43 characters of base64url, no padding), and the answer's `auth_bytes` is empty. Any failure, whatever its reason, is `AUTHENTICATION_FAILED` with the message `authentication failed`, and the node closes the connection. The session acts as the token's owner with no IdP groups; `session_lifetime_ms` is the node's `max_session_s` or the token's remaining time, whichever is shorter, and a connection signed in with a token ends when the token does or is revoked. A node with `[auth] tokens = false` does not list the mechanism. Authenticate again with the same text before the session ends; the secret only ever travels in this message, so send it over TLS.
+**LOTSE-TOKEN** (ADR 0133) is one round: the message is the token's text, `lotse_tok_<id>_<secret>` (16 lower-case hex digits, then 43 characters of base64url, no padding), and the answer's `auth_bytes` is empty. Any failure, whatever its reason, is `AUTHENTICATION_FAILED` with the message `authentication failed`, and the node closes the connection. The session acts as the token's owner with no IdP groups; `session_lifetime_ms` is the node's `max_session_s` or the token's remaining time, whichever is shorter, and a connection signed in with a token ends when the token expires, is revoked or its owner is deleted, or the owner's sessions are revoked. A node with `[auth] tokens = false` does not list the mechanism. Authenticate again with the same text before the session ends; the secret only ever travels in this message, so send it over TLS.
 
 **SCRAM-SHA-512** (RFC 5802, RFC 7677) is two rounds, with these particulars that differ from what a library might assume:
 
@@ -163,7 +163,7 @@ An empty password is valid. HMAC pads a short key with zeros, so an implementati
 
 **Setting a password** (`AlterUser`, admin) sends a credential, never the password: a 16-byte random salt, 4096 iterations, `StoredKey` and `ServerKey = HMAC(SaltedPassword, "Server Key")` (each 64 bytes). A removal sends no credential.
 
-**Sessions.** `session_lifetime_ms` of the **last** response is how long the session lasts, counted by the node from when it completes the login (its last answer); `0` means as long as the connection (a certificate login has no SASL session at all). The node caps it at its `max_session_s` and, for OAUTHBEARER, at the token's expiry. Authenticate again on the same connection (`SaslHandshake`, then `SaslAuthenticate`) before it ends: the Rust client does so at four fifths of the lifetime, counted from before its first request (so it never believes in a session longer than the node does), and the node insists on the same principal. Requests in flight meanwhile are served. After the end the node answers `UNAUTHORIZED` to everything but SASL and `ApiVersions`; the Rust client does not try to renew then but opens a new connection and logs in again, and so does the Java one.
+**Sessions.** `session_lifetime_ms` of the **last** response is how long the session lasts, counted by the node from when it completes the login (its last answer); `0` means as long as the connection (a certificate login has no SASL session at all). The node caps it at its `max_session_s` and, for OAUTHBEARER and `LOTSE-TOKEN`, at the token's expiry. Authenticate again on the same connection (`SaslHandshake`, then `SaslAuthenticate`) before it ends: the Rust client does so at four fifths of the lifetime, counted from before its first request (so it never believes in a session longer than the node does), and the node insists on the same principal. Requests in flight meanwhile are served. After the end the node answers `UNAUTHORIZED` to everything but SASL and `ApiVersions`; the Rust client does not try to renew then but opens a new connection and logs in again, and so does the Java one.
 
 ## Client behaviour: streams
 

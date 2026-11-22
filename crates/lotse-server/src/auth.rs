@@ -376,10 +376,12 @@ impl<R: Clock + Http + Clone> Auth<R> {
         }
     }
 
-    /// Whether the metadata group, as last applied, holds token `id`,
-    /// expired or not. Checked for every frame, so it copies nothing.
-    pub(crate) fn has_token(&self, id: u64) -> bool {
-        self.tokens.lock().expect("tokens lock").contains_key(&id)
+    /// Whether token `id` still signs a session in at `now_ms` (ms since
+    /// the Unix epoch): the metadata group, as last applied, holds it and
+    /// it has not expired by the node's wall clock. Checked for every
+    /// frame, so it copies nothing.
+    pub(crate) fn token_live(&self, id: u64, now_ms: u64) -> bool {
+        self.tokens.lock().expect("tokens lock").get(&id).is_some_and(|t| t.expires_at_ms > now_ms)
     }
 
     /// Token `id` as the metadata group last applied it, expired or not.

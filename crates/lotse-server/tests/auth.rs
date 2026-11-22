@@ -1864,6 +1864,73 @@ fn an_idle_session_ends_when_its_token_expires() {
     });
 }
 
+/// The wall clock steps forward past the token's expiry (an NTP step, a
+/// virtual machine resumed) while monotonic time does not: the session
+/// ends with the token all the same.
+#[test]
+fn a_token_session_ends_when_the_wall_clock_passes_its_expiry() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let t = alice.create_with(&rt, "alice", "week", 1, secret_hash(1)).await;
+            assert_eq!(t.error, ErrorCode::NONE);
+            let (conn, _) = signed_in(&rt, "w", 1, &token_text(t.id, 1)).await;
+            assert!(sees_stream(&rt, &conn).await, "days left: the session works");
+            let now = rt.unix_time().as_millis() as u64;
+            rt.step_wall_clock(Duration::from_millis(t.expires_at_ms - now + 1_000));
+            let stepped = rt.unix_time().as_millis() as u64;
+            let closed = closed_at(&rt, &conn, Duration::from_secs(5)).await.expect("the connection closes");
+            assert!(closed <= stepped + 2_000, "within two seconds of the step: {closed} {stepped}");
+            stop(nodes).await;
+        });
+    });
+}
+
+/// Authenticating again on a token session cannot change who it is, and
+/// with the same token cannot outlast the token.
+#[test]
+fn authenticating_again_with_a_token_keeps_the_owner_and_the_expiry() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut bob = AsUser::new("bob", "bob-pw");
+            let hers = alice.create_with(&rt, "alice", "week", 1, secret_hash(1)).await;
+            let his = bob.create_with(&rt, "bob", "bobs", 1, secret_hash(2)).await;
+            assert_eq!((hers.error, his.error), (ErrorCode::NONE, ErrorCode::NONE));
+            // Bob's token works on a connection of its own, so what follows
+            // fails only for being another owner's.
+            signed_in(&rt, "b", 1, &token_text(his.id, 2)).await;
+
+            // Another owner's token on alice's live session is refused and
+            // the connection closes.
+            let (conn, _) = signed_in(&rt, "a1", 1, &token_text(hers.id, 1)).await;
+            let r = token_sign_in(&rt, &conn, &token_text(his.id, 2)).await;
+            assert_eq!(
+                (r.error, r.error_msg.as_deref(), r.session_lifetime_ms),
+                (ErrorCode::AUTHENTICATION_FAILED, Some("authentication failed"), 0),
+                "{r:?}"
+            );
+            assert!(conn_closed(&rt, &conn).await, "the connection stays open");
+
+            // The same token again, three seconds before it expires, gives
+            // three seconds at most, and the connection closes at expiry.
+            let (conn, _) = signed_in(&rt, "a2", 1, &token_text(hers.id, 1)).await;
+            let now = rt.unix_time().as_millis() as u64;
+            rt.step_wall_clock(Duration::from_millis(hers.expires_at_ms - now - 3_000));
+            let r = token_sign_in(&rt, &conn, &token_text(hers.id, 1)).await;
+            assert_eq!(r.error, ErrorCode::NONE, "{r:?}");
+            assert!(r.session_lifetime_ms > 0 && r.session_lifetime_ms <= 3_000, "{r:?}");
+            assert!(sees_stream(&rt, &conn).await, "the same connection goes on");
+            let closed = closed_at(&rt, &conn, Duration::from_secs(10)).await.expect("the connection closes");
+            assert!(closed >= hers.expires_at_ms, "not before the token expires: {closed} {}", hers.expires_at_ms);
+            assert!(closed <= hers.expires_at_ms + 1_000, "within a second of expiry: {closed} {}", hers.expires_at_ms);
+            stop(nodes).await;
+        });
+    });
+}
+
 #[test]
 fn a_token_session_cannot_create_tokens() {
     lotse_sim::check_few_seeds(3, |seed| {
