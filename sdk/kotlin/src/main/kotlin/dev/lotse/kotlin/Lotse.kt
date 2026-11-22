@@ -1,6 +1,8 @@
 package dev.lotse.kotlin
 
+import dev.lotse.auth.TokenLifetime
 import dev.lotse.client.ClientConfig
+import dev.lotse.client.CreatedToken
 import dev.lotse.client.Fetched
 import dev.lotse.client.GroupConfig
 import dev.lotse.client.LotseClient
@@ -229,6 +231,23 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     /** Revokes a user's or an IdP group's sessions (ADR 0070). */
     public suspend fun revokeSessions(subject: String, group: Boolean = false): Unit =
         io { java.revokeSessions(subject, group) }
+
+    /**
+     * Creates an access token for [owner], or for the caller with `null` (ADR 0133); only its hash leaves the client,
+     * so the returned text is the only copy. See [LotseClient.createToken].
+     */
+    public suspend fun createToken(
+        name: String,
+        owner: String?,
+        lifetime: TokenLifetime,
+    ): CreatedToken = io { java.createToken(name, owner, lifetime) }
+
+    /** Lists access tokens: the caller's own, or [owner]'s (ADR 0133). See [LotseClient.describeTokens]. */
+    public suspend fun describeTokens(owner: String? = null): List<Messages.TokenEntry> =
+        io { java.describeTokens(owner) }
+
+    /** Revokes an access token; the sessions it opened end (ADR 0133). See [LotseClient.revokeToken]. */
+    public suspend fun revokeToken(id: Long): Unit = io { java.revokeToken(id) }
 
     /** Adds a certificate to the cluster's revocation list. */
     public suspend fun revokeCertificate(

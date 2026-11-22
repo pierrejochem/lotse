@@ -24,6 +24,15 @@ public sealed interface Credentials {
         return new OAuthBearer(token);
     }
 
+    /**
+     * An access token the cluster issued ({@code LOTSE-TOKEN}, ADR 0133): its text, {@code lotse_tok_...}, as
+     * {@code LotseClient.createToken} gave it. The session acts as the token's owner and ends when the
+     * token does or is revoked; the text leaves the client only in the sign-in itself, so use it over TLS.
+     */
+    static Credentials token(String text) {
+        return new Token(text);
+    }
+
     /** See {@link Credentials#scram}. */
     record Scram(String user, String password) implements Credentials {
         /** The mechanism's name. */
@@ -72,6 +81,28 @@ public sealed interface Credentials {
         @Override
         public String toString() {
             return "OAuthBearer";
+        }
+    }
+
+    /** See {@link Credentials#token}. */
+    record Token(String text) implements Credentials {
+        /** The mechanism's name. */
+        public static final String MECHANISM = "LOTSE-TOKEN";
+
+        /** Creates the credentials. */
+        public Token {
+            Objects.requireNonNull(text);
+        }
+
+        @Override
+        public String mechanism() {
+            return MECHANISM;
+        }
+
+        /** The text is the secret: it is never shown. */
+        @Override
+        public String toString() {
+            return "Token";
         }
     }
 }

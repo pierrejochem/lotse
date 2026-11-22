@@ -176,6 +176,72 @@ class ConformanceTest {
         assertTrue(found);
     }
 
+    /**
+     * The access token messages (ADR 0133), keys 66 to 68, read into the values the broker's samples hold; the
+     * round trip byte for byte is {@link #everyRequestRoundTrips} and {@link #everyResponseRoundTrips}.
+     */
+    @Test
+    void tokenMessagesReadAsTheBrokerWroteThem() {
+        List<Request> requests = new java.util.ArrayList<>();
+        for (String[] v : Vectors.lines("requests.hex")) {
+            Request r = Frames.decodeRequest(Vectors.hex(v[1])).request();
+            if (r instanceof Request.CreateToken || r instanceof Request.DescribeTokens
+                    || r instanceof Request.RevokeToken) {
+                requests.add(r);
+            }
+        }
+        byte[] hash = new byte[32];
+        Arrays.fill(hash, (byte) 0xab);
+        assertEquals(
+                List.of(
+                        new Request.CreateToken("ci", "alice", 2, dev.lotse.record.ByteString.copyOf(hash)),
+                        new Request.DescribeTokens(null),
+                        new Request.DescribeTokens("alice"),
+                        new Request.RevokeToken(41)),
+                requests);
+
+        List<Response> responses = new java.util.ArrayList<>();
+        for (String[] v : Vectors.lines("responses.hex")) {
+            int key = Integer.parseInt(v[1]);
+            if (key >= 66 && key <= 68) {
+                responses.add(Frames.decodeResponse(Vectors.hex(v[2]), new ApiKey(key)).response());
+            }
+        }
+        assertEquals(
+                List.of(
+                        new Response.CreateToken(ErrorCode.NONE, null, 41, 1_757_776_000_000L, null),
+                        new Response.CreateToken(ErrorCode.NOT_LEADER, null, 0, 0, new LeaderHint(2, 7)),
+                        new Response.DescribeTokens(
+                                ErrorCode.NONE,
+                                null,
+                                List.of(
+                                        new Messages.TokenEntry(
+                                                41, "ci", "alice", 1_749_995_000_000L, 1_757_776_000_000L, "admin"),
+                                        new Messages.TokenEntry(
+                                                42, "laptop", "bob", 1_749_996_000_000L, 1_752_588_000_000L, "bob"))),
+                        new Response.Admin(ErrorCode.NONE, null, null)),
+                responses);
+    }
+
+    /** Tag 0 of a session entry: the id of the access token it signed in with, only for mechanism 4 (ADR 0133). */
+    @Test
+    void aSessionNamesItsTokenId() {
+        boolean found = false;
+        for (String[] v : Vectors.lines("responses.hex")) {
+            Response r = Frames.decodeResponse(Vectors.hex(v[2]), new ApiKey(Integer.parseInt(v[1]))).response();
+            if (r instanceof Response.DescribeSessions d) {
+                found = true;
+                assertEquals(3, d.sessions().size());
+                for (Messages.SessionEntry s : d.sessions()) {
+                    boolean token = s.mechanism() == Messages.SessionMechanism.TOKEN;
+                    assertEquals(token ? Long.valueOf(41) : null, s.tokenId(), s.toString());
+                }
+                assertEquals(Messages.SessionMechanism.TOKEN, d.sessions().get(1).mechanism());
+            }
+        }
+        assertTrue(found);
+    }
+
     /** Tags 0 and 1 of a partition in a metadata answer: its pinned leader and placement (ADR 0121). */
     @Test
     void pinsAndPlacementsAreReadFromTheirPartitions() {

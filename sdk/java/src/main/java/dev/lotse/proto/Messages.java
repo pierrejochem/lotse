@@ -1105,6 +1105,8 @@ public final class Messages {
      * @param credentialMs when its credential dates from, a {@code u64}: a token's issue time (0 without one), the
      *     SCRAM login, or the connection; a session revocation after it ends the session
      * @param expiresMs when the session ends unless renewed, a {@code u64}; 0 for one that lasts the connection
+     * @param tokenId the id of the access token the session signed in with, a {@code u64}; {@code null} for every
+     *     other mechanism (tag 0, ADR 0133)
      */
     public record SessionEntry(
             int principalKind,
@@ -1114,12 +1116,29 @@ public final class Messages {
             String peer,
             long connectedMs,
             long credentialMs,
-            long expiresMs) {
+            long expiresMs,
+            Long tokenId) {
         /** Creates the structure. */
         public SessionEntry {
             groups = List.copyOf(groups);
         }
+
+        /** Creates the structure for a session that did not sign in with an access token. */
+        public SessionEntry(
+                int principalKind,
+                String name,
+                List<String> groups,
+                int mechanism,
+                String peer,
+                long connectedMs,
+                long credentialMs,
+                long expiresMs) {
+            this(principalKind, name, groups, mechanism, peer, connectedMs, credentialMs, expiresMs, null);
+        }
     }
+
+    /** The tag of {@link SessionEntry#tokenId()} in a session entry's block. */
+    static final long TAG_TOKEN_ID = 0;
 
     /** Who a session acts as, in {@link SessionEntry#principalKind()} (ADR 0121). */
     public static final class SessionPrincipal {
@@ -1143,9 +1162,23 @@ public final class Messages {
         public static final int SCRAM_SHA_512 = 2;
         /** SASL OAUTHBEARER. */
         public static final int OAUTHBEARER = 3;
+        /** An access token ({@code LOTSE-TOKEN}, ADR 0133); the entry names it in {@link SessionEntry#tokenId()}. */
+        public static final int TOKEN = 4;
 
         private SessionMechanism() {}
     }
+
+    /**
+     * One access token in {@link Response.DescribeTokens} (ADR 0133): only what describes it, never a secret or hash.
+     *
+     * @param id the token's id, a {@code u64}
+     * @param name its label
+     * @param owner the user it acts as
+     * @param createdAtMs when it was created, milliseconds since the Unix epoch, a {@code u64}
+     * @param expiresAtMs when it stops being valid, milliseconds since the Unix epoch, a {@code u64}
+     * @param createdBy who created it
+     */
+    public record TokenEntry(long id, String name, String owner, long createdAtMs, long expiresAtMs, String createdBy) {}
 
     /**
      * One client certificate in the inventory.
