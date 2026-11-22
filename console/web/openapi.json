@@ -1345,6 +1345,177 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/tokens": {
+      "get": {
+        "tags": [],
+        "summary": "The access tokens of the signed-in user, or of `owner`. Never the text.",
+        "operationId": "tokens",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner",
+            "in": "path",
+            "description": "A user whose tokens to list; only cluster admins and viewers may ask\nfor anyone but themselves.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "summary": "Makes an access token. The answer holds its text, the only time anyone\nsees it: keep it out of logs and lists.",
+        "operationId": "create_token",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedTokenView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The cluster does not take tokens yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/clusters/{cluster}/tokens/{id}/revoke": {
+      "post": {
+        "tags": [],
+        "summary": "Revokes an access token: the sessions it opened end and it is refused\nfrom then on.",
+        "operationId": "revoke_token",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Token ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/upgrade/pause": {
       "post": {
         "tags": [],
@@ -2222,6 +2393,31 @@
           }
         }
       },
+      "CreateTokenBody": {
+        "type": "object",
+        "description": "Request to make an access token (ADR 0133).",
+        "required": [
+          "name",
+          "lifetime"
+        ],
+        "properties": {
+          "lifetime": {
+            "type": "string",
+            "description": "How long it lasts: `1w` (7 days), `1m` (30), `3m` (90), `6m` (180) or `1y` (365)."
+          },
+          "name": {
+            "type": "string",
+            "description": "A label to tell the token by, 1 to 64 bytes."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user it acts as; only a cluster admin may name someone but\nthemselves. Absent: the signed-in user."
+          }
+        }
+      },
       "CreateUser": {
         "allOf": [
           {
@@ -2242,6 +2438,33 @@
           }
         ],
         "description": "Request to create a user with a credential."
+      },
+      "CreatedTokenView": {
+        "type": "object",
+        "description": "A token just made. This answer is the only place its text exists: the\ncluster keeps a hash, so nobody can show the text again.",
+        "required": [
+          "id",
+          "text",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it stops being valid, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The token's id, to revoke it by.",
+            "minimum": 0
+          },
+          "text": {
+            "type": "string",
+            "description": "The text to give to scripts and tools. Shown once."
+          }
+        }
       },
       "Credential": {
         "type": "object",
@@ -4045,6 +4268,66 @@
             "format": "int64",
             "description": "Bytes stored, all replicas.",
             "minimum": 0
+          }
+        }
+      },
+      "TokenRow": {
+        "type": "object",
+        "description": "One access token as it is listed (ADR 0133): what the cluster keeps,\nwhich is never the secret.",
+        "required": [
+          "id",
+          "name",
+          "owner",
+          "created_at",
+          "expires_at",
+          "created_by"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was made, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Who made it: the owner, or a cluster admin."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it stops being valid, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The token's id.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Its label."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The user it acts as."
+          }
+        }
+      },
+      "TokensView": {
+        "type": "object",
+        "description": "The access tokens the signed-in user may see: their own, or with an\nowner named and the role for it, that user's.",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenRow"
+            },
+            "description": "The tokens still valid, oldest first."
           }
         }
       },

@@ -67,6 +67,9 @@ struct State {
     /// Certificate requests made here, newest last: principal, signing
     /// request and the time. The demo has no CA holder, so they stay pending.
     cert_requests: Vec<(String, Vec<u8>, u64)>,
+    /// Access tokens made here. The text is not kept: it went out with the
+    /// answer, as in a real cluster.
+    tokens: Vec<TokenRow>,
 }
 
 /// Users the demo cluster starts with, as `(name, configured)`.
@@ -1390,6 +1393,50 @@ impl Cluster for DemoCluster {
 
     async fn revoke_sessions(&self, _who: &Identity, subject: &str, group: bool) -> ApiResult<()> {
         self.lock().revoked.insert((group, subject.into()));
+        Ok(())
+    }
+
+    async fn tokens(&self, who: &Identity, owner: Option<&str>) -> ApiResult<TokensView> {
+        let now = crate::time::now_ms();
+        // The demo user is a cluster admin: any owner may be asked for.
+        let owner = owner.unwrap_or(&who.principal);
+        let tokens = self.lock().tokens.iter().filter(|t| t.owner == owner && t.expires_at > now).cloned().collect();
+        Ok(TokensView { tokens })
+    }
+
+    async fn create_token(&self, who: &Identity, req: CreateTokenBody) -> ApiResult<CreatedTokenView> {
+        use sha2::{Digest, Sha256};
+        let lifetime = req.lifetime()?;
+        if req.name.is_empty() || req.name.len() > 64 {
+            return Err(ApiError::BadRequest(
+                "The cluster refused the token: a token's name has 1 to 64 bytes.".into(),
+            ));
+        }
+        let now = crate::time::now_ms();
+        let mut st = self.lock();
+        let id = st.tokens.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        let expires_at = now + lifetime.millis();
+        st.tokens.push(TokenRow {
+            id,
+            name: req.name,
+            owner: req.owner.unwrap_or_else(|| who.principal.clone()),
+            created_at: now,
+            expires_at,
+            created_by: who.principal.clone(),
+        });
+        // Shaped like a real text, but nothing signs in with it.
+        let digest = Sha256::digest(format!("demo token {id} {now}"));
+        let secret: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(CreatedTokenView { id, text: format!("lotse_tok_{id:016x}_{secret}"), expires_at })
+    }
+
+    async fn revoke_token(&self, _who: &Identity, id: u64) -> ApiResult<()> {
+        let mut st = self.lock();
+        let before = st.tokens.len();
+        st.tokens.retain(|t| t.id != id);
+        if st.tokens.len() == before {
+            return Err(ApiError::NotFound(format!("There is no token {id}.")));
+        }
         Ok(())
     }
 }
