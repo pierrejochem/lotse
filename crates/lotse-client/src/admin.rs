@@ -442,6 +442,68 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::RevokeSessions(req)).await
     }
 
+    /// Creates an access token (ADR 0133) for `owner`, or for the caller
+    /// with `None`; only a cluster admin names someone else. The secret is
+    /// drawn here and only its hash is sent, so the returned text is the
+    /// only place it exists: keep it, nobody can show it again.
+    pub async fn create_token(
+        &self,
+        name: &str,
+        owner: Option<&str>,
+        lifetime: lotse_auth::token::Lifetime,
+    ) -> Result<CreatedToken, ClientError> {
+        let mut secret = [0u8; 32];
+        self.rt.fill_secret(&mut secret);
+        // The id is the cluster's, so the text is built from its answer.
+        let token = lotse_auth::token::Token::new(0, secret);
+        let req = Request::CreateToken(lotse_proto::CreateTokenRequest {
+            name: name.into(),
+            owner: owner.unwrap_or_default().into(),
+            lifetime: lifetime.code(),
+            secret_hash: Bytes::copy_from_slice(&token.hash()),
+        });
+        let r = self
+            .retrying(|| async {
+                match self.call_admin(&req).await? {
+                    Response::CreateToken(r) => match self.admin_answer(r.error, r.leader_hint) {
+                        Err(Attempt::Fail(ClientError::Broker { code, .. })) => {
+                            Err(Attempt::Fail(ClientError::Broker { code, message: r.error_msg.clone() }))
+                        }
+                        Err(e) => Err(e),
+                        Ok(()) => Ok(r),
+                    },
+                    other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+                }
+            })
+            .await?;
+        let text = lotse_auth::token::Token::new(r.id, secret).text();
+        Ok(CreatedToken { id: r.id, text, expires_at_ms: r.expires_at_ms })
+    }
+
+    /// Lists access tokens (ADR 0133): the caller's own, or with `owner` a
+    /// user's, which only a cluster admin or viewer may see. Only metadata:
+    /// no secret is kept anywhere to list.
+    pub async fn describe_tokens(&self, owner: Option<&str>) -> Result<Vec<lotse_proto::TokenEntry>, ClientError> {
+        let req = Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: owner.map(str::to_string) });
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeTokens(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d.tokens.clone())
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
+    /// Revokes an access token (ADR 0133): sessions it opened end and it is
+    /// refused from then on. Another user's token is unknown to the caller,
+    /// unless a cluster admin asks.
+    pub async fn revoke_token(&self, id: u64) -> Result<(), ClientError> {
+        self.admin_change(Request::RevokeToken(lotse_proto::RevokeTokenRequest { id })).await
+    }
+
     /// Revokes one client certificate (ADR 0090): each node ends the
     /// connections that showed it and refuses it from then on, until it
     /// expires at `not_after_ms` (ms since the Unix epoch). `issuer` is the
@@ -950,4 +1012,26 @@ pub struct RenewedCertificate {
     /// Millisecond the new certificate stops being valid in, since the Unix
     /// epoch.
     pub not_after_ms: u64,
+}
+
+/// An access token just created (ADR 0133).
+#[derive(Clone, PartialEq, Eq)]
+pub struct CreatedToken {
+    /// Names the token; listed with [`Client::describe_tokens`].
+    pub id: u64,
+    /// The token's text, `lotse_tok_...`: shown once, the cluster keeps
+    /// only its hash.
+    pub text: String,
+    /// Millisecond the token stops being valid in, since the Unix epoch.
+    pub expires_at_ms: u64,
+}
+
+// By hand: a derived `Debug` would put the text into logs.
+impl std::fmt::Debug for CreatedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedToken")
+            .field("id", &self.id)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
 }

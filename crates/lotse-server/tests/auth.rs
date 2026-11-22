@@ -1965,3 +1965,51 @@ fn describe_sessions_names_the_token_id_and_never_the_secret() {
         });
     });
 }
+
+/// The client's own calls for tokens, end to end: a token made by one
+/// client signs another in as the owner, and revoking it ends that.
+#[test]
+fn a_client_signs_in_with_a_token_it_created() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let alice = client(&rt, "a1", scram("alice", "alice-pw"));
+            let created = alice.create_token("laptop", None, lotse_client::Lifetime::Week).await.expect("created");
+            assert!(created.id > 0 && created.text.starts_with("lotse_tok_"), "{created:?}");
+            assert!(created.expires_at_ms > rt.unix_time().as_millis() as u64);
+            assert!(!format!("{created:?}").contains(&created.text), "Debug hides the text");
+
+            let with_token = client(&rt, "a2", Some(Credentials::Token(created.text.clone())));
+            assert_eq!(with_token.who_am_i().await.expect("signed in").name, "alice");
+            with_token.produce("s", 0, batch("from a token")).await.expect("alice's roles apply");
+            let listed = with_token.describe_tokens(None).await.expect("lists their own");
+            assert_eq!(
+                listed.iter().map(|t| (t.id, t.name.as_str())).collect::<Vec<_>>(),
+                vec![(created.id, "laptop")]
+            );
+
+            // The same id with another secret is not the token.
+            let mut forged = created.text.clone();
+            forged.pop();
+            forged.push(if created.text.ends_with('A') { 'B' } else { 'A' });
+            assert!(denied(client(&rt, "a3", Some(Credentials::Token(forged))).produce("s", 0, batch("x")).await));
+
+            // Revoked, it signs no one in and ends the open session.
+            alice.revoke_token(created.id).await.expect("revoked");
+            assert!(matches!(alice.revoke_token(created.id).await, Err(ClientError::Broker { .. })), "once only");
+            let mut ended = false;
+            for _ in 0..100 {
+                if denied(with_token.produce("s", 0, batch("after")).await) {
+                    ended = true;
+                    break;
+                }
+                rt.sleep(TICK * 10).await;
+            }
+            assert!(ended, "the revoked token still works");
+            assert!(denied(
+                client(&rt, "a4", Some(Credentials::Token(created.text))).produce("s", 0, batch("x")).await
+            ));
+            stop(nodes).await;
+        });
+    });
+}
