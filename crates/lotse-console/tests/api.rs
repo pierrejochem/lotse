@@ -314,7 +314,7 @@ async fn demo_tokens_are_made_listed_and_revoked_with_the_text_shown_once() {
         (row["id"].as_u64(), row["name"].as_str(), row["owner"].as_str()),
         (Some(id), Some("ci"), Some("pierre"))
     );
-    let span = row["expires_at"].as_u64().unwrap() - row["created_at"].as_u64().unwrap();
+    let span = row["expires_ms"].as_u64().unwrap() - row["created_ms"].as_u64().unwrap();
     assert_eq!(span, 90 * 86_400_000);
 
     let (s, v) = call_on(&app, "POST", base, Some(json!({"name": "ci", "lifetime": "2w"}))).await;

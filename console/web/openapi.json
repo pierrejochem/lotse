@@ -1362,14 +1362,11 @@
           },
           {
             "name": "owner",
-            "in": "path",
-            "description": "A user whose tokens to list; only cluster admins and viewers may ask\nfor anyone but themselves.",
-            "required": true,
+            "in": "query",
+            "description": "A user whose tokens to list. Only cluster admins and viewers see\nanyone's but their own; for everyone else the list is empty.",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -2445,10 +2442,10 @@
         "required": [
           "id",
           "text",
-          "expires_at"
+          "expires_ms"
         ],
         "properties": {
-          "expires_at": {
+          "expires_ms": {
             "type": "integer",
             "format": "int64",
             "description": "When it stops being valid, ms since the Unix epoch.",
@@ -4278,22 +4275,22 @@
           "id",
           "name",
           "owner",
-          "created_at",
-          "expires_at",
+          "created_ms",
+          "expires_ms",
           "created_by"
         ],
         "properties": {
-          "created_at": {
+          "created_by": {
+            "type": "string",
+            "description": "Who made it: the owner, or a cluster admin."
+          },
+          "created_ms": {
             "type": "integer",
             "format": "int64",
             "description": "When it was made, ms since the Unix epoch.",
             "minimum": 0
           },
-          "created_by": {
-            "type": "string",
-            "description": "Who made it: the owner, or a cluster admin."
-          },
-          "expires_at": {
+          "expires_ms": {
             "type": "integer",
             "format": "int64",
             "description": "When it stops being valid, ms since the Unix epoch.",

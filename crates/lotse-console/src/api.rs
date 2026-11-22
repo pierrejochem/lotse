@@ -541,9 +541,10 @@ pub async fn revoke_sessions(
 
 /// Query of the token list.
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct TokensParams {
-    /// A user whose tokens to list; only cluster admins and viewers may ask
-    /// for anyone but themselves.
+    /// A user whose tokens to list. Only cluster admins and viewers see
+    /// anyone's but their own; for everyone else the list is empty.
     pub owner: Option<String>,
 }
 

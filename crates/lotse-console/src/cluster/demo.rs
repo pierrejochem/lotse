@@ -1400,7 +1400,7 @@ impl Cluster for DemoCluster {
         let now = crate::time::now_ms();
         // The demo user is a cluster admin: any owner may be asked for.
         let owner = owner.unwrap_or(&who.principal);
-        let tokens = self.lock().tokens.iter().filter(|t| t.owner == owner && t.expires_at > now).cloned().collect();
+        let tokens = self.lock().tokens.iter().filter(|t| t.owner == owner && t.expires_ms > now).cloned().collect();
         Ok(TokensView { tokens })
     }
 
@@ -1415,19 +1415,19 @@ impl Cluster for DemoCluster {
         let now = crate::time::now_ms();
         let mut st = self.lock();
         let id = st.tokens.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        let expires_at = now + lifetime.millis();
+        let expires_ms = now + lifetime.millis();
         st.tokens.push(TokenRow {
             id,
             name: req.name,
             owner: req.owner.unwrap_or_else(|| who.principal.clone()),
-            created_at: now,
-            expires_at,
+            created_ms: now,
+            expires_ms,
             created_by: who.principal.clone(),
         });
         // Shaped like a real text, but nothing signs in with it.
         let digest = Sha256::digest(format!("demo token {id} {now}"));
         let secret: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(CreatedTokenView { id, text: format!("lotse_tok_{id:016x}_{secret}"), expires_at })
+        Ok(CreatedTokenView { id, text: format!("lotse_tok_{id:016x}_{secret}"), expires_ms })
     }
 
     async fn revoke_token(&self, _who: &Identity, id: u64) -> ApiResult<()> {

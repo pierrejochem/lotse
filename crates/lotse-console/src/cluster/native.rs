@@ -1370,8 +1370,8 @@ impl Cluster for NativeCluster {
                 id: t.id,
                 name: t.name,
                 owner: t.owner,
-                created_at: t.created_at_ms,
-                expires_at: t.expires_at_ms,
+                created_ms: t.created_at_ms,
+                expires_ms: t.expires_at_ms,
                 created_by: t.created_by,
             })
             .collect();
@@ -1387,7 +1387,7 @@ impl Cluster for NativeCluster {
             .create_token(&req.name, req.owner.as_deref(), lifetime)
             .await
             .map_err(|e| refused("the token", e))?;
-        Ok(CreatedTokenView { id: made.id, text: made.text, expires_at: made.expires_at_ms })
+        Ok(CreatedTokenView { id: made.id, text: made.text, expires_ms: made.expires_at_ms })
     }
 
     async fn revoke_token(&self, who: &Identity, id: u64) -> ApiResult<()> {
