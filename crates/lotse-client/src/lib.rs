@@ -421,6 +421,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// The runtime's wall clock in milliseconds since the Unix epoch: the
+    /// timestamp for records a caller builds for [`Client::produce`] or
+    /// [`Client::publish`].
+    pub fn unix_time_ms(&self) -> i64 {
+        i64::try_from(self.rt.unix_time().as_millis()).unwrap_or(i64::MAX)
+    }
+
     /// Asks any reachable broker for metadata and remembers the leaders.
     pub async fn metadata(&self, names: &[&str]) -> Result<MetadataResponse, ClientError> {
         let start = self.rt.now();
