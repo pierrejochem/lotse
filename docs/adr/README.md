@@ -134,5 +134,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0128 | [A Helm chart whose pods take the restart turn](0128-a-helm-chart-whose-pods-take-the-restart-turn.md) | Accepted |
 | 0129 | [A Kubernetes operator after the chart](0129-a-kubernetes-operator-after-the-chart.md) | Proposed |
 | 0130 | [Node links notice a peer that went away](0130-node-links-notice-a-peer-that-went-away.md) | Accepted |
+| 0131 | [Long release simulations run in parallel shards](0131-long-release-simulations-run-in-parallel-shards.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

@@ -297,13 +297,37 @@ impl Rng for SimRng {
 ///
 /// - `LOTSE_SIM_SEED=<n>` runs exactly that seed (to reproduce a failure);
 /// - `LOTSE_SIM_SEEDS=<count>` runs `count` seeds (CI uses thousands);
-/// - otherwise `default_count` seeds.
+/// - otherwise `default_count` seeds;
+/// - `LOTSE_SIM_SHARD=<i>/<n>` then keeps only the i-th of n equal ranges of
+///   them (from 1), so that the release workflow runs one depth on several
+///   runners at once and every seed once (ADR 0131).
 pub fn seeds(default_count: u64) -> Vec<u64> {
     if let Some(seed) = std::env::var("LOTSE_SIM_SEED").ok().and_then(|s| s.parse().ok()) {
         return vec![seed];
     }
     let count = std::env::var("LOTSE_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(default_count);
-    (0..count).collect()
+    match std::env::var("LOTSE_SIM_SHARD") {
+        Ok(shard) => {
+            let (i, n) =
+                parse_shard(&shard).unwrap_or_else(|| panic!("LOTSE_SIM_SHARD={shard}: want <i>/<n>, 1 <= i <= n"));
+            shard_range(count, i, n).collect()
+        }
+        Err(_) => (0..count).collect(),
+    }
+}
+
+/// `"<i>/<n>"` with `1 <= i <= n`.
+fn parse_shard(s: &str) -> Option<(u64, u64)> {
+    let (i, n) = s.trim().split_once('/')?;
+    let (i, n): (u64, u64) = (i.trim().parse().ok()?, n.trim().parse().ok()?);
+    (1..=n).contains(&i).then_some((i, n))
+}
+
+/// The i-th of n ranges of `0..count`, from 1: together they hold every seed
+/// once, and their sizes differ by at most one.
+fn shard_range(count: u64, i: u64, n: u64) -> std::ops::Range<u64> {
+    let at = |k: u64| (u128::from(count) * u128::from(k) / u128::from(n)) as u64;
+    at(i - 1)..at(i)
 }
 
 /// Like [`check_seeds`], but always `count` seeds (or the one in
@@ -332,3 +356,6 @@ pub fn check_seeds(default_count: u64, check: impl Fn(u64)) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
