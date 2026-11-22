@@ -1,0 +1,603 @@
+//! Tools that look: the cluster, its resources, consumer groups, nodes,
+//! sessions and the upgrade. Each sees what the principal may see: the
+//! cluster filters `Metadata` and `DescribeMetrics` by role.
+
+use std::collections::BTreeMap;
+
+use lotse_client::{Client, ClientError};
+use lotse_proto::{DescribeMetricsResponse, ErrorCode, MetadataResponse, PartitionMetrics, ResourceMetadata, kind};
+use lotse_rt::{Clock, Net, Rng, Spawn};
+use serde_json::{Value, json};
+
+use crate::{Args, Outcome, ToolError, ToolSpec, done, kind_name, spec};
+
+pub(crate) fn specs() -> Vec<ToolSpec> {
+    vec![
+        spec(
+            "cluster_overview",
+            "The cluster at a glance: each node with its version, uptime, connections and the Raft groups it hosts \
+             and leads, partitions without a leader, nodes low on disk, and the cluster version.",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        spec(
+            "list_resources",
+            "Streams, queues and exchanges you may see, with their tenant, partitions, leaders and voters, and \
+             each exchange's type and bindings.",
+            json!({
+                "kind": {"type": "string", "enum": ["stream", "queue", "exchange"], "description": "Only resources of this kind."},
+            }),
+            &[],
+            true,
+            false,
+        ),
+        spec(
+            "describe_stream",
+            "One stream: per partition the leader, offsets (log start, high watermark, last stable offset), size in \
+             bytes, replicas behind the leader in offsets and open transactions; its settings; and the consumer \
+             groups reading it with their lag in offsets.",
+            json!({
+                "name": {"type": "string", "description": "The stream's name."},
+            }),
+            &["name"],
+            true,
+            false,
+        ),
+        spec(
+            "describe_queue",
+            "One queue: messages ready, in flight and held by open transactions, its consumers with their credit, \
+             its settings, and its dead-letter queue with the messages ready there.",
+            json!({
+                "name": {"type": "string", "description": "The queue's name."},
+            }),
+            &["name"],
+            true,
+            false,
+        ),
+        spec(
+            "describe_consumer_group",
+            "One consumer group: its members and the partitions each owns, and per partition the committed offset, \
+             the high watermark and the lag in offsets.",
+            json!({
+                "group_id": {"type": "string", "description": "The consumer group's id."},
+                "tenant": {"type": "string", "description": "The tenant the group id lives in. Without it, the group in every tenant you may see."},
+            }),
+            &["group_id"],
+            true,
+            false,
+        ),
+        spec(
+            "node_metrics",
+            "Each node's metrics: traffic in bytes, connections, CPU in per mille, memory and disk in bytes, the \
+             free space limit, the commit latency histogram in ms, and the groups, queues and consumer groups it \
+             hosts or leads. Counters run since the node started.",
+            json!({
+                "node_id": {"type": "integer", "minimum": 0, "description": "Only this node."},
+            }),
+            &[],
+            true,
+            false,
+        ),
+        spec(
+            "list_sessions",
+            "Open client sessions on every node: principal, sign-in mechanism, peer address, and when each was \
+             made and ends, in ms since the Unix epoch. A cluster admin or viewer sees all, anyone else their own.",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        spec(
+            "describe_upgrade",
+            "Where a rolling upgrade stands: the cluster version, which node holds the restart turn, whether turns \
+             are paused, and each node's release and the cluster versions it runs with. Needs the cluster-admin or \
+             cluster-viewer role.",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+    ]
+}
+
+/// The answers of every node that answered, and which did not, with why.
+fn split(
+    all: Vec<(u32, Result<DescribeMetricsResponse, ClientError>)>,
+) -> (Vec<DescribeMetricsResponse>, Vec<(u32, String)>) {
+    let mut answered = Vec::new();
+    let mut silent = Vec::new();
+    for (node, r) in all {
+        match r {
+            Ok(m) => answered.push(m),
+            Err(e) => silent.push((node, e.to_string())),
+        }
+    }
+    (answered, silent)
+}
+
+/// The leader's view of one partition: from the node that says it leads,
+/// the latest term if two do for a moment.
+fn led(metrics: &[DescribeMetricsResponse], resource_id: u64, partition: u32) -> Option<&PartitionMetrics> {
+    metrics
+        .iter()
+        .flat_map(|m| &m.partitions)
+        .filter(|p| p.leader && p.resource_id == resource_id && p.partition == partition)
+        .max_by_key(|p| p.term)
+}
+
+/// The resource called `name` of `want` kind, as the principal sees it.
+fn find(m: &MetadataResponse, name: &str, want: u8) -> Result<ResourceMetadata, ToolError> {
+    m.resources
+        .iter()
+        .find(|r| r.name == name && r.error == ErrorCode::NONE && r.kind == want)
+        .cloned()
+        .ok_or_else(|| ToolError::unknown(format!("there is no {} named {name:?} that you may see", kind_name(want))))
+}
+
+pub(crate) async fn cluster_overview<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {
+    let m = c.metadata(&[]).await?;
+    let (metrics, silent) = split(c.node_metrics().await?);
+    // Only cluster admins and viewers may read it; everyone else gets the rest.
+    let upgrade = c.describe_upgrade().await.ok();
+    let nodes: Vec<Value> = m
+        .brokers
+        .iter()
+        .map(|b| {
+            let mut node = json!({
+                "node_id": b.node_id,
+                "address": format!("{}:{}", b.host, b.port),
+                "zone": if b.rack.is_empty() { Value::Null } else { json!(b.rack) },
+            });
+            match metrics.iter().find(|n| n.node_id == b.node_id) {
+                Some(n) => {
+                    node["answered"] = json!(true);
+                    node["version"] = json!(n.version);
+                    node["uptime_ms"] = json!(n.uptime_ms);
+                    node["connections"] = json!(n.connections);
+                    node["groups_hosted"] = json!(n.partitions.len());
+                    node["groups_led"] = json!(n.partitions.iter().filter(|p| p.leader).count());
+                    node["disk_low"] = json!(n.disk.map(|d| d.low));
+                }
+                None => {
+                    node["answered"] = json!(false);
+                    let why = silent.iter().find(|(id, _)| *id == b.node_id).map(|(_, w)| w.clone());
+                    node["error"] = json!(why);
+                }
+            }
+            node
+        })
+        .collect();
+    let leaderless: Vec<Value> = m
+        .resources
+        .iter()
+        .filter(|r| r.error == ErrorCode::NONE)
+        .flat_map(|r| {
+            r.partitions
+                .iter()
+                .filter(|p| p.leader == 0)
+                .map(move |p| json!({"name": r.name, "partition": p.partition}))
+        })
+        .collect();
+    let low: Vec<u32> = metrics.iter().filter(|n| n.disk.is_some_and(|d| d.low)).map(|n| n.node_id).collect();
+    let mut problems = Vec::new();
+    if !silent.is_empty() {
+        problems.push(format!("{} of {} nodes did not answer", silent.len(), m.brokers.len()));
+    }
+    if !leaderless.is_empty() {
+        problems.push(format!("{} partitions have no leader", leaderless.len()));
+    }
+    if !low.is_empty() {
+        problems.push(format!("{} nodes are low on disk", low.len()));
+    }
+    let cluster_version = upgrade.as_ref().and_then(|u| u.cluster_version).map(version);
+    let text = format!(
+        "{} nodes, {} answered; {} resources you may see; {}.",
+        m.brokers.len(),
+        metrics.len(),
+        m.resources.len(),
+        if problems.is_empty() { "healthy".to_string() } else { problems.join(", ") }
+    );
+    done(
+        json!({
+            "healthy": problems.is_empty(),
+            "problems": problems,
+            "nodes": nodes,
+            "resources": m.resources.len(),
+            "partitions_without_leader": leaderless,
+            "nodes_low_on_disk": low,
+            "cluster_version": cluster_version,
+        }),
+        text,
+    )
+}
+
+fn version(v: u32) -> String {
+    format!("{}.{}", lotse_proto::cluster_version::major(v), lotse_proto::cluster_version::minor(v))
+}
+
+fn exchange_type(t: u8) -> &'static str {
+    match t {
+        lotse_proto::exchange_type::DIRECT => "direct",
+        lotse_proto::exchange_type::TOPIC => "topic",
+        lotse_proto::exchange_type::FANOUT => "fanout",
+        lotse_proto::exchange_type::HEADERS => "headers",
+        _ => "unknown",
+    }
+}
+
+pub(crate) async fn list_resources<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let want = match a.opt_str("kind")? {
+        None => None,
+        Some("stream") => Some(kind::STREAM),
+        Some("queue") => Some(kind::QUEUE),
+        Some("exchange") => Some(kind::EXCHANGE),
+        Some(other) => return Err(ToolError::invalid(format!("\"kind\" is stream, queue or exchange, not {other:?}"))),
+    };
+    let m = c.metadata(&[]).await?;
+    let names: BTreeMap<u64, &str> = m.resources.iter().map(|r| (r.resource_id, r.name.as_str())).collect();
+    let mut found: Vec<&ResourceMetadata> =
+        m.resources.iter().filter(|r| r.error == ErrorCode::NONE && want.is_none_or(|k| k == r.kind)).collect();
+    found.sort_by(|x, y| (&x.tenant, &x.name).cmp(&(&y.tenant, &y.name)));
+    let resources: Vec<Value> = found
+        .iter()
+        .map(|r| {
+            let mut v = json!({
+                "name": r.name,
+                "tenant": r.tenant,
+                "kind": kind_name(r.kind),
+                "partitions": r.partitions.iter().map(|p| json!({
+                    "partition": p.partition,
+                    "leader": if p.leader == 0 { Value::Null } else { json!(p.leader) },
+                    "voters": p.voters,
+                })).collect::<Vec<_>>(),
+            });
+            if let Some(x) = &r.exchange {
+                v["exchange_type"] = json!(exchange_type(x.exchange_type));
+                v["bindings"] = x
+                    .bindings
+                    .iter()
+                    .map(|b| {
+                        json!({
+                            "queue": names.get(&b.queue_id).copied(),
+                            "routing_key": b.binding_key,
+                        })
+                    })
+                    .collect();
+            }
+            v
+        })
+        .collect();
+    let text = format!("{} resources.", resources.len());
+    done(json!({ "resources": resources }), text)
+}
+
+/// A resource's settings, or null if the principal may not read them.
+async fn configs<R: Net + Clock + Spawn + Rng>(c: &Client<R>, name: &str) -> Value {
+    match c.describe_configs(name).await {
+        Ok(entries) => {
+            let map: serde_json::Map<String, Value> = entries.into_iter().map(|e| (e.key, json!(e.value))).collect();
+            Value::Object(map)
+        }
+        Err(_) => Value::Null,
+    }
+}
+
+pub(crate) async fn describe_stream<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let name = a.str("name")?;
+    let r = find(&c.metadata(&[name]).await?, name, kind::STREAM)?;
+    let (metrics, _) = split(c.node_metrics().await?);
+    let mut high_watermarks = BTreeMap::new();
+    let partitions: Vec<Value> = r
+        .partitions
+        .iter()
+        .map(|p| {
+            let mut v = json!({
+                "partition": p.partition,
+                "leader": if p.leader == 0 { Value::Null } else { json!(p.leader) },
+                "voters": p.voters,
+            });
+            if let Some(m) = led(&metrics, r.resource_id, p.partition) {
+                high_watermarks.insert(p.partition, m.high_watermark);
+                v["log_start"] = json!(m.log_start);
+                v["high_watermark"] = json!(m.high_watermark);
+                v["last_stable_offset"] = json!(m.last_stable);
+                v["size_bytes"] = json!(m.size_bytes);
+                v["oldest_timestamp_ms"] = json!(m.oldest_timestamp_ms);
+                v["open_transactions"] = json!(m.open_transactions);
+                v["replicas_behind"] = m
+                    .replicas
+                    .iter()
+                    .map(|rp| json!({"node_id": rp.node_id, "offsets": m.high_watermark.saturating_sub(rp.log_end)}))
+                    .collect();
+            }
+            v
+        })
+        .collect();
+    let groups: Vec<Value> = metrics
+        .iter()
+        .flat_map(|m| &m.groups)
+        .filter(|g| {
+            g.offsets.iter().any(|o| o.resource_id == r.resource_id)
+                || g.members.iter().any(|m| m.owned.iter().any(|o| o.resource_id == r.resource_id))
+        })
+        .map(|g| {
+            let lag: u64 = g
+                .offsets
+                .iter()
+                .filter(|o| o.resource_id == r.resource_id)
+                .map(|o| high_watermarks.get(&o.partition).copied().unwrap_or(0).saturating_sub(o.offset))
+                .sum();
+            json!({"group_id": g.group_id, "tenant": g.tenant, "members": g.members.len(), "lag": lag})
+        })
+        .collect();
+    let text = format!("Stream {name}: {} partitions, {} consumer groups.", partitions.len(), groups.len());
+    done(
+        json!({
+            "name": r.name,
+            "tenant": r.tenant,
+            "partitions": partitions,
+            "configs": configs(c, name).await,
+            "consumer_groups": groups,
+        }),
+        text,
+    )
+}
+
+pub(crate) async fn describe_queue<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let name = a.str("name")?;
+    let r = find(&c.metadata(&[name]).await?, name, kind::QUEUE)?;
+    let (metrics, _) = split(c.node_metrics().await?);
+    let settings = configs(c, name).await;
+    let queue = |id: u64| metrics.iter().flat_map(|m| &m.queues).find(|q| q.resource_id == id);
+    let leader = r.partitions.first().map(|p| p.leader).filter(|l| *l != 0);
+    let mut v = json!({
+        "name": r.name,
+        "tenant": r.tenant,
+        "leader": leader,
+        "configs": settings,
+    });
+    match queue(r.resource_id) {
+        Some(q) => {
+            v["ready"] = json!(q.ready);
+            v["in_flight"] = json!(q.in_flight);
+            v["in_open_transactions"] = json!(q.in_open_txns);
+            v["delivered"] = json!(q.delivered);
+            v["acked"] = json!(q.acked);
+            if !q.ready_by_level.is_empty() {
+                v["ready_by_priority"] = json!(q.ready_by_level);
+            }
+            v["consumers"] = q
+                .consumers
+                .iter()
+                .map(|s| {
+                    json!({
+                        "subscription_id": s.subscription_id,
+                        "peer": s.peer,
+                        "in_flight": s.in_flight,
+                        "in_flight_bytes": s.in_flight_bytes,
+                        "credit": s.credit,
+                        "state": s.state.name(),
+                    })
+                })
+                .collect();
+        }
+        None => v["note"] = json!("no node reported this queue's counts: it has no leader at the moment"),
+    }
+    if let Some(p) = led(&metrics, r.resource_id, 0) {
+        v["size_bytes"] = json!(p.size_bytes);
+    }
+    let dlq = settings.get("dead.letter.queue").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(dlq) = dlq {
+        let ready = match c.metadata(&[&dlq]).await.ok().and_then(|m| find(&m, &dlq, kind::QUEUE).ok()) {
+            Some(d) => queue(d.resource_id).map(|q| q.ready),
+            None => None,
+        };
+        v["dead_letter_queue"] = json!({"name": dlq, "ready": ready});
+    }
+    let text = match (v["ready"].as_u64(), v["in_flight"].as_u64()) {
+        (Some(ready), Some(flight)) => format!("Queue {name}: {ready} ready, {flight} in flight."),
+        _ => format!("Queue {name}: no counts, it has no leader at the moment."),
+    };
+    done(v, text)
+}
+
+pub(crate) async fn describe_consumer_group<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let group_id = a.str("group_id")?;
+    let tenant = a.opt_str("tenant")?;
+    let m = c.metadata(&[]).await?;
+    let (metrics, _) = split(c.node_metrics().await?);
+    let names: BTreeMap<u64, &str> = m.resources.iter().map(|r| (r.resource_id, r.name.as_str())).collect();
+    let stream = |id: u64| names.get(&id).map_or_else(|| json!(id), |n| json!(n));
+    let groups: Vec<Value> = metrics
+        .iter()
+        .flat_map(|n| &n.groups)
+        .filter(|g| g.group_id == group_id && tenant.is_none_or(|t| t == g.tenant))
+        .map(|g| {
+            let members: Vec<Value> = g
+                .members
+                .iter()
+                .map(|mm| {
+                    let owned: Vec<Value> = mm
+                        .owned
+                        .iter()
+                        .flat_map(|o| o.partitions.iter().map(move |p| (o.resource_id, *p)))
+                        .map(|(id, p)| json!({"stream": stream(id), "partition": p}))
+                        .collect();
+                    json!({"member_id": mm.member_id, "partitions": owned})
+                })
+                .collect();
+            let mut total = 0u64;
+            let partitions: Vec<Value> = g
+                .offsets
+                .iter()
+                .map(|o| {
+                    let hw = led(&metrics, o.resource_id, o.partition).map(|p| p.high_watermark);
+                    let lag = hw.map(|hw| hw.saturating_sub(o.offset));
+                    total += lag.unwrap_or(0);
+                    json!({
+                        "stream": stream(o.resource_id),
+                        "partition": o.partition,
+                        "committed_offset": o.offset,
+                        "high_watermark": hw,
+                        "lag": lag,
+                    })
+                })
+                .collect();
+            json!({
+                "group_id": g.group_id,
+                "tenant": g.tenant,
+                "epoch": g.epoch,
+                "members": members,
+                "partitions": partitions,
+                "total_lag": total,
+            })
+        })
+        .collect();
+    if groups.is_empty() {
+        return Err(ToolError::unknown(format!(
+            "there is no consumer group {group_id:?} that you may see, or the node leading the coordinator group did not answer"
+        )));
+    }
+    let text = groups
+        .iter()
+        .map(|g| {
+            format!(
+                "Group {} in {}: {} members, lag {} offsets.",
+                group_id,
+                g["tenant"].as_str().unwrap_or_default(),
+                g["members"].as_array().map_or(0, Vec::len),
+                g["total_lag"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    done(json!({ "groups": groups }), text)
+}
+
+pub(crate) async fn node_metrics<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let only = a.opt_u32("node_id")?;
+    let all = c.node_metrics().await?;
+    if let Some(id) = only
+        && !all.iter().any(|(n, _)| *n == id)
+    {
+        return Err(ToolError::unknown(format!("there is no node {id}")));
+    }
+    let nodes: Vec<Value> = all
+        .into_iter()
+        .filter(|(n, _)| only.is_none_or(|id| id == *n))
+        .map(|(node_id, r)| match r {
+            Err(e) => json!({"node_id": node_id, "answered": false, "error": e.to_string()}),
+            Ok(m) => json!({
+                "node_id": node_id,
+                "answered": true,
+                "version": m.version,
+                "uptime_ms": m.uptime_ms,
+                "connections": m.connections,
+                "client_in_bytes": m.client_in_bytes,
+                "client_out_bytes": m.client_out_bytes,
+                "peer_in_bytes": m.peer_in_bytes,
+                "peer_out_bytes": m.peer_out_bytes,
+                "commit_latency": m.commit_latency.iter().enumerate().map(|(i, n)| {
+                    let under = if i + 1 == m.commit_latency.len() { Value::Null } else { json!(1u64 << i) };
+                    json!({"under_ms": under, "count": n})
+                }).collect::<Vec<_>>(),
+                "host": {
+                    "cpu_permille": m.host.cpu_permille,
+                    "memory_bytes": m.host.memory_bytes,
+                    "memory_limit_bytes": m.host.memory_limit_bytes,
+                    "disk_free_bytes": m.host.disk_free_bytes,
+                    "disk_total_bytes": m.host.disk_total_bytes,
+                },
+                "disk": m.disk.map(|d| json!({"free_limit_bytes": d.free_limit_bytes, "low": d.low})),
+                "groups_hosted": m.partitions.len(),
+                "groups_led": m.partitions.iter().filter(|p| p.leader).count(),
+                "queues_led": m.queues.len(),
+                "consumer_groups": m.groups.len(),
+                "produce_records": m.partitions.iter().map(|p| p.produce_records).sum::<u64>(),
+                "produce_bytes": m.partitions.iter().map(|p| p.produce_bytes).sum::<u64>(),
+                "fetch_bytes": m.partitions.iter().map(|p| p.fetch_bytes).sum::<u64>(),
+            }),
+        })
+        .collect();
+    let answered = nodes.iter().filter(|n| n["answered"] == true).count();
+    let text = format!("{} nodes, {answered} answered.", nodes.len());
+    done(json!({ "nodes": nodes }), text)
+}
+
+fn mechanism(m: u8) -> &'static str {
+    use lotse_proto::session_mechanism::*;
+    match m {
+        NONE => "none",
+        CERTIFICATE => "certificate",
+        SCRAM_SHA_512 => "scram-sha-512",
+        OAUTHBEARER => "oauthbearer",
+        TOKEN => "token",
+        _ => "unknown",
+    }
+}
+
+fn principal(k: u8) -> &'static str {
+    use lotse_proto::session_principal::*;
+    match k {
+        ANONYMOUS => "anonymous",
+        USER => "user",
+        NODE => "node",
+        _ => "unknown",
+    }
+}
+
+pub(crate) async fn list_sessions<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {
+    let mut sessions = Vec::new();
+    let mut silent = Vec::new();
+    for (node_id, r) in c.node_sessions().await? {
+        match r {
+            Ok(s) => sessions.extend(s.sessions.iter().map(|e| {
+                json!({
+                    "node_id": node_id,
+                    "principal": principal(e.principal_kind),
+                    "name": e.name,
+                    "groups": e.groups,
+                    "mechanism": mechanism(e.mechanism),
+                    "token_id": e.token_id,
+                    "peer": e.peer,
+                    "connected_ms": e.connected_ms,
+                    "expires_ms": if e.expires_ms == 0 { Value::Null } else { json!(e.expires_ms) },
+                })
+            })),
+            Err(e) => silent.push(json!({"node_id": node_id, "error": e.to_string()})),
+        }
+    }
+    let text = format!("{} open sessions; {} nodes did not answer.", sessions.len(), silent.len());
+    done(json!({ "sessions": sessions, "nodes_not_answering": silent }), text)
+}
+
+pub(crate) async fn describe_upgrade<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {
+    let u = c.describe_upgrade().await?;
+    let nodes: Vec<Value> = u
+        .nodes
+        .iter()
+        .map(|n| {
+            let reported = !n.release.is_empty();
+            json!({
+                "node_id": n.node_id,
+                "release": if reported { json!(n.release) } else { Value::Null },
+                "oldest_cluster_version": if reported { json!(version(n.oldest)) } else { Value::Null },
+                "newest_cluster_version": if reported { json!(version(n.newest)) } else { Value::Null },
+            })
+        })
+        .collect();
+    let cluster_version = u.cluster_version.map(version);
+    let turn = u.turn.map(|t| json!({"node_id": t.node_id, "since_ms": t.since_ms}));
+    let text = format!(
+        "Cluster version {}; {}{}.",
+        cluster_version.as_deref().unwrap_or("not set yet"),
+        match u.turn {
+            Some(t) => format!("node {} holds the restart turn", t.node_id),
+            None => "no node holds the restart turn".to_string(),
+        },
+        if u.held { "; turns are paused" } else { "" }
+    );
+    done(json!({"cluster_version": cluster_version, "turn": turn, "paused": u.held, "nodes": nodes}), text)
+}

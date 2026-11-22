@@ -1,0 +1,28 @@
+[package]
+name = "lotse-mcp"
+description = "The tools of `lotse mcp`: Lotse for AI agents, as the principal that signed in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lotse-rt.workspace = true
+lotse-proto.workspace = true
+lotse-record.workspace = true
+lotse-route.workspace = true
+lotse-client.workspace = true
+bytes.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+lotse-sim.workspace = true
+lotse-server.workspace = true
+lotse-log.workspace = true
+lotse-raft.workspace = true
+lotse-auth.workspace = true
+
+[lints]
+workspace = true

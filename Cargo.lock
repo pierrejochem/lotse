@@ -1080,6 +1080,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lotse-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "lotse-auth",
+ "lotse-client",
+ "lotse-log",
+ "lotse-proto",
+ "lotse-raft",
+ "lotse-record",
+ "lotse-route",
+ "lotse-rt",
+ "lotse-server",
+ "lotse-sim",
+ "serde_json",
+]
+
+[[package]]
 name = "lotse-node"
 version = "0.1.0"
 dependencies = [
