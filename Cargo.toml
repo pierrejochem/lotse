@@ -23,6 +23,7 @@ lotse-client = { path = "crates/lotse-client" }
 lotse-queue = { path = "crates/lotse-queue" }
 lotse-route = { path = "crates/lotse-route" }
 lotse-auth = { path = "crates/lotse-auth" }
+lotse-mcp = { path = "crates/lotse-mcp" }
 
 bytes = "1.7"
 crc32c = "0.6"
@@ -49,6 +50,8 @@ pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The official Rust MCP SDK, for the transports of `lotse mcp` (ADR 0134): stdio and the Streamable HTTP server.
+rmcp = { version = "3.10", default-features = false }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 # Configuration files of the console and the node binary.
 toml = "1.2"

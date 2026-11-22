@@ -4,6 +4,7 @@
 
 pub mod certs;
 pub mod config;
+pub mod mcp;
 
 use std::future::Future;
 
