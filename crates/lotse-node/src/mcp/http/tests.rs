@@ -31,3 +31,25 @@ fn an_empty_origin_is_refused() {
     let e = Listen::new("127.0.0.1:1".into(), None, None, vec![" ".into()], false).unwrap_err();
     assert!(e.contains("--allow-origin"), "{e}");
 }
+
+#[test]
+fn the_null_origin_is_refused() {
+    for null in ["null", "NULL", " null "] {
+        let e = Listen::new("127.0.0.1:1".into(), None, None, vec!["https://a.example".into(), null.into()], false)
+            .unwrap_err();
+        assert!(e.contains("--allow-origin null"), "{e}");
+    }
+}
+
+#[test]
+fn origins_that_can_never_match_are_warned_about() {
+    let origins =
+        ["https://a.example", "http://localhost:3000", "https://b.example/", "https://c.example/app", "d.example"];
+    let l =
+        Listen::new("127.0.0.1:1".into(), None, None, origins.iter().map(|o| o.to_string()).collect(), false).unwrap();
+    let warnings = l.warnings();
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    for bad in ["https://b.example/", "https://c.example/app", "d.example"] {
+        assert!(warnings.iter().any(|w| w.contains(bad) && w.contains("never match")), "{bad}: {warnings:?}");
+    }
+}

@@ -79,6 +79,11 @@ impl Listen {
         if let Some(o) = allow_origins.iter().find(|o| o.trim().is_empty()) {
             return Err(format!("--allow-origin {o:?}: an origin such as https://console.example"));
         }
+        if allow_origins.iter().any(|o| o.trim().eq_ignore_ascii_case("null")) {
+            return Err("--allow-origin null would admit sandboxed iframes and file: pages from anywhere; name the \
+                        origin instead, such as https://console.example"
+                .into());
+        }
         if tls.is_none() && !loopback(&addr)? {
             return Err(format!(
                 "{addr} is not a loopback address: lotse mcp serves plain HTTP only on loopback; give --tls-cert \
@@ -86,6 +91,27 @@ impl Listen {
             ));
         }
         Ok(Listen { addr, tls, allow_origins })
+    }
+}
+
+impl Listen {
+    /// What to warn about at start: an allowed origin that no browser ever
+    /// sends, so it can never match. A browser's `Origin` is
+    /// `scheme://host[:port]`, without a path or a trailing slash.
+    pub fn warnings(&self) -> Vec<String> {
+        self.allow_origins
+            .iter()
+            .filter(|o| match o.split_once("://") {
+                Some((scheme, rest)) => scheme.is_empty() || rest.is_empty() || rest.contains('/'),
+                None => true,
+            })
+            .map(|o| {
+                format!(
+                    "--allow-origin {o} can never match: a browser sends scheme://host[:port], without a path or a \
+                     trailing slash"
+                )
+            })
+            .collect()
     }
 }
 
@@ -165,6 +191,13 @@ async fn guard(State(g): State<Arc<Guard>>, mut req: Request, next: Next) -> Res
             next.run(req).await
         }
         Err(SignInError::Refused) => unauthorized("the cluster did not accept the credential"),
+        // Bounded sign-in work: a flood of made-up credentials gets a
+        // quick refusal, not a queue.
+        Err(SignInError::Busy) => {
+            let mut r = (StatusCode::SERVICE_UNAVAILABLE, "too many sign-ins at once; try again\n").into_response();
+            r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            r
+        }
         Err(e @ SignInError::Unreachable(_)) => {
             tracing::warn!(error = %e, "signing in for an HTTP request failed");
             (StatusCode::SERVICE_UNAVAILABLE, "the cluster could not be reached; try again\n").into_response()
