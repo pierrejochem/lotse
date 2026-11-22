@@ -5,7 +5,9 @@
 //! names, and holds no rights of its own: every tool call is a request of
 //! that principal's client, which the cluster checks as it checks the same
 //! request over the native protocol. Standard output carries only JSON-RPC;
-//! logs go to standard error.
+//! logs go to standard error. Over Streamable HTTP ([`http`]) it holds no
+//! credential: each request is served by the client its own credential
+//! signed in ([`cache`]).
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -22,6 +24,9 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer, ServerInitializeError};
 use serde_json::Value;
+
+pub mod cache;
+pub mod http;
 
 /// What `lotse mcp` says when it has no credential: the three ways to give
 /// one.
@@ -154,16 +159,31 @@ pub fn client(reach: &Reach, sign_in: SignIn) -> Result<Client<TokioRuntime>, St
     Ok(Client::new(rt, cfg))
 }
 
-/// The MCP server: the tools on one signed-in client.
+/// The MCP server: the tools on a signed-in client.
 #[derive(Debug)]
 pub struct Server {
-    tools: Tools<TokioRuntime>,
+    acting: Acting,
+}
+
+/// Whose client a tool call acts through.
+#[derive(Debug)]
+enum Acting {
+    /// One for the whole process (stdio).
+    One(Arc<Client<TokioRuntime>>),
+    /// The one each HTTP request's own credential signed in, which the
+    /// layer in front put into the request ([`http::Signed`]).
+    PerRequest,
 }
 
 impl Server {
     /// The tools acting through `client`.
     pub fn new(client: Arc<Client<TokioRuntime>>) -> Server {
-        Server { tools: Tools::new(client) }
+        Server { acting: Acting::One(client) }
+    }
+
+    /// The tools acting through the client each request brings.
+    pub fn per_request() -> Server {
+        Server { acting: Acting::PerRequest }
     }
 }
 
@@ -203,10 +223,32 @@ impl rmcp::ServerHandler for Server {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let (client, signed) = match &self.acting {
+            Acting::One(c) => (c.clone(), None),
+            Acting::PerRequest => {
+                let signed = context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .and_then(|p| p.extensions.get::<http::Signed>())
+                    .cloned();
+                // Never another credential's client, and none of its own:
+                // without the request's client, no tool runs.
+                let Some(signed) = signed else {
+                    return Err(McpError::internal_error("the request brought no signed-in client", None));
+                };
+                (signed.client.clone(), Some(signed))
+            }
+        };
         let args = request.arguments.map_or(Value::Null, Value::Object);
-        let r = self.tools.call(&request.name, args).await;
+        let r = Tools::new(client).call(&request.name, args).await;
+        if r.is_error
+            && r.structured["error"]["code"] == "AUTHENTICATION_FAILED"
+            && let Some(s) = &signed
+        {
+            s.refused();
+        }
         // A refusal is a result the agent reads, not a protocol error.
         let mut result = if r.is_error {
             CallToolResult::structured_error(r.structured)
