@@ -1392,6 +1392,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 net: &shared.net,
                 host,
                 sessions: &auth.sessions,
+                token_sign_ins: &auth.token_sign_ins,
                 disk: disk.metrics(),
                 disk_low: &disk_low,
             },
@@ -1998,6 +1999,7 @@ impl Known {
         auth.set_revocations(&state.revocations);
         auth.set_revoked_certs(&state.revoked_certs);
         auth.set_renewed(&state.renewed);
+        auth.set_tokens(&state.tokens);
         let mut known = Known::configured(cfg);
         known.access = Access::build(&cfg.auth, &configured_ids(cfg), &state);
         known.applied = self.applied;

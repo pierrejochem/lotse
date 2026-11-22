@@ -23,3 +23,19 @@ fn a_shard_is_named_from_one_to_its_count() {
     assert_eq!(parse_shard("2"), None);
     assert_eq!(parse_shard("a/b"), None);
 }
+
+/// A step of the wall clock moves every node's date, never its timers.
+#[test]
+fn stepping_the_wall_clock_leaves_virtual_time_alone() {
+    use lotse_rt::Clock;
+    use std::time::Duration;
+    super::Sim::new(1).run(|rt| async move {
+        let other = rt.node("n2");
+        let start = rt.now();
+        rt.step_wall_clock(Duration::from_secs(86_400));
+        assert_eq!(rt.now(), start, "no virtual time passed");
+        assert_eq!(other.unix_time(), super::SIM_EPOCH + Duration::from_secs(86_400), "every node's date moved");
+        rt.sleep(Duration::from_secs(1)).await;
+        assert_eq!(rt.unix_time(), super::SIM_EPOCH + Duration::from_secs(86_401));
+    });
+}

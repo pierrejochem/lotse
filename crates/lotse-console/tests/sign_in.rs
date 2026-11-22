@@ -250,6 +250,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         mtls: true,
         scram: true,
         oidc: Some(OidcConfig::new(&issuer, "lotse")),
+        tokens: true,
         max_session: Duration::from_secs(60),
         users,
         admins: vec!["admin".into()],

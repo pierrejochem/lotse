@@ -67,6 +67,7 @@ impl Sim {
             identity: None,
             cert: None,
             http: SimHttp::default(),
+            wall_step: Arc::default(),
         };
         exec.block_on(test(rt), self.seed)
     }
@@ -83,6 +84,8 @@ pub struct SimRuntime {
     identity: Option<lotse_rt::PeerIdentity>,
     cert: Option<lotse_rt::CertInfo>,
     http: SimHttp,
+    /// How far every node's wall clock was stepped ahead of virtual time.
+    wall_step: Arc<Mutex<Duration>>,
 }
 
 impl SimRuntime {
@@ -137,6 +140,14 @@ impl SimRuntime {
         &self.host
     }
 
+    /// Steps every node's wall clock forward by `by`, as an NTP step would,
+    /// while virtual time (timers, [`Clock::now`]) goes on unchanged. For
+    /// what depends on the date, such as a credential that expires after
+    /// days, which no simulation could run up to tick by tick.
+    pub fn step_wall_clock(&self, by: Duration) {
+        *self.wall_step.lock().expect("wall clock lock") += by;
+    }
+
     /// Simulates a power loss: file handles become stale, and unsynced data
     /// is lost or torn as the seed decides. Reopen files afterwards.
     pub fn crash(&self) -> CrashReport {
@@ -154,8 +165,9 @@ impl Clock for SimRuntime {
     }
 
     /// [`SIM_EPOCH`] plus virtual time: every run starts on the same day.
+    /// Plus any [`SimRuntime::step_wall_clock`].
     fn unix_time(&self) -> Duration {
-        SIM_EPOCH + (self.exec.now() - lotse_rt::Instant::ZERO)
+        SIM_EPOCH + (self.exec.now() - lotse_rt::Instant::ZERO) + *self.wall_step.lock().expect("wall clock lock")
     }
 }
 

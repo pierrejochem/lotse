@@ -115,6 +115,11 @@ pub struct Observation {
     /// metadata group has applied them (ADR 0133); `None` on a node without
     /// one.
     pub tokens: Option<u64>,
+    /// Sign-ins with an access token on this node since it started that
+    /// succeeded (ADR 0133).
+    pub token_sign_ins_ok: u64,
+    /// Those that failed, whatever the reason.
+    pub token_sign_ins_failed: u64,
     /// Whether the scraper that asked may read the metrics: they name every
     /// tenant's resources (ADR 0021).
     pub may_scrape: bool,
@@ -204,6 +209,10 @@ pub fn render(obs: &Observation) -> String {
     out.family("lotse_tokens", "gauge", "Access tokens that have not expired, as this node has applied them.", "");
     if let Some(n) = obs.tokens {
         out.sample("lotse_tokens", &node, n);
+    }
+    out.family("lotse_token_sign_ins", "counter", "Sign-ins with an access token on this node, by result.", "");
+    for (result, n) in [("ok", obs.token_sign_ins_ok), ("failed", obs.token_sign_ins_failed)] {
+        out.sample("lotse_token_sign_ins_total", &[("node", obs.node_id.to_string()), ("result", result.into())], n);
     }
     for (name, help, v) in [
         ("lotse_client_received_bytes", "Bytes received from clients.", m.client_in_bytes),

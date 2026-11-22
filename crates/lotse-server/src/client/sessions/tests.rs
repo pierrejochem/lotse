@@ -15,6 +15,7 @@ fn session(p: Option<Principal>, expires_ms: u64) -> OpenSession {
         connected_ms: 10,
         credential_ms: 20,
         expires_ms,
+        token_id: None,
     }
 }
 
