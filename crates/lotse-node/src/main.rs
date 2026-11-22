@@ -93,7 +93,8 @@ mcp    speaks the Model Context Protocol on stdin and stdout, for an AI
        or Basic <user:password>; without one it gets 401. Plain HTTP only
        on a loopback address; elsewhere --tls-cert and --tls-key (PEM)
        make it HTTPS, else it exits 2. A request with an Origin header
-       (from a browser) is refused unless --allow-origin names it.
+       (from a browser) is refused unless --allow-origin names it, as
+       scheme://host[:port]; null is refused.
        <admin> is --cert <file> --key <file> (a client certificate) or
        --user <name> with the password in LOTSE_PASSWORD.";
 
@@ -827,13 +828,17 @@ fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
             let own = ["LOTSE_TOKEN", "LOTSE_USER", "LOTSE_PASSWORD"].iter().any(|v| env(v).is_some())
                 || a.cert.is_some()
                 || a.key.is_some();
-            McpMode::Http(lotse_node::mcp::http::Listen::new(
+            let listen = lotse_node::mcp::http::Listen::new(
                 listen.clone(),
                 a.tls_cert.clone(),
                 a.tls_key.clone(),
                 a.allow_origin.clone(),
                 own,
-            )?)
+            )?;
+            for w in listen.warnings() {
+                eprintln!("lotse: warning: {w}");
+            }
+            McpMode::Http(listen)
         }
     };
     let reach = match &a.bootstrap {

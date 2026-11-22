@@ -900,3 +900,28 @@ async fn https_with_the_given_certificate() {
     assert!(!String::from_utf8_lossy(&out).contains("HTTP/1.1 "), "plain HTTP answered: {out:?}");
     cluster.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_null_origin_is_refused_at_start() {
+    let ca = std::env::temp_dir().join(format!("lotse-node-mcp-null-{}-ca.pem", std::process::id()));
+    let listen = format!("127.0.0.1:{}", free_port());
+    let run = |origin: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lotse"));
+        cmd.args(["mcp", "--bootstrap", "127.0.0.1:1", "--ca", ca.to_str().unwrap(), "--listen", listen.as_str()]);
+        cmd.args(["--allow-origin", origin]);
+        for v in CREDENTIAL_VARS {
+            cmd.env_remove(v);
+        }
+        cmd.stdin(Stdio::null()).output().expect("the lotse executable runs")
+    };
+    let out = run("null");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--allow-origin null"), "{stderr}");
+
+    // An origin with a path can never match: a warning, before anything
+    // else (here the missing CA ends the process).
+    let out = run("https://console.example/");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning: --allow-origin https://console.example/ can never match"), "{stderr}");
+}

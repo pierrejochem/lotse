@@ -7,6 +7,13 @@
 //! least recently used goes first; dropping the last handle to a client
 //! closes its connections. Sign-ins for one key happen one at a time, so
 //! concurrent requests with one credential sign in once.
+//!
+//! Anyone who reaches the listener can make up credentials, so sign-ins in
+//! progress cost bounded work and cannot push out clients that work: they
+//! do not count toward [`MAX`] and only clients that signed in are evicted;
+//! at most [`MAX_PENDING`] wait at once, and at most [`MAX_SIGN_INS`] reach
+//! the cluster at once. A request that cannot start its sign-in within
+//! [`SIGN_IN_WAIT`] is refused as busy rather than queued.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -23,8 +30,22 @@ use super::{Reach, SignIn, client};
 /// How long a client stays unused before it is closed.
 pub const IDLE: Duration = Duration::from_secs(15 * 60);
 
-/// The most clients held at once.
+/// The most signed-in clients held at once.
 pub const MAX: usize = 1_000;
+
+/// The most credentials whose sign-in is waiting or in progress at once;
+/// a request for one more is refused as busy at once.
+pub const MAX_PENDING: usize = 256;
+
+/// The most sign-ins that reach the cluster at once: each builds a client,
+/// opens a TLS connection and, for a password, computes a SCRAM proof.
+pub const MAX_SIGN_INS: usize = 32;
+
+/// How long a sign-in waits for its turn before the request is refused as
+/// busy. Long enough to ride out a burst of real agents (a sign-in takes
+/// milliseconds, 32 run at once), short enough that a flood of made-up
+/// credentials gets a quick 503 instead of piling up open requests.
+pub const SIGN_IN_WAIT: Duration = Duration::from_secs(5);
 
 /// The credential one HTTP request carried in its `Authorization` header.
 #[derive(Clone, PartialEq, Eq)]
@@ -121,6 +142,15 @@ pub enum SignInError {
     /// The cluster did not answer, or the client could not be made.
     #[error("the cluster could not be reached: {0}")]
     Unreachable(String),
+    /// Too many sign-ins are waiting or in progress; try again shortly.
+    #[error("too many sign-ins at once")]
+    Busy,
+}
+
+impl From<Busy> for SignInError {
+    fn from(_: Busy) -> SignInError {
+        SignInError::Busy
+    }
 }
 
 impl From<ClientError> for SignInError {
@@ -148,7 +178,7 @@ impl ClientCache {
     /// No clients yet; each one reaches the cluster as `reach` says.
     pub fn new(reach: Reach) -> ClientCache {
         let rt = TokioRuntime::new(std::env::temp_dir());
-        ClientCache { reach, cache: Cache::new(Box::new(move || rt.now())) }
+        ClientCache { reach, cache: Cache::new(Box::new(move || rt.now()), Limits::default()) }
     }
 
     /// The client `credential` signed in, signing in first if none is held.
@@ -188,9 +218,9 @@ impl ClientCache {
         self.cache.sweep();
     }
 
-    /// How many clients are held.
+    /// How many signed-in clients are held.
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.cache.held()
     }
 
     /// Whether none is.
@@ -211,11 +241,37 @@ async fn still_signed_in(client: &Client<TokioRuntime>) -> Result<(), SignInErro
     }
 }
 
+/// The cache refused to start a sign-in: too many wait or run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Busy;
+
+/// The cache's bounds; tests use smaller ones.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    /// Signed-in values held.
+    pub(crate) held: usize,
+    /// Keys whose sign-in waits or runs.
+    pub(crate) pending: usize,
+    /// Sign-ins running at once.
+    pub(crate) signing: usize,
+    /// How long a sign-in waits for its turn.
+    pub(crate) wait: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits { held: MAX, pending: MAX_PENDING, signing: MAX_SIGN_INS, wait: SIGN_IN_WAIT }
+    }
+}
+
 /// The cache itself, over any value, so its rules are tested without a
 /// cluster.
 pub(crate) struct Cache<T> {
     entries: Mutex<BTreeMap<CredentialKey, Entry<T>>>,
     now: Box<dyn Fn() -> Instant + Send + Sync>,
+    limits: Limits,
+    /// One permit per sign-in running.
+    signing: Arc<tokio::sync::Semaphore>,
 }
 
 struct Entry<T> {
@@ -228,8 +284,9 @@ struct Entry<T> {
 }
 
 impl<T> Cache<T> {
-    pub(crate) fn new(now: Box<dyn Fn() -> Instant + Send + Sync>) -> Cache<T> {
-        Cache { entries: Mutex::new(BTreeMap::new()), now }
+    pub(crate) fn new(now: Box<dyn Fn() -> Instant + Send + Sync>, limits: Limits) -> Cache<T> {
+        let signing = Arc::new(tokio::sync::Semaphore::new(limits.signing));
+        Cache { entries: Mutex::new(BTreeMap::new()), now, limits, signing }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<CredentialKey, Entry<T>>> {
@@ -240,8 +297,14 @@ impl<T> Cache<T> {
     /// held. Only one `make` runs for a key at a time; a request that waited
     /// for it gets its value. A failed `make` holds nothing, and the next
     /// waiter makes its own. The flag says whether the value was just made.
+    ///
+    /// A key without a value waits for one of [`Limits::signing`] turns, at
+    /// most [`Limits::wait`], and only [`Limits::pending`] keys may wait or
+    /// make at once; otherwise the answer is [`Busy`]. Only held values are
+    /// evicted to make room, so made-up keys never push out a working one.
     pub(crate) async fn get_or_insert<E, F, Fut>(&self, key: CredentialKey, make: F) -> Result<(Arc<T>, bool), E>
     where
+        E: From<Busy>,
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
@@ -259,11 +322,8 @@ impl<T> Cache<T> {
                         e.gate.clone()
                     }
                     None => {
-                        if entries.len() >= MAX {
-                            let oldest = entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| *k);
-                            if let Some(k) = oldest {
-                                entries.remove(&k);
-                            }
+                        if entries.values().filter(|e| e.value.is_none()).count() >= self.limits.pending {
+                            return Err(Busy.into());
                         }
                         let gate = Arc::new(tokio::sync::Mutex::new(()));
                         entries.insert(key, Entry { gate: gate.clone(), value: None, used: now });
@@ -284,6 +344,14 @@ impl<T> Cache<T> {
                     _ => continue,
                 }
             }
+            let permit = tokio::time::timeout(self.limits.wait, self.signing.clone().acquire_owned()).await;
+            let Ok(Ok(_permit)) = permit else {
+                let mut entries = self.lock();
+                if entries.get(&key).is_some_and(|e| Arc::ptr_eq(&e.gate, &gate) && e.value.is_none()) {
+                    entries.remove(&key);
+                }
+                return Err(Busy.into());
+            };
             let made = make().await;
             let mut entries = self.lock();
             let ours = entries.get_mut(&key).filter(|e| Arc::ptr_eq(&e.gate, &gate));
@@ -294,6 +362,7 @@ impl<T> Cache<T> {
                     if let Some(e) = ours {
                         e.value = Some(v.clone());
                         e.used = (self.now)();
+                        evict(&mut entries, key, self.limits.held);
                     }
                     Ok((v, true))
                 }
@@ -323,6 +392,27 @@ impl<T> Cache<T> {
 
     pub(crate) fn len(&self) -> usize {
         self.lock().len()
+    }
+
+    /// How many entries hold a value.
+    pub(crate) fn held(&self) -> usize {
+        self.lock().values().filter(|e| e.value.is_some()).count()
+    }
+}
+
+/// Drops the least recently used held entries, never `keep` (just made) and
+/// never one whose sign-in is in progress, until at most `max` hold a value.
+fn evict<T>(entries: &mut BTreeMap<CredentialKey, Entry<T>>, keep: CredentialKey, max: usize) {
+    while entries.values().filter(|e| e.value.is_some()).count() > max {
+        let oldest = entries
+            .iter()
+            .filter(|(k, e)| e.value.is_some() && **k != keep)
+            .min_by_key(|(_, e)| e.used)
+            .map(|(k, _)| *k);
+        match oldest {
+            Some(k) => entries.remove(&k),
+            None => return,
+        };
     }
 }
 
