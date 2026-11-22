@@ -58,7 +58,7 @@ use lotse_rt::{Conn, Instant, Runtime};
 use crate::access::Access;
 use crate::auth::{Auth, Principal};
 use crate::replica::{Error, MarkerOutcome, ProposeError, Proposed, Replica, StateMachine};
-use crate::signal::{Signal, race};
+use crate::signal::{Signal, before, race};
 use crate::wire::GroupId;
 
 mod actions;
@@ -169,8 +169,22 @@ pub(crate) async fn serve<R: Runtime>(
         if session.revoked() {
             break;
         }
-        let frame = match race(conn.recv(), &[&stop, &changed]).await {
-            Some(Ok(Some(frame))) => frame,
+        // A session signed in with an access token ends with the token,
+        // and the connection with it, also while it waits (ADR 0133).
+        let closes_at = session.closes_at();
+        if closes_at.is_some_and(|t| rt.now() >= t) {
+            break;
+        }
+        let ends = async {
+            match closes_at {
+                Some(t) => rt.sleep(t.saturating_duration_since(rt.now())).await,
+                None => std::future::pending().await,
+            }
+        };
+        let frame = match race(before(conn.recv(), ends), &[&stop, &changed]).await {
+            Some(Some(Ok(Some(frame)))) => frame,
+            // The token expired: the check above ends the connection.
+            Some(None) => continue,
             None if !stop.is_set() => continue,
             _ => break,
         };

@@ -287,6 +287,9 @@ pub struct Auth {
     /// SASL SCRAM-SHA-512 with users set at runtime (default on).
     #[serde(default = "yes")]
     pub scram: bool,
+    /// Signing in with an access token, `LOTSE-TOKEN` (default on).
+    #[serde(default = "yes")]
+    pub tokens: bool,
     /// Principals that are cluster admins from the start.
     #[serde(default)]
     pub admins: Vec<String>,
@@ -307,6 +310,7 @@ impl Default for Auth {
             required: true,
             mtls: true,
             scram: true,
+            tokens: true,
             admins: Vec::new(),
             tenants: Vec::new(),
             max_session_s: None,
@@ -478,6 +482,7 @@ impl ClusterFile {
             required: a.required,
             mtls: a.mtls,
             scram: a.scram,
+            tokens: a.tokens,
             oidc: a.oidc.as_ref().map(|o| {
                 let mut c = lotse_server::OidcConfig::new(&o.issuer, &o.audience);
                 if let Some(p) = &o.principal_claim {

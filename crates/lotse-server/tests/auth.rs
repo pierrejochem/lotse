@@ -492,7 +492,10 @@ fn sessions_end_and_keep_their_principal() {
             match call(&rt, &conn, 1, &hs).await {
                 Response::SaslHandshake(r) => {
                     assert_eq!(r.error, ErrorCode::UNSUPPORTED_SASL_MECHANISM);
-                    assert_eq!(r.mechanisms, vec!["SCRAM-SHA-512".to_string(), "OAUTHBEARER".to_string()]);
+                    assert_eq!(
+                        r.mechanisms,
+                        ["SCRAM-SHA-512", "OAUTHBEARER", "LOTSE-TOKEN"].map(String::from).to_vec()
+                    );
                 }
                 other => panic!("{other:?}"),
             }
@@ -1317,7 +1320,11 @@ impl AsUser {
             }
             self.next_id += 1;
             let conn = self.conn.as_ref().unwrap();
-            conn.send(lotse_proto::encode_request(self.next_id, req)).await.unwrap();
+            // A connection the node closed (a revocation, say) is made anew.
+            if conn.send(lotse_proto::encode_request(self.next_id, req)).await.is_err() {
+                self.conn = None;
+                continue;
+            }
             let answer = next(rt, conn).await.map(|f| lotse_proto::decode_response(f, req.api_key()).unwrap().1);
             match answer {
                 // The session ended or the connection with it.
@@ -1626,6 +1633,334 @@ fn tokens_wait_for_cluster_version_0_1() {
                 let obs = node.handle().observe(lotse_server::ops::Scraper::Local).await.unwrap();
                 assert_eq!(obs.tokens, Some(0));
             }
+            stop(nodes).await;
+        });
+    });
+}
+
+// Signing in with a token (ADR 0133).
+
+/// The text of token `id` whose secret is 32 bytes of `seed`.
+fn token_text(id: u64, seed: u8) -> String {
+    lotse_auth::token::Token::new(id, [seed; 32]).text()
+}
+
+/// The hash `CreateToken` takes for the secret of 32 bytes of `seed`.
+fn secret_hash(seed: u8) -> Vec<u8> {
+    lotse_auth::token::Token::new(0, [seed; 32]).hash().to_vec()
+}
+
+/// Signs in with `text` on `conn` (`LOTSE-TOKEN`): the node's answer.
+async fn token_sign_in(
+    rt: &SimRuntime,
+    conn: &lotse_sim::SimConn,
+    text: &str,
+) -> lotse_proto::SaslAuthenticateResponse {
+    let hs = Request::SaslHandshake(SaslHandshakeRequest { mechanism: lotse_auth::token::MECHANISM.into() });
+    match call(rt, conn, 1, &hs).await {
+        Response::SaslHandshake(r) => assert_eq!(r.error, ErrorCode::NONE, "{r:?}"),
+        other => panic!("{other:?}"),
+    }
+    let step = Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: Bytes::from(text.as_bytes().to_vec()) });
+    match call(rt, conn, 2, &step).await {
+        Response::SaslAuthenticate(r) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A connection from `host` to node `node`, signed in with `text` once the
+/// node has applied the token; the node's answer with it.
+async fn signed_in(
+    rt: &SimRuntime,
+    host: &str,
+    node: u32,
+    text: &str,
+) -> (lotse_sim::SimConn, lotse_proto::SaslAuthenticateResponse) {
+    for _ in 0..100 {
+        let conn = rt.node(host).connect(&format!("n{node}:9000"), Link::Client).await.unwrap();
+        let r = token_sign_in(rt, &conn, text).await;
+        if r.error == ErrorCode::NONE {
+            return (conn, r);
+        }
+        rt.sleep(TICK * 5).await;
+    }
+    panic!("node {node} never took the token")
+}
+
+/// Whether a failed sign-in said only `authentication failed` and closed.
+async fn refused(rt: &SimRuntime, host: &str, text: &str) -> bool {
+    let conn = raw(rt, host).await;
+    let r = token_sign_in(rt, &conn, text).await;
+    let same = (r.error, r.error_msg.as_deref(), r.session_lifetime_ms)
+        == (ErrorCode::AUTHENTICATION_FAILED, Some("authentication failed"), 0);
+    assert!(same, "{r:?}");
+    same && conn_closed(rt, &conn).await
+}
+
+/// Whether `conn` sees stream `s`.
+async fn sees_stream(rt: &SimRuntime, conn: &lotse_sim::SimConn) -> bool {
+    let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec!["s".into()] });
+    match call(rt, conn, 30, &meta).await {
+        Response::Metadata(m) => m.resources.iter().any(|r| r.name == "s" && r.error == ErrorCode::NONE),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Node 1's token sign-ins so far: succeeded and failed, as `/metrics`
+/// renders them.
+async fn sign_ins(nodes: &[Node<SimRuntime>]) -> (u64, u64) {
+    let obs = nodes[0].handle().observe(lotse_server::ops::Scraper::Local).await.unwrap();
+    let text = lotse_server::ops::render(&obs);
+    let count = |result: &str| {
+        let prefix = format!("lotse_token_sign_ins_total{{node=\"1\",result=\"{result}\"}} ");
+        let line = text.lines().find_map(|l| l.strip_prefix(&prefix)).unwrap_or_else(|| panic!("{prefix}\n{text}"));
+        line.parse::<u64>().unwrap()
+    };
+    (count("ok"), count("failed"))
+}
+
+/// When `conn` closes, as the unix time in ms, waiting at most `within`;
+/// `None` if a frame comes or it stays open.
+async fn closed_at(rt: &SimRuntime, conn: &lotse_sim::SimConn, within: Duration) -> Option<u64> {
+    let mut recv = std::pin::pin!(conn.recv());
+    let mut wait = std::pin::pin!(rt.sleep(within));
+    let closed = std::future::poll_fn(|cx| {
+        if let std::task::Poll::Ready(r) = recv.as_mut().poll(cx) {
+            return std::task::Poll::Ready(!matches!(r, Ok(Some(_))));
+        }
+        wait.as_mut().poll(cx).map(|()| false)
+    })
+    .await;
+    closed.then(|| rt.unix_time().as_millis() as u64)
+}
+
+#[test]
+fn a_token_signs_in_as_its_owner_with_only_name_roles() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut admin = AsUser::new("admin", "admin-pw");
+            let hers = alice.create_with(&rt, "", "laptop", 1, secret_hash(1)).await;
+            assert_eq!(hers.error, ErrorCode::NONE, "{:?}", hers.error_msg);
+            let his = admin.create_with(&rt, "bob", "for-bob", 1, secret_hash(2)).await;
+            assert_eq!(his.error, ErrorCode::NONE, "{:?}", his.error_msg);
+            let (before_ok, _) = sign_ins(&nodes).await;
+
+            // Alice's token acts as alice, with the roles bound to her name.
+            let (conn, r) = signed_in(&rt, "t1", 1, &token_text(hers.id, 1)).await;
+            assert!(r.session_lifetime_ms > 0 && r.session_lifetime_ms <= MAX_SESSION.as_millis() as u64, "{r:?}");
+            assert!(sees_stream(&rt, &conn).await, "alice is a producer by name");
+            // A pasted token with a newline works the same.
+            let (pasted, _) = signed_in(&rt, "t2", 1, &format!("{}\n", token_text(hers.id, 1))).await;
+            assert!(sees_stream(&rt, &pasted).await);
+
+            // Bob is in the group ops at the identity provider, which may
+            // produce; with a token, groups do not count.
+            let idp = issuer("k1");
+            let oauth = raw(&rt, "o1").await;
+            let hs = Request::SaslHandshake(SaslHandshakeRequest { mechanism: "OAUTHBEARER".into() });
+            assert!(
+                matches!(call(&rt, &oauth, 1, &hs).await, Response::SaslHandshake(r) if r.error == ErrorCode::NONE)
+            );
+            let first = Bytes::from(lotse_auth::oauth::initial_response(&token(&rt, &idp, "bob", 600)));
+            let r =
+                call(&rt, &oauth, 2, &Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: first })).await;
+            assert!(matches!(r, Response::SaslAuthenticate(ref r) if r.error == ErrorCode::NONE), "{r:?}");
+            assert!(sees_stream(&rt, &oauth).await, "bob through ops");
+            let (bobs, _) = signed_in(&rt, "t3", 1, &token_text(his.id, 2)).await;
+            assert!(!sees_stream(&rt, &bobs).await, "bob's token has no group");
+
+            let (after_ok, _) = sign_ins(&nodes).await;
+            assert!(after_ok >= before_ok + 3, "{before_ok} {after_ok}");
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn every_failed_token_sign_in_says_the_same() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let kept = alice.create_with(&rt, "alice", "kept", 1, secret_hash(1)).await;
+            let gone = alice.create_with(&rt, "alice", "gone", 1, secret_hash(3)).await;
+            assert_eq!((kept.error, gone.error), (ErrorCode::NONE, ErrorCode::NONE));
+            // Both work, so what follows fails for its own reason.
+            signed_in(&rt, "w1", 1, &token_text(kept.id, 1)).await;
+            signed_in(&rt, "w2", 1, &token_text(gone.id, 3)).await;
+
+            let (ok, failed) = sign_ins(&nodes).await;
+            assert!(refused(&rt, "f1", &token_text(kept.id + 1000, 1)).await, "an unknown id");
+            assert!(refused(&rt, "f2", &token_text(kept.id, 9)).await, "a wrong secret");
+            assert!(refused(&rt, "f3", "lotse_tok_nonsense").await, "not a token");
+            assert_eq!(alice.revoke(&rt, gone.id).await, (ErrorCode::NONE, None));
+            rt.sleep(TICK * 50).await;
+            assert!(refused(&rt, "f4", &token_text(gone.id, 3)).await, "a revoked token");
+            // A week on (lifetime 1), the kept one has expired.
+            rt.step_wall_clock(Duration::from_millis(7 * DAY_MS + 1_000));
+            assert!(refused(&rt, "f5", &token_text(kept.id, 1)).await, "an expired token");
+            assert_eq!(sign_ins(&nodes).await, (ok, failed + 5), "each counted once as failed");
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn revoking_a_token_ends_its_connections_at_once() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let doomed = alice.create_with(&rt, "alice", "doomed", 2, secret_hash(1)).await;
+            let other = alice.create_with(&rt, "alice", "other", 2, secret_hash(2)).await;
+            assert_eq!((doomed.error, other.error), (ErrorCode::NONE, ErrorCode::NONE));
+            let (on_1, _) = signed_in(&rt, "d1", 1, &token_text(doomed.id, 1)).await;
+            let (on_2, _) = signed_in(&rt, "d2", 2, &token_text(doomed.id, 1)).await;
+            let (kept, _) = signed_in(&rt, "k1", 1, &token_text(other.id, 2)).await;
+            let password = raw(&rt, "k2").await;
+            login(&rt, &password, "alice", "alice-pw").await.unwrap();
+
+            let start = rt.now();
+            assert_eq!(alice.revoke(&rt, doomed.id).await, (ErrorCode::NONE, None));
+            // Waiting for nothing, both connections end.
+            for conn in [&on_1, &on_2] {
+                assert!(conn_closed(&rt, conn).await, "a connection of the revoked token stays open");
+            }
+            assert!(rt.now() - start < Duration::from_secs(1), "at once: {:?}", rt.now() - start);
+            // Alice's other token and her password session go on.
+            assert!(sees_stream(&rt, &kept).await);
+            assert!(sees_stream(&rt, &password).await);
+            // Until alice is deleted, which takes her tokens with her.
+            client(&rt, "c1", scram("admin", "admin-pw")).delete_user("alice").await.unwrap();
+            assert!(conn_closed(&rt, &kept).await, "a deleted owner's token session stays open");
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn an_idle_session_ends_when_its_token_expires() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let t = alice.create_with(&rt, "alice", "week", 1, secret_hash(1)).await;
+            assert_eq!(t.error, ErrorCode::NONE);
+            signed_in(&rt, "w", 1, &token_text(t.id, 1)).await;
+            // Three seconds before it expires, less than a session's
+            // maximum (MAX_SESSION), it signs in once more and then sends
+            // nothing.
+            let now = rt.unix_time().as_millis() as u64;
+            rt.step_wall_clock(Duration::from_millis(t.expires_at_ms - now - 3_000));
+            let (conn, r) = signed_in(&rt, "idle", 1, &token_text(t.id, 1)).await;
+            assert!(r.session_lifetime_ms > 0 && r.session_lifetime_ms <= 3_000, "{r:?}");
+            let closed = closed_at(&rt, &conn, Duration::from_secs(10)).await.expect("the connection closes");
+            assert!(closed >= t.expires_at_ms, "not before the token expires: {closed} {}", t.expires_at_ms);
+            assert!(closed <= t.expires_at_ms + 1_000, "within a second of expiry: {closed} {}", t.expires_at_ms);
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn a_token_session_cannot_create_tokens() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let t = alice.create_with(&rt, "alice", "mine", 2, secret_hash(1)).await;
+            assert_eq!(t.error, ErrorCode::NONE);
+            let req = Request::CreateToken(lotse_proto::CreateTokenRequest {
+                name: "successor".into(),
+                owner: String::new(),
+                lifetime: 5,
+                secret_hash: Bytes::from(secret_hash(2)),
+            });
+            // On every node, the metadata leader included.
+            let mut answers = Vec::new();
+            for node in 1..=3 {
+                let (conn, _) = signed_in(&rt, &format!("c{node}"), node, &token_text(t.id, 1)).await;
+                answers.push(code(&call(&rt, &conn, 40, &req).await));
+            }
+            let why = "a session signed in with a token cannot create tokens";
+            assert!(answers.iter().all(|a| *a == (ErrorCode::UNAUTHORIZED, Some(why.into()))), "{answers:?}");
+            assert_eq!(names(&alice.list(&rt, None).await), vec![triple("alice", "mine", "alice")]);
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn revoking_the_owners_sessions_ends_token_sessions() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut bob = AsUser::new("bob", "bob-pw");
+            let old = alice.create_with(&rt, "alice", "old", 2, secret_hash(1)).await;
+            let bobs = bob.create_with(&rt, "bob", "bobs", 2, secret_hash(2)).await;
+            assert_eq!((old.error, bobs.error), (ErrorCode::NONE, ErrorCode::NONE));
+            let (hers, _) = signed_in(&rt, "a1", 1, &token_text(old.id, 1)).await;
+            let (his, _) = signed_in(&rt, "b1", 1, &token_text(bobs.id, 2)).await;
+
+            rt.sleep(TICK * 10).await;
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            admin.revoke_sessions("alice", false).await.unwrap();
+            assert!(conn_closed(&rt, &hers).await, "alice's token session ends");
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec![] });
+            assert!(matches!(call(&rt, &his, 30, &meta).await, Response::Metadata(_)), "bob's goes on");
+            // A token made before the revocation stays refused; one made
+            // after works.
+            rt.sleep(TICK * 50).await;
+            assert!(refused(&rt, "a2", &token_text(old.id, 1)).await, "made before the revocation");
+            let new = alice.create_with(&rt, "alice", "new", 2, secret_hash(3)).await;
+            assert_eq!(new.error, ErrorCode::NONE);
+            let (conn, _) = signed_in(&rt, "a3", 1, &token_text(new.id, 3)).await;
+            assert!(sees_stream(&rt, &conn).await);
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn describe_sessions_names_the_token_id_and_never_the_secret() {
+    use lotse_proto::session_mechanism;
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let t = alice.create_with(&rt, "alice", "laptop", 2, secret_hash(1)).await;
+            assert_eq!(t.error, ErrorCode::NONE);
+            let created_at_ms = alice.list(&rt, None).await.iter().find(|e| e.id == t.id).unwrap().created_at_ms;
+            let text = token_text(t.id, 1);
+            let (conn, _) = signed_in(&rt, "t1", 1, &text).await;
+
+            let admin = client(&rt, "c1", scram("admin", "admin-pw"));
+            let all = sessions_seen(&admin).await;
+            let hers: Vec<_> = all.iter().filter(|(n, s)| *n == 1 && s.peer.starts_with("t1")).collect();
+            assert_eq!(hers.len(), 1, "{all:?}");
+            let s = &hers[0].1;
+            assert_eq!((s.name.as_str(), s.mechanism, s.token_id), ("alice", session_mechanism::TOKEN, Some(t.id)));
+            assert!(s.groups.is_empty(), "{s:?}");
+            assert_eq!(s.credential_ms, created_at_ms, "the credential dates from the token's creation");
+            assert!(s.expires_ms > 0 && s.expires_ms <= t.expires_at_ms, "{s:?}");
+            assert!(
+                all.iter().filter(|(_, s)| s.mechanism != session_mechanism::TOKEN).all(|(_, s)| s.token_id.is_none())
+            );
+            // Alice sees it too, on her token's own connection.
+            let req = Request::DescribeSessions(lotse_proto::DescribeSessionsRequest);
+            let mine = match call(&rt, &conn, 50, &req).await {
+                Response::DescribeSessions(r) => r,
+                other => panic!("{other:?}"),
+            };
+            assert!(mine.sessions.iter().any(|s| s.token_id == Some(t.id)), "{mine:?}");
+            // The secret is nowhere in what any of it says.
+            // Its last 43 characters (base64url, which may hold `_`).
+            let secret = &text[text.len() - 43..];
+            let said = format!("{all:?} {mine:?}");
+            assert!(!said.contains(secret) && !said.contains(&text), "{said}");
             stop(nodes).await;
         });
     });
