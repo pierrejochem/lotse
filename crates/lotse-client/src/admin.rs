@@ -445,7 +445,10 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// Creates an access token (ADR 0133) for `owner`, or for the caller
     /// with `None`; only a cluster admin names someone else. The secret is
     /// drawn here and only its hash is sent, so the returned text is the
-    /// only place it exists: keep it, nobody can show it again.
+    /// only place it exists: keep it, nobody can show it again. A retry
+    /// after a lost answer may leave an extra token (the same secret hash
+    /// under a later id), which its owner can list with
+    /// [`describe_tokens`](Self::describe_tokens) and revoke.
     pub async fn create_token(
         &self,
         name: &str,

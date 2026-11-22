@@ -162,17 +162,23 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         self.mechanism
     }
 
-    /// Whether a revocation ended this session (ADR 0070): the connection
-    /// closes, and the client authenticates afresh on a new one.
-    pub(super) fn revoked(&self) -> bool {
+    /// Whether a revocation ended this session (ADR 0070), or the access
+    /// token it signed in with is gone or expired at `now_ms` (ms since the
+    /// Unix epoch): the connection closes, and the client authenticates
+    /// afresh on a new one.
+    pub(super) fn revoked(&self, now_ms: u64) -> bool {
         // A certificate a cluster admin revoked ends the connection whoever
         // it then authenticates as (ADR 0090).
         self.cert.as_ref().is_some_and(|c| self.auth.cert_revoked(c))
             || self.principal.as_ref().is_some_and(|p| self.auth.revoked(p, self.since_ms))
             || self.unrecorded()
             // A revoked token, or one whose owner was deleted, is gone from
-            // the metadata state (ADR 0133).
-            || self.token_id.is_some_and(|id| !self.auth.has_token(id))
+            // the metadata state (ADR 0133). An expired one ends the session
+            // by the wall clock too: the monotonic deadline armed at sign-in
+            // misses a forward step of the wall clock (an NTP step, a
+            // resumed virtual machine), which would let the session outlive
+            // the token.
+            || self.token_id.is_some_and(|id| !self.auth.token_live(id, now_ms))
     }
 
     /// When the connection closes by itself: when the token it signed in
@@ -290,7 +296,7 @@ impl<R: Clock + Http + Rng + Clone> Session<R> {
         let presented = std::str::from_utf8(text).ok().and_then(Token::parse);
         let found = presented.and_then(|t| {
             let stored = self.auth.token(t.id)?;
-            // Expired tokens stay in the state until the next token change.
+            // Expired tokens stay in the state until the next token is created.
             (stored.expires_at_ms > now_ms && token::matches(&stored.hash, &t)).then_some((t.id, stored))
         });
         let Some((id, stored)) = found else { return failed(TOKEN_FAILED) };

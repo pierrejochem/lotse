@@ -108,7 +108,7 @@ export class Certs {
       `[cluster]\ndata_dir = "${dir}/data/node-{id}"\n\n` +
         `[tls]\nca = "${dir}/tls/ca.pem"\ncert = "${dir}/tls/node-{id}.pem"\nkey = "${dir}/tls/node-{id}.key"\n` +
         `renewal_ca = "${dir}/tls/renewal-ca.pem"\n\n` +
-        `[retention]\nms = -1\n\n[auth]\nadmins = ["alice"]\n${extra}\n` +
+        `[retention]\nms = -1\n\n[disk]\nfree_limit = 0\n\n[auth]\nadmins = ["alice"]\n${extra}\n` +
         `[[node]]\nid = 1\npeer = "127.0.0.1:${certs.peerPort}"\nclient = "127.0.0.1:${certs.clientPort}"\n`,
     );
     run(bin, "certs", "--config", certs.config);

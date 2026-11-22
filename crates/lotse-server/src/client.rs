@@ -166,24 +166,28 @@ pub(crate) async fn serve<R: Runtime>(
         // A revoked session ends the connection, also while it waits
         // (ADR 0070); the client then authenticates afresh.
         let changed = session.revocations_changed();
-        if session.revoked() {
+        if session.revoked(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX)) {
             break;
         }
         // A session signed in with an access token ends with the token,
-        // and the connection with it, also while it waits (ADR 0133).
+        // and the connection with it, also while it waits (ADR 0133). It
+        // wakes at least every `TOKEN_RECHECK` to compare the token's
+        // expiry with the wall clock, which may have stepped forward
+        // past it while monotonic time did not.
         let closes_at = session.closes_at();
         if closes_at.is_some_and(|t| rt.now() >= t) {
             break;
         }
         let ends = async {
             match closes_at {
-                Some(t) => rt.sleep(t.saturating_duration_since(rt.now())).await,
+                Some(t) => rt.sleep(t.saturating_duration_since(rt.now()).min(TOKEN_RECHECK)).await,
                 None => std::future::pending().await,
             }
         };
         let frame = match race(before(conn.recv(), ends), &[&stop, &changed]).await {
             Some(Some(Ok(Some(frame)))) => frame,
-            // The token expired: the check above ends the connection.
+            // The token expired, or it is time to compare its expiry with
+            // the wall clock: the checks above end the connection if so.
             Some(None) => continue,
             None if !stop.is_set() => continue,
             _ => break,
@@ -291,11 +295,16 @@ struct PendingInit {
     term: u64,
 }
 
-/// How long the coordinator waits for an allocation to commit.
 /// A connection that stays open tells the certificate inventory again after
 /// this (ADR 0091).
 const NOTE_CERT_EVERY: Duration = Duration::from_secs(600);
 
+/// How often a waiting token session compares its token's expiry with the
+/// wall clock (ADR 0133). Nothing signals a step of the wall clock, and a
+/// timer a second per token connection costs little.
+const TOKEN_RECHECK: Duration = Duration::from_secs(1);
+
+/// How long the coordinator waits for an allocation to commit.
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PendingFetch {
