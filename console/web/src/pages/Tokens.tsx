@@ -19,11 +19,12 @@ const LIFETIMES = [
 
 const day = (ms: number) => new Date(ms).toLocaleDateString('en-GB', { year: 'numeric', month: 'short', day: 'numeric' });
 
-/** The id is not secret; its last four digits are enough to tell two tokens of one name apart. */
-const tail = (id: number) => {
-  const s = String(id);
-  return s.length > 4 ? s.slice(-4) : s;
-};
+/**
+ * The id is not secret; the last four characters of it as the token text writes it (16 lowercase hex digits)
+ * are enough to tell two tokens of one name apart. The generated client types the id as a number; it is the
+ * index of a log entry, far below 2^53, so the conversion is exact.
+ */
+const tail = (id: number) => BigInt(id).toString(16).padStart(16, '0').slice(-4);
 
 /** A token as it was just made. Lives only in the dialog's state and is dropped when the dialog closes. */
 type Made = { text: string; expires_ms: number };
@@ -86,7 +87,14 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="dialog" style={narrow} aria-describedby="tok-desc">
+        <Dialog.Content
+          className="dialog"
+          style={narrow}
+          aria-describedby="tok-desc"
+          // The text is the only copy; only "Done" closes the dialog while it is shown.
+          onInteractOutside={(e) => made && e.preventDefault()}
+          onEscapeKeyDown={(e) => made && e.preventDefault()}
+        >
           <form onSubmit={submit} style={{ display: 'contents' }} noValidate>
             <div className="dialog-head">
               <div>
@@ -213,6 +221,7 @@ export function Tokens({ cluster }: { cluster: string }) {
   const [typed, setTyped] = useState('');
   const q = useTokens(cluster, owner);
   // A cluster admin sees every certificate request; the same call tells who may name an owner.
+  // Cluster viewers see all tokens but get no owner filter or field on purpose: the console has no viewer signal, and the server enforces access.
   const admin = useCertificateRequests(cluster).data?.all === true;
   return (
     <section className="stack" aria-label="Access tokens">

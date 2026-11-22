@@ -12,7 +12,6 @@ vi.mock('../api/client', async (importActual) => {
 });
 
 import { Tokens } from './Tokens';
-import { ApiError } from '../api/client';
 
 const SECRET = 'lotse_tok_SECRETSECRETSECRET';
 const ok = (data: unknown) => Promise.resolve({ data, response: { ok: true, status: 200 } });
@@ -54,19 +53,20 @@ const view = () =>
   );
 
 describe('Tokens', () => {
-  it('lists name, owner, created, expires and the last four characters of the id', async () => {
+  it('lists name, owner, created, expires and the last four hex digits of the id', async () => {
     view();
     const table = await screen.findByRole('table');
     const cells = within(table).getAllByRole('row').map((r) => r.textContent ?? '');
     expect(cells[0]).toMatch(/Name.*Owner.*Created.*Expires.*ID/);
     expect(cells[1]).toContain('ci pipeline');
     expect(cells[1]).toContain('ana');
-    expect(cells[1]).toContain('4567');
-    expect(cells[1]).not.toContain('1234567');
+    // 1234567 is 000000000012d687 in the token text; the tail is hex, not the decimal 4567.
+    expect(cells[1]).toContain('d687');
+    expect(cells[1]).not.toContain('4567');
     expect(cells[1]).toContain('3 Nov 2026');
     expect(cells[1]).toContain('3 Dec 2026');
     expect(cells[2]).toContain('svc-robot');
-    expect(cells[2]).toContain('42');
+    expect(cells[2]).toContain('002a');
   });
 
   it('offers exactly the five lifetimes with 1 month selected', async () => {
@@ -102,6 +102,12 @@ describe('Tokens', () => {
     expect(JSON.stringify(client.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(SECRET);
     expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.data))).not.toContain(SECRET);
 
+    // The text is the only copy: Escape and a click outside leave the dialog open.
+    await user.keyboard('{Escape}');
+    await user.click(document.querySelector('.overlay')!);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByText(SECRET)).toBeTruthy();
+
     await user.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(document.body.textContent).not.toContain(SECRET);
@@ -123,7 +129,6 @@ describe('Tokens', () => {
     await user.type(await screen.findByLabelText('Name'), 'x');
     await user.click(screen.getByRole('button', { name: 'Create' }));
     expect((await screen.findByRole('alert')).textContent).toContain('The cluster runs version 0.0; raise it to 0.1 first.');
-    expect(ApiError).toBeDefined();
   });
 
   it('says in the dialog that identity provider groups do not count', async () => {
