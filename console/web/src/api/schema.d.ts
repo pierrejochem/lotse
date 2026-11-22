@@ -404,6 +404,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The access tokens of the signed-in user, or of `owner`. Never the text. */
+        get: operations["tokens"];
+        put?: never;
+        /**
+         * Makes an access token. The answer holds its text, the only time anyone
+         *     sees it: keep it out of logs and lists.
+         */
+        post: operations["create_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/clusters/{cluster}/tokens/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revokes an access token: the sessions it opened end and it is refused
+         *     from then on.
+         */
+        post: operations["revoke_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/upgrade/pause": {
         parameters: {
             query?: never;
@@ -768,10 +809,40 @@ export interface components {
              */
             ttl_ms?: number | null;
         };
+        /** @description Request to make an access token (ADR 0133). */
+        CreateTokenBody: {
+            /** @description How long it lasts: `1w` (7 days), `1m` (30), `3m` (90), `6m` (180) or `1y` (365). */
+            lifetime: string;
+            /** @description A label to tell the token by, 1 to 64 bytes. */
+            name: string;
+            /**
+             * @description The user it acts as; only a cluster admin may name someone but
+             *     themselves. Absent: the signed-in user.
+             */
+            owner?: string | null;
+        };
         /** @description Request to create a user with a credential. */
         CreateUser: components["schemas"]["Credential"] & {
             /** @description New user name. */
             name: string;
+        };
+        /**
+         * @description A token just made. This answer is the only place its text exists: the
+         *     cluster keeps a hash, so nobody can show the text again.
+         */
+        CreatedTokenView: {
+            /**
+             * Format: int64
+             * @description When it stops being valid, ms since the Unix epoch.
+             */
+            expires_ms: number;
+            /**
+             * Format: int64
+             * @description The token's id, to revoke it by.
+             */
+            id: number;
+            /** @description The text to give to scripts and tools. Shown once. */
+            text: string;
         };
         /**
          * @description A SCRAM credential derived in the browser (ADR 0089). There is no
@@ -1659,6 +1730,41 @@ export interface components {
              * @description Bytes stored, all replicas.
              */
             stored_bytes: number;
+        };
+        /**
+         * @description One access token as it is listed (ADR 0133): what the cluster keeps,
+         *     which is never the secret.
+         */
+        TokenRow: {
+            /** @description Who made it: the owner, or a cluster admin. */
+            created_by: string;
+            /**
+             * Format: int64
+             * @description When it was made, ms since the Unix epoch.
+             */
+            created_ms: number;
+            /**
+             * Format: int64
+             * @description When it stops being valid, ms since the Unix epoch.
+             */
+            expires_ms: number;
+            /**
+             * Format: int64
+             * @description The token's id.
+             */
+            id: number;
+            /** @description Its label. */
+            name: string;
+            /** @description The user it acts as. */
+            owner: string;
+        };
+        /**
+         * @description The access tokens the signed-in user may see: their own, or with an
+         *     owner named and the role for it, that user's.
+         */
+        TokensView: {
+            /** @description The tokens still valid, oldest first. */
+            tokens: components["schemas"]["TokenRow"][];
         };
         /**
          * @description Health of something, as the UI colours it.
@@ -2750,6 +2856,132 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TenantsView"];
+                };
+            };
+        };
+    };
+    tokens: {
+        parameters: {
+            query?: {
+                /**
+                 * @description A user whose tokens to list. Only cluster admins and viewers see
+                 *     anyone's but their own; for everyone else the list is empty.
+                 */
+                owner?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokensView"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTokenBody"];
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedTokenView"];
+                };
+            };
+            /** @description The request is not valid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The cluster does not take tokens yet. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+                /** @description Token ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description No such token. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

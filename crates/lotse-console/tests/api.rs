@@ -295,3 +295,40 @@ async fn users_bindings_and_sessions_in_the_demo() {
     let (s, v) = call_on(&app, "POST", &format!("{base}/sessions/revoke"), Some(revoke("platform-team"))).await;
     assert_eq!((s, v["cli"].as_str()), (StatusCode::OK, Some("lotse-cli session revoke --group platform-team")), "{v}");
 }
+
+#[tokio::test]
+async fn demo_tokens_are_made_listed_and_revoked_with_the_text_shown_once() {
+    let app = app();
+    let base = "/api/v1/clusters/prod-hamburg-1/tokens";
+    let (s, v) = call_on(&app, "POST", base, Some(json!({"name": "ci", "lifetime": "3m"}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let text = v["text"].as_str().unwrap().to_owned();
+    let id = v["id"].as_u64().unwrap();
+    assert!(text.starts_with("lotse_tok_"), "{text}");
+
+    let (s, list) = call_on(&app, "GET", base, None).await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    assert!(!list.to_string().contains(&text), "the list never holds the text: {list}");
+    let row = &list["tokens"][0];
+    assert_eq!(
+        (row["id"].as_u64(), row["name"].as_str(), row["owner"].as_str()),
+        (Some(id), Some("ci"), Some("pierre"))
+    );
+    let span = row["expires_ms"].as_u64().unwrap() - row["created_ms"].as_u64().unwrap();
+    assert_eq!(span, 90 * 86_400_000);
+
+    let (s, v) = call_on(&app, "POST", base, Some(json!({"name": "ci", "lifetime": "2w"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, v) = call_on(&app, "POST", &format!("{base}/{id}/revoke"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, list) = call_on(&app, "GET", base, None).await;
+    assert!(list["tokens"].as_array().unwrap().is_empty(), "{list}");
+    let (s, _) = call_on(&app, "POST", &format!("{base}/{id}/revoke"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let (_, doc) = call_on(&app, "GET", "/api/openapi.json", None).await;
+    let paths = doc["paths"].as_object().unwrap();
+    for p in ["/api/v1/clusters/{cluster}/tokens", "/api/v1/clusters/{cluster}/tokens/{id}/revoke"] {
+        assert!(paths.contains_key(p), "{p} missing");
+    }
+}

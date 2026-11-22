@@ -53,6 +53,9 @@ use crate::model::*;
         add_binding,
         remove_binding,
         revoke_sessions,
+        tokens,
+        create_token,
+        revoke_token,
         revoke_certificate,
         certificates,
         certificate_requests,
@@ -534,6 +537,66 @@ pub async fn revoke_sessions(
         req.subject
     );
     Ok(Json(Done { message, cli: cli::revoke_sessions(&req.subject, req.group) }))
+}
+
+/// Query of the token list.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TokensParams {
+    /// A user whose tokens to list. Only cluster admins and viewers see
+    /// anyone's but their own; for everyone else the list is empty.
+    pub owner: Option<String>,
+}
+
+/// The access tokens of the signed-in user, or of `owner`. Never the text.
+#[utoipa::path(get, path = "/api/v1/clusters/{cluster}/tokens",
+    params(("cluster" = String, Path, description = "Cluster ID"), TokensParams),
+    responses((status = 200, description = "Success.", body = TokensView), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody)))]
+pub async fn tokens(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Query(q): Query<TokensParams>,
+) -> ApiResult<Json<TokensView>> {
+    Ok(Json(cluster(&st, &id)?.tokens(&who, q.owner.as_deref()).await?))
+}
+
+/// Makes an access token. The answer holds its text, the only time anyone
+/// sees it: keep it out of logs and lists.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/tokens",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = CreateTokenBody,
+    responses((status = 200, description = "Success.", body = CreatedTokenView), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 409, description = "The cluster does not take tokens yet.", body = ErrorBody)))]
+pub async fn create_token(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<CreateTokenBody>,
+) -> ApiResult<Json<CreatedTokenView>> {
+    req.lifetime()?;
+    let owner = req.owner.clone();
+    let made = cluster(&st, &id)?.create_token(&who, req).await?;
+    // The id and the owner, never the text.
+    tracing::info!(principal = %who.principal, cluster = %id, token = made.id, owner = owner.as_deref().unwrap_or(""), "token created");
+    Ok(Json(made))
+}
+
+/// Revokes an access token: the sessions it opened end and it is refused
+/// from then on.
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/tokens/{id}/revoke",
+    params(("cluster" = String, Path, description = "Cluster ID"), ("id" = u64, Path, description = "Token ID")),
+    responses((status = 200, description = "Success.", body = Done), (status = 404, description = "No such token.", body = ErrorBody)))]
+pub async fn revoke_token(
+    State(st): State<AppState>,
+    who: Identity,
+    Path((id, token)): Path<(String, u64)>,
+) -> ApiResult<Json<Done>> {
+    cluster(&st, &id)?.revoke_token(&who, token).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, token, "token revoked");
+    Ok(Json(Done {
+        message: format!("Revoked token {token}. Sessions it opened end and it is refused from now on."),
+        cli: cli::revoke_token(token),
+    }))
 }
 
 /// The client certificates the cluster has seen or had revoked, by expiry.

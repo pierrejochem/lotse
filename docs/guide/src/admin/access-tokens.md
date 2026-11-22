@@ -85,7 +85,7 @@ for t in client.describe_tokens(None).await? {
 client.revoke_token(made.id).await?;
 ```
 
-See [Rust client](../developer/rust-client.md#access-tokens). A cluster admin passes `Some("svc-ci")` as the owner to make one for another principal. The console's *Tokens* page is coming.
+See [Rust client](../developer/rust-client.md#access-tokens). A cluster admin passes `Some("svc-ci")` as the owner to make one for another principal. The console's *Tokens* tab under *Users and access* does the same ([Console](../user/console.md#access-tokens)).
 
 ## Check the cluster
 

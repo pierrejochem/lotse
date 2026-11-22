@@ -989,6 +989,85 @@ pub struct RevokeSessions {
     pub confirm: String,
 }
 
+/// One access token as it is listed (ADR 0133): what the cluster keeps,
+/// which is never the secret.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TokenRow {
+    /// The token's id.
+    pub id: u64,
+    /// Its label.
+    pub name: String,
+    /// The user it acts as.
+    pub owner: String,
+    /// When it was made, ms since the Unix epoch.
+    pub created_ms: u64,
+    /// When it stops being valid, ms since the Unix epoch.
+    pub expires_ms: u64,
+    /// Who made it: the owner, or a cluster admin.
+    pub created_by: String,
+}
+
+/// The access tokens the signed-in user may see: their own, or with an
+/// owner named and the role for it, that user's.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TokensView {
+    /// The tokens still valid, oldest first.
+    pub tokens: Vec<TokenRow>,
+}
+
+/// Request to make an access token (ADR 0133).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateTokenBody {
+    /// A label to tell the token by, 1 to 64 bytes.
+    pub name: String,
+    /// How long it lasts: `1w` (7 days), `1m` (30), `3m` (90), `6m` (180) or `1y` (365).
+    pub lifetime: String,
+    /// The user it acts as; only a cluster admin may name someone but
+    /// themselves. Absent: the signed-in user.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+impl CreateTokenBody {
+    /// The lifetime asked for, or a request error that names the choices.
+    pub fn lifetime(&self) -> Result<lotse_client::Lifetime, crate::error::ApiError> {
+        use lotse_client::Lifetime;
+        match self.lifetime.as_str() {
+            "1w" => Ok(Lifetime::Week),
+            "1m" => Ok(Lifetime::Month),
+            "3m" => Ok(Lifetime::Quarter),
+            "6m" => Ok(Lifetime::Half),
+            "1y" => Ok(Lifetime::Year),
+            other => Err(crate::error::ApiError::BadRequest(format!(
+                "The lifetime \"{other}\" is not one of 1w (7 days), 1m (30 days), 3m (90 days), 6m (180 days) or 1y (365 days)."
+            ))),
+        }
+    }
+}
+
+/// A token just made. This answer is the only place its text exists: the
+/// cluster keeps a hash, so nobody can show the text again.
+#[derive(Clone, Serialize, ToSchema)]
+pub struct CreatedTokenView {
+    /// The token's id, to revoke it by.
+    pub id: u64,
+    /// The text to give to scripts and tools. Shown once.
+    pub text: String,
+    /// When it stops being valid, ms since the Unix epoch.
+    pub expires_ms: u64,
+}
+
+// By hand, so that a log line or a failed assertion never carries the text.
+impl std::fmt::Debug for CreatedTokenView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedTokenView")
+            .field("id", &self.id)
+            .field("text", &"<hidden>")
+            .field("expires_ms", &self.expires_ms)
+            .finish()
+    }
+}
+
 /// One point of a time series.
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 pub struct Point {
