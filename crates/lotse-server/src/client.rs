@@ -78,6 +78,7 @@ mod retire;
 mod session;
 mod sessions;
 mod stats;
+mod tokens;
 mod upgrade;
 pub(crate) use upgrade::TurnJob;
 mod verify;
@@ -135,6 +136,8 @@ pub(crate) struct ClientRequest {
     request: Request,
     /// Who the request acts as.
     principal: Principal,
+    /// How its session signed in, [`lotse_proto::session_mechanism`].
+    mechanism: u8,
 }
 
 /// Reads requests from one connection and writes its responses. Requests
@@ -188,12 +191,22 @@ pub(crate) async fn serve<R: Runtime>(
                 }
             }
             Ok((header, request)) => match session.principal(rt.now()) {
-                Some(p) => commands(ClientRequest { outbox: outbox.clone(), header, request, principal: p.clone() }),
+                Some(p) => commands(ClientRequest {
+                    outbox: outbox.clone(),
+                    header,
+                    request,
+                    principal: p.clone(),
+                    mechanism: session.mechanism(),
+                }),
                 // Which versions a node speaks is no secret: a client asks
                 // before it knows how to authenticate.
-                None if matches!(request, Request::ApiVersions) => {
-                    commands(ClientRequest { outbox: outbox.clone(), header, request, principal: Principal::Anonymous })
-                }
+                None if matches!(request, Request::ApiVersions) => commands(ClientRequest {
+                    outbox: outbox.clone(),
+                    header,
+                    request,
+                    principal: Principal::Anonymous,
+                    mechanism: lotse_proto::session_mechanism::NONE,
+                }),
                 None => outbox.push(header.correlation_id, &Response::Error(ErrorCode::UNAUTHORIZED)),
             },
             // The client may retry with a version this node speaks.
@@ -461,7 +474,7 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, mut request, principal } = req;
+        let ClientRequest { outbox, header, mut request, principal, mechanism } = req;
         let id = header.correlation_id;
         if let Err(why) = view.access.check(&principal, &request) {
             outbox.push(id, &Response::Refused { code: ErrorCode::UNAUTHORIZED, message: why });
@@ -544,11 +557,9 @@ impl Clients {
             Request::ReportVersion(req) => self.report_version(outbox, id, req, &principal, view, groups),
             Request::AlterUpgrade(req) => self.alter_upgrade(outbox, id, req, view, groups),
             Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, view, groups),
-            // Not served yet: the node answers as it does for any request it
-            // does not speak.
-            Request::CreateToken(_) | Request::DescribeTokens(_) | Request::RevokeToken(_) => {
-                outbox.push(id, &Response::Error(ErrorCode::UNSUPPORTED_VERSION))
-            }
+            Request::CreateToken(req) => self.create_token(outbox, id, req, (&principal, mechanism), view, groups),
+            Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, view, groups),
+            Request::RevokeToken(req) => self.revoke_token(outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,

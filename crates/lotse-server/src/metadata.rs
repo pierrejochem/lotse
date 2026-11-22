@@ -643,8 +643,6 @@ impl MetadataState {
     /// [`MAX_TOKENS_PER_OWNER`] live ones each and [`MAX_TOKENS`] in all.
     /// Expired ones are pruned only when a token is created, so they must
     /// not count.
-    // Unused until the token requests are served; remove this then.
-    #[allow(dead_code)]
     pub(crate) fn token_room(&self, owner: &str, now_ms: u64) -> Result<(), String> {
         let live = || self.tokens.values().filter(|t| t.expires_at_ms > now_ms);
         if live().count() >= MAX_TOKENS {
@@ -657,10 +655,13 @@ impl MetadataState {
     }
 
     /// The token `id`, if it exists and has not expired at `now_ms`.
-    // Unused until the token requests are served; remove this then.
-    #[allow(dead_code)]
     pub(crate) fn live_token(&self, id: u64, now_ms: u64) -> Option<&StoredToken> {
         self.tokens.get(&id).filter(|t| t.expires_at_ms > now_ms)
+    }
+
+    /// How many tokens have not expired at `now_ms`.
+    pub(crate) fn live_tokens(&self, now_ms: u64) -> usize {
+        self.tokens.values().filter(|t| t.expires_at_ms > now_ms).count()
     }
 
     /// Applies the voters a group is to have, from the planner or an
@@ -2597,13 +2598,9 @@ pub(crate) struct CertKey {
 pub(crate) const MAX_RENEWED: usize = 4096;
 
 /// Most live access tokens one owner holds (ADR 0133).
-// Unused until the token requests are served; remove this then.
-#[allow(dead_code)]
 pub const MAX_TOKENS_PER_OWNER: usize = 50;
 
 /// Most live access tokens the state holds at once (ADR 0133).
-// Unused until the token requests are served; remove this then.
-#[allow(dead_code)]
 pub const MAX_TOKENS: usize = 10_000;
 
 /// A certificate the renewal CA issued (ADR 0123).

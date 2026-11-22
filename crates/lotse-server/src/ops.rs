@@ -111,6 +111,10 @@ pub struct Observation {
     /// node's replica of the metadata group has applied them (ADR 0119);
     /// `None` on a node without one.
     pub certificate_requests_pending: Option<u64>,
+    /// Access tokens that have not expired, as this node's replica of the
+    /// metadata group has applied them (ADR 0133); `None` on a node without
+    /// one.
+    pub tokens: Option<u64>,
     /// Whether the scraper that asked may read the metrics: they name every
     /// tenant's resources (ADR 0021).
     pub may_scrape: bool,
@@ -196,6 +200,10 @@ pub fn render(obs: &Observation) -> String {
     );
     if let Some(n) = obs.certificate_requests_pending {
         out.sample("lotse_certificate_requests_pending", &node, n);
+    }
+    out.family("lotse_tokens", "gauge", "Access tokens that have not expired, as this node has applied them.", "");
+    if let Some(n) = obs.tokens {
+        out.sample("lotse_tokens", &node, n);
     }
     for (name, help, v) in [
         ("lotse_client_received_bytes", "Bytes received from clients.", m.client_in_bytes),

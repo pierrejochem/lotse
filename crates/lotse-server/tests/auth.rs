@@ -170,6 +170,15 @@ async fn cluster(rt: &SimRuntime) -> Vec<Node<SimRuntime>> {
 }
 
 async fn cluster_with(rt: &SimRuntime, auth: AuthConfig) -> Vec<Node<SimRuntime>> {
+    cluster_on(rt, auth, lotse_server::version::Versions::default()).await
+}
+
+/// The cluster with every node reporting `versions` (ADR 0127).
+async fn cluster_on(
+    rt: &SimRuntime,
+    auth: AuthConfig,
+    versions: lotse_server::version::Versions,
+) -> Vec<Node<SimRuntime>> {
     rt.net().verify_peers(true);
     let idp = issuer("k1");
     rt.http().serve(&lotse_auth::oauth::discovery_url(ISSUER), idp.discovery(JWKS));
@@ -177,7 +186,8 @@ async fn cluster_with(rt: &SimRuntime, auth: AuthConfig) -> Vec<Node<SimRuntime>
     let mut nodes = Vec::new();
     for id in 1..=3 {
         let host = rt.node(&format!("n{id}")).with_identity(Some(PeerIdentity::Node(id)));
-        nodes.push(Node::start(host, config(id, auth.clone()), |_| Nothing).await.unwrap());
+        let config = NodeConfig { versions: versions.clone(), ..config(id, auth.clone()) };
+        nodes.push(Node::start(host, config, |_| Nothing).await.unwrap());
     }
     // Authenticated is not enough: the users here also get roles.
     let admin = client(rt, "setup", scram("admin", "admin-pw"));
@@ -1260,6 +1270,362 @@ fn a_certificate_is_renewed_over_its_connection_and_works_only_while_recorded() 
             let rt2 = rt.node("r6").with_identity(Some(PeerIdentity::Principal("alice".into()))).with_cert(again.clone());
             let conn = rt2.connect("n3:9000", Link::Client).await.unwrap();
             assert!(matches!(call(&rt, &conn, 40, &meta).await, Response::Metadata(_)));
+            stop(nodes).await;
+        });
+    });
+}
+
+// Access tokens (ADR 0133). The client's calls for them come later; until
+// then the tests speak the protocol on raw connections.
+
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A user's raw connection to the metadata group's leader: it logs in with
+/// SCRAM, moves to the next node when one does not lead, and connects anew
+/// when its session ended (`MAX_SESSION`).
+struct AsUser {
+    host: String,
+    user: String,
+    password: String,
+    conn: Option<lotse_sim::SimConn>,
+    node: u32,
+    next_id: u32,
+}
+
+impl AsUser {
+    fn new(user: &str, password: &str) -> AsUser {
+        AsUser {
+            host: format!("raw-{user}"),
+            user: user.into(),
+            password: password.into(),
+            conn: None,
+            node: 1,
+            next_id: 100,
+        }
+    }
+
+    async fn call(&mut self, rt: &SimRuntime, req: &Request) -> Response {
+        for _ in 0..300 {
+            if self.conn.is_none() {
+                let conn = rt.node(&self.host).connect(&format!("n{}:9000", self.node), Link::Client).await.unwrap();
+                if login(rt, &conn, &self.user, &self.password).await.is_err() {
+                    self.node = self.node % 3 + 1;
+                    rt.sleep(TICK * 5).await;
+                    continue;
+                }
+                self.conn = Some(conn);
+            }
+            self.next_id += 1;
+            let conn = self.conn.as_ref().unwrap();
+            conn.send(lotse_proto::encode_request(self.next_id, req)).await.unwrap();
+            let answer = next(rt, conn).await.map(|f| lotse_proto::decode_response(f, req.api_key()).unwrap().1);
+            match answer {
+                // The session ended or the connection with it.
+                None | Some(Response::Error(ErrorCode::UNAUTHORIZED)) => self.conn = None,
+                Some(r) if matches!(code(&r).0, ErrorCode::NOT_LEADER | ErrorCode::COORDINATOR_NOT_AVAILABLE) => {
+                    self.conn = None;
+                    self.node = self.node % 3 + 1;
+                    rt.sleep(TICK * 5).await;
+                }
+                Some(r) => return r,
+            }
+        }
+        panic!("no metadata leader answered {req:?}")
+    }
+
+    async fn create(
+        &mut self,
+        rt: &SimRuntime,
+        owner: &str,
+        name: &str,
+        lifetime: u8,
+    ) -> lotse_proto::CreateTokenResponse {
+        self.create_with(rt, owner, name, lifetime, vec![7; 32]).await
+    }
+
+    async fn create_with(
+        &mut self,
+        rt: &SimRuntime,
+        owner: &str,
+        name: &str,
+        lifetime: u8,
+        secret_hash: Vec<u8>,
+    ) -> lotse_proto::CreateTokenResponse {
+        let req = lotse_proto::CreateTokenRequest {
+            name: name.into(),
+            owner: owner.into(),
+            lifetime,
+            secret_hash: Bytes::from(secret_hash),
+        };
+        match self.call(rt, &Request::CreateToken(req)).await {
+            Response::CreateToken(r) => r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn list(&mut self, rt: &SimRuntime, owner: Option<&str>) -> Vec<lotse_proto::TokenEntry> {
+        let req = lotse_proto::DescribeTokensRequest { owner: owner.map(str::to_string) };
+        match self.call(rt, &Request::DescribeTokens(req)).await {
+            Response::DescribeTokens(r) if r.error == ErrorCode::NONE => r.tokens,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn revoke(&mut self, rt: &SimRuntime, id: u64) -> (ErrorCode, Option<String>) {
+        code(&self.call(rt, &Request::RevokeToken(lotse_proto::RevokeTokenRequest { id })).await)
+    }
+}
+
+/// The outcome of a token request's answer.
+fn code(r: &Response) -> (ErrorCode, Option<String>) {
+    match r {
+        Response::CreateToken(c) => (c.error, c.error_msg.clone()),
+        Response::DescribeTokens(d) => (d.error, None),
+        Response::Admin(a) => (a.error, a.error_msg.clone()),
+        Response::Refused { code, message } => (*code, Some(message.clone())),
+        Response::Error(c) => (*c, None),
+        other => panic!("not an answer to a token request: {other:?}"),
+    }
+}
+
+/// Waits until the cluster has taken cluster version `v`.
+async fn cluster_version_is(rt: &SimRuntime, admin: &Client<SimRuntime>, v: u32) {
+    for _ in 0..600 {
+        if admin.describe_upgrade().await.ok().and_then(|d| d.cluster_version) == Some(v) {
+            return;
+        }
+        rt.sleep(TICK * 10).await;
+    }
+    panic!("the cluster never took version {}", lotse_server::version::display(v));
+}
+
+/// The cluster with SCRAM users alice, bob and mon (a cluster viewer), at
+/// cluster version 0.1, which tokens need.
+async fn token_cluster(rt: &SimRuntime) -> Vec<Node<SimRuntime>> {
+    let nodes = cluster(rt).await;
+    setup_token_users(rt).await;
+    let admin = client(rt, "tv", scram("admin", "admin-pw"));
+    cluster_version_is(rt, &admin, lotse_server::version::TOKENS_SINCE).await;
+    nodes
+}
+
+async fn setup_token_users(rt: &SimRuntime) {
+    let admin = client(rt, "tu", scram("admin", "admin-pw"));
+    for user in ["alice", "bob", "mon"] {
+        admin.set_user_password(user, &format!("{user}-pw")).await.expect("creates the user");
+    }
+    let viewer = lotse_proto::RoleBindingData {
+        subject_kind: lotse_proto::subject_kind::USER,
+        subject: "mon".into(),
+        role: lotse_proto::role::CLUSTER_VIEWER,
+        tenant: lotse_server::DEFAULT_TENANT.into(),
+        prefix: String::new(),
+    };
+    admin.alter_role_bindings(vec![viewer], Vec::new()).await.expect("mon views the cluster");
+    rt.sleep(TICK * 50).await;
+}
+
+fn names(tokens: &[lotse_proto::TokenEntry]) -> Vec<(String, String, String)> {
+    let mut v: Vec<_> = tokens.iter().map(|t| (t.owner.clone(), t.name.clone(), t.created_by.clone())).collect();
+    v.sort();
+    v
+}
+
+fn triple(owner: &str, name: &str, by: &str) -> (String, String, String) {
+    (owner.into(), name.into(), by.into())
+}
+
+#[test]
+fn users_create_list_and_revoke_their_own_tokens() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut bob = AsUser::new("bob", "bob-pw");
+            let mut mon = AsUser::new("mon", "mon-pw");
+            let mut admin = AsUser::new("admin", "admin-pw");
+
+            let laptop = alice.create(&rt, "alice", "laptop", 2).await;
+            assert_eq!((laptop.error, laptop.error_msg.as_deref()), (ErrorCode::NONE, None));
+            assert!(laptop.id > 0);
+            // No owner named: the token is the caller's.
+            let ci = alice.create(&rt, "", "ci", 1).await;
+            assert_eq!(ci.error, ErrorCode::NONE, "{:?}", ci.error_msg);
+            assert_ne!(ci.id, laptop.id);
+            let bobs = bob.create(&rt, "bob", "bob-1", 3).await;
+            assert_eq!(bobs.error, ErrorCode::NONE, "{:?}", bobs.error_msg);
+
+            // Out of shape: a name of 1 to 64 bytes, a hash of 32.
+            for (name, hash) in [("", 32), (&*"n".repeat(65), 32), ("short", 31), ("long", 33)] {
+                let r = alice.create_with(&rt, "alice", name, 2, vec![1; hash]).await;
+                assert_eq!(r.error, ErrorCode::INVALID_REQUEST, "{name:?} {hash}");
+                assert!(r.error_msg.is_some() && r.id == 0);
+            }
+            assert_eq!(alice.create(&rt, "alice", &"n".repeat(64), 2).await.error, ErrorCode::NONE);
+
+            // Each user sees their own; a cluster viewer and admin see all.
+            let mine = alice.list(&rt, None).await;
+            assert_eq!(
+                names(&mine),
+                vec![
+                    triple("alice", "ci", "alice"),
+                    triple("alice", "laptop", "alice"),
+                    triple("alice", &"n".repeat(64), "alice")
+                ]
+            );
+            let laptop_entry = mine.iter().find(|t| t.id == laptop.id).expect("listed by id");
+            assert_eq!(laptop_entry.expires_at_ms, laptop.expires_at_ms);
+            assert!(alice.list(&rt, Some("bob")).await.is_empty(), "alice cannot see bob's");
+            assert_eq!(names(&bob.list(&rt, None).await), vec![triple("bob", "bob-1", "bob")]);
+            assert_eq!(mon.list(&rt, None).await.len(), 4, "a cluster viewer sees every token");
+            assert_eq!(admin.list(&rt, None).await.len(), 4, "a cluster admin sees every token");
+            assert_eq!(names(&admin.list(&rt, Some("bob")).await), vec![triple("bob", "bob-1", "bob")]);
+
+            // Someone else's token is unknown to alice and to a viewer.
+            assert_eq!(alice.revoke(&rt, bobs.id).await.0, ErrorCode::UNKNOWN_RESOURCE);
+            assert_eq!(mon.revoke(&rt, bobs.id).await.0, ErrorCode::UNKNOWN_RESOURCE);
+            assert_eq!(bob.list(&rt, None).await.len(), 1, "bob's token stays");
+
+            // Her own she revokes, once.
+            assert_eq!(alice.revoke(&rt, laptop.id).await, (ErrorCode::NONE, None));
+            assert!(!alice.list(&rt, None).await.iter().any(|t| t.id == laptop.id));
+            assert_eq!(alice.revoke(&rt, laptop.id).await.0, ErrorCode::UNKNOWN_RESOURCE);
+
+            // Every node tells the operator how many tokens live.
+            for node in &nodes {
+                let h = node.handle();
+                let since = rt.now();
+                loop {
+                    let obs = h.observe(lotse_server::ops::Scraper::Local).await.unwrap();
+                    if obs.tokens == Some(3) {
+                        assert!(
+                            lotse_server::ops::render(&obs)
+                                .contains(&format!("lotse_tokens{{node=\"{}\"}} 3\n", obs.node_id))
+                        );
+                        break;
+                    }
+                    assert!(rt.now() - since < Duration::from_secs(10), "{:?}", obs.tokens);
+                    rt.sleep(Duration::from_millis(100)).await;
+                }
+            }
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn a_cluster_admin_creates_a_token_for_another_principal_and_others_cannot() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut bob = AsUser::new("bob", "bob-pw");
+            let mut mon = AsUser::new("mon", "mon-pw");
+            let mut admin = AsUser::new("admin", "admin-pw");
+
+            let made = admin.create(&rt, "alice", "for-alice", 2).await;
+            assert_eq!(made.error, ErrorCode::NONE, "{:?}", made.error_msg);
+            assert_eq!(names(&alice.list(&rt, None).await), vec![triple("alice", "for-alice", "admin")]);
+
+            // Anyone else creates only their own: a user, and a viewer too.
+            for (who, name) in [(&mut alice, "alice"), (&mut mon, "mon")] {
+                let r = who.create(&rt, "bob", "for-bob", 2).await;
+                assert_eq!(r.error, ErrorCode::UNAUTHORIZED, "{name} made a token for bob");
+                assert!(r.error_msg.is_some_and(|m| m.contains("cluster admin")));
+            }
+            assert!(bob.list(&rt, None).await.is_empty(), "nothing was written for bob");
+
+            // A cluster admin revokes anyone's.
+            let bobs = bob.create(&rt, "bob", "mine", 2).await;
+            assert_eq!(bobs.error, ErrorCode::NONE);
+            assert_eq!(admin.revoke(&rt, bobs.id).await, (ErrorCode::NONE, None));
+            assert_eq!(admin.revoke(&rt, made.id).await, (ErrorCode::NONE, None));
+            assert!(admin.list(&rt, None).await.is_empty());
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn token_lifetimes_are_only_the_five_steps() {
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            for code in [0, 6, 255] {
+                let r = alice.create(&rt, "alice", "odd", code).await;
+                assert_eq!(r.error, ErrorCode::INVALID_REQUEST, "lifetime code {code}");
+            }
+            assert!(alice.list(&rt, None).await.is_empty());
+            for (code, days) in [(1, 7), (2, 30), (3, 90), (4, 180), (5, 365)] {
+                let before = rt.unix_time().as_millis() as u64;
+                let r = alice.create(&rt, "alice", &format!("d{days}"), code).await;
+                let after = rt.unix_time().as_millis() as u64;
+                assert_eq!(r.error, ErrorCode::NONE, "{:?}", r.error_msg);
+                let listed = alice.list(&rt, None).await;
+                let t = listed.iter().find(|t| t.id == r.id).expect("listed");
+                assert!((before..=after).contains(&t.created_at_ms), "created by the leader's clock");
+                assert_eq!(t.expires_at_ms - t.created_at_ms, days * DAY_MS, "code {code}");
+                assert_eq!(r.expires_at_ms, t.expires_at_ms);
+            }
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn token_limits_hold() {
+    lotse_sim::check_few_seeds(2, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = token_cluster(&rt).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut bob = AsUser::new("bob", "bob-pw");
+            let mut first = 0;
+            for i in 0..50 {
+                let r = alice.create(&rt, "alice", &format!("t{i}"), 1).await;
+                assert_eq!(r.error, ErrorCode::NONE, "token {i}: {:?}", r.error_msg);
+                if i == 0 {
+                    first = r.id;
+                }
+            }
+            let r = alice.create(&rt, "alice", "t50", 1).await;
+            assert_eq!(r.error, ErrorCode::INVALID_REQUEST);
+            assert!(r.error_msg.as_deref().is_some_and(|m| m.contains("50")), "{:?}", r.error_msg);
+            assert_eq!(alice.list(&rt, None).await.len(), 50, "the 51st was not written");
+            // The limit is per owner: bob has room.
+            assert_eq!(bob.create(&rt, "bob", "b", 1).await.error, ErrorCode::NONE);
+            // A revoked token gives its place back.
+            assert_eq!(alice.revoke(&rt, first).await.0, ErrorCode::NONE);
+            assert_eq!(alice.create(&rt, "alice", "again", 1).await.error, ErrorCode::NONE);
+            stop(nodes).await;
+        });
+    });
+}
+
+#[test]
+fn tokens_wait_for_cluster_version_0_1() {
+    use lotse_proto::cluster_version::of;
+    lotse_sim::check_few_seeds(3, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            // Nodes that run with cluster version 0.0 at most.
+            let versions =
+                lotse_server::version::Versions { release: "0.0.9".into(), oldest: of(0, 0), newest: of(0, 0) };
+            let nodes = cluster_on(&rt, auth(), versions).await;
+            setup_token_users(&rt).await;
+            cluster_version_is(&rt, &client(&rt, "tv", scram("admin", "admin-pw")), of(0, 0)).await;
+            let mut alice = AsUser::new("alice", "alice-pw");
+            let mut admin = AsUser::new("admin", "admin-pw");
+            let why = "tokens need cluster version 0.1; raise it with `lotse upgrade finalize`";
+            let r = alice.create(&rt, "alice", "early", 2).await;
+            assert_eq!((r.error, r.error_msg.as_deref(), r.id), (ErrorCode::UNSUPPORTED_VERSION, Some(why), 0));
+            let r = admin.create(&rt, "alice", "early", 2).await;
+            assert_eq!((r.error, r.error_msg.as_deref()), (ErrorCode::UNSUPPORTED_VERSION, Some(why)));
+            assert_eq!(admin.revoke(&rt, 1).await, (ErrorCode::UNSUPPORTED_VERSION, Some(why.to_string())));
+            assert!(admin.list(&rt, None).await.is_empty(), "nothing was written");
+            for node in &nodes {
+                let obs = node.handle().observe(lotse_server::ops::Scraper::Local).await.unwrap();
+                assert_eq!(obs.tokens, Some(0));
+            }
             stop(nodes).await;
         });
     });
