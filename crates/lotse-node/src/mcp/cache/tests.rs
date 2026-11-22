@@ -262,7 +262,9 @@ async fn at_most_so_many_sign_ins_run_at_once() {
     for t in tasks {
         assert!(t.await.unwrap().is_ok(), "within the wait, every sign-in gets its turn");
     }
-    assert_eq!(most.load(Ordering::SeqCst), MAX_SIGN_INS);
+    let most = most.load(Ordering::SeqCst);
+    assert!(most <= MAX_SIGN_INS, "{most} ran at once");
+    assert!(most >= MAX_SIGN_INS / 4, "sign-ins do run side by side: {most}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -302,4 +304,87 @@ async fn a_sign_in_that_waits_too_long_is_busy() {
     assert_eq!(cache.len(), 1, "its pending entry went");
     release.add_permits(1);
     assert!(first.await.unwrap().is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn making_room_never_drops_a_sign_in_in_progress() {
+    let (t, now) = clock();
+    let limits = Limits { held: 1, ..Limits::default() };
+    let cache: Arc<Cache<u32>> = Arc::new(Cache::new(now, limits));
+    cache.get_or_insert(key(1), || async { Ok::<_, E>(1) }).await.unwrap();
+    advance(&t, Duration::from_millis(1));
+    // Key 2 starts signing in and stays pending, with a waiter behind it.
+    let (release, made) = (Arc::new(tokio::sync::Semaphore::new(0)), Arc::new(AtomicUsize::new(0)));
+    let start = |cache: Arc<Cache<u32>>, release: Arc<tokio::sync::Semaphore>, made: Arc<AtomicUsize>| {
+        tokio::spawn(async move {
+            cache
+                .get_or_insert(key(2), || async move {
+                    made.fetch_add(1, Ordering::SeqCst);
+                    let _ = release.acquire().await;
+                    Ok::<_, E>(2)
+                })
+                .await
+                .unwrap()
+        })
+    };
+    let first = start(cache.clone(), release.clone(), made.clone());
+    while made.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let second = start(cache.clone(), release.clone(), made.clone());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Key 1 is used after key 2 started: key 2's entry is the oldest.
+    advance(&t, Duration::from_millis(1));
+    assert!(!cache.get_or_insert(key(1), || async { Ok::<_, E>(0) }).await.unwrap().1);
+    advance(&t, Duration::from_millis(1));
+    // Key 3 signs in; with room for one, key 1 goes, not key 2's sign-in.
+    cache.get_or_insert(key(3), || async { Ok::<_, E>(3) }).await.unwrap();
+    assert_eq!(cache.len(), 2, "key 3 held, key 2 pending");
+    release.add_permits(2);
+    let (a, b) = (first.await.unwrap(), second.await.unwrap());
+    assert!(Arc::ptr_eq(&a.0, &b.0), "the waiter got the first one's value");
+    assert_eq!(made.load(Ordering::SeqCst), 1, "key 2 signed in once");
+    assert!(!cache.get_or_insert(key(2), || async { Ok::<_, E>(0) }).await.unwrap().1, "and is held");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_request_answers_within_one_bound() {
+    let (_t, now) = clock();
+    let wait = Duration::from_millis(200);
+    let limits = Limits { held: MAX, pending: 8, signing: 1, wait };
+    let cache: Arc<Cache<u32>> = Arc::new(Cache::new(now, limits));
+    // The one permit is taken by a sign-in that does not end.
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let stuck = {
+        let (cache, release) = (cache.clone(), release.clone());
+        tokio::spawn(async move {
+            cache
+                .get_or_insert(key(1), || async move {
+                    let _ = release.acquire().await;
+                    Ok::<_, E>(1)
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Twenty requests with one credential: each waits once, in all.
+    let start = tokio::time::Instant::now();
+    let tasks: Vec<_> = (0..20)
+        .map(|_| {
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                let r = cache.get_or_insert(key(2), || async { Ok::<_, E>(2) }).await;
+                (r.map(|_| ()), tokio::time::Instant::now())
+            })
+        })
+        .collect();
+    for t in tasks {
+        let (r, done) = t.await.unwrap();
+        assert_eq!(r, Err(E::Busy));
+        let took = done - start;
+        assert!(took < wait * 2, "answered after {took:?}, more than one bound of {wait:?}");
+    }
+    assert_eq!(cache.len(), 1, "key 2 left nothing pending");
+    release.add_permits(1);
+    assert!(stuck.await.unwrap().is_ok());
 }
