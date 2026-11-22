@@ -192,6 +192,14 @@ pub(crate) async fn serve<R: Runtime>(
             None if !stop.is_set() => continue,
             _ => break,
         };
+        // The wall clock may have stepped past the token's expiry while the
+        // connection waited, less than a `TOKEN_RECHECK` ago: such a frame
+        // is not served.
+        if session.revoked(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX))
+            || session.closes_at().is_some_and(|t| rt.now() >= t)
+        {
+            break;
+        }
         NetStats::add(&net.client_in, frame.len());
         if rt.now() - noted >= NOTE_CERT_EVERY {
             noted = rt.now();

@@ -1877,9 +1877,15 @@ fn a_token_session_ends_when_the_wall_clock_passes_its_expiry() {
             assert_eq!(t.error, ErrorCode::NONE);
             let (conn, _) = signed_in(&rt, "w", 1, &token_text(t.id, 1)).await;
             assert!(sees_stream(&rt, &conn).await, "days left: the session works");
+            let (busy, _) = signed_in(&rt, "w2", 1, &token_text(t.id, 1)).await;
             let now = rt.unix_time().as_millis() as u64;
             rt.step_wall_clock(Duration::from_millis(t.expires_at_ms - now + 1_000));
             let stepped = rt.unix_time().as_millis() as u64;
+            // A request right after the step, before the session's next
+            // wake-up, is not served: the connection closes unanswered.
+            let meta = Request::Metadata(lotse_proto::MetadataRequest { names: vec!["s".into()] });
+            busy.send(lotse_proto::encode_request(30, &meta)).await.unwrap();
+            assert!(closed_at(&rt, &busy, Duration::from_secs(5)).await.is_some(), "a request served after expiry");
             let closed = closed_at(&rt, &conn, Duration::from_secs(5)).await.expect("the connection closes");
             assert!(closed <= stepped + 2_000, "within two seconds of the step: {closed} {stepped}");
             stop(nodes).await;
