@@ -1,4 +1,5 @@
-//! Authenticating a connection: SASL SCRAM-SHA-512 or OAUTHBEARER right
+//! Authenticating a connection: SASL SCRAM-SHA-512, OAUTHBEARER or an access
+//! token right
 //! after connecting, and again on the same connection before the session
 //! the node granted ends.
 
@@ -9,6 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use lotse_auth::oauth;
 use lotse_auth::scram::{self, ScramClient};
+use lotse_auth::token;
 use lotse_proto::{ErrorCode, Request, Response, SaslAuthenticateRequest, SaslHandshakeRequest};
 use lotse_rt::{Clock, Conn, Instant, Rng};
 
@@ -28,6 +30,11 @@ pub enum Credentials {
     /// SASL OAUTHBEARER: called for every authentication (on connecting
     /// and before each session ends), returns the current access token.
     OAuthBearer(Arc<dyn Fn() -> String + Send + Sync>),
+    /// An access token the cluster issued (`LOTSE-TOKEN`, ADR 0133): its
+    /// text, `lotse_tok_...`. The session acts as the token's owner and
+    /// ends when the token does; the text never leaves the client except
+    /// in the sign-in itself.
+    Token(String),
 }
 
 impl fmt::Debug for Credentials {
@@ -35,6 +42,8 @@ impl fmt::Debug for Credentials {
         match self {
             Credentials::Scram { user, .. } => f.debug_struct("Scram").field("user", user).finish_non_exhaustive(),
             Credentials::OAuthBearer(_) => f.write_str("OAuthBearer"),
+            // The text is the secret.
+            Credentials::Token(_) => f.write_str("Token"),
         }
     }
 }
@@ -74,6 +83,7 @@ impl<C: Conn> Connection<C> {
         let mechanism = match creds {
             Credentials::Scram { .. } => scram::MECHANISM,
             Credentials::OAuthBearer(_) => oauth::MECHANISM,
+            Credentials::Token(_) => token::MECHANISM,
         };
         let req = Request::SaslHandshake(SaslHandshakeRequest { mechanism: mechanism.into() });
         match self.call(&req, rt, timeout).await? {
@@ -98,6 +108,8 @@ impl<C: Conn> Connection<C> {
                 lifetime
             }
             Credentials::OAuthBearer(token) => self.sasl(step(oauth::initial_response(&token())), rt, timeout).await?.1,
+            // The node reads the token's text as the whole initial response.
+            Credentials::Token(text) => self.sasl(step(text.clone().into_bytes()), rt, timeout).await?.1,
         };
         Ok((lifetime > 0).then(|| SessionTimes::new(start, Duration::from_millis(lifetime))))
     }

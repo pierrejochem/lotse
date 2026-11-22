@@ -206,3 +206,60 @@ fn a_stream_is_unknown_only_once_every_broker_says_so() {
         assert_eq!(offset, 41);
     });
 }
+
+/// What `create_token` sends is the hash of the secret and nothing else of
+/// it: the cluster never sees the secret, and the text the caller gets
+/// carries the id the cluster chose.
+#[test]
+fn create_token_sends_only_the_hash() {
+    use lotse_auth::token::{Lifetime, Token};
+    use lotse_proto::{CreateTokenResponse, Request, Response};
+    use std::sync::{Arc, Mutex};
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let seen: Arc<Mutex<Vec<lotse_proto::CreateTokenRequest>>> = Arc::default();
+        let frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let (s, f) = (seen.clone(), frames.clone());
+        serve(&rt, "a", move |r| match r {
+            Request::CreateToken(c) => {
+                s.lock().unwrap().push(c.clone());
+                f.lock().unwrap().push(lotse_proto::encode_request(1, r).to_vec());
+                Response::CreateToken(CreateTokenResponse { id: 0x2a, expires_at_ms: 5_000, ..Default::default() })
+            }
+            _ => Response::Error(ErrorCode::INVALID_REQUEST),
+        });
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig {
+                retry_for: std::time::Duration::from_secs(2),
+                ..crate::ClientConfig::new(vec!["a:9000".into()])
+            },
+        );
+        let created = client.create_token("laptop", None, Lifetime::Month).await.expect("created");
+        assert_eq!((created.id, created.expires_at_ms), (0x2a, 5_000));
+        let token = Token::parse(&created.text).expect("the text is a token");
+        assert_eq!(token.id, 0x2a, "the id is the cluster's");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let req = &seen[0];
+        assert_eq!((req.name.as_str(), req.owner.as_str(), req.lifetime), ("laptop", "", Lifetime::Month.code()));
+        assert_eq!(req.secret_hash.len(), 32);
+        assert_eq!(&req.secret_hash[..], &token.hash()[..], "the hash of the secret");
+        assert_ne!(&req.secret_hash[..], &token.secret[..]);
+        let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        for frame in frames.lock().unwrap().iter() {
+            assert!(!contains(frame, &token.secret), "the secret is in the frame");
+            assert!(!contains(frame, created.text.as_bytes()), "the text is in the frame");
+        }
+    });
+}
+
+/// A token's text is a secret: printing credentials must not show it.
+#[test]
+fn token_credentials_are_not_printed() {
+    let text = "lotse_tok_000000000000002a_c3VwZXJzZWNyZXRzdXBlcnNlY3JldHN1cGVyc2VjcmV0MTI";
+    let shown = format!("{:?}", crate::Credentials::Token(text.into()));
+    assert!(!shown.contains("c3VwZXJ"), "{shown}");
+    assert!(!shown.contains(text), "{shown}");
+    assert!(shown.contains("Token"), "{shown}");
+}
