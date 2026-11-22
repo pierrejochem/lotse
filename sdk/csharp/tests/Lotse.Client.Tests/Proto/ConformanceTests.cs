@@ -193,6 +193,83 @@ public class ConformanceTests
         Assert.True(found);
     }
 
+    /// <summary>
+    /// The access token messages (ADR 0133), keys 66 to 68, read into the values the broker's samples hold; the round
+    /// trip byte for byte is <see cref="EveryRequestRoundTrips"/> and <see cref="EveryResponseRoundTrips"/>.
+    /// </summary>
+    [Fact]
+    public void TokenMessagesReadAsTheBrokerWroteThem()
+    {
+        var requests = new List<Request>();
+        foreach (string[] v in Vectors.Lines("requests.hex"))
+        {
+            Request r = Frames.DecodeRequest(Vectors.Hex(v[1])).Request;
+            if (r is Request.CreateToken or Request.DescribeTokens or Request.RevokeToken)
+            {
+                requests.Add(r);
+            }
+        }
+        byte[] hash = new byte[32];
+        Array.Fill(hash, (byte)0xab);
+        Assert.Equal(
+            new Request[]
+            {
+                new Request.CreateToken("ci", "alice", 2, Lotse.Record.ByteString.CopyOf(hash)),
+                new Request.DescribeTokens(null),
+                new Request.DescribeTokens("alice"),
+                new Request.RevokeToken(41),
+            },
+            requests);
+
+        var responses = new List<Response>();
+        foreach (string[] v in Vectors.Lines("responses.hex"))
+        {
+            ushort key = ushort.Parse(v[1]);
+            if (key is >= 66 and <= 68)
+            {
+                responses.Add(Frames.DecodeResponse(Vectors.Hex(v[2]), new ApiKey(key)).Response);
+            }
+        }
+        Assert.Equal(4, responses.Count);
+        Assert.Equal(new Response.CreateToken(ErrorCode.None, null, 41, 1_757_776_000_000UL, null), responses[0]);
+        Assert.Equal(new Response.CreateToken(ErrorCode.NotLeader, null, 0, 0, new LeaderHint(2, 7)), responses[1]);
+        // A record's list compares by reference: the entries are compared one by one.
+        var described = Assert.IsType<Response.DescribeTokens>(responses[2]);
+        Assert.Equal(ErrorCode.None, described.Error);
+        Assert.Null(described.LeaderHint);
+        Assert.Equal(
+            new[]
+            {
+                new Messages.TokenEntry(41, "ci", "alice", 1_749_995_000_000UL, 1_757_776_000_000UL, "admin"),
+                new Messages.TokenEntry(42, "laptop", "bob", 1_749_996_000_000UL, 1_752_588_000_000UL, "bob"),
+            },
+            described.Tokens);
+        Assert.Equal(new Response.Admin(ErrorCode.None, null, null), responses[3]);
+    }
+
+    /// <summary>Tag 0 of a session entry: the id of the access token it signed in with, only for mechanism 4 (ADR 0133).</summary>
+    [Fact]
+    public void ASessionNamesItsTokenId()
+    {
+        bool found = false;
+        foreach (string[] v in Vectors.Lines("responses.hex"))
+        {
+            Response r = Frames.DecodeResponse(Vectors.Hex(v[2]), new ApiKey(ushort.Parse(v[1]))).Response;
+            if (r is Response.DescribeSessions d)
+            {
+                found = true;
+                Assert.Equal(3, d.Sessions.Count);
+                foreach (Messages.SessionEntry s in d.Sessions)
+                {
+                    bool token = s.Mechanism == Messages.SessionMechanism.Token;
+                    Assert.Equal(token ? 41UL : (ulong?)null, s.TokenId);
+                }
+                Assert.Equal(Messages.SessionMechanism.Token, d.Sessions[1].Mechanism);
+            }
+        }
+        Assert.True(found);
+    }
+
     /// <summary>Tags 0 and 1 of a partition in a metadata answer: its pinned leader and placement (ADR 0121).</summary>
     [Fact]
     public void PinsAndPlacementsAreReadFromTheirPartitions()

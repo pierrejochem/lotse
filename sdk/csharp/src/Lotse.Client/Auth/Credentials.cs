@@ -35,6 +35,13 @@ public abstract record Credentials
     /// <summary>Like <see cref="OAuthBearer(Func{string})"/>, for a token source that is asynchronous.</summary>
     public static Credentials OAuthBearerAsync(Func<CancellationToken, Task<string>> token) => new OAuthBearerLogin(token);
 
+    /// <summary>
+    /// An access token the cluster issued (<c>LOTSE-TOKEN</c>, ADR 0133): its text, <c>lotse_tok_...</c>, as
+    /// <c>LotseClient.CreateTokenAsync</c> gave it. The session acts as the token's owner and ends when the token does
+    /// or is revoked; the text leaves the client only in the sign-in itself, so use it over TLS.
+    /// </summary>
+    public static Credentials Token(string text) => new TokenLogin(text);
+
     /// <summary>See <see cref="Scram"/>.</summary>
     public sealed record ScramLogin : Credentials
     {
@@ -80,8 +87,9 @@ public abstract record Credentials
             Token = token;
         }
 
+        // Hides Credentials.Token(string), the access token credentials, which a bearer login has no use for.
         /// <summary>Returns the current access token.</summary>
-        public Func<CancellationToken, Task<string>> Token { get; }
+        public new Func<CancellationToken, Task<string>> Token { get; }
 
         /// <inheritdoc/>
         public override string Mechanism => MechanismName;
@@ -92,5 +100,28 @@ public abstract record Credentials
 
         /// <inheritdoc/>
         public override string ToString() => "OAuthBearer";
+    }
+
+    /// <summary>See <see cref="Token"/>.</summary>
+    public sealed record TokenLogin : Credentials
+    {
+        /// <summary>The mechanism's name.</summary>
+        public const string MechanismName = "LOTSE-TOKEN";
+
+        /// <summary>Creates the credentials.</summary>
+        public TokenLogin(string text)
+        {
+            ArgumentNullException.ThrowIfNull(text);
+            Text = text;
+        }
+
+        /// <summary>The token's text; <see cref="ToString"/> does not show it.</summary>
+        public string Text { get; }
+
+        /// <inheritdoc/>
+        public override string Mechanism => MechanismName;
+
+        /// <summary>The text is the secret: it is never shown.</summary>
+        public override string ToString() => "Token";
     }
 }

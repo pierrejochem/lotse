@@ -192,6 +192,15 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>Where a rolling upgrade stands (cluster admin or viewer, ADR 0127).</summary>
     public static readonly ApiKey DescribeUpgrade = new(65);
 
+    /// <summary>Records an access token whose secret the client drew; only its hash is sent (ADR 0133).</summary>
+    public static readonly ApiKey CreateToken = new(66);
+
+    /// <summary>Lists access tokens, never their secrets (ADR 0133).</summary>
+    public static readonly ApiKey DescribeTokens = new(67);
+
+    /// <summary>Revokes an access token: its sessions end on every node (ADR 0133).</summary>
+    public static readonly ApiKey RevokeToken = new(68);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
@@ -215,7 +224,8 @@ public readonly record struct ApiKey(ushort Id)
         Range(DescribeNodes), Range(PurgeQueue), Range(Requeue), Range(MoveLeader), Range(RevokeSessions),
         Range(CreatePartitions), Range(RevokeCertificate), Range(DescribeCertificates), Range(RecordCertificates),
         Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(ReassignPartition), Range(DescribeSessions), Range(RenewCertificate),
-        Range(AlterUpgrade), Range(DescribeUpgrade), Range(Publish),
+        Range(AlterUpgrade), Range(DescribeUpgrade), Range(CreateToken), Range(DescribeTokens), Range(RevokeToken),
+        Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);
