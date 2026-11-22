@@ -41,12 +41,14 @@ mod auth;
 mod consumer;
 mod group;
 mod publish;
+mod renewal;
 
 pub use admin::RenewedCertificate;
 pub use auth::Credentials;
 pub use consumer::{Consumer, Message};
 pub use group::{GroupConfig, GroupConsumer, GroupRecord};
 pub use publish::{OutMessage, Published};
+pub use renewal::{CertificateRenewal, RENEW_CHECK, RENEW_RETRY};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

@@ -363,6 +363,20 @@ pub trait Host: Send + Sync + 'static {
     fn disk_space(&self) -> impl Future<Output = (Option<u64>, Option<u64>)> + Send;
 }
 
+/// Where a client keeps the certificate and key it connects with, for a
+/// client that renews its certificate by itself (ADR 0123). Not part of
+/// [`Runtime`]: a client is given one when it should renew.
+pub trait CertificateStore: Send + Sync + 'static {
+    /// The certificate connections are made with now, DER: the first of
+    /// the chain.
+    fn leaf(&self) -> impl Future<Output = io::Result<Vec<u8>>> + Send;
+
+    /// Puts a renewed key (PKCS #8 PEM) and chain (PEM, the certificate
+    /// first) in place, so that connections made from now on show them.
+    /// The key goes first: a certificate without its key would not load.
+    fn replace(&self, key_pem: &str, chain_pem: &str) -> impl Future<Output = io::Result<()>> + Send;
+}
+
 /// Everything a Lotse node needs from its environment.
 pub trait Runtime: Clock + Disk + Spawn + Rng + Net + Host + Http {}
 

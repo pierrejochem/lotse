@@ -151,6 +151,17 @@ Each is checked against the signed-in principal's roles on the broker ([ADR 0039
 
 On a cluster with a renewal CA, `renew_certificate` renews the certificate the client's connections are made with, once it is in its window: its last 30 days, or past two thirds of its validity ([ADR 0123](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0123-client-certificates-are-renewed-over-a-connection-made-with-them.md)). It makes a new P-256 key and returns `RenewedCertificate` with the key and chain as PEM, for you to write where the runtime's TLS reads them; a `TokioRuntime` takes new files up with `reload_tls`. `renew_certificate_if_due` takes the certificate (DER) and does nothing before the window opens. A retry after a lost answer renews again, and the earlier renewal then stops working, so keep only the one returned.
 
+To have the client renew by itself, give it a store for its files ([ADR 0132](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0132-the-rust-client-renews-its-certificate-through-a-store-on-the-runtime-seam.md)):
+
+```rust
+let rt = TokioRuntime::new(dir).with_tls(TlsConfig::from_files(&ca, Some((&cert, &key)))?);
+let client = Arc::new(Client::new(rt.clone(), config));
+let files = lotse_rt_tokio::CertificateFiles::new(rt, &ca, &cert, &key);
+let renewal = client.keep_certificate_renewed(files, lotse_client::RENEW_CHECK);
+```
+
+The client looks at the certificate at once and then every hour, and once the window is open renews it and writes the new key, then the new chain, over the files; connections made from then on show the new certificate. A failure is tried again a minute later; `renewal.failure()` says why the last look failed, and `renewal.renewals()` how many renewals were written. Keep `renewal` and the client: dropping either stops the renewal.
+
 ## Testing against the simulation
 
 Because the client takes its runtime as a parameter, you can run it on `lotse-sim` with crashing disks and a faulty network. The client simulation in `crates/lotse-server/tests/clients.rs` does this. See [Contributing](contributing.md).

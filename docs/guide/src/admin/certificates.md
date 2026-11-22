@@ -104,7 +104,7 @@ lotse certs --config cluster.toml --renew --cert alice/alice.pem --key alice/ali
 lotse certs --config cluster.toml --renew --if-due --cert alice/alice.pem --key alice/alice.key   # from a daily timer
 ```
 
-renews the certificate in `--cert` and writes the new key, then the new certificate (with the renewal CA's after it), over the files. With `--if-due` it does nothing before the window opens. The clients for Java, Kotlin, C# and Node.js can renew by themselves, and every client has a call for it (see the client guides).
+renews the certificate in `--cert` and writes the new key, then the new certificate (with the renewal CA's after it), over the files. With `--if-due` it does nothing before the window opens. Every client can renew by itself, and every client has a call for it (see the client guides).
 
 A certificate from the renewal CA signs in only while the cluster holds its record for that principal. A copy of the renewal CA's key therefore mints nothing that signs in. Renewing the same certificate a second time replaces the first renewal, whose connections end. The *Certificates* tab lists renewed certificates like any other.
 

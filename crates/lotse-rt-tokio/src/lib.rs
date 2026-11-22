@@ -34,6 +34,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use lotse_rt::{Clock, Disk, Host, HostStats, Instant, OpenMode, Rng, SegmentFile, Spawn};
 
+mod certificate_files;
 #[cfg(feature = "dev-certs")]
 pub mod dev_certs;
 mod http;
@@ -41,6 +42,7 @@ mod net;
 mod serve;
 mod tls;
 
+pub use certificate_files::CertificateFiles;
 pub use net::{TokioConn, TokioListener};
 pub use serve::{HttpListener, HttpRequest, HttpResponse};
 pub use tls::{TlsConfig, TlsError};
