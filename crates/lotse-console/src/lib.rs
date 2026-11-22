@@ -94,6 +94,8 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/users/{name}", delete(api::delete_user))
         .route("/clusters/{cluster}/bindings", get(api::bindings).post(api::add_binding).delete(api::remove_binding))
         .route("/clusters/{cluster}/sessions/revoke", post(api::revoke_sessions))
+        .route("/clusters/{cluster}/tokens", get(api::tokens).post(api::create_token))
+        .route("/clusters/{cluster}/tokens/{id}/revoke", post(api::revoke_token))
         .route("/clusters/{cluster}/certificates", get(api::certificates))
         .route("/clusters/{cluster}/certificates/revoke", post(api::revoke_certificate))
         .route(

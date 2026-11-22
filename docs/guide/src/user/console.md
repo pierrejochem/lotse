@@ -72,6 +72,12 @@ The *Users and access* page manages who may sign in and what they may do, as you
 
 **Sessions** ends the sessions of a user or an identity provider group. Type the name again to confirm.
 
+### Access tokens
+
+**Tokens** lists the access tokens you may see, with name, owner, when each was made and when it ends, and the last four digits of its id. *Create token* asks for a name and one of five lifetimes: 1 week, 1 month (the default), 3 months, 6 months or 1 year. The text of the token appears once, with a copy button; it cannot be shown again, and the console keeps it only while that dialog is open ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md)).
+
+A token acts as its owner with the roles bound to the owner's own name. Your identity provider's groups do not count, so if all your roles come from groups, the token grants nothing until a cluster admin binds a role to your name. *Revoke* asks first: connections signed in with the token end at once. You see and revoke your own tokens; cluster admins see every token, can filter by owner, and can make a token for another principal, such as a service account. On a cluster below version 0.1 the dialog shows the cluster's message instead of making a token. See [Access tokens](../admin/access-tokens.md).
+
 ### Client certificates
 
 **Certificates** lists the client certificates the nodes accepted, with the principal, when they expire and their state: valid, expiring within 30 days, expired or revoked. *Revoke* refuses a certificate on every node at once and ends the connections that showed it; type the serial again to confirm ([ADR 0090](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0090-revoking-client-certificates-in-the-metadata-group.md), [ADR 0091](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0091-client-certificate-inventory.md)).

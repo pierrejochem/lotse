@@ -385,6 +385,7 @@ fn session_row(node: u32, e: &lotse_proto::SessionEntry) -> SessionRow {
         session_mechanism::CERTIFICATE => "certificate",
         session_mechanism::SCRAM_SHA_512 => "SCRAM-SHA-512",
         session_mechanism::OAUTHBEARER => "OAUTHBEARER",
+        session_mechanism::TOKEN => "LOTSE-TOKEN",
         _ => "none",
     };
     SessionRow {
@@ -428,6 +429,11 @@ fn refused(what: &str, e: ClientError) -> ApiError {
         ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, message } => {
             ApiError::NotFound(message.unwrap_or_else(|| "The cluster does not know that name.".into()))
         }
+        // The cluster has not taken the version that introduced the feature
+        // (ADR 0127); its message says what to do.
+        ClientError::Broker { code: ErrorCode::UNSUPPORTED_VERSION, message } => ApiError::Conflict(
+            message.unwrap_or_else(|| "The cluster's version does not support this yet; finish the upgrade.".into()),
+        ),
         ClientError::UnknownStream(name, _) => ApiError::NotFound(format!("There is no \"{name}\" on this cluster.")),
         e => failed(e),
     }
@@ -1354,6 +1360,38 @@ impl Cluster for NativeCluster {
 
     async fn revoke_sessions(&self, who: &Identity, subject: &str, group: bool) -> ApiResult<()> {
         self.seat(who).client.revoke_sessions(subject, group).await.map_err(|e| refused("the revocation", e))
+    }
+
+    async fn tokens(&self, who: &Identity, owner: Option<&str>) -> ApiResult<TokensView> {
+        let entries = self.seat(who).client.describe_tokens(owner).await.map_err(|e| refused("the list", e))?;
+        let mut tokens: Vec<TokenRow> = entries
+            .into_iter()
+            .map(|t| TokenRow {
+                id: t.id,
+                name: t.name,
+                owner: t.owner,
+                created_ms: t.created_at_ms,
+                expires_ms: t.expires_at_ms,
+                created_by: t.created_by,
+            })
+            .collect();
+        tokens.sort_by_key(|t| t.id);
+        Ok(TokensView { tokens })
+    }
+
+    async fn create_token(&self, who: &Identity, req: CreateTokenBody) -> ApiResult<CreatedTokenView> {
+        let lifetime = req.lifetime()?;
+        let made = self
+            .seat(who)
+            .client
+            .create_token(&req.name, req.owner.as_deref(), lifetime)
+            .await
+            .map_err(|e| refused("the token", e))?;
+        Ok(CreatedTokenView { id: made.id, text: made.text, expires_ms: made.expires_at_ms })
+    }
+
+    async fn revoke_token(&self, who: &Identity, id: u64) -> ApiResult<()> {
+        self.seat(who).client.revoke_token(id).await.map_err(|e| refused("the revocation", e))
     }
 
     async fn pause_upgrade(&self, who: &Identity) -> ApiResult<()> {

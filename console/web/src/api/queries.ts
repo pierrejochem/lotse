@@ -19,6 +19,7 @@ export const keys = {
   certificates: (c: string) => ['certificates', c] as const,
   certificateRequests: (c: string) => ['certificate-requests', c] as const,
   sessions: (c: string) => ['sessions', c] as const,
+  tokens: (c: string, owner: string) => ['tokens', c, owner] as const,
   metrics: (c: string, s: string, r: Range) => ['metrics', c, s, r] as const,
 };
 
@@ -322,5 +323,42 @@ export function useRevokeSessions(cluster: string) {
     mutationFn: (body: S['RevokeSessions']) =>
       unwrap(api.POST('/api/v1/clusters/{cluster}/sessions/revoke', { ...path(cluster), body })),
     onSuccess: () => void qc.invalidateQueries({ queryKey: keys.sessions(cluster) }),
+  });
+}
+
+/** The access tokens of the signed-in user, or of `owner` for a cluster admin or viewer (ADR 0133). Never the text. */
+export const useTokens = (cluster: string, owner: string) =>
+  useQuery({
+    queryKey: keys.tokens(cluster, owner),
+    queryFn: () =>
+      unwrap(
+        api.GET('/api/v1/clusters/{cluster}/tokens', {
+          params: { path: { cluster }, query: owner ? { owner } : {} },
+        }),
+      ),
+  });
+
+/**
+ * Makes an access token. The answer holds the only copy of its text, so the
+ * result is not kept: the caller takes it from `mutateAsync` and nothing stays
+ * in the mutation cache (`gcTime: 0`).
+ */
+export function useCreateToken(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (body: S['CreateTokenBody']) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/tokens', { ...path(cluster), body })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['tokens', cluster] }),
+  });
+}
+
+/** Revokes one token by id: the connections signed in with it end at once (ADR 0133). */
+export function useRevokeToken(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      unwrap(api.POST('/api/v1/clusters/{cluster}/tokens/{id}/revoke', { params: { path: { cluster, id } } })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['tokens', cluster] }),
   });
 }
