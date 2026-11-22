@@ -289,7 +289,12 @@ impl Access {
             | Request::RevokeCertificate(_)
             | Request::DescribeCertificates(_)
             | Request::RecordCertificate(_)
-            | Request::AlterUpgrade(_) => admin(),
+            | Request::AlterUpgrade(_)
+            // Until the token requests are served (Task 5 of the access-token
+            // plan refines who may send them), only a cluster admin.
+            | Request::CreateToken(_)
+            | Request::DescribeTokens(_)
+            | Request::RevokeToken(_) => admin(),
             // A user asks in their own name and sees their own requests; a
             // cluster admin asks for anyone and sees all (ADR 0119).
             Request::RequestCertificate(r) => match p {

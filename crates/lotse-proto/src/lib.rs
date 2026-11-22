@@ -181,6 +181,14 @@ impl ApiKey {
     pub const ALTER_UPGRADE: ApiKey = ApiKey(64);
     /// Where a rolling upgrade stands (ADR 0127).
     pub const DESCRIBE_UPGRADE: ApiKey = ApiKey(65);
+    /// Creates an access token: the client sends the hash of a secret it
+    /// made, the cluster records the hash (cluster admin for anyone, a user
+    /// for themselves).
+    pub const CREATE_TOKEN: ApiKey = ApiKey(66);
+    /// Lists access tokens, never their secrets.
+    pub const DESCRIBE_TOKENS: ApiKey = ApiKey(67);
+    /// Revokes an access token by id.
+    pub const REVOKE_TOKEN: ApiKey = ApiKey(68);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -205,7 +213,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 65] = [
+    pub const SUPPORTED: [ApiVersionRange; 68] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -270,6 +278,9 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::REPORT_VERSION, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::ALTER_UPGRADE, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_UPGRADE, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::CREATE_TOKEN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_TOKENS, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::REVOKE_TOKEN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -606,6 +617,12 @@ pub enum Request {
     AlterUpgrade(AlterUpgradeRequest),
     /// [`ApiKey::DESCRIBE_UPGRADE`].
     DescribeUpgrade(DescribeUpgradeRequest),
+    /// [`ApiKey::CREATE_TOKEN`].
+    CreateToken(CreateTokenRequest),
+    /// [`ApiKey::DESCRIBE_TOKENS`].
+    DescribeTokens(DescribeTokensRequest),
+    /// [`ApiKey::REVOKE_TOKEN`].
+    RevokeToken(RevokeTokenRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -678,6 +695,9 @@ impl Request {
             Request::ReportVersion(_) => ApiKey::REPORT_VERSION,
             Request::AlterUpgrade(_) => ApiKey::ALTER_UPGRADE,
             Request::DescribeUpgrade(_) => ApiKey::DESCRIBE_UPGRADE,
+            Request::CreateToken(_) => ApiKey::CREATE_TOKEN,
+            Request::DescribeTokens(_) => ApiKey::DESCRIBE_TOKENS,
+            Request::RevokeToken(_) => ApiKey::REVOKE_TOKEN,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -734,6 +754,10 @@ pub enum Response {
     DescribeSessions(DescribeSessionsResponse),
     /// To [`Request::DescribeUpgrade`].
     DescribeUpgrade(DescribeUpgradeResponse),
+    /// Answer to [`Request::CreateToken`].
+    CreateToken(CreateTokenResponse),
+    /// Answer to [`Request::DescribeTokens`].
+    DescribeTokens(DescribeTokensResponse),
     /// Answer to [`Request::RenewCertificate`].
     RenewCertificate(RenewCertificateResponse),
     /// Answer to [`Request::DescribeCertificateRequests`].
@@ -840,6 +864,9 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
         Request::ReportVersion(r) => r.put(&mut w),
         Request::AlterUpgrade(r) => r.put(&mut w),
         Request::DescribeUpgrade(r) => r.put(&mut w),
+        Request::CreateToken(r) => r.put(&mut w),
+        Request::DescribeTokens(r) => r.put(&mut w),
+        Request::RevokeToken(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -927,6 +954,9 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         ApiKey::REPORT_VERSION => Request::ReportVersion(ReportVersionRequest::get(&mut r)?),
         ApiKey::ALTER_UPGRADE => Request::AlterUpgrade(AlterUpgradeRequest::get(&mut r)?),
         ApiKey::DESCRIBE_UPGRADE => Request::DescribeUpgrade(DescribeUpgradeRequest::get(&mut r)?),
+        ApiKey::CREATE_TOKEN => Request::CreateToken(CreateTokenRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_TOKENS => Request::DescribeTokens(DescribeTokensRequest::get(&mut r)?),
+        ApiKey::REVOKE_TOKEN => Request::RevokeToken(RevokeTokenRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -964,6 +994,8 @@ pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
         Response::DescribeCertificates(r) => r.put(&mut w),
         Response::DescribeSessions(r) => r.put(&mut w),
         Response::DescribeUpgrade(r) => r.put(&mut w),
+        Response::CreateToken(r) => r.put(&mut w),
+        Response::DescribeTokens(r) => r.put(&mut w),
         Response::RenewCertificate(r) => r.put(&mut w),
         Response::DescribeCertificateRequests(r) => r.put(&mut w),
         Response::DescribeTenants(r) => r.put(&mut w),
@@ -1083,6 +1115,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         | ApiKey::TURN
         | ApiKey::REPORT_VERSION
         | ApiKey::ALTER_UPGRADE
+        | ApiKey::REVOKE_TOKEN
         | ApiKey::REQUEST_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATE
         | ApiKey::REASSIGN_PARTITION
@@ -1096,6 +1129,8 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         ApiKey::DESCRIBE_CERTIFICATES => Response::DescribeCertificates(DescribeCertificatesResponse::get(&mut r)?),
         ApiKey::DESCRIBE_SESSIONS => Response::DescribeSessions(DescribeSessionsResponse::get(&mut r)?),
         ApiKey::DESCRIBE_UPGRADE => Response::DescribeUpgrade(DescribeUpgradeResponse::get(&mut r)?),
+        ApiKey::CREATE_TOKEN => Response::CreateToken(CreateTokenResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_TOKENS => Response::DescribeTokens(DescribeTokensResponse::get(&mut r)?),
         ApiKey::RENEW_CERTIFICATE => Response::RenewCertificate(RenewCertificateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATE_REQUESTS => {
             Response::DescribeCertificateRequests(DescribeCertificateRequestsResponse::get(&mut r)?)

@@ -385,6 +385,15 @@ pub fn requests() -> Vec<Request> {
         Request::RenewCertificate(RenewCertificateRequest {
             csr: Bytes::from_static(b"0\x81\x9a stands for a PKCS #10 request"),
         }),
+        Request::CreateToken(CreateTokenRequest {
+            name: "ci".into(),
+            owner: "alice".into(),
+            lifetime: 2,
+            secret_hash: Bytes::from(vec![0xab; 32]),
+        }),
+        Request::DescribeTokens(DescribeTokensRequest { owner: None }),
+        Request::DescribeTokens(DescribeTokensRequest { owner: Some("alice".into()) }),
+        Request::RevokeToken(RevokeTokenRequest { id: 41 }),
         Request::Publish(PublishRequest {
             txn_id: None,
             timeout_ms: 5_000,
@@ -919,6 +928,55 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
             }),
         ),
         (
+            ApiKey::CREATE_TOKEN,
+            Response::CreateToken(CreateTokenResponse {
+                error: ErrorCode::NONE,
+                error_msg: None,
+                leader_hint: None,
+                id: 41,
+                expires_at_ms: 1_757_776_000_000,
+            }),
+        ),
+        (
+            ApiKey::CREATE_TOKEN,
+            Response::CreateToken(CreateTokenResponse {
+                error: ErrorCode::NOT_LEADER,
+                error_msg: None,
+                leader_hint: Some(LeaderHint { leader: 2, term: 7 }),
+                id: 0,
+                expires_at_ms: 0,
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_TOKENS,
+            Response::DescribeTokens(DescribeTokensResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                tokens: vec![
+                    TokenEntry {
+                        id: 41,
+                        name: "ci".into(),
+                        owner: "alice".into(),
+                        created_at_ms: 1_749_995_000_000,
+                        expires_at_ms: 1_757_776_000_000,
+                        created_by: "admin".into(),
+                    },
+                    TokenEntry {
+                        id: 42,
+                        name: "laptop".into(),
+                        owner: "bob".into(),
+                        created_at_ms: 1_749_996_000_000,
+                        expires_at_ms: 1_752_588_000_000,
+                        created_by: "bob".into(),
+                    },
+                ],
+            }),
+        ),
+        (
+            ApiKey::REVOKE_TOKEN,
+            Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
             ApiKey::RENEW_CERTIFICATE,
             Response::RenewCertificate(RenewCertificateResponse {
                 error: ErrorCode::NONE,
@@ -954,6 +1012,18 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         connected_ms: 1_749_990_000_000,
                         credential_ms: 1_749_999_000_000,
                         expires_ms: 1_750_003_600_000,
+                        token_id: None,
+                    },
+                    SessionEntry {
+                        principal_kind: session_principal::USER,
+                        name: "alice".into(),
+                        groups: vec![],
+                        mechanism: session_mechanism::TOKEN,
+                        peer: "10.0.0.8:40222".into(),
+                        connected_ms: 1_749_995_000_000,
+                        credential_ms: 1_749_995_000_000,
+                        expires_ms: 1_757_776_000_000,
+                        token_id: Some(41),
                     },
                     SessionEntry {
                         principal_kind: session_principal::NODE,
@@ -964,6 +1034,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         connected_ms: 1_749_000_000_000,
                         credential_ms: 1_749_000_000_000,
                         expires_ms: 0,
+                        token_id: None,
                     },
                 ],
             }),

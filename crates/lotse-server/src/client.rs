@@ -544,6 +544,11 @@ impl Clients {
             Request::ReportVersion(req) => self.report_version(outbox, id, req, &principal, view, groups),
             Request::AlterUpgrade(req) => self.alter_upgrade(outbox, id, req, view, groups),
             Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, view, groups),
+            // Not served yet: the node answers as it does for any request it
+            // does not speak.
+            Request::CreateToken(_) | Request::DescribeTokens(_) | Request::RevokeToken(_) => {
+                outbox.push(id, &Response::Error(ErrorCode::UNSUPPORTED_VERSION))
+            }
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,
