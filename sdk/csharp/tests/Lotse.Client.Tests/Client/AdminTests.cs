@@ -71,6 +71,8 @@ public sealed class AdminTests : IDisposable
             Request.DescribeNodes => new Response.DescribeNodes(ErrorCode.NotLeader, hint, Array.Empty<Messages.NodeEntry>()),
             Request.DescribeUpgrade => new Response.DescribeUpgrade(
                 ErrorCode.NotLeader, hint, null, false, null, Array.Empty<Response.UpgradeNode>()),
+            Request.CreateToken => new Response.CreateToken(ErrorCode.NotLeader, null, 0, 0, hint),
+            Request.DescribeTokens => new Response.DescribeTokens(ErrorCode.NotLeader, hint, Array.Empty<Messages.TokenEntry>()),
             Request.WhoAmI => new Response.WhoAmI(Messages.PrincipalKind.User, "node 1", Array.Empty<string>(), Array.Empty<Messages.RoleBinding>()),
             _ => new Response.Admin(ErrorCode.NotLeader, null, hint),
         };
@@ -332,6 +334,74 @@ public sealed class AdminTests : IDisposable
         await _client!.DeleteUserAsync("alice");
         Assert.Null(_b.Requests<Request.AlterUser>()[2].Credential);
         Assert.Equal("alice", _b.Requests<Request.AlterUser>()[2].User);
+    }
+
+    // ---- access tokens ----
+
+    /// <summary>
+    /// What <c>CreateTokenAsync</c> sends is the hash of the secret and nothing else of it: the cluster never sees the
+    /// secret, and the text the caller gets carries the id the cluster chose (ADR 0133).
+    /// </summary>
+    [Fact]
+    public async Task CreateTokenSendsOnlyTheHash()
+    {
+        Serve((n, r) => new Response.CreateToken(ErrorCode.None, null, 0x2a, 5_000, null));
+        CreatedToken created = await _client!.CreateTokenAsync("laptop", null, TokenLifetime.Month);
+        Assert.Equal(0x2aUL, created.Id);
+        Assert.Equal(5_000UL, created.ExpiresAtMs);
+        AccessToken token = AccessToken.Parse(created.Text);
+        Assert.Equal(0x2aUL, token.Id); // the id is the cluster's
+
+        Request.CreateToken sent = Assert.Single(_b.Requests<Request.CreateToken>()); // the leader, after node 1 pointed to it
+        Request.CreateToken first = Assert.Single(_a.Requests<Request.CreateToken>()); // node 1 got the same request first
+        foreach (Request.CreateToken req in new[] { first, sent })
+        {
+            Assert.Equal("laptop", req.Name);
+            Assert.Equal(string.Empty, req.Owner); // no owner: the caller
+            Assert.Equal((byte)TokenLifetime.Month, req.Lifetime);
+            Assert.Equal(32, req.SecretHash.Size);
+            Assert.Equal(token.Hash(), req.SecretHash.ToByteArray()); // the hash of the secret
+            byte[] frame = Frames.EncodeRequest(1, req);
+            Assert.False(frame.AsSpan().IndexOf(token.Secret()) >= 0, "the secret is in the frame");
+            Assert.False(frame.AsSpan().IndexOf(Encoding.UTF8.GetBytes(created.Text)) >= 0, "the text is in the frame");
+        }
+        Assert.DoesNotContain(created.Text, created.ToString());
+
+        await _client!.CreateTokenAsync("ci", "bob", TokenLifetime.Year);
+        Request.CreateToken forBob = _b.Requests<Request.CreateToken>()[1];
+        Assert.Equal("bob", forBob.Owner);
+        Assert.Equal(5, forBob.Lifetime);
+        Assert.NotEqual(token.Hash(), forBob.SecretHash.ToByteArray()); // a new secret each
+
+        // A lifetime outside the five steps is refused before anything is sent.
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _client!.CreateTokenAsync("x", null, (TokenLifetime)9));
+        Assert.Equal(2, _b.Count<Request.CreateToken>());
+    }
+
+    [Fact]
+    public async Task ARefusedTokenSaysWhy()
+    {
+        const string Why = "tokens need cluster version 0.1; raise it with `lotse upgrade finalize`";
+        Serve((n, r) => new Response.CreateToken(ErrorCode.UnsupportedVersion, Why, 0, 0, null));
+        var e = await Assert.ThrowsAsync<BrokerErrorException>(() => _client!.CreateTokenAsync("early", null, TokenLifetime.Week));
+        Assert.Equal(ErrorCode.UnsupportedVersion, e.Code);
+        Assert.Equal(Why, e.BrokerMessage);
+        Assert.Single(_b.Requests<Request.CreateToken>()); // a refusal is not retried
+    }
+
+    [Fact]
+    public async Task TokensAreListedAndRevokedOnTheMetadataLeader()
+    {
+        var tokens = new[] { new Messages.TokenEntry(41, "ci", "alice", 1, 2, "admin") };
+        Serve((n, r) => r is Request.DescribeTokens
+            ? (Response)new Response.DescribeTokens(ErrorCode.None, null, tokens)
+            : Ok());
+        Assert.Equal(tokens, await _client!.DescribeTokensAsync("alice"));
+        Assert.Equal("alice", _b.Requests<Request.DescribeTokens>()[0].Owner);
+        Assert.Equal(tokens, await _client!.DescribeTokensAsync(null));
+        Assert.Null(_b.Requests<Request.DescribeTokens>()[1].Owner);
+        await _client!.RevokeTokenAsync(41);
+        Assert.Equal(41UL, Assert.Single(_b.Requests<Request.RevokeToken>()).Id);
     }
 
     [Fact]
@@ -604,6 +674,7 @@ public sealed class AdminTests : IDisposable
             c => c.DeleteTenantAsync("t"),
             c => c.AlterRoleBindingsAsync(new[] { binding }),
             c => c.RevokeSessionsAsync("u", false),
+            c => c.RevokeTokenAsync(41),
             c => c.RevokeCertificateAsync(new byte[32], new byte[] { 1 }, 0, string.Empty),
             c => c.RequestCertificateAsync("u", new byte[] { 1 }),
             c => c.RecordCertificateAsync(new byte[32], new byte[] { 1 }, new byte[32], new byte[] { 1 }, 0, 0),

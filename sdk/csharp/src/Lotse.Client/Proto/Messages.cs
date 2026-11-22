@@ -836,6 +836,9 @@ public static class Messages
 
         /// <summary>SASL OAUTHBEARER.</summary>
         public const byte OAuthBearer = 3;
+
+        /// <summary>An access token (<c>LOTSE-TOKEN</c>, ADR 0133); the entry names it in <see cref="SessionEntry.TokenId"/>.</summary>
+        public const byte Token = 4;
     }
 
     /// <summary>One open client session on a node (ADR 0121).</summary>
@@ -847,6 +850,7 @@ public static class Messages
     /// <param name="ConnectedMs">When the connection was made, in milliseconds since the epoch.</param>
     /// <param name="CredentialMs">When its credential dates from: a token's issue time (0 without one), the SCRAM login, or the connection; a session revocation after it ends the session.</param>
     /// <param name="ExpiresMs">When the session ends unless renewed; 0 for one that lasts the connection.</param>
+    /// <param name="TokenId">The id of the access token the session signed in with; <c>null</c> for every other mechanism (tag 0, ADR 0133).</param>
     public sealed record SessionEntry(
         byte PrincipalKind,
         string Name,
@@ -855,7 +859,20 @@ public static class Messages
         string Peer,
         ulong ConnectedMs,
         ulong CredentialMs,
-        ulong ExpiresMs);
+        ulong ExpiresMs,
+        ulong? TokenId = null);
+
+    /// <summary>The tag of <see cref="SessionEntry.TokenId"/> in a session entry's block.</summary>
+    internal const long TagTokenId = 0;
+
+    /// <summary>One access token in <see cref="Response.DescribeTokens"/> (ADR 0133): only what describes it, never a secret or hash.</summary>
+    /// <param name="Id">The token's id.</param>
+    /// <param name="Name">Its label.</param>
+    /// <param name="Owner">The user it acts as.</param>
+    /// <param name="CreatedAtMs">When it was created, in milliseconds since the epoch.</param>
+    /// <param name="ExpiresAtMs">When it stops being valid, in milliseconds since the epoch.</param>
+    /// <param name="CreatedBy">Who created it.</param>
+    public sealed record TokenEntry(ulong Id, string Name, string Owner, ulong CreatedAtMs, ulong ExpiresAtMs, string CreatedBy);
 
     /// <summary>One client certificate in the cluster's inventory.</summary>
     /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>

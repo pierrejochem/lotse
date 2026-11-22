@@ -25,7 +25,7 @@ Without `LOTSE_BIN` the tests that need a `lotse` executable are skipped with a 
 | `Lotse.Proto` | Field reader and writer, frames, every client-facing request and response, error codes. |
 | `Lotse.Record` | Record batch parser and builder, in-place edits, control batches. |
 | `Lotse.Net` | `Connection`, `ConnectionPool`, `ConnectionOptions`, `TlsConfig`, `Address`, the exceptions. |
-| `Lotse.Auth` | `Credentials` (SCRAM-SHA-512 and OAUTHBEARER), `ScramCredential`. |
+| `Lotse.Auth` | `Credentials` (SCRAM-SHA-512, OAUTHBEARER and access tokens), `ScramCredential`, `AccessToken` (a token's text and hash) and `TokenLifetime`. |
 | `Lotse.Client` | `LotseClient`, `QueueConsumer`, `GroupConsumer`, `Transaction` and the admin calls. |
 
 Unsigned wire types keep their width: offsets are `ulong`, so no unsigned-compare helpers are needed as in Java.
@@ -139,7 +139,21 @@ After an exception that aborted the transaction, call `group.Rewind()` to read t
 
 ## Admin
 
-The admin calls are methods of `LotseClient`: `DeleteAsync`, `DeleteIfEmptyAsync`, `PurgeAsync`, `RequeueAsync`, `AlterConfigsAsync`, `DescribeConfigsAsync`, `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync`, `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync`, `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync`, `RevokeSessionsAsync`, `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync`, `MoveLeaderAsync`, `ReassignPartitionAsync`, `CreatePartitionsAsync` and `NodeMetricsAsync`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call throws `ResourceExistsException` with the id.
+The admin calls are methods of `LotseClient`: `DeleteAsync`, `DeleteIfEmptyAsync`, `PurgeAsync`, `RequeueAsync`, `AlterConfigsAsync`, `DescribeConfigsAsync`, `SetUserPasswordAsync`, `DeleteUserAsync`, `DescribeUsersAsync`, `CreateTenantAsync`, `DeleteTenantAsync`, `DescribeTenantsAsync`, `AlterRoleBindingsAsync`, `DescribeRoleBindingsAsync`, `WhoAmIAsync`, `RevokeSessionsAsync`, `CreateTokenAsync`, `DescribeTokensAsync`, `RevokeTokenAsync`, `AddNodeAsync`, `RemoveNodeAsync`, `DescribeNodesAsync`, `MoveLeaderAsync`, `ReassignPartitionAsync`, `CreatePartitionsAsync` and `NodeMetricsAsync`. Each needs the role the broker asks for. A create whose answer was lost is retried; if the first attempt did create the resource, the call throws `ResourceExistsException` with the id.
+
+### Access tokens
+
+A token signs a script or tool in as the user who made it ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md), [Access tokens](../admin/access-tokens.md)). `CreateTokenAsync(name, owner, lifetime)` draws the secret, sends only its SHA-256 and returns a `CreatedToken` whose `Text` is the only copy of the token: keep it, nobody can show it again. `owner` is `null` for yourself; only a cluster admin names someone else. `DescribeTokensAsync(owner)` lists tokens without secrets, and `RevokeTokenAsync(id)` ends one and the sessions it opened.
+
+```csharp
+CreatedToken t = await admin.CreateTokenAsync("nightly-export", null, TokenLifetime.Month);
+var script = new LotseClient(ClientConfig.CreateBuilder("10.0.0.1:9000")
+    .Tls(TlsConfig.FromFiles("ca.pem"))
+    .WithCredentials(Credentials.Token(t.Text))     // LOTSE-TOKEN: acts as the owner until the token ends
+    .Build());
+```
+
+A session signed in with a token cannot make tokens. `CreatedToken.ToString()` and `Credentials.Token(...).ToString()` leave the text out. `AccessToken.TryParse` reads a token's text as the node does, ASCII whitespace around it ignored.
 
 ### Renewing the client certificate
 

@@ -981,7 +981,16 @@ public abstract record Response
                 w1.Array(s.Groups, (w2, g) => w2.String(g));
                 w1.U8(s.Mechanism).String(s.Peer);
                 w1.U64(s.ConnectedMs).U64(s.CredentialMs).U64(s.ExpiresMs);
-                w1.NoTags();
+                if (s.TokenId is ulong tokenId)
+                {
+                    var v = new Writer();
+                    v.U64(tokenId);
+                    w1.Tags(new[] { new Tag(TagTokenId, ByteString.CopyOf(v.ToByteArray())) });
+                }
+                else
+                {
+                    w1.NoTags();
+                }
             });
             w.NoTags();
         }
@@ -994,10 +1003,27 @@ public abstract record Response
             // kind, name, no groups, mechanism, peer, three u64, no tags
             List<SessionEntry> sessions = r.Array(1 + 2 + 1 + 1 + 2 + 3 * 8 + 1, r1 =>
             {
-                var s = new SessionEntry(
-                    r1.U8(), r1.String(), r1.Array(2, r2 => r2.String()), r1.U8(), r1.String(), r1.U64(), r1.U64(), r1.U64());
-                r1.Tags();
-                return s;
+                byte principalKind = r1.U8();
+                string name = r1.String();
+                List<string> groups = r1.Array(2, r2 => r2.String());
+                byte mechanism = r1.U8();
+                string peer = r1.String();
+                ulong connectedMs = r1.U64();
+                ulong credentialMs = r1.U64();
+                ulong expiresMs = r1.U64();
+                ulong? tokenId = null;
+                foreach (Tag t in r1.Tags())
+                {
+                    if (t.Number == TagTokenId)
+                    {
+                        var v = new Reader(t.Value.ToByteArray());
+                        tokenId = v.U64();
+                        v.Finish();
+                    }
+                    // any other tag is from a newer version: skipped
+                }
+                return new SessionEntry(
+                    principalKind, name, groups, mechanism, peer, connectedMs, credentialMs, expiresMs, tokenId);
             });
             r.Tags();
             return new DescribeSessions(error, nodeId, now, sessions);
@@ -1299,6 +1325,71 @@ public abstract record Response
             var chain = r.Array(4, r1 => r1.Bytes());
             var notAfterMs = r.U64();
             return new RenewCertificate(error, errorMsg, chain, notAfterMs, GetHint(r));
+        }
+    }
+
+    /// <summary>
+    /// <c>CreateToken</c> (66): the token the metadata leader recorded (ADR 0133). The leader hint is the structure's
+    /// block of tagged fields.
+    /// </summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="ErrorMsg">Why, for a refusal, or <c>null</c>.</param>
+    /// <param name="Id">The token's id; 0 on a refusal.</param>
+    /// <param name="ExpiresAtMs">When the token stops being valid, in milliseconds since the epoch; 0 on a refusal.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    public sealed record CreateToken(ErrorCode Error, string? ErrorMsg, ulong Id, ulong ExpiresAtMs, LeaderHint? LeaderHint)
+        : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code).OptString(ErrorMsg).U64(Id).U64(ExpiresAtMs);
+            PutHint(w, LeaderHint);
+        }
+
+        internal static CreateToken Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            string? errorMsg = r.OptString();
+            ulong id = r.U64();
+            ulong expiresAtMs = r.U64();
+            return new CreateToken(error, errorMsg, id, expiresAtMs, GetHint(r));
+        }
+    }
+
+    /// <summary>
+    /// <c>DescribeTokens</c> (67): the access tokens the asker may see, never a secret or hash (ADR 0133). The leader
+    /// hint is the structure's block of tagged fields, after the tokens.
+    /// </summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    /// <param name="Tokens">The tokens.</param>
+    public sealed record DescribeTokens(ErrorCode Error, LeaderHint? LeaderHint, IReadOnlyList<TokenEntry> Tokens) : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code);
+            w.Array(Tokens, (w1, t) =>
+            {
+                w1.U64(t.Id).String(t.Name).String(t.Owner);
+                w1.U64(t.CreatedAtMs).U64(t.ExpiresAtMs).String(t.CreatedBy);
+                w1.NoTags();
+            });
+            PutHint(w, LeaderHint);
+        }
+
+        internal static DescribeTokens Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            // id, name, owner, two times, created by, no tags
+            List<TokenEntry> tokens = r.Array(8 + 2 + 2 + 8 + 8 + 2 + 1, r1 =>
+            {
+                var t = new TokenEntry(r1.U64(), r1.String(), r1.String(), r1.U64(), r1.U64(), r1.String());
+                r1.Tags();
+                return t;
+            });
+            return new DescribeTokens(error, GetHint(r), tokens);
         }
     }
 }
