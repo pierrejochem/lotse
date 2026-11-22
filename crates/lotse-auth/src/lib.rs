@@ -20,6 +20,7 @@ pub mod roles;
 pub mod scram;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod token;
 pub mod x509;
 
 #[cfg(test)]
