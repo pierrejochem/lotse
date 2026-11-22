@@ -23,6 +23,10 @@ lotse-auth.workspace = true
 lotse-mcp.workspace = true
 rmcp = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server"] }
 serde_json.workspace = true
+axum.workspace = true
+base64.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 bytes.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true
@@ -36,9 +40,6 @@ tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "io-std"] }
 
 [dev-dependencies]
-base64.workspace = true
-rustls.workspace = true
-tokio-rustls.workspace = true
 lotse-rt-tokio = { workspace = true, features = ["dev-certs"] }
 
 [lints]

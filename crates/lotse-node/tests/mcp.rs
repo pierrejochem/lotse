@@ -5,11 +5,19 @@
 //! owner of the token in `LOTSE_TOKEN`, so the cluster's checks apply to
 //! that owner; without a credential it refuses to start. Its standard
 //! output carries nothing but JSON-RPC, even with debug logging on.
+//!
+//! Over Streamable HTTP (`--listen`): a request without a credential the
+//! cluster accepts gets 401 and runs no tool; a token and a password each
+//! act as their own principal, never as the other; a revoked token fails on
+//! its next request; concurrent requests with one credential sign in once
+//! (the node's `lotse_token_sign_ins_total`); plain HTTP off loopback is
+//! refused; a browser `Origin` is refused unless allowed; HTTPS with the
+//! certificate given.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use lotse_client::{Client, ClientConfig};
@@ -46,6 +54,8 @@ struct Cluster {
     root: PathBuf,
     config: PathBuf,
     client_addr: String,
+    /// The node's operator endpoint, plain HTTP on loopback.
+    metrics_addr: String,
     stop: tokio::sync::oneshot::Sender<()>,
     node: tokio::task::JoinHandle<()>,
 }
@@ -57,11 +67,13 @@ impl Cluster {
         std::fs::create_dir_all(&root).unwrap();
         let r = root.display();
         let client_addr = format!("127.0.0.1:{}", free_port());
+        let metrics_addr = format!("127.0.0.1:{}", free_port());
         let text = format!(
             "[cluster]\ndata_dir = \"{r}/data/node-{{id}}\"\n\n[tls]\nca = \"{r}/tls/ca.pem\"\n\
              cert = \"{r}/tls/node-{{id}}.pem\"\nkey = \"{r}/tls/node-{{id}}.key\"\n\n\
              [disk]\nfree_limit = 0\n\n[auth]\nadmins = [\"alice\"]\n\n\
-             [[node]]\nid = 1\npeer = \"127.0.0.1:{}\"\nclient = \"{client_addr}\"\n",
+             [[node]]\nid = 1\npeer = \"127.0.0.1:{}\"\nclient = \"{client_addr}\"\n\
+             metrics = \"{metrics_addr}\"\n",
             free_port(),
         );
         let config = root.join("cluster.toml");
@@ -79,7 +91,7 @@ impl Cluster {
             .await
             .unwrap();
         });
-        let cluster = Cluster { root, config, client_addr, stop, node };
+        let cluster = Cluster { root, config, client_addr, metrics_addr, stop, node };
         // Tokens need cluster version 0.1, which a new cluster takes once
         // its node has reported its release.
         let alice = cluster.alice();
@@ -384,5 +396,507 @@ async fn stdio_refuses_to_start_without_a_credential() {
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("LOTSE_PASSWORD"), "{stderr}");
+    cluster.stop().await;
+}
+
+// Streamable HTTP (`lotse mcp --listen`).
+
+/// `lotse mcp --listen` as a shared deployment runs it, on a free loopback
+/// port, its log (debug) in a file. Killed when dropped.
+struct HttpMcp {
+    child: Child,
+    addr: String,
+    log: PathBuf,
+}
+
+impl HttpMcp {
+    /// Starts it with `args` after `--listen` and waits until it accepts
+    /// connections.
+    async fn start(cluster: &Cluster, name: &str, args: &[&str]) -> HttpMcp {
+        let addr = format!("127.0.0.1:{}", free_port());
+        let log = cluster.root.join(format!("{name}.log"));
+        let mut all = vec!["--listen", addr.as_str()];
+        all.extend_from_slice(args);
+        let child = mcp_command(&cluster.config, &all, &[])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .expect("the lotse executable runs");
+        let mut mcp = HttpMcp { child, addr, log };
+        for _ in 0..300 {
+            if tokio::net::TcpStream::connect(&mcp.addr).await.is_ok() {
+                return mcp;
+            }
+            if let Some(status) = mcp.child.try_wait().unwrap() {
+                panic!("lotse mcp --listen ended ({status}): {}", mcp.log_text());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("lotse mcp --listen never accepted a connection: {}", mcp.log_text());
+    }
+
+    fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+impl Drop for HttpMcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// An HTTP answer.
+#[derive(Debug)]
+struct Answer {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl Answer {
+    /// Every value of a header, whatever the case of its name.
+    fn header(&self, name: &str) -> Vec<&str> {
+        self.headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()).collect()
+    }
+
+    /// The JSON-RPC message in the body: JSON, or the last `data:` line of
+    /// an event stream.
+    fn json(&self) -> Value {
+        let text = match self.body.trim_start().starts_with('{') {
+            true => self.body.clone(),
+            false => self
+                .body
+                .lines()
+                .filter_map(|l| l.strip_prefix("data:"))
+                .map(str::trim)
+                .rfind(|l| l.starts_with('{'))
+                .unwrap_or_else(|| panic!("no JSON-RPC message in the answer: {self:?}"))
+                .to_string(),
+        };
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {self:?}"))
+    }
+}
+
+/// Sends one HTTP/1.1 request and reads the answer until the server closes.
+async fn exchange<S>(mut s: S, request: String) -> Answer
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    s.write_all(request.as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(60), s.read_to_end(&mut out)).await.expect("an answer in 60 s");
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or_else(|| panic!("no HTTP answer: {text:?}"));
+    let mut lines = head.split("\r\n");
+    let status = lines.next().unwrap()[9..12].parse().unwrap();
+    let headers: Vec<(String, String)> =
+        lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect();
+    let chunked =
+        headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked"));
+    let body = if chunked { unchunk(body) } else { body.to_string() };
+    Answer { status, headers, body }
+}
+
+fn unchunk(mut body: &str) -> String {
+    let mut out = String::new();
+    while let Some((size, rest)) = body.split_once("\r\n") {
+        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        out.push_str(&rest[..n]);
+        body = rest[n..].strip_prefix("\r\n").unwrap_or(&rest[n..]);
+    }
+    out
+}
+
+/// `POST /mcp` with `headers` and a JSON body, plain or over `tls`.
+async fn post(addr: &str, tls: Option<Arc<rustls::ClientConfig>>, headers: &[(&str, String)], body: &Value) -> Answer {
+    let body = body.to_string();
+    let mut request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    match tls {
+        None => exchange(tcp, request).await,
+        Some(cfg) => {
+            let s = tokio_rustls::TlsConnector::from(cfg)
+                .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
+                .await
+                .expect("a TLS handshake with lotse mcp");
+            exchange(s, request).await
+        }
+    }
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+fn basic(user: &str, password: &str) -> String {
+    use base64::Engine as _;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}")))
+}
+
+/// The headers and body of an MCP 2026-07-28 request.
+fn mcp_request(method: &str, name: Option<&str>, params: Value) -> (Vec<(&'static str, String)>, Value) {
+    let mut headers = vec![("MCP-Protocol-Version", "2026-07-28".to_string()), ("Mcp-Method", method.to_string())];
+    if let Some(n) = name {
+        headers.push(("Mcp-Name", n.to_string()));
+    }
+    (headers, json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+}
+
+/// Calls tool `name` with `args`, with `auth` as the `Authorization` header
+/// if given, and `extra` headers.
+async fn call_http(
+    addr: &str,
+    tls: Option<Arc<rustls::ClientConfig>>,
+    auth: Option<&str>,
+    extra: &[(&str, String)],
+    name: &str,
+    args: Value,
+) -> Answer {
+    let (mut headers, body) =
+        mcp_request("tools/call", Some(name), json!({"_meta": meta(), "name": name, "arguments": args}));
+    if let Some(a) = auth {
+        headers.push(("Authorization", a.to_string()));
+    }
+    headers.extend(extra.iter().cloned());
+    post(addr, tls, &headers, &body).await
+}
+
+/// A tool call over plain HTTP that the server answered with a tool result:
+/// the result.
+async fn tool_result(mcp: &HttpMcp, auth: &str, name: &str, args: Value) -> Value {
+    let a = call_http(&mcp.addr, None, Some(auth), &[], name, args).await;
+    assert_eq!(a.status, 200, "{a:?}");
+    let v = a.json();
+    assert!(v["result"].is_object(), "{v}");
+    v["result"].clone()
+}
+
+/// The principals every session the result of `list_sessions` lists.
+fn session_names(result: &Value) -> Vec<String> {
+    result["structuredContent"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{result}"))
+        .iter()
+        .map(|s| s["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A 401 that asks for a token or a password, with no MCP answer in it.
+fn assert_unauthorized(a: &Answer) {
+    assert_eq!(a.status, 401, "{a:?}");
+    let challenges = a.header("WWW-Authenticate").join(", ");
+    assert!(challenges.contains("Bearer"), "{a:?}");
+    assert!(challenges.contains("Basic"), "{a:?}");
+    assert!(!a.body.contains("jsonrpc"), "no MCP answer: {a:?}");
+}
+
+/// The node's `lotse_token_sign_ins_total` with `result`, from its
+/// operator endpoint.
+async fn token_sign_ins(cluster: &Cluster, result: &str) -> u64 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(&cluster.metrics_addr).await.unwrap();
+    s.write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let prefix = format!("lotse_token_sign_ins_total{{node=\"1\",result=\"{result}\"}} ");
+    out.lines().find_map(|l| l.strip_prefix(prefix.as_str())).map_or(0, |v| v.trim().parse().unwrap())
+}
+
+/// Binds `user` as tenant admin of the default tenant's resources named
+/// `<user>-*`.
+async fn bind_own_prefix(alice: &Client<TokioRuntime>, user: &str) {
+    let binding = lotse_proto::RoleBindingData {
+        subject_kind: lotse_proto::subject_kind::USER,
+        subject: user.into(),
+        role: lotse_proto::role::TENANT_ADMIN,
+        tenant: lotse_server::DEFAULT_TENANT.into(),
+        prefix: format!("{user}-"),
+    };
+    alice.alter_role_bindings(vec![binding], Vec::new()).await.expect("binds the user");
+}
+
+async fn exists(alice: &Client<TokioRuntime>, name: &str) -> bool {
+    let known = alice.metadata(&[name]).await.expect("metadata");
+    known.resources.iter().any(|r| r.name == name && r.error == lotse_proto::ErrorCode::NONE)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_needs_a_credential() {
+    let cluster = Cluster::start("mcp-http-401").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "erin").await;
+    alice.set_user_password("erin", "erin-password").await.expect("erin's password");
+    let mcp = HttpMcp::start(&cluster, "mcp", &[]).await;
+    let create = json!({"name": "erin-stream", "partitions": 1});
+
+    // No credential, a token the cluster does not know, a wrong password, a
+    // header that is no credential at all: 401, and no tool runs.
+    let unknown = "lotse_tok_00000000000000ff_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let wrong = basic("erin", "not-her-password");
+    for auth in [None, Some(bearer(unknown).as_str()), Some(wrong.as_str()), Some("Basic !!!"), Some("Negotiate x")] {
+        let a = call_http(&mcp.addr, None, auth, &[], "create_stream", create.clone()).await;
+        assert_unauthorized(&a);
+    }
+    // tools/list too: nothing is served without a credential.
+    let (headers, body) = mcp_request("tools/list", None, json!({"_meta": meta()}));
+    assert_unauthorized(&post(&mcp.addr, None, &headers, &body).await);
+    assert!(!exists(&alice, "erin-stream").await, "no tool ran");
+
+    // With her password the same call runs.
+    let r = tool_result(&mcp, &basic("erin", "erin-password"), "create_stream", create).await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(exists(&alice, "erin-stream").await);
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_bearer_token_and_basic_password_both_work() {
+    let cluster = Cluster::start("mcp-http-both").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "dave").await;
+    bind_own_prefix(&alice, "erin").await;
+    let password = "erin-correct-horse";
+    alice.set_user_password("erin", password).await.expect("erin's password");
+    let token = alice.create_token("agent", Some("dave"), lotse_client::Lifetime::Week).await.expect("a token");
+    let mcp = HttpMcp::start(&cluster, "mcp", &[]).await;
+    let (dave, erin) = (bearer(&token.text), basic("erin", password));
+
+    // Requests alternate between the two credentials; each runs as its own
+    // principal, never as the other.
+    for round in 0..2 {
+        let r =
+            tool_result(&mcp, &dave, "create_stream", json!({"name": format!("dave-{round}"), "partitions": 1})).await;
+        assert_eq!(r["isError"], false, "{r}");
+        let r =
+            tool_result(&mcp, &erin, "create_stream", json!({"name": format!("erin-{round}"), "partitions": 1})).await;
+        assert_eq!(r["isError"], false, "{r}");
+        let r =
+            tool_result(&mcp, &dave, "create_stream", json!({"name": format!("erin-d{round}"), "partitions": 1})).await;
+        assert_eq!(r["structuredContent"]["error"]["code"], "UNAUTHORIZED", "dave may not: {r}");
+        let r =
+            tool_result(&mcp, &erin, "create_stream", json!({"name": format!("dave-e{round}"), "partitions": 1})).await;
+        assert_eq!(r["structuredContent"]["error"]["code"], "UNAUTHORIZED", "erin may not: {r}");
+
+        let mine = tool_result(&mcp, &dave, "list_sessions", json!({})).await;
+        let names = session_names(&mine);
+        assert!(!names.is_empty() && names.iter().all(|n| n == "dave"), "{mine}");
+        let listed = mine["structuredContent"]["sessions"].as_array().unwrap();
+        assert!(listed.iter().all(|s| s["token_id"] == json!(token.id)), "signed in with the token: {mine}");
+        let hers = tool_result(&mcp, &erin, "list_sessions", json!({})).await;
+        let names = session_names(&hers);
+        assert!(!names.is_empty() && names.iter().all(|n| n == "erin"), "{hers}");
+    }
+    for name in ["dave-0", "dave-1", "erin-0", "erin-1"] {
+        assert!(exists(&alice, name).await, "{name}");
+    }
+    for name in ["erin-d0", "dave-e0"] {
+        assert!(!exists(&alice, name).await, "{name}");
+    }
+
+    // Discovery and the tool list over HTTP, with a credential.
+    let (headers, body) = mcp_request("server/discover", None, json!({"_meta": meta()}));
+    let mut headers = headers;
+    headers.push(("Authorization", erin.clone()));
+    let found = post(&mcp.addr, None, &headers, &body).await;
+    assert_eq!(found.status, 200, "{found:?}");
+    assert!(found.json()["result"]["supportedVersions"].as_array().unwrap().contains(&json!("2026-07-28")));
+    let (mut headers, body) = mcp_request("tools/list", None, json!({"_meta": meta()}));
+    headers.push(("Authorization", dave.clone()));
+    let listed = post(&mcp.addr, None, &headers, &body).await.json();
+    assert_eq!(tool_names(&listed).len(), lotse_mcp::Tools::<TokioRuntime>::list().len(), "{listed}");
+
+    // Neither the token, its secret nor the password is logged, though the
+    // log is at debug.
+    let log = mcp.log_text();
+    assert!(!log.is_empty(), "the log is written");
+    let secret = token.text.rsplit('_').next().unwrap();
+    for (what, text) in [("token", token.text.as_str()), ("secret", secret), ("password", password)] {
+        assert!(!log.contains(text), "the {what} is in the log");
+    }
+    assert!(!log.contains(erin.trim_start_matches("Basic ")), "the Basic credential is in the log");
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_token_fails_on_its_next_request() {
+    let cluster = Cluster::start("mcp-http-revoked").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "dave").await;
+    let token = alice.create_token("agent", Some("dave"), lotse_client::Lifetime::Week).await.expect("a token");
+    let mcp = HttpMcp::start(&cluster, "mcp", &[]).await;
+    let dave = bearer(&token.text);
+
+    let r = tool_result(&mcp, &dave, "create_stream", json!({"name": "dave-before", "partitions": 1})).await;
+    assert_eq!(r["isError"], false, "{r}");
+    alice.revoke_token(token.id).await.expect("revoked");
+
+    // The client signed in with the token is still cached; the next request
+    // fails at the cluster with 401, and the one after signs in afresh and
+    // fails too. No tool runs.
+    for _ in 0..2 {
+        let a = call_http(&mcp.addr, None, Some(&dave), &[], "create_stream", json!({"name": "dave-after"})).await;
+        assert_unauthorized(&a);
+    }
+    assert!(exists(&alice, "dave-before").await);
+    assert!(!exists(&alice, "dave-after").await, "no tool ran after the revocation");
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_requests_with_one_credential_sign_in_once() {
+    let cluster = Cluster::start("mcp-http-once").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "dave").await;
+    let token = alice.create_token("agent", Some("dave"), lotse_client::Lifetime::Week).await.expect("a token");
+    let mcp = HttpMcp::start(&cluster, "mcp", &[]).await;
+    assert_eq!(token_sign_ins(&cluster, "ok").await, 0, "no token sign-in yet");
+
+    // Twenty requests with the same token at once.
+    let dave = bearer(&token.text);
+    let calls = (0..20).map(|_| {
+        let (addr, dave) = (mcp.addr.clone(), dave.clone());
+        tokio::spawn(async move { call_http(&addr, None, Some(&dave), &[], "list_sessions", json!({})).await })
+    });
+    for call in calls.collect::<Vec<_>>() {
+        let a = call.await.unwrap();
+        assert_eq!(a.status, 200, "{a:?}");
+        let v = a.json();
+        assert_eq!(session_names(&v["result"]), ["dave"], "one session, dave's: {v}");
+    }
+    assert_eq!(token_sign_ins(&cluster, "ok").await, 1, "the twenty requests signed in once");
+    assert_eq!(token_sign_ins(&cluster, "failed").await, 0);
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_http_is_refused_off_loopback() {
+    let root = std::env::temp_dir().join(format!("lotse-node-mcp-http-plain-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ca = root.join("ca.pem");
+    let listen = format!("0.0.0.0:{}", free_port());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lotse"))
+        .args(["mcp", "--bootstrap", "127.0.0.1:1", "--ca", ca.to_str().unwrap(), "--listen", listen.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the lotse executable runs");
+    let mut status = None;
+    for _ in 0..300 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("lotse mcp listened with plain HTTP on {listen}");
+    }
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert!(stderr.contains("loopback"), "{stderr}");
+    assert!(stderr.contains("--tls-cert") && stderr.contains("--tls-key"), "the message names the flags: {stderr}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_origin_is_refused_unless_allowed() {
+    let cluster = Cluster::start("mcp-http-origin").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "erin").await;
+    alice.set_user_password("erin", "erin-password").await.expect("erin's password");
+    let erin = basic("erin", "erin-password");
+    let origin = |o: &str| vec![("Origin", o.to_string())];
+
+    // None allowed by default: any Origin is refused, before the
+    // credential is looked at; a request without one passes.
+    let mcp = HttpMcp::start(&cluster, "mcp-default", &[]).await;
+    let a =
+        call_http(&mcp.addr, None, Some(&erin), &origin("https://console.example"), "list_sessions", json!({})).await;
+    assert_eq!(a.status, 403, "{a:?}");
+    let a = call_http(&mcp.addr, None, None, &origin("https://console.example"), "list_sessions", json!({})).await;
+    assert_eq!(a.status, 403, "the origin before the credential: {a:?}");
+    let a = call_http(&mcp.addr, None, Some(&erin), &origin("null"), "list_sessions", json!({})).await;
+    assert_eq!(a.status, 403, "{a:?}");
+    let a = call_http(&mcp.addr, None, Some(&erin), &[], "list_sessions", json!({})).await;
+    assert_eq!(a.status, 200, "no Origin: not a browser: {a:?}");
+    drop(mcp);
+
+    // Allowed origins pass; others stay refused.
+    let args = ["--allow-origin", "https://console.example", "--allow-origin", "http://localhost:3000"];
+    let mcp = HttpMcp::start(&cluster, "mcp-allowed", &args).await;
+    for allowed in ["https://console.example", "http://localhost:3000"] {
+        let a = call_http(&mcp.addr, None, Some(&erin), &origin(allowed), "list_sessions", json!({})).await;
+        assert_eq!(a.status, 200, "{allowed}: {a:?}");
+        assert_eq!(session_names(&a.json()["result"]), ["erin"]);
+    }
+    for refused in ["https://evil.example", "https://console.example:8443", "http://console.example"] {
+        let a = call_http(&mcp.addr, None, Some(&erin), &origin(refused), "list_sessions", json!({})).await;
+        assert_eq!(a.status, 403, "{refused}: {a:?}");
+    }
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn https_with_the_given_certificate() {
+    let cluster = Cluster::start("mcp-http-tls").await;
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "dave").await;
+    let token = alice.create_token("agent", Some("dave"), lotse_client::Lifetime::Week).await.expect("a token");
+    // The listener's certificate, from a CA of its own (not the cluster's).
+    let ca = lotse_rt_tokio::dev_certs::DevCa::new();
+    let issued = ca.custom("mcp.example", &[], &["127.0.0.1", "localhost"]);
+    let (cert, key) = (cluster.root.join("mcp.pem"), cluster.root.join("mcp.key"));
+    std::fs::write(&cert, &issued.cert_pem).unwrap();
+    std::fs::write(&key, &issued.key_pem).unwrap();
+    let mcp =
+        HttpMcp::start(&cluster, "mcp", &["--tls-cert", cert.to_str().unwrap(), "--tls-key", key.to_str().unwrap()])
+            .await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    use rustls::pki_types::pem::PemObject as _;
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(ca.ca_pem().as_bytes()) {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let tls = Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let a = call_http(&mcp.addr, Some(tls.clone()), Some(&bearer(&token.text)), &[], "list_sessions", json!({})).await;
+    assert_eq!(a.status, 200, "{a:?}");
+    assert_eq!(session_names(&a.json()["result"]), ["dave"]);
+    let a = call_http(&mcp.addr, Some(tls), None, &[], "list_sessions", json!({})).await;
+    assert_unauthorized(&a);
+
+    // Plain HTTP to the TLS listener gets no MCP answer.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(&mcp.addr).await.unwrap();
+    s.write_all(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut out)).await;
+    assert!(!String::from_utf8_lossy(&out).contains("HTTP/1.1 "), "plain HTTP answered: {out:?}");
     cluster.stop().await;
 }
