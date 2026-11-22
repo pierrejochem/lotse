@@ -12,6 +12,7 @@ The crash test in `crates/lotse-sim/tests/log_crash.rs` appends, syncs, truncate
 
 ```sh
 LOTSE_SIM_SEEDS=5000 cargo test -p lotse-sim --release   # many seeds
+LOTSE_SIM_SEEDS=5000 LOTSE_SIM_SHARD=1/4 cargo test -p lotse-sim --release   # the first quarter of them
 LOTSE_SIM_SEED=1234 cargo test -p lotse-sim               # one seed, exactly
 ```
 
