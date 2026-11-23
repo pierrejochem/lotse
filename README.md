@@ -69,6 +69,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## Security
+
+Report a vulnerability privately, not in a public issue: [SECURITY.md](SECURITY.md) says how.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE).
