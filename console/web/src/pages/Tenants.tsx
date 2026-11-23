@@ -21,7 +21,7 @@ export function Tenants() {
   return (
     <main className="page">
       <div>
-        <h1 className="h1">Tenants and access</h1>
+        <h1 className="h1">Tenants</h1>
         <p className="sub">
           {quotas
             ? 'Storage quotas count every replica. Usage is aggregated every few seconds, so a tenant can overshoot briefly before writes are rejected.'

@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { credentialTab } from './credentialTabs';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
@@ -597,33 +599,46 @@ function CertificatesTab({ cluster }: { cluster: string }) {
     <Tabs.Trigger value="certificates">
       Certificates
       {waiting > 0 && (
-        <span className="chip warn" style={{ marginLeft: 6 }} aria-label={`${waiting} waiting for the CA holder`}>
-          {waiting}
-        </span>
+        <>
+          <span className="chip warn" style={{ marginLeft: 6 }} aria-hidden="true">
+            {waiting}
+          </span>
+          <span className="sr-only">, {waiting} waiting for the CA holder</span>
+        </>
       )}
     </Tabs.Trigger>
   );
 }
 
 export function UsersAccess() {
-  const { cluster = '' } = useParams();
+  const { cluster = '', tab } = useParams();
+  const navigate = useNavigate();
+  const current = credentialTab(tab);
+  if (!current) return <Navigate to={`/clusters/${encodeURIComponent(cluster)}/users`} replace />;
   return (
     <main className="page">
       <div>
-        <h1 className="h1">Users and access</h1>
-        <p className="sub">Passwords, role bindings, sessions and access tokens. Every change is made as you, and the cluster checks your roles.</p>
+        <h1 className="h1">{current.label}</h1>
+        <p className="sub">
+          People and credentials. Every change is made as you, and the cluster checks your roles.
+        </p>
       </div>
-      <Tabs.Root defaultValue="users">
-        <Tabs.List className="tabs-list" aria-label="Users and access">
+      <Tabs.Root
+        value={current.id}
+        onValueChange={(v) =>
+          navigate(`/clusters/${encodeURIComponent(cluster)}/users${v === 'users' ? '' : `/${v}`}`)
+        }
+      >
+        {/* Shown only where the sidebar does not list the five pages (1099 px and below). */}
+        <Tabs.List className="tabs-list tabs-narrow" aria-label="Credentials">
           <Tabs.Trigger value="users">Users</Tabs.Trigger>
           <Tabs.Trigger value="bindings">Role bindings</Tabs.Trigger>
-          <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
           <Tabs.Trigger value="tokens">Tokens</Tabs.Trigger>
           <CertificatesTab cluster={cluster} />
+          <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
-        <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="tokens" className="tabs-content"><Tokens cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="certificates" className="tabs-content">
           <div className="stack" style={{ gap: 32 }}>
@@ -635,6 +650,7 @@ export function UsersAccess() {
             </details>
           </div>
         </Tabs.Content>
+        <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
       </Tabs.Root>
     </main>
   );

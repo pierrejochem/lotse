@@ -111,7 +111,7 @@ export function Messages() {
   return (
     <main className="page">
       <div>
-        <h1 className="h1">Message browser</h1>
+        <h1 className="h1">Record browser</h1>
         <p className="sub">Reads records without joining a consumer group or moving any offset. Every read is logged with your name.</p>
       </div>
 

@@ -108,6 +108,12 @@ const ICONS: Record<string, ReactNode> = {
     </>
   ),
   tenants: <path d="M3 14V3h7v11M10 7h3v7M1.5 14h13M5.5 5.5h2M5.5 8.5h2M5.5 11.5h2" />,
+  users: <path d="M8 8a2.75 2.75 0 1 0 0-5.5A2.75 2.75 0 0 0 8 8ZM2.5 14c0-3 2.5-4.5 5.5-4.5s5.5 1.5 5.5 4.5" />,
+  people: <path d="M8 1.75 13.5 4v4c0 3-2.3 5.2-5.5 6.25C4.8 13.2 2.5 11 2.5 8V4z" />,
+  tokens: <path d="M6 10a3 3 0 1 1 1.2-5.75L13.5 4.5v2.25h-1.75V8.5H10L8.9 9.6A3 3 0 0 1 6 10Z" />,
+  certificates: <><rect x="2" y="2.5" width="12" height="8" rx="1" /><path d="M5 5.5h6M5 8h3.5M5.5 13.5l1-2.5 1 2.5 1-2.5 1 2.5" /></>,
+  sessions: <><rect x="2" y="3" width="12" height="8" rx="1" /><path d="M5.5 13.5h5M8 11v2.5" /></>,
+  bindings: <path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />,
   chevron: <path d="m5 6 3 3 3-3" />,
   close: <path d="M4 4l8 8M12 4l-8 8" />,
   menu: <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />,
