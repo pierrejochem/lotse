@@ -27,9 +27,9 @@ Lotse is a message broker in Rust: reliable queues and persistent streams on one
 - **Queues and streams on one log:** RabbitMQ-style queues (acks, redelivery, dead-letter queues, delayed delivery, priorities, exchanges and bindings) and Kafka-style streams (partitions, consumer groups, retention, log compaction) share one storage engine.
 - **Replication with Raft:** every partition is a Raft group, batched per node pair; nodes can be added to and drained from a running cluster.
 - **Exactly-once:** idempotent producers, transactions and consumer group offsets committed in the same transaction.
-- **Secure by default:** TLS 1.3 on every connection, SCRAM-SHA-512, OAUTHBEARER and client certificates, tenants and roles.
+- **Secure by default:** TLS 1.3 on every connection, SCRAM-SHA-512, OAUTHBEARER, client certificates and access tokens, tenants and roles.
 - **Tested by simulation:** deterministic simulation with crashing disks and a faulty network, 5,000 seeds per simulation before every release.
-- **Clients and console:** clients for Rust, Java (with a Kotlin layer), C# and Node.js, and a web console.
+- **Clients and console:** clients for Rust, Java (with a Kotlin layer), C# and Node.js, a web console, and `lotse mcp` for AI agents.
 
 Status: foundation. What exists, what is not built yet and the limits that were decided are in [Status and known gaps](docs/status.md).
 
@@ -61,8 +61,14 @@ The cluster file, certificates, adding and draining nodes, packages and images: 
 
 ## Contributing
 
-[AGENTS.md](AGENTS.md) holds the rules, commands and conventions for everyone who changes this repository, people and AI coding agents alike; [agents/lotse-engineer.md](agents/lotse-engineer.md) describes the project's dedicated coding agent.
+[AGENTS.md](AGENTS.md) holds the rules, commands and conventions for everyone who changes this repository, people and AI coding agents alike; [agents/lotse-engineer.md](agents/lotse-engineer.md) describes the project's dedicated coding agent. Before opening a pull request, run:
 
 ```sh
-cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE).
