@@ -349,9 +349,29 @@ fn exchanges_bindings_settings_and_partitions_change_through_the_tools() {
             ok(&t, "alter_configs", json!({"name": "eu", "reset": ["max.deliveries"]})).await;
             let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
             assert_ne!(eu["configs"]["max.deliveries"], "7", "{eu}");
+            // A length limit can drop messages: without confirm nothing changes.
+            for args in [
+                json!({"name": "eu", "set": {"max.length": "1"}}),
+                json!({"name": "eu", "set": {"max.deliveries": "3", "overflow": "drop-head"}, "confirm": "EU"}),
+                json!({"name": "eu", "reset": ["max.length.bytes"]}),
+            ] {
+                let r = fails(&t, "alter_configs", args, "CONFIRMATION_MISMATCH").await;
+                assert!(r.text.contains("can delete data"), "{}", r.text);
+            }
+            let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
+            assert_ne!(eu["configs"]["max.length"], "1", "{eu}");
+            assert_ne!(eu["configs"]["max.deliveries"], "3", "nothing of a refused change is applied: {eu}");
+            ok(&t, "alter_configs", json!({"name": "eu", "set": {"max.length": "1"}, "confirm": "eu"})).await;
+            let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
+            assert_eq!(eu["configs"]["max.length"], "1", "{eu}");
 
             ok(&t, "create_stream", json!({"name": "s", "partitions": 1})).await;
             ok(&t, "create_partitions", json!({"name": "s", "count": 3})).await;
+            fails(&t, "alter_configs", json!({"name": "s", "set": {"retention.ms": "1000"}}), "CONFIRMATION_MISMATCH")
+                .await;
+            ok(&t, "alter_configs", json!({"name": "s", "set": {"retention.ms": "1000"}, "confirm": "s"})).await;
+            let s = ok(&t, "describe_stream", json!({"name": "s"})).await;
+            assert_eq!(s["configs"]["retention.ms"], "1000", "{s}");
             settle(&rt).await;
             let offsets = ok(&t, "list_offsets", json!({"stream": "s", "time_ms": 0})).await;
             assert_eq!(offsets["partitions"].as_array().unwrap().len(), 3, "{offsets}");
