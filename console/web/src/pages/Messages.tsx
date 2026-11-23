@@ -5,7 +5,7 @@ import { useMutation } from '@tanstack/react-query';
 import type { S } from '../api/client';
 import { ApiError } from '../api/client';
 import { readRecords, useStream, useStreams } from '../api/queries';
-import { Chip, Icon, Select } from '../components/ui';
+import { Chip, Icon, Select, TableWrap } from '../components/ui';
 import { count, clockMs } from '../format';
 
 const TXN: Record<S['TxnState'], { text: string; tone: 'ok' | 'warn' | 'info' | 'plain' }> = {
@@ -173,7 +173,7 @@ export function Messages() {
 
       {read.data && (
         <div className="row" style={{ alignItems: 'flex-start' }}>
-          <section className="table-wrap" aria-label="Records" style={{ flex: '3 1 520px' }}>
+          <TableWrap style={{ flex: '3 1 520px' }} label="Records">
             {records.length === 0 ? (
               <p className="empty">No records from this offset{committed ? ' up to the last stable offset' : ''}.</p>
             ) : (
@@ -193,11 +193,14 @@ export function Messages() {
                       key={r.offset}
                       className={`clickable${r.offset === selected ? ' selected' : ''}`}
                       onClick={() => setSelected(r.offset)}
-                      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setSelected(r.offset))}
-                      tabIndex={0}
-                      aria-selected={r.offset === selected}
+                      aria-current={r.offset === selected ? 'true' : undefined}
                     >
-                      <td className="r mono">{count(r.offset)}</td>
+                      <td className="r mono">
+                        <button type="button" className="rowlink mono" aria-pressed={r.offset === selected} onClick={() => setSelected(r.offset)}>
+                          {count(r.offset)}
+                        </button>
+                        {r.offset === selected && <span className="selmark">Selected</span>}
+                      </td>
                       <td className="mono muted">{clockMs(r.timestamp)}</td>
                       <td className="mono">{r.key ?? '—'}</td>
                       <td className="r">{count(r.size_bytes)} B</td>
@@ -211,7 +214,7 @@ export function Messages() {
               <span className="label">Same read from the CLI</span>
               <pre className="code" style={{ marginTop: 8 }}>{read.data.cli}</pre>
             </div>
-          </section>
+          </TableWrap>
           {sel && <Detail r={sel} stream={stream} partition={partition} onClose={() => setSelected(null)} />}
         </div>
       )}

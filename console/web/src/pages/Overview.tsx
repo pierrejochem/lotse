@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { useOverview } from '../api/queries';
 import { ThroughputChart } from '../components/ThroughputChart';
-import { Banner, Chip, DiskBar, Failed, Loading } from '../components/ui';
+import { Banner, Chip, DiskBar, Failed, Loading, TableWrap } from '../components/ui';
 import { NONE_NOTE, bytes, count, counted, fraction, ms, percent, rate } from '../format';
 
 export function Overview() {
@@ -78,7 +78,7 @@ export function Overview() {
           <h2 id="nodes-title" className="h2">Nodes</h2>
           <Link to={`${base}/nodes`} className="small" style={{ fontWeight: 600 }}>Nodes and upgrade</Link>
         </div>
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -110,7 +110,7 @@ export function Overview() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
         {o.nodes.some((n) => n.disk_free_limit_bytes) && (
           <p className="small muted" style={{ margin: 0 }}>
             The tick on the disk bar marks each node's free space limit. Below it, streams and queues with a replica on the node take no new data; reads and acks go on.
@@ -124,7 +124,7 @@ export function Overview() {
             <h2 id="streams-title" className="h2">Busiest streams</h2>
             <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'The one stream' : `All ${count(o.stream_count)} streams`}</Link>
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             <table>
               <thead>
                 <tr>
@@ -148,7 +148,7 @@ export function Overview() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableWrap>
         </section>
 
         <section className="stack" aria-labelledby="queues-title" style={{ flex: '1 1 520px' }}>
@@ -156,7 +156,7 @@ export function Overview() {
             <h2 id="queues-title" className="h2">Queues that need attention</h2>
             <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'The one queue' : `All ${count(o.queue_count)} queues`}</Link>
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             {o.attention_queues.length === 0 ? (
               <p className="empty">No queue needs attention.</p>
             ) : (
@@ -184,7 +184,7 @@ export function Overview() {
                 </tbody>
               </table>
             )}
-          </div>
+          </TableWrap>
         </section>
       </div>
     </main>

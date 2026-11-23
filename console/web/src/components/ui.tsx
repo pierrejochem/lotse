@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { S, Tone } from '../api/client';
@@ -45,7 +45,14 @@ export function DiskBar({ node, width = 120 }: { node: S['Node']; width?: number
   const limit = node.disk_free_limit_bytes ? fraction(node.disk_free_limit_bytes, node.disk_total_bytes) : null;
   const tone = node.disk_low ? 'critical' : limit !== null && free <= 2 * limit ? 'warn' : undefined;
   const ticks = limit !== null ? [1 - limit] : [];
-  return <Bar value={1 - free} tone={tone} ticks={ticks} width={width} />;
+  const used = Math.round((1 - free) * 100);
+  const state = node.disk_low ? 'Below disk limit' : tone === 'warn' ? 'Near limit' : '';
+  return (
+    <span className="disk-bar">
+      <Bar value={1 - free} tone={tone} ticks={ticks} width={width} label={`Disk used: ${used} %${state ? `, ${state.toLowerCase()}` : ''}`} />
+      {state && <span className={`bar-state ${tone}`}>{state}</span>}
+    </span>
+  );
 }
 
 /** A small trend line. */
@@ -241,5 +248,70 @@ export function Hint({ text, children }: { text: string; children: ReactNode }) 
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
+  );
+}
+
+const CARDS = '(max-width: 640px)';
+
+/**
+ * A table in a card. Wider than its box it scrolls sideways and becomes a
+ * focusable region (so a keyboard can reach what is hidden); on a phone each
+ * row becomes a card whose cells carry their column's name. The cells are
+ * labelled from the header here, so the pages' tables stay plain markup.
+ */
+export function TableWrap({ label, style, children }: { label?: string; style?: CSSProperties; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mq = typeof matchMedia === 'function' ? matchMedia(CARDS) : null;
+    const fit = () => {
+      const table = el.querySelector('table');
+      if (table) {
+        const heads = Array.from(table.querySelectorAll('thead th')).map((h) => h.textContent?.trim() ?? '');
+        const cards = mq?.matches ?? false;
+        table.classList.toggle('cards', cards);
+        // display: grid drops a table's semantics in some screen readers, so say them again.
+        const roles: [string, string][] = [['table', 'table'], ['thead,tbody', 'rowgroup'], ['tr', 'row'], ['th,td', 'cell']];
+        for (const [sel, role] of roles) {
+          for (const n of Array.from(table.matches(sel) ? [table] : table.querySelectorAll(sel))) {
+            if (cards) n.setAttribute('role', n.tagName === 'TH' ? (n.getAttribute('scope') === 'row' ? 'rowheader' : 'columnheader') : role);
+            else n.removeAttribute('role');
+          }
+        }
+        table.querySelectorAll('tbody tr').forEach((tr) => {
+          Array.from(tr.children).forEach((c, i) => c.setAttribute('data-label', heads[i] ?? ''));
+        });
+      }
+      const scrolls = !(mq?.matches ?? false) && el.scrollWidth > el.clientWidth + 1;
+      el.classList.toggle('scrolls', scrolls);
+      if (scrolls) {
+        el.tabIndex = 0;
+        el.setAttribute('role', 'region');
+        el.setAttribute('aria-label', `${label ?? 'Table'}, scrolls sideways`);
+      } else {
+        el.removeAttribute('tabindex');
+        if (label) el.setAttribute('aria-label', label);
+        else el.removeAttribute('aria-label');
+        if (label) el.setAttribute('role', 'region');
+        else el.removeAttribute('role');
+      }
+    };
+    fit();
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null;
+    ro?.observe(el);
+    const mo = new MutationObserver(fit);
+    mo.observe(el, { childList: true, subtree: true });
+    mq?.addEventListener('change', fit);
+    return () => {
+      ro?.disconnect();
+      mo.disconnect();
+      mq?.removeEventListener('change', fit);
+    };
+  }, [label]);
+  return (
+    <div className="table-wrap" ref={ref} style={style}>
+      {children}
+    </div>
   );
 }

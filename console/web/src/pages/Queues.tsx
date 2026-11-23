@@ -2,7 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useQueue, useQueues } from '../api/queries';
 import { MoveLeaderButton, PlaceButton, PurgeButton, ReplicationButton, RequeueButton } from '../components/Actions';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
-import { Bar, Chip, Failed, Loading, Stats } from '../components/ui';
+import { Bar, Chip, Failed, Loading, Stats, TableWrap } from '../components/ui';
 import { NONE, bytes, clock, count, duration } from '../format';
 
 export function QueueList() {
@@ -20,7 +20,7 @@ export function QueueList() {
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -43,7 +43,7 @@ export function QueueList() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </main>
   );
@@ -146,7 +146,7 @@ export function QueueDetail() {
 
       <section className="stack" aria-labelledby="consumers-title">
         <h2 id="consumers-title" className="h2">Consumers</h2>
-        <div className="table-wrap">
+        <TableWrap>
           {d.consumers.length === 0 ? (
             <p className="empty">No consumer is subscribed.</p>
           ) : (
@@ -180,7 +180,7 @@ export function QueueDetail() {
               </tbody>
             </table>
           )}
-        </div>
+        </TableWrap>
       </section>
 
       {d.dlq && (
@@ -191,7 +191,7 @@ export function QueueDetail() {
             </h2>
             <RequeueButton cluster={cluster} dlq={d.dlq} />
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             {d.dead_letters.length === 0 ? (
               <p className="empty">No dead letters.</p>
             ) : (
@@ -218,7 +218,7 @@ export function QueueDetail() {
                 </tbody>
               </table>
             )}
-          </div>
+          </TableWrap>
         </section>
       )}
     </main>

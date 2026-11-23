@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
 import { MoveLeaderButton, PlaceButton, ReplicationButton } from '../components/Actions';
-import { Chip, Failed, Hint, Loading, Sparkline, Stats } from '../components/ui';
+import { Chip, Failed, Hint, Loading, Sparkline, Stats, TableWrap } from '../components/ui';
 import { NONE, bytes, count, duration, rate } from '../format';
 
 export function StreamList() {
@@ -18,7 +18,7 @@ export function StreamList() {
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -41,7 +41,7 @@ export function StreamList() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </main>
   );
@@ -63,7 +63,7 @@ function replicaLabel(r: S['Replica']) {
 function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
   return (
     <section className="stack" aria-label="Partitions">
-      <div className="table-wrap">
+      <TableWrap>
         <table>
           <thead>
             <tr>
@@ -123,7 +123,7 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
             })}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
       <p className="small muted" style={{ margin: 0 }}>
         Replica squares show the broker number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
         node; a placed partition stays on the nodes it was placed on. Last stable sits below the high
@@ -138,7 +138,7 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
   const a = d.assignment;
   return (
     <div className="row">
-      <div className="table-wrap" style={{ flex: '3 1 560px' }}>
+      <TableWrap style={{ flex: '3 1 560px' }}>
         <table>
           <thead>
             <tr>
@@ -166,7 +166,7 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
             })}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
       {a && (
         <aside className="card stack" aria-labelledby="assign-title" style={{ flex: '2 1 340px', '--gap': '14px' } as React.CSSProperties}>
           <div>
@@ -209,7 +209,7 @@ function Config({ d }: { d: S['StreamDetail'] }) {
     ['Compaction', d.compaction ? 'On, latest value per key' : 'Off'],
   ];
   return (
-    <div className="table-wrap" style={{ maxWidth: 640 }}>
+    <TableWrap style={{ maxWidth: 640 }}>
       <table>
         <tbody>
           {rows.map(([k, v]) => (
@@ -220,7 +220,7 @@ function Config({ d }: { d: S['StreamDetail'] }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableWrap>
   );
 }
 

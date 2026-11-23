@@ -4,7 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError } from '../api/client';
 import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens } from '../api/queries';
 import { useToast } from '../components/toast';
-import { Failed, Icon, Loading } from '../components/ui';
+import { Failed, Icon, Loading, TableWrap } from '../components/ui';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
 const message = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
@@ -258,7 +258,7 @@ export function Tokens({ cluster }: { cluster: string }) {
       ) : q.data.tokens.length === 0 ? (
         <p className="empty">{owner ? `No tokens for ${owner}.` : 'No tokens.'}</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -286,7 +286,7 @@ export function Tokens({ cluster }: { cluster: string }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </section>
   );

@@ -207,6 +207,17 @@ thead th { padding: 10px 16px; background: var(--fog); color: var(--ink-muted); 
 tbody tr > * { border-top: 1px solid var(--line); }
 tbody th { font-weight: 400; }
 .r { text-align: right; }
+/* Shadows at an edge only where the table has more to show on that side. */
+.table-wrap.scrolls {
+  background:
+    linear-gradient(to right, var(--surface-raised) 30%, transparent) left / 24px 100% no-repeat local,
+    linear-gradient(to left, var(--surface-raised) 30%, transparent) right / 24px 100% no-repeat local,
+    linear-gradient(to right, rgb(11 23 32 / 0.18), transparent) left / 10px 100% no-repeat scroll,
+    linear-gradient(to left, rgb(11 23 32 / 0.18), transparent) right / 10px 100% no-repeat scroll,
+    var(--surface-raised);
+}
+.table-wrap:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+thead th { position: sticky; top: 0; }
 .wrap { white-space: normal; }
 tr.selected { background: var(--selected-bg); }
 tr.selected > :first-child { box-shadow: inset 3px 0 0 var(--selected); }
@@ -216,7 +227,11 @@ tr.clickable.selected:hover { background: var(--selected-bg); }
 
 /* chips */
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: var(--radius-sm); font-size: 12px; line-height: 18px; font-weight: 600; white-space: nowrap; }
-.chip::before { content: ''; width: 6px; height: 6px; border-radius: 3px; background: currentColor; }
+.chip::before { content: ''; width: 8px; height: 8px; flex: 0 0 auto; background: currentColor; border-radius: 4px; }
+/* A shape per state, so a chip is not told apart by colour alone. */
+.chip.warn::before { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.chip.critical::before { border-radius: 0; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+.chip.info::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
 .chip.ok { background: var(--ok-bg); color: var(--ok-text); }
 .chip.warn { background: var(--warn-bg); color: var(--warn-text); }
 .chip.critical { background: var(--crit-bg); color: var(--crit-text); }
@@ -229,6 +244,12 @@ tr.clickable.selected:hover { background: var(--selected-bg); }
 .bar > .fill.warn { background: var(--warn); }
 .bar > .fill.critical { background: var(--signal); }
 .bar > .fill.brass { background: var(--brass); }
+.disk-bar { display: inline-flex; align-items: center; gap: 8px; }
+.bar-state { font-size: 12px; font-weight: 600; color: var(--warn-text); white-space: nowrap; }
+.bar-state.critical { color: var(--crit-text); }
+.rowlink { display: inline-flex; align-items: center; min-height: 32px; padding: 0; border: 0; background: none; color: var(--ink); text-decoration: underline; text-decoration-color: var(--control); text-underline-offset: 4px; cursor: pointer; font-size: inherit; }
+.rowlink.mono { font-family: var(--font-mono); font-size: 13px; font-weight: 500; }
+.selmark { margin-left: 8px; padding: 0 6px; border: 1px solid var(--selected); border-radius: 4px; font: 600 12px/16px var(--font-sans); white-space: nowrap; }
 .bar > .tick { position: absolute; top: -3px; width: 1px; height: 14px; background: var(--ink-muted); }
 
 /* buttons and inputs */
@@ -354,6 +375,16 @@ pre.value { margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: var(
   .nav a[aria-current='true'] { background: rgb(255 255 255 / 0.06); box-shadow: inset 3px 0 0 var(--nav-icon-active); }
 }
 @media (max-width: 640px) {
+  /* Each row is a card; a cell shows its column's name above its value. */
+  .table-wrap { overflow: visible; background: none; border: 0; }
+  table.cards, table.cards tbody { display: block; }
+  table.cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.cards tbody tr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin-bottom: 12px; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-raised); }
+  table.cards tbody tr.selected { box-shadow: inset 4px 0 0 var(--selected); background: var(--selected-bg); }
+  table.cards tbody tr > * { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; border: 0; white-space: normal; text-align: right; }
+  table.cards tbody tr > :first-child { justify-content: flex-start; font-weight: 600; text-align: left; box-shadow: none; }
+  table.cards tbody tr > *::before { content: attr(data-label); flex: 0 0 auto; color: var(--ink-muted); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; text-align: left; }
+  table.cards tbody tr > :first-child::before, table.cards tbody tr > [data-label='']::before { display: none; }
   .app { grid-template-columns: minmax(0, 1fr); }
   .demo-pill, .live { display: none; }
   .demo-strip { display: block; padding: 6px 16px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; font-weight: 600; }

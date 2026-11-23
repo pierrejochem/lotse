@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTenants } from '../api/queries';
-import { Banner, Bar, Chip, Failed, Loading } from '../components/ui';
+import { Banner, Bar, Chip, Failed, Loading, TableWrap } from '../components/ui';
 import { bytes, count } from '../format';
 
 export function Tenants() {
@@ -36,7 +36,7 @@ export function Tenants() {
       ))}
 
       <div className="row" style={{ alignItems: 'flex-start' }}>
-        <section className="table-wrap" aria-label="Tenants" style={{ flex: '3 1 560px' }}>
+        <TableWrap style={{ flex: '3 1 560px' }} label="Tenants">
           <table>
             <thead>
               <tr>
@@ -56,11 +56,15 @@ export function Tenants() {
                     key={t.name}
                     className={`clickable${t.name === current ? ' selected' : ''}`}
                     onClick={() => setPicked(t.name)}
-                    onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setPicked(t.name))}
-                    tabIndex={0}
-                    aria-selected={t.name === current}
+                    aria-current={t.name === current ? 'true' : undefined}
                   >
-                    <th scope="row" className="mono">{t.name}</th>
+                    <th scope="row">
+                      {/* The row is clickable for a mouse; the button is what a keyboard and a screen reader use. */}
+                      <button type="button" className="rowlink mono" aria-pressed={t.name === current} onClick={() => setPicked(t.name)}>
+                        {t.name}
+                      </button>
+                      {t.name === current && <span className="selmark">Selected</span>}
+                    </th>
                     <td>
                       <div className="stack" style={{ '--gap': '6px' } as React.CSSProperties}>
                         <span>{bytes(t.used_bytes)} {t.quota_bytes != null && <span className="muted">of {bytes(t.quota_bytes)}</span>}</span>
@@ -76,7 +80,7 @@ export function Tenants() {
               })}
             </tbody>
           </table>
-        </section>
+        </TableWrap>
 
         <aside className="card stack" aria-labelledby="tenant-title" style={{ flex: '2 1 400px', '--gap': '14px' } as React.CSSProperties}>
           <div>

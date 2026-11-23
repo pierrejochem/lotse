@@ -5,7 +5,7 @@ import type { S } from '../api/client';
 import { ApiError } from '../api/client';
 import { useNodes, usePauseUpgrade, useRaiseClusterVersion, useResumeUpgrade } from '../api/queries';
 import { useToast } from '../components/toast';
-import { Chip, DiskBar, Failed, Loading } from '../components/ui';
+import { Chip, DiskBar, Failed, Loading, TableWrap } from '../components/ui';
 import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, rate } from '../format';
 
 /** "3 broker nodes in 3 zones · managed by the Lotse operator", from what is known. */
@@ -249,7 +249,7 @@ export function Nodes() {
 
       <section className="stack" aria-labelledby="events-title">
         <h2 id="events-title" className="h2">Operator events</h2>
-        <div className="table-wrap">
+        <TableWrap>
           {v.events.length === 0 ? (
             <p className="empty">No operator events.</p>
           ) : (
@@ -265,7 +265,7 @@ export function Nodes() {
               </tbody>
             </table>
           )}
-        </div>
+        </TableWrap>
       </section>
     </main>
   );

@@ -18,7 +18,7 @@ import {
 import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
 import { Tokens } from './Tokens';
-import { Chip, Failed, Loading, Select } from '../components/ui';
+import { Chip, Failed, Loading, Select, TableWrap } from '../components/ui';
 
 const failure = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
@@ -40,7 +40,7 @@ function Users({ cluster }: { cluster: string }) {
         <p className="sub" style={{ margin: 0 }}>SCRAM-SHA-512 users. Users from the node configuration are read only.</p>
         <PasswordDialog cluster={cluster} />
       </div>
-      <section className="table-wrap" aria-label="Users">
+      <TableWrap label="Users">
         <table>
           <thead>
             <tr>
@@ -111,7 +111,7 @@ function Users({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -139,7 +139,7 @@ function Bindings({ cluster }: { cluster: string }) {
           {can_edit && <BindingDialog cluster={cluster} />}
         </div>
       </div>
-      <section className="table-wrap" aria-label="Role bindings">
+      <TableWrap label="Role bindings">
         <table>
           <thead>
             <tr>
@@ -184,7 +184,7 @@ function Bindings({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -219,7 +219,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
       {v.sessions.length === 0 ? (
         <p className="empty">No open sessions.</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -273,7 +273,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </section>
   );
@@ -379,7 +379,7 @@ function CertificateList({ cluster }: { cluster: string }) {
           options={[{ value: 'all', label: 'All' }, { value: 'expiring', label: 'Expiring within 30 days' }, { value: 'revoked', label: 'Revoked' }, { value: 'expired', label: 'Expired' }]}
         />
       </div>
-      <section className="table-wrap" aria-label="Client certificates">
+      <TableWrap label="Client certificates">
         <table>
           <thead>
             <tr>
@@ -436,7 +436,7 @@ function CertificateList({ cluster }: { cluster: string }) {
             )}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -480,7 +480,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
           No role is bound to {principal} itself. A certificate signs in without your identity provider&apos;s groups, so it would grant nothing until a cluster admin binds a role to {principal}.
         </p>
       )}
-      <section className="table-wrap" aria-label="Certificate requests">
+      <TableWrap label="Certificate requests">
         <table>
           <thead>
             <tr>
@@ -518,7 +518,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
             {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests.' : 'No requests.'}</td></tr>}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
