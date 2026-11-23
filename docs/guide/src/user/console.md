@@ -46,23 +46,23 @@ The list shows the messages per queue and how many were dead-lettered. The detai
 
 On a queue that is another queue's dead-letter queue, **Requeue all** moves its messages back to the queues they came from. A message moves once. Messages whose origin is unknown or gone stay where they are. Same role as for purge. Both actions are done as you ([ADR 0066](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0066-console-actions.md), [ADR 0064](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0064-purge-and-requeue.md)).
 
-## Messages
+## Record browser
 
-The message browser shows messages of a stream or queue without taking them from it.
+The record browser reads the records of a stream partition without joining a consumer group or moving an offset. Choose a stream, a partition and a start offset, then *Read 50 records*. *Oldest*, *Older*, *Newer* and *Latest* page through the log; *Older* means lower offsets. Records of open transactions show as *Uncommitted*; the switch *Show uncommitted records* turns them off, which is the view of a consumer that reads only committed records. Choosing a record opens its key, headers and value beside the table. Every read is logged with your name.
 
-![Message browser](../images/messages.png)
+![Record browser](../images/messages.png)
 
-## Tenants and access
+## Tenants
 
 The tenant page lists tenants and the role bindings that apply to them: who holds which of the six roles, on which name prefix.
 
 ![Tenants](../images/tenants.png)
 
-## Users and access
+## People and credentials
 
-The *Users and access* page manages who may sign in and what they may do, as you: every change is a request the cluster checks against your roles, and the console adds no rights of its own ([ADR 0089](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0089-console-users-and-access.md)). Only cluster admins can use it.
+The *People and credentials* pages manage who may sign in and what they may do, as you: every change is a request the cluster checks against your roles, and the console adds no rights of its own ([ADR 0089](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0089-console-users-and-access.md)). Users, role bindings and certificates are for cluster admins; every signed-in user sees their own tokens, sessions and certificate requests. In the sidebar the pages are *Users*, *Role bindings*, *Tokens*, *Certificates* and *Sessions*; on a narrow screen they are tabs above the page.
 
-**Users** lists the SCRAM users and where each comes from. *Add user* and *Set password* turn the password into a salted key in your browser and send only the key; the console never sees the password. *Delete* asks you to type the name again.
+**Users** lists the SCRAM users and where each comes from. *Create user* and *Set password* turn the password into a salted key in your browser and send only the key; the console never sees the password. The row's *…* menu holds *Set password*, *Revoke sessions* and *Delete user*; each asks you to type the name again, and the red button that confirms stays off until you do.
 
 ![Users](../images/users.png)
 
@@ -76,7 +76,7 @@ The *Users and access* page manages who may sign in and what they may do, as you
 
 **Tokens** lists the access tokens you may see, with name, owner, when each was made and when it ends, and the last four digits of its id. *Create token* asks for a name and one of five lifetimes: 1 week, 1 month (the default), 3 months, 6 months or 1 year. The text of the token appears once, with a copy button; it cannot be shown again, and the console keeps it only while that dialog is open ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md)).
 
-A token acts as its owner with the roles bound to the owner's own name. Your identity provider's groups do not count, so if all your roles come from groups, the token grants nothing until a cluster admin binds a role to your name. *Revoke* asks first: connections signed in with the token end at once. You see and revoke your own tokens; cluster admins see every token, can filter by owner, and can make a token for another principal, such as a service account. On a cluster below version 0.1 the dialog shows the cluster's message instead of making a token. See [Access tokens](../admin/access-tokens.md).
+A token acts as its owner with the roles bound to the owner's own name. Your identity provider's groups do not count, so if all your roles come from groups, the token grants nothing until a cluster admin binds a role to your name. *Revoke* asks you to type the token's name first: connections signed in with the token end at once. You see and revoke your own tokens; cluster admins see every token, can filter by owner, and can make a token for another principal, such as a service account. On a cluster below version 0.1 the dialog shows the cluster's message instead of making a token. See [Access tokens](../admin/access-tokens.md).
 
 ### Client certificates
 

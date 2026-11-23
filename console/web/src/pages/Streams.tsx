@@ -264,7 +264,7 @@ export function StreamDetail() {
         <Tabs.List className="tabs-list" aria-label="Stream sections">
           <Tabs.Trigger value="partitions">Partitions</Tabs.Trigger>
           <Tabs.Trigger value="groups">Consumer groups <span className="tag" style={{ marginLeft: 4, padding: '0 6px', fontSize: 12 }}>{d.groups.length}</span></Tabs.Trigger>
-          <Tabs.Trigger value="config">Config</Tabs.Trigger>
+          <Tabs.Trigger value="config">Settings</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="partitions" className="tabs-content"><Partitions d={d} cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="groups" className="tabs-content"><Groups d={d} /></Tabs.Content>

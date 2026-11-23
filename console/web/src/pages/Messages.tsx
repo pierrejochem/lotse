@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import * as Switch from '@radix-ui/react-switch';
 import { useMutation } from '@tanstack/react-query';
@@ -25,12 +25,15 @@ function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream:
     /* not JSON: show as is */
   }
   const copy = (text: string) => navigator.clipboard?.writeText(text).catch(() => {});
+  const title = useRef<HTMLHeadingElement>(null);
+  // Choosing a record moves focus to its panel, which is also what tells a screen reader that something opened.
+  useEffect(() => title.current?.focus({ preventScroll: true }), [r.offset]);
   return (
     <aside className="card stack" aria-labelledby="rec-title" style={{ flex: '2 1 380px', '--gap': '18px' } as React.CSSProperties}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
         <div>
           <span className="label">Record</span>
-          <h2 id="rec-title" className="mono" style={{ fontSize: 18, lineHeight: '26px', marginTop: 2 }}>
+          <h2 id="rec-title" ref={title} tabIndex={-1} className="mono" style={{ fontSize: 18, lineHeight: '26px', marginTop: 2 }}>
             {stream} / P{partition} / {count(r.offset)}
           </h2>
         </div>
@@ -81,6 +84,30 @@ function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream:
   );
 }
 
+/** Oldest, Older, Newer, Latest: a page is 50 records, and Older means lower offsets. */
+function Pager({ first, last, start, end, page, busy, onGo }: { first: number; last: number; start: number; end: number; page: number; busy: boolean; onGo: (from: number) => void }) {
+  const atStart = first <= start;
+  const atEnd = last >= end;
+  return (
+    <div style={{ padding: '12px 16px', borderTop: '1px solid var(--line)' }} className="stack">
+      <p className="small muted" style={{ margin: 0 }}>
+        Offsets {count(first)} to {count(last)}, oldest first. {page} records a page. Offsets {count(start)} to {count(end)} exist.
+      </p>
+      <div className="row" style={{ gap: 8 }}>
+        {/* aria-disabled, not disabled, so keyboard focus is not lost when the last page is reached. */}
+        <button type="button" className="btn" aria-disabled={atStart || busy} onClick={() => !atStart && !busy && onGo(start)}>Oldest</button>
+        <button type="button" className="btn" aria-disabled={atStart || busy} onClick={() => !atStart && !busy && onGo(Math.max(start, first - page))}>
+          <Icon name="chevron" size={14} className="rot-left" /> Older
+        </button>
+        <button type="button" className="btn" aria-disabled={atEnd || busy} onClick={() => !atEnd && !busy && onGo(last + 1)}>
+          Newer <Icon name="chevron" size={14} className="rot-right" />
+        </button>
+        <button type="button" className="btn" aria-disabled={atEnd || busy} onClick={() => !atEnd && !busy && onGo(Math.max(start, end - page + 1))}>Latest</button>
+      </div>
+    </div>
+  );
+}
+
 export function Messages() {
   const { cluster = '' } = useParams();
   const [params, setParams] = useSearchParams();
@@ -89,7 +116,8 @@ export function Messages() {
   const detail = useStream(cluster, stream);
   const [partition, setPartition] = useState(0);
   const [offset, setOffset] = useState('');
-  const [committed, setCommitted] = useState(false);
+  // Off is what a consumer reading only committed records sees (read_committed).
+  const [uncommitted, setUncommitted] = useState(true);
   const [selected, setSelected] = useState<number | null>(null);
   const read = useMutation({ mutationFn: (a: Parameters<typeof readRecords>[1]) => readRecords(cluster, a) });
 
@@ -99,10 +127,15 @@ export function Messages() {
     if (p && offset === '') setOffset(String(Math.max(p.log_start, p.high_watermark - 50)));
   }, [p, offset]);
 
+  const PAGE = 50;
+  function run(from: number) {
+    setSelected(null);
+    setOffset(String(from));
+    read.mutate({ stream, partition, offset: from, count: PAGE, isolation: uncommitted ? 'uncommitted' : 'committed' });
+  }
   function submit(e: FormEvent) {
     e.preventDefault();
-    setSelected(null);
-    read.mutate({ stream, partition, offset: Number(offset.replace(/[,\s]/g, '')) || 0, count: 50, isolation: committed ? 'committed' : 'uncommitted' });
+    run(Number(offset.replace(/[,\s]/g, '')) || 0);
   }
 
   const records = read.data?.records ?? [];
@@ -148,18 +181,20 @@ export function Messages() {
           <span id="mb-offset-help" className="help">{p ? `${count(p.log_start)} to ${count(p.high_watermark - 1)}` : ' '}</span>
         </div>
         <div className="field">
-          <span className="field-label" id="mb-iso">Committed only</span>
+          <span className="field-label" id="mb-iso">Show uncommitted records</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 40 }}>
-            <Switch.Root className="switch" checked={committed} onCheckedChange={setCommitted} aria-labelledby="mb-iso">
+            <Switch.Root className="switch" checked={uncommitted} onCheckedChange={setUncommitted} aria-labelledby="mb-iso" aria-describedby="mb-iso-help">
               <Switch.Thumb className="switch-thumb" />
             </Switch.Root>
-            <span className="small muted">{committed ? 'read_committed' : 'everything'}</span>
+            <span className="small">{uncommitted ? 'On' : 'Off'}</span>
           </div>
-          <span className="help"> </span>
+          <span id="mb-iso-help" className="help" style={{ maxWidth: 360 }}>
+            On: also records of open transactions, marked Uncommitted. Off: only records before the first open transaction, the view of a consumer that reads only committed records (read_committed).
+          </span>
         </div>
         <div className="field">
           <button type="submit" className="btn primary" disabled={!stream || read.isPending}>
-            {read.isPending ? 'Reading…' : 'Read 50 records'}
+            {read.isPending ? 'Reading…' : `Read ${PAGE} records`}
           </button>
           <span className="help"> </span>
         </div>
@@ -175,7 +210,7 @@ export function Messages() {
         <div className="row" style={{ alignItems: 'flex-start' }}>
           <TableWrap style={{ flex: '3 1 520px' }} label="Records">
             {records.length === 0 ? (
-              <p className="empty">No records from this offset{committed ? ' up to the last stable offset' : ''}.</p>
+              <p className="empty">No records at these offsets. Choose another partition or start offset{uncommitted ? '' : ', or turn on Show uncommitted records'}.</p>
             ) : (
               <table>
                 <thead>
@@ -183,7 +218,7 @@ export function Messages() {
                     <th scope="col" className="r">Offset</th>
                     <th scope="col">Time</th>
                     <th scope="col">Key</th>
-                    <th scope="col" className="r">Size</th>
+                    <th scope="col" className="r">Size (bytes)</th>
                     <th scope="col">Transaction</th>
                   </tr>
                 </thead>
@@ -203,15 +238,26 @@ export function Messages() {
                       </td>
                       <td className="mono muted">{clockMs(r.timestamp)}</td>
                       <td className="mono">{r.key ?? '—'}</td>
-                      <td className="r">{count(r.size_bytes)} B</td>
+                      <td className="r">{count(r.size_bytes)}</td>
                       <td><Chip tone={TXN[r.txn].tone}>{TXN[r.txn].text}</Chip></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
+            {records.length > 0 && p && (
+              <Pager
+                first={records[0]!.offset}
+                last={records[records.length - 1]!.offset}
+                start={p.log_start}
+                end={p.high_watermark - 1}
+                page={PAGE}
+                busy={read.isPending}
+                onGo={run}
+              />
+            )}
             <div style={{ padding: '12px 16px', borderTop: '1px solid var(--line)' }}>
-              <span className="label">Same read from the CLI</span>
+              <span className="label">Same as CLI command</span>
               <pre className="code" style={{ marginTop: 8 }}>{read.data.cli}</pre>
             </div>
           </TableWrap>

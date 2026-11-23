@@ -91,7 +91,7 @@ function Users({ cluster }: { cluster: string }) {
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list users. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list users.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
@@ -282,7 +282,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
                               { subject: x.principal, group: false, confirm },
                               {
                                 onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                                onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
+                                onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions. The cluster did not accept the change; try again.'), error: true }),
                               },
                             )
                           }
@@ -325,8 +325,8 @@ function RevokeByName({ cluster }: { cluster: string }) {
       </p>
       <div className="two">
         <div className="field">
-          <span className="field-label">Kind</span>
-          <Select label="Kind" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'group (identity provider)' }]} />
+          <span className="field-label">Applies to</span>
+          <Select label="Applies to" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'Group from your identity provider' }]} />
         </div>
         <div className="field">
           <label htmlFor="rev-name">{kind === 'group' ? 'Group name' : 'User name'}</label>
@@ -352,7 +352,7 @@ function RevokeByName({ cluster }: { cluster: string }) {
                     toast({ title: d.message, cli: d.cli });
                     setName('');
                   },
-                  onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
+                  onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions. The cluster did not accept the change; try again.'), error: true }),
                 },
               )
             }
@@ -380,7 +380,7 @@ function CertificateList({ cluster }: { cluster: string }) {
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list certificates. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list certificates.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
@@ -474,7 +474,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list certificate requests. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list certificate requests.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }

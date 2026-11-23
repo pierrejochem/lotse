@@ -191,7 +191,7 @@ export function Loading({ label = 'Loading' }: { label?: string }) {
 
 /** Shows a failed query with the server's message. */
 export function Failed({ error, retry }: { error: unknown; retry?: () => void }) {
-  const message = error instanceof ApiError ? error.message : 'Something went wrong while loading this page.';
+  const message = error instanceof ApiError ? error.message : 'The console could not load the data for this page. Check your connection and try again.';
   return (
     <Banner tone="critical" title={error instanceof ApiError && error.status === 404 ? 'Not found' : 'Could not load this page'} actions={retry && <button className="btn" onClick={retry}>Try again</button>}>
       {message}

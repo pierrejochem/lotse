@@ -87,7 +87,7 @@ describe('Tokens', () => {
     view();
     await user.click(await screen.findByRole('button', { name: /create token/i }));
     await user.type(await screen.findByLabelText('Name'), 'deploy');
-    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Create token' }));
 
     expect(await screen.findByText(SECRET)).toBeTruthy();
     expect(screen.getByText('This token is shown once. Store it now; it cannot be shown again.')).toBeTruthy();
@@ -127,7 +127,7 @@ describe('Tokens', () => {
     view();
     await user.click(await screen.findByRole('button', { name: /create token/i }));
     await user.type(await screen.findByLabelText('Name'), 'x');
-    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Create token' }));
     expect((await screen.findByRole('alert')).textContent).toContain('The cluster runs version 0.0; raise it to 0.1 first.');
   });
 
@@ -182,7 +182,7 @@ describe('Tokens', () => {
     await user.type(screen.getByLabelText('Owner'), 'svc-robot');
     post.mockImplementation(() => ok({ id: 8, text: SECRET, expires_ms: 1 }));
     await user.type(screen.getByLabelText('Name'), 'bot');
-    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Create token' }));
     await screen.findByText(SECRET);
     expect(post).toHaveBeenCalledWith(
       '/api/v1/clusters/{cluster}/tokens',

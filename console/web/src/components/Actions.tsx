@@ -51,7 +51,7 @@ export function RequeueButton({ cluster, dlq }: { cluster: string; dlq: string }
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Not now</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
               className="btn dark"
               onClick={() =>
@@ -93,7 +93,7 @@ export function MoveLeaderButton({
       { resource, partition, node },
       {
         onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not move the leader.', error: true }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not pin the leader. The cluster did not accept the change; try again.', error: true }),
       },
     );
   return (
@@ -183,7 +183,7 @@ export function ReplicationButton({ cluster, resource, current }: { cluster: str
                   { resource, factor },
                   {
                     onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                    onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the replication.', error: true }),
+                    onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the replication factor.', error: true }),
                   },
                 )
               }
@@ -222,7 +222,7 @@ export function PlaceButton({
       { resource, partition, nodes: to },
       {
         onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not place the partition.', error: true }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not place the partition on those nodes.', error: true }),
       },
     );
   const same = chosen.length === replicas.length && chosen.every((n) => replicas.includes(n));

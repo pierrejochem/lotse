@@ -34,9 +34,9 @@ function PauseButton({ cluster, node }: { cluster: string; node: string }) {
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep going</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Do not pause</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 pause.mutate(undefined, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -90,9 +90,9 @@ function RaiseButton({ cluster, from, to }: { cluster: string; from: string | nu
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Not yet</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 raise.mutate(undefined, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -198,7 +198,7 @@ export function Nodes() {
       {v.upgrade && <Upgrade u={v.upgrade} cluster={cluster} />}
 
       <section className="stack" aria-labelledby="cards-title">
-        <h2 id="cards-title" className="h2">Broker nodes</h2>
+        <h2 id="cards-title" className="h2">Nodes</h2>
         <div className="grid-auto" style={{ '--min': '300px' } as React.CSSProperties}>
           {v.nodes.map((n) => (
             <article key={n.id} className="card stack" style={{ '--gap': '14px' } as React.CSSProperties}>

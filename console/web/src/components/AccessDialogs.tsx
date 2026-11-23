@@ -428,8 +428,8 @@ export function BindingDialog({ cluster }: { cluster: string }) {
               )}
               <div className="two">
                 <div className="field">
-                  <span className="field-label">Kind</span>
-                  <Select label="Kind" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'group (identity provider)' }]} />
+                  <span className="field-label">Applies to</span>
+                  <Select label="Applies to" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'Group from your identity provider' }]} />
                 </div>
                 <div className="field">
                   <label htmlFor="bind-subject">{kind === 'group' ? 'Group name' : 'User name'}</label>

@@ -156,7 +156,7 @@ export function QueueDetail() {
                   <th scope="col">Consumer</th>
                   <th scope="col">Principal</th>
                   <th scope="col">Connection</th>
-                  <th scope="col">Credit in use</th>
+                  <th scope="col">Credit in use (messages)</th>
                   <th scope="col" className="r">Acks/s</th>
                   <th scope="col">State</th>
                 </tr>

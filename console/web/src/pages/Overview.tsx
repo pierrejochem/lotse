@@ -84,9 +84,9 @@ export function Overview() {
               <tr>
                 <th scope="col">Node</th>
                 <th scope="col">Role</th>
-                <th scope="col" className="r">Leads / replicas</th>
+                <th scope="col" className="r">Leader of / replicas</th>
                 <th scope="col">Disk free</th>
-                <th scope="col" className="r">Produce in</th>
+                <th scope="col" className="r">Produce throughput</th>
                 <th scope="col">Version</th>
                 <th scope="col">Status</th>
               </tr>
@@ -122,14 +122,14 @@ export function Overview() {
         <section className="stack" aria-labelledby="streams-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="streams-title" className="h2">Busiest streams</h2>
-            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'The one stream' : `All ${count(o.stream_count)} streams`}</Link>
+            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'View the stream' : `All ${count(o.stream_count)} streams`}</Link>
           </div>
           <TableWrap>
             <table>
               <thead>
                 <tr>
                   <th scope="col">Stream</th>
-                  <th scope="col" className="r">Parts</th>
+                  <th scope="col" className="r">Partitions</th>
                   <th scope="col" className="r">In</th>
                   <th scope="col" className="r">Stored</th>
                 </tr>
@@ -154,7 +154,7 @@ export function Overview() {
         <section className="stack" aria-labelledby="queues-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="queues-title" className="h2">Queues that need attention</h2>
-            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'The one queue' : `All ${count(o.queue_count)} queues`}</Link>
+            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'View the queue' : `All ${count(o.queue_count)} queues`}</Link>
           </div>
           <TableWrap>
             {o.attention_queues.length === 0 ? (

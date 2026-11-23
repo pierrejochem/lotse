@@ -264,7 +264,9 @@ tr.clickable.selected:hover { background: var(--selected-bg); }
 .btn.danger-solid { border-color: transparent; background: var(--danger-solid); color: var(--on-danger-solid); }
 .btn.danger-solid:hover { background: var(--danger-solid-hover); color: var(--on-danger-solid); }
 .btn.icon { width: 40px; padding: 0; }
-.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn:disabled, .btn[aria-disabled='true'] { opacity: 0.55; cursor: not-allowed; }
+.rot-left { transform: rotate(90deg); }
+.rot-right { transform: rotate(-90deg); }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > label, .field > .field-label { font-size: 14px; font-weight: 600; }
 .help { font-size: 13px; line-height: 18px; color: var(--ink-muted); }
@@ -416,3 +418,20 @@ pre.value { margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: var(
 .live .dot.connecting { background: var(--warn); }
 .live .dot.closed { background: var(--ink-muted); }
 .live.idle { display: none; }
+
+/* High-contrast mode drops backgrounds and shadows, so the states that rely on them get borders and outlines. */
+@media (forced-colors: active) {
+  .btn:disabled, .btn[aria-disabled='true'] { color: GrayText; border-color: GrayText; border-style: dashed; opacity: 1; }
+  tr.selected > :first-child { border-left: 4px solid Highlight; box-shadow: none; }
+  .toggle button[data-state='on'], .seg button[aria-pressed='true'] { outline: 2px solid Highlight; outline-offset: -2px; }
+  .nav a[aria-current='true'] { border-left: 3px solid Highlight; }
+  .switch { border-color: ButtonText; }
+  .switch[data-state='checked'] { background: Highlight; border-color: Highlight; }
+  .avatar { border: 1px solid ButtonText; }
+  .bar { border: 1px solid CanvasText; }
+  .bar > .fill { background: Highlight; }
+}
+
+.chart-data { margin-top: 4px; }
+.chart-data > summary { display: inline-flex; list-style: none; cursor: pointer; }
+.chart-data[open] > summary { margin-bottom: 12px; }

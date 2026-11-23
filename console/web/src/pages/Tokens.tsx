@@ -106,9 +106,12 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
                     : 'A token lets a script or a tool sign in to the cluster without a password or a certificate. It ends when its lifetime is up or when you revoke it.'}
                 </Dialog.Description>
               </div>
-              <Dialog.Close className="btn icon" aria-label="Close">
-                <Icon name="close" size={14} />
-              </Dialog.Close>
+              {/* While the text is shown only Done closes the dialog: an X would lose the only copy. */}
+              {!made && (
+                <Dialog.Close className="btn icon" aria-label="Close dialog">
+                  <Icon name="close" size={14} />
+                </Dialog.Close>
+              )}
             </div>
             <div className="dialog-body">
               {error && (
@@ -167,7 +170,7 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
               ) : (
                 <>
                   <Dialog.Close className="btn">Cancel</Dialog.Close>
-                  <button type="submit" className="btn primary" disabled={create.isPending}>Create</button>
+                  <button type="submit" className="btn primary" disabled={create.isPending}>Create token</button>
                 </>
               )}
             </div>
