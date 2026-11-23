@@ -31,6 +31,9 @@ usage:
   lotse upgrade finalize --config <cluster.toml> [--version <major.minor>] <admin>
   lotse upgrade release  --config <cluster.toml> --node <id> <admin>
   lotse probe <healthz|readyz|safe-to-stop> --config <cluster.toml> --node <id>
+  lotse mcp (--config <cluster.toml> | --bootstrap <host:port,...> --ca <file>) [--cert <file> --key <file>]
+            [--plaintext-on-loopback]
+            [--listen <host:port> [--tls-cert <file> --tls-key <file>] [--allow-origin <origin>]...]
   lotse --version
 
 run    runs the node; stops on Ctrl-C or SIGTERM. LOTSE_LOG sets the log
@@ -75,6 +78,23 @@ upgrade shows the cluster version, the turn and each node's release;
 probe  asks the node's operator endpoint ([[node]] metrics, on loopback)
        for /healthz, /readyz or /safe-to-stop; exit 0 for 200. For exec
        probes in a container without a shell.
+mcp    speaks the Model Context Protocol on stdin and stdout, for an AI
+       agent that starts it (ADR 0134): MCP 2026-07-28, and 2025-11-25 for
+       clients that open a session. It acts as one principal, from
+       LOTSE_TOKEN (an access token), LOTSE_USER and LOTSE_PASSWORD, or
+       --cert and --key (a client certificate); without one it exits 2.
+       It reaches the nodes the cluster file names, or those --bootstrap
+       names, over TLS with the CA of [tls] ca or --ca; plain TCP only with
+       --plaintext-on-loopback, to a loopback address. Logs go to stderr
+       (LOTSE_LOG, default info). With --listen it speaks MCP over
+       Streamable HTTP instead, at POST /mcp, for many agents: it holds no
+       credential of its own (giving it one is refused) and every request
+       signs in with its own Authorization header, Bearer <access token>
+       or Basic <user:password>; without one it gets 401. Plain HTTP only
+       on a loopback address; elsewhere --tls-cert and --tls-key (PEM)
+       make it HTTPS, else it exits 2. A request with an Origin header
+       (from a browser) is refused unless --allow-origin names it, as
+       scheme://host[:port]; null is refused.
        <admin> is --cert <file> --key <file> (a client certificate) or
        --user <name> with the password in LOTSE_PASSWORD.";
 
@@ -101,6 +121,13 @@ struct Args {
     yes: bool,
     wait: Option<std::time::Duration>,
     version: Option<String>,
+    bootstrap: Option<Vec<String>>,
+    ca: Option<PathBuf>,
+    plaintext_on_loopback: bool,
+    listen: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    allow_origin: Vec<String>,
 }
 
 fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -139,6 +166,21 @@ fn parse(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
                 a.wait = Some(duration(&v).ok_or_else(|| format!("--wait {v}: a time such as 90s, 30m or 2h"))?);
             }
             "--version" => a.version = Some(value()?),
+            "--bootstrap" => {
+                let v = value()?;
+                let addrs: Vec<String> =
+                    v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+                if addrs.is_empty() {
+                    return Err(format!("--bootstrap {v:?}: one or more host:port, separated by commas"));
+                }
+                a.bootstrap = Some(addrs);
+            }
+            "--ca" => a.ca = Some(PathBuf::from(value()?)),
+            "--plaintext-on-loopback" => a.plaintext_on_loopback = true,
+            "--listen" => a.listen = Some(value()?),
+            "--tls-cert" => a.tls_cert = Some(PathBuf::from(value()?)),
+            "--tls-key" => a.tls_key = Some(PathBuf::from(value()?)),
+            "--allow-origin" => a.allow_origin.push(value()?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -231,6 +273,21 @@ fn main() -> ExitCode {
             }
             _ => Err(format!("lotse probe needs healthz, readyz or safe-to-stop\n\n{USAGE}")),
         },
+        "mcp" => {
+            return match parse(args).and_then(|a| mcp_setup(&a)) {
+                Err(e) => {
+                    eprintln!("lotse: {e}");
+                    ExitCode::from(2)
+                }
+                Ok(setup) => match mcp(setup) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("lotse: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
+            };
+        }
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     };
     match result {
@@ -735,6 +792,110 @@ fn probe(path: &str, a: &Args) -> Result<bool, String> {
     let (status, body) = lotse_node::probe(&file, this_node(a)?, path)?;
     print!("{body}");
     Ok(status == 200)
+}
+
+/// What `lotse mcp` was asked for: where the cluster is and who to sign in
+/// as.
+struct McpSetup {
+    reach: lotse_node::mcp::Reach,
+    mode: McpMode,
+}
+
+/// Stdio as one principal, or HTTP with a credential per request.
+enum McpMode {
+    Stdio(lotse_node::mcp::SignIn),
+    Http(lotse_node::mcp::http::Listen),
+}
+
+/// Reads the flags and the environment of `lotse mcp`; an error here is a
+/// usage error, exit code 2.
+fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let mode = match &a.listen {
+        None => {
+            if a.tls_cert.is_some() || a.tls_key.is_some() || !a.allow_origin.is_empty() {
+                return Err("--tls-cert, --tls-key and --allow-origin go with --listen".into());
+            }
+            McpMode::Stdio(lotse_node::mcp::SignIn::choose(
+                env("LOTSE_TOKEN"),
+                env("LOTSE_USER"),
+                env("LOTSE_PASSWORD"),
+                a.cert.clone(),
+                a.key.clone(),
+            )?)
+        }
+        Some(listen) => {
+            let own = ["LOTSE_TOKEN", "LOTSE_USER", "LOTSE_PASSWORD"].iter().any(|v| env(v).is_some())
+                || a.cert.is_some()
+                || a.key.is_some();
+            let listen = lotse_node::mcp::http::Listen::new(
+                listen.clone(),
+                a.tls_cert.clone(),
+                a.tls_key.clone(),
+                a.allow_origin.clone(),
+                own,
+            )?;
+            for w in listen.warnings() {
+                eprintln!("lotse: warning: {w}");
+            }
+            McpMode::Http(listen)
+        }
+    };
+    let reach = match &a.bootstrap {
+        Some(bootstrap) => {
+            if a.config.is_some() {
+                return Err("--config and --bootstrap exclude each other".into());
+            }
+            lotse_node::mcp::Reach {
+                bootstrap: bootstrap.clone(),
+                ca: a.ca.clone(),
+                plaintext_on_loopback: a.plaintext_on_loopback,
+            }
+        }
+        None => {
+            let file = load(a).map_err(|e| format!("{e}; or give --bootstrap <host:port,...> --ca <file>"))?;
+            lotse_node::mcp::Reach {
+                bootstrap: file.nodes.iter().map(|n| n.client.clone()).collect(),
+                ca: a.ca.clone().or_else(|| file.tls.ca.as_ref().map(PathBuf::from)),
+                plaintext_on_loopback: a.plaintext_on_loopback,
+            }
+        }
+    };
+    let with_certificate = match &mode {
+        McpMode::Stdio(lotse_node::mcp::SignIn::Certificate { .. }) => true,
+        McpMode::Stdio(_) => false,
+        McpMode::Http(_) => a.cert.is_some(),
+    };
+    reach.validate(with_certificate)?;
+    Ok(McpSetup { reach, mode })
+}
+
+/// `lotse mcp`: signs in, then serves MCP on stdin and stdout; or serves
+/// it over HTTP, signing in per request. Logs go to stderr, since stdout
+/// carries only JSON-RPC.
+fn mcp(setup: McpSetup) -> Result<(), String> {
+    let filter = std::env::var("LOTSE_LOG").unwrap_or_else(|_| "info".into());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let sign_in = match setup.mode {
+        McpMode::Stdio(s) => s,
+        McpMode::Http(listen) => {
+            return rt.block_on(lotse_node::mcp::http::serve_http(setup.reach, listen, shutdown()));
+        }
+    };
+    rt.block_on(async {
+        let client = std::sync::Arc::new(lotse_node::mcp::client(&setup.reach, sign_in)?);
+        // Sign in before serving, so a wrong credential or an unreachable
+        // cluster shows when the agent starts the server, not at its first
+        // tool call.
+        let me = client.who_am_i().await.map_err(|e| format!("signing in to the cluster: {e}"))?;
+        tracing::info!(principal = %me.name, "signed in; serving MCP on stdio");
+        lotse_node::mcp::serve_stdio(client).await
+    })
 }
 
 #[cfg(test)]
