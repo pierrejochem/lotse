@@ -116,8 +116,17 @@ async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) 
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
+/// The nodes' log, filtered by `LOTSE_LOG` as the node's own
+/// (`info,lotse::raft=debug,lotse::stall=debug` for elections and stalls,
+/// ADR 0139); the test harness shows it for a test that fails.
+fn log() {
+    let filter = tracing_subscriber::EnvFilter::new(std::env::var("LOTSE_LOG").unwrap_or_else(|_| "warn".into()));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_console_shows_a_real_cluster() {
+    log();
     let root = std::env::temp_dir().join(format!("lotse-console-native-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let peers: BTreeMap<NodeId, String> = (1..=3).map(|id| (id, format!("127.0.0.1:{}", free_port()))).collect();

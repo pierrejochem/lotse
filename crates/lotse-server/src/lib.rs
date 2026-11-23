@@ -13,6 +13,7 @@ mod auth;
 mod client;
 mod coordinator;
 mod disk;
+mod elections;
 mod groups;
 mod membership;
 mod metadata;

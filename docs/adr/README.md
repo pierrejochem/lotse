@@ -141,5 +141,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0135 | [`alter_configs` asks for `confirm` when a setting can delete data](0135-alter-configs-asks-for-confirm-when-a-setting-can-delete-data.md) | Accepted |
 | 0136 | [Message lifetime and delivery limit need `confirm` too](0136-message-lifetime-and-delivery-limit-need-confirm-too.md) | Accepted |
 | 0137 | [The console ships in the release, with HTTPS of its own](0137-the-console-ships-in-the-release-with-https-of-its-own.md) | Accepted |
+| 0139 | [Nodes log their groups' elections and stalls](0139-nodes-log-their-groups-elections-and-stalls.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

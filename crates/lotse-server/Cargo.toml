@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 lotse-rt.workspace = true
+tracing.workspace = true
 lotse-record.workspace = true
 lotse-log.workspace = true
 lotse-raft.workspace = true
