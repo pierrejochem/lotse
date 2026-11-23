@@ -19,6 +19,8 @@ export function QueueList() {
         <Loading />
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
+      ) : q.data.length === 0 ? (
+        <p className="empty">No queues yet. Use Create queue to make one.</p>
       ) : (
         <TableWrap>
           <table>
@@ -148,7 +150,7 @@ export function QueueDetail() {
         <h2 id="consumers-title" className="h2">Consumers</h2>
         <TableWrap>
           {d.consumers.length === 0 ? (
-            <p className="empty">No consumer is subscribed.</p>
+            <p className="empty">No consumer is subscribed. Messages wait here until one is.</p>
           ) : (
             <table>
               <thead>

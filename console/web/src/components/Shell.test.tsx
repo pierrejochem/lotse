@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import * as Tooltip from '@radix-ui/react-tooltip';
@@ -84,6 +84,18 @@ describe('Shell', () => {
     const nav = await screen.findByRole('navigation', { name: 'Main navigation' });
     const trigger = await within(nav).findByRole('button', { name: /Switch cluster, current demo, upgrading to 0\.4\.1/ });
     expect(trigger.querySelector('svg.degraded-icon')).not.toBeNull();
+  });
+});
+
+describe('Shell phone menu', () => {
+  it('closes on Escape and gives the focus back to the menu button', async () => {
+    shellAt('/clusters/demo/nodes');
+    const button = await screen.findByRole('button', { name: 'Menu' });
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(button.getAttribute('aria-expanded')).toBe('false'));
+    expect(document.activeElement).toBe(button);
   });
 });
 

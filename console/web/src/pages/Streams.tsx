@@ -17,6 +17,8 @@ export function StreamList() {
         <Loading />
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
+      ) : q.data.length === 0 ? (
+        <p className="empty">No streams yet. Create one from a client, or with <span className="mono">lotse-cli</span>; it appears here at once.</p>
       ) : (
         <TableWrap>
           <table>

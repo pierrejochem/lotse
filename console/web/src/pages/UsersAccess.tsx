@@ -248,7 +248,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
         </p>
       </div>
       {v.sessions.length === 0 ? (
-        <p className="empty">No open sessions.</p>
+        <p className="empty">No open sessions. A session appears when a client signs in.</p>
       ) : (
         <TableWrap>
           <table>
@@ -466,7 +466,7 @@ function CertificateList({ cluster }: { cluster: string }) {
               </tr>
             ))}
             {shown.length === 0 && (
-              <tr><td colSpan={6} className="muted">No certificates{filter === 'all' ? ' seen yet' : ' match'}.</td></tr>
+              <tr><td colSpan={6} className="muted">No certificates{filter === 'all' ? ' seen yet. A certificate shows here after a node accepts it' : ' match'}.</td></tr>
             )}
           </tbody>
         </table>
@@ -549,7 +549,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
                 </td>
               </tr>
             ))}
-            {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests.' : 'No requests.'}</td></tr>}
+            {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests. Use Request certificate to ask for one.' : 'No requests. Use Request certificate to ask for one.'}</td></tr>}
           </tbody>
         </table>
       </TableWrap>

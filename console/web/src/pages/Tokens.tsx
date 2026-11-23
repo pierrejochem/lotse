@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError } from '../api/client';
@@ -39,6 +39,11 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
   const [made, setMade] = useState<Made | null>(null);
   const create = useCreateToken(cluster);
   const toast = useToast();
+  const secret = useRef<HTMLParagraphElement>(null);
+  // The form is replaced by the text; put the focus on the text, so a screen reader reads it and a keyboard can copy it.
+  useEffect(() => {
+    if (made) secret.current?.focus();
+  }, [made]);
   // Only a cluster admin may name an owner, and only a cluster admin can list users, so the suggestions come with the field.
   const users = useUsers(cluster, admin);
 
@@ -124,7 +129,7 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
               {made ? (
                 <>
                   <p style={{ margin: 0, fontWeight: 600 }}>This token is shown once. Store it now; it cannot be shown again.</p>
-                  <p className="mono small" style={{ margin: 0, wordBreak: 'break-all', userSelect: 'all' }}>{made.text}</p>
+                  <p ref={secret} tabIndex={-1} className="mono small" style={{ margin: 0, wordBreak: 'break-all', userSelect: 'all' }}>{made.text}</p>
                   <p className="muted" style={{ margin: 0 }}>It stops working on {day(made.expires_ms)}.</p>
                 </>
               ) : (

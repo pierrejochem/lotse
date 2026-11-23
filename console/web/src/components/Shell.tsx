@@ -90,6 +90,18 @@ function Nav({ cluster }: { cluster: string }) {
   const rail = useRail();
   const [open, setOpen] = useState(false);
   useEffect(() => setOpen(false), [location.pathname]);
+  const toggle = useRef<HTMLButtonElement>(null);
+  // Escape closes the phone menu and gives the focus back to its button.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      toggle.current?.focus();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
   const current = clusters.data?.find((c) => c.id === cluster);
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   const path = location.pathname.replace(/\/$/, '');
@@ -111,6 +123,7 @@ function Nav({ cluster }: { cluster: string }) {
         <strong>Lotse</strong>
         <span className="nav-console">Console</span>
         <button
+          ref={toggle}
           type="button"
           className="nav-toggle"
           aria-expanded={open}

@@ -198,7 +198,7 @@ export function Nodes() {
       {v.upgrade && <Upgrade u={v.upgrade} cluster={cluster} />}
 
       <section className="stack" aria-labelledby="cards-title">
-        <h2 id="cards-title" className="h2">Nodes</h2>
+        <h2 id="cards-title" className="h2">Node details</h2>
         <div className="grid-auto" style={{ '--min': '300px' } as React.CSSProperties}>
           {v.nodes.map((n) => (
             <article key={n.id} className="card stack" style={{ '--gap': '14px' } as React.CSSProperties}>
@@ -225,7 +225,7 @@ export function Nodes() {
               </div>
               <dl className="two" style={{ margin: 0, gap: '10px 16px', fontSize: 14 }}>
                 {[
-                  ['Leads / replicas', `${count(n.leads)} / ${count(n.replicas)}`],
+                  ['Leader of / replicas', `${count(n.leads)} / ${count(n.replicas)}`],
                   ['Version', n.version],
                   ['Connections', count(n.connections)],
                   ['Network in / out', `${rate(n.net_in_bytes_per_sec)} / ${rate(n.net_out_bytes_per_sec)}`],
@@ -251,7 +251,7 @@ export function Nodes() {
         <h2 id="events-title" className="h2">Operator events</h2>
         <TableWrap>
           {v.events.length === 0 ? (
-            <p className="empty">No operator events.</p>
+            <p className="empty">No operator events yet. They appear when the operator restarts or moves a node.</p>
           ) : (
             <table>
               <tbody>
