@@ -14,6 +14,8 @@
 # served only on loopback, so a container listens with [https].
 
 FROM node:22-alpine AS web
+# The web app shows the workspace version, which vite.config.ts reads from here.
+COPY Cargo.toml /src/Cargo.toml
 WORKDIR /src/console/web
 COPY console/web/package.json console/web/package-lock.json ./
 RUN npm ci --no-audit --no-fund --loglevel=error
