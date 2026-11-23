@@ -2,6 +2,7 @@ import * as ToggleGroup from '@radix-ui/react-toggle-group';
 import { useState } from 'react';
 import { useMetrics, type Range } from '../api/queries';
 import { bytes } from '../format';
+import { TableWrap } from './ui';
 
 const W = 700;
 const H = 226;
@@ -64,7 +65,8 @@ export function ThroughputChart({ cluster }: { cluster: string }) {
           Out: fetch and deliver{lastOut && <strong style={{ color: 'var(--ink)' }}>{bytes(lastOut.v)}/s</strong>}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 14, height: 8, borderRadius: 4, background: 'var(--brass)' }} aria-hidden="true" />
+          {/* Dashed, like its line, so the two series differ by more than colour. */}
+          <svg width="22" height="8" aria-hidden="true"><line x1="0" x2="22" y1="4" y2="4" stroke="var(--brass)" strokeWidth="2.5" strokeDasharray="6 3" /></svg>
           In: produce and publish{lastIn && <strong style={{ color: 'var(--ink)' }}>{bytes(lastIn.v)}/s</strong>}
         </span>
       </div>
@@ -75,7 +77,7 @@ export function ThroughputChart({ cluster }: { cluster: string }) {
           viewBox={`0 0 ${W} ${H}`}
           style={{ width: '100%', height: 'auto' }}
           role="img"
-          aria-label={`Throughput over the last ${LABEL[range]}: out ${lastOut ? bytes(lastOut.v) : ''}/s, in ${lastIn ? bytes(lastIn.v) : ''}/s now`}
+          aria-label={`Throughput over the last ${LABEL[range]}. Out varies between ${span(outs)}, in between ${span(ins)}. A data table follows.`}
         >
           {[0, 1, 2, 3, 4].map((i) => (
             <g key={i}>
@@ -94,11 +96,44 @@ export function ThroughputChart({ cluster }: { cluster: string }) {
             <path d={`M${line(outs)} L${x(outs.at(-1)!.t)},${B} L${x(outs[0]!.t)},${B}Z`} fill="var(--ink)" fillOpacity="0.07" />
           )}
           <polyline points={line(outs)} fill="none" stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round" />
-          <polyline points={line(ins)} fill="none" stroke="var(--brass)" strokeWidth="2" strokeLinejoin="round" />
+          <polyline points={line(ins)} fill="none" stroke="var(--brass)" strokeWidth="2" strokeLinejoin="round" strokeDasharray="6 3" />
           {lastOut && <circle cx={x(lastOut.t)} cy={y(lastOut.v)} r="4" fill="var(--ink)" />}
-          {lastIn && <circle cx={x(lastIn.t)} cy={y(lastIn.v)} r="4" fill="var(--brass)" />}
+          {lastIn && <rect x={x(lastIn.t) - 4} y={y(lastIn.v) - 4} width="8" height="8" fill="var(--brass)" />}
         </svg>
+      )}
+      {all.length >= 2 && (
+        <details className="chart-data">
+          <summary className="btn small">Show data table</summary>
+          <TableWrap label="Throughput samples">
+            <table>
+              <caption className="sr-only">Throughput samples over the last {LABEL[range]}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col" className="r">Out</th>
+                  <th scope="col" className="r">In</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ins.map((p, i) => (
+                  <tr key={p.t}>
+                    <th scope="row">{fmtTime(p.t)}</th>
+                    <td className="r num">{outs[i] ? `${bytes(outs[i]!.v)}/s` : '—'}</td>
+                    <td className="r num">{bytes(p.v)}/s</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        </details>
       )}
     </section>
   );
+}
+
+/** "12.0 MiB/s and 58.2 MiB/s" for the smallest and largest sample, for the chart's text alternative. */
+function span(pts: { v: number }[]): string {
+  if (pts.length === 0) return 'nothing';
+  const vs = pts.map((p) => p.v);
+  return `${bytes(Math.min(...vs))}/s and ${bytes(Math.max(...vs))}/s`;
 }

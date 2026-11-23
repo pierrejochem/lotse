@@ -1,10 +1,11 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError } from '../api/client';
-import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens } from '../api/queries';
+import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens, useUsers } from '../api/queries';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/toast';
-import { Failed, Icon, Loading } from '../components/ui';
+import { Failed, Icon, Loading, TableWrap } from '../components/ui';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
 const message = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
@@ -38,6 +39,13 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
   const [made, setMade] = useState<Made | null>(null);
   const create = useCreateToken(cluster);
   const toast = useToast();
+  const secret = useRef<HTMLParagraphElement>(null);
+  // The form is replaced by the text; put the focus on the text, so a screen reader reads it and a keyboard can copy it.
+  useEffect(() => {
+    if (made) secret.current?.focus();
+  }, [made]);
+  // Only a cluster admin may name an owner, and only a cluster admin can list users, so the suggestions come with the field.
+  const users = useUsers(cluster, admin);
 
   const close = () => {
     setName('');
@@ -105,9 +113,12 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
                     : 'A token lets a script or a tool sign in to the cluster without a password or a certificate. It ends when its lifetime is up or when you revoke it.'}
                 </Dialog.Description>
               </div>
-              <Dialog.Close className="btn icon" aria-label="Close">
-                <Icon name="close" size={14} />
-              </Dialog.Close>
+              {/* While the text is shown only Done closes the dialog: an X would lose the only copy. */}
+              {!made && (
+                <Dialog.Close className="btn icon" aria-label="Close dialog">
+                  <Icon name="close" size={14} />
+                </Dialog.Close>
+              )}
             </div>
             <div className="dialog-body">
               {error && (
@@ -118,7 +129,7 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
               {made ? (
                 <>
                   <p style={{ margin: 0, fontWeight: 600 }}>This token is shown once. Store it now; it cannot be shown again.</p>
-                  <p className="mono small" style={{ margin: 0, wordBreak: 'break-all', userSelect: 'all' }}>{made.text}</p>
+                  <p ref={secret} tabIndex={-1} className="mono small" style={{ margin: 0, wordBreak: 'break-all', userSelect: 'all' }}>{made.text}</p>
                   <p className="muted" style={{ margin: 0 }}>It stops working on {day(made.expires_ms)}.</p>
                 </>
               ) : (
@@ -147,8 +158,9 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
                   {admin && (
                     <div className="field">
                       <label htmlFor="tok-owner">Owner</label>
-                      <input id="tok-owner" className="input" value={owner} onChange={(e) => setOwner(e.target.value)} autoComplete="off" spellCheck={false} />
-                      <span className="muted small">The user it acts as, such as a service account. Empty: you.</span>
+                      <input id="tok-owner" className="input" list="tok-owners" placeholder="Me" value={owner} onChange={(e) => setOwner(e.target.value)} autoComplete="off" spellCheck={false} aria-describedby="tok-owner-help" />
+                      <datalist id="tok-owners">{(users.data?.users ?? []).map((u) => <option key={u.name} value={u.name} />)}</datalist>
+                      <span id="tok-owner-help" className="muted small">The user the token acts as, such as a service account. Leave empty to use yourself.</span>
                     </div>
                   )}
                   <p className="muted small" style={{ margin: 0 }}>
@@ -166,7 +178,7 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
               ) : (
                 <>
                   <Dialog.Close className="btn">Cancel</Dialog.Close>
-                  <button type="submit" className="btn primary" disabled={create.isPending}>Create</button>
+                  <button type="submit" className="btn primary" disabled={create.isPending}>Create token</button>
                 </>
               )}
             </div>
@@ -177,41 +189,31 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
   );
 }
 
-function RevokeTokenButton({ cluster, id, name }: { cluster: string; id: number; name: string }) {
+function RevokeTokenButton({ cluster, id, name, owner }: { cluster: string; id: number; name: string; owner: string }) {
   const revoke = useRevokeToken(cluster);
   const toast = useToast();
   return (
-    <AlertDialog.Root>
-      <AlertDialog.Trigger className="btn small">Revoke</AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
-          <div className="dialog-head">
-            <div>
-              <AlertDialog.Title className="h2">Revoke the token {name}?</AlertDialog.Title>
-              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                Connections signed in with this token end at once. Nobody can use it again. This cannot be undone.
-              </AlertDialog.Description>
-            </div>
-          </div>
-          <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep the token</AlertDialog.Cancel>
-            <AlertDialog.Action
-              className="btn danger"
-              disabled={revoke.isPending}
-              onClick={() =>
-                revoke.mutate(id, {
-                  onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                  onError: (e) => toast({ title: message(e, 'Could not revoke the token.'), error: true }),
-                })
-              }
-            >
-              Revoke token
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <ConfirmDialog
+      trigger={
+        <AlertDialog.Trigger className="btn small">
+          Revoke{' '}
+          <span className="sr-only">token {name} of {owner}</span>
+        </AlertDialog.Trigger>
+      }
+      title={`Revoke the token ${name}?`}
+      body={`Connections signed in with this token of ${owner} end at once. Nobody can use it again; make a new token to restore access. This cannot be undone.`}
+      name={name}
+      prompt="Type the token's name to revoke it"
+      action="Revoke token"
+      keep="Keep the token"
+      pending={revoke.isPending}
+      onConfirm={() =>
+        revoke.mutate(id, {
+          onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+          onError: (e) => toast({ title: message(e, `Could not revoke the token ${name}.`), error: true }),
+        })
+      }
+    />
   );
 }
 
@@ -256,9 +258,9 @@ export function Tokens({ cluster }: { cluster: string }) {
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
       ) : q.data.tokens.length === 0 ? (
-        <p className="empty">{owner ? `No tokens for ${owner}.` : 'No tokens.'}</p>
+        <p className="empty">{owner ? `No tokens for ${owner}.` : 'No tokens yet. A token lets a script or tool sign in as you. Create one to sign a script in.'}</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -281,12 +283,12 @@ export function Tokens({ cluster }: { cluster: string }) {
                   <td>{day(t.created_ms)}</td>
                   <td>{day(t.expires_ms)}</td>
                   <td className="mono">{tail(t.id)}</td>
-                  <td><RevokeTokenButton cluster={cluster} id={t.id} name={t.name} /></td>
+                  <td><RevokeTokenButton cluster={cluster} id={t.id} name={t.name} owner={t.owner} /></td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </section>
   );

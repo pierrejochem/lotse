@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { useOverview } from '../api/queries';
 import { ThroughputChart } from '../components/ThroughputChart';
-import { Banner, Chip, DiskBar, Failed, Loading } from '../components/ui';
+import { Banner, Chip, DiskBar, Failed, Loading, TableWrap } from '../components/ui';
 import { NONE_NOTE, bytes, count, counted, fraction, ms, percent, rate } from '../format';
 
 export function Overview() {
@@ -21,7 +21,7 @@ export function Overview() {
       <div>
         <h1 className="h1">Cluster overview</h1>
         <p className="sub">
-          {o.nodes.length} broker nodes · {count(o.raft_groups)} Raft groups · metadata leader{' '}
+          {counted(o.nodes.length, 'node')} · {count(o.raft_groups)} Raft groups · metadata leader{' '}
           <span className="mono">{o.metadata_leader}</span>, term {o.metadata_term}
         </p>
       </div>
@@ -59,14 +59,16 @@ export function Overview() {
           <h2 id="health-title" className="h3" style={{ marginBottom: 8 }}>Health</h2>
           <dl style={{ margin: 0 }}>
             {o.health.map((h) => (
-              <div key={h.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '12px 0', borderTop: '1px solid var(--line)' }}>
-                <div style={{ minWidth: 0 }}>
-                  <dt className="muted" style={{ fontSize: 14 }}>{h.label}</dt>
-                  <dd style={{ margin: '2px 0 0', fontWeight: 600 }}>
-                    {h.value} <span className="small muted" style={{ fontWeight: 400 }}>{h.detail}</span>
+              <div key={h.label} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: 12, padding: '12px 0', borderTop: '1px solid var(--line)' }}>
+                <dt className="muted" style={{ fontSize: 14, gridColumn: 1 }}>{h.label}</dt>
+                <dd style={{ margin: '2px 0 0', fontWeight: 600, gridColumn: 1 }}>
+                  {h.value} <span className="small muted" style={{ fontWeight: 400 }}>{h.detail}</span>
+                </dd>
+                {h.chip && (
+                  <dd style={{ margin: 0, gridColumn: 2, gridRow: '1 / span 2', alignSelf: 'center' }}>
+                    <Chip chip={h.chip} />
                   </dd>
-                </div>
-                {h.chip && <Chip chip={h.chip} />}
+                )}
               </div>
             ))}
           </dl>
@@ -78,15 +80,15 @@ export function Overview() {
           <h2 id="nodes-title" className="h2">Nodes</h2>
           <Link to={`${base}/nodes`} className="small" style={{ fontWeight: 600 }}>Nodes and upgrade</Link>
         </div>
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
                 <th scope="col">Node</th>
                 <th scope="col">Role</th>
-                <th scope="col" className="r">Leads / replicas</th>
+                <th scope="col" className="r">Leader of / replicas</th>
                 <th scope="col">Disk free</th>
-                <th scope="col" className="r">Produce in</th>
+                <th scope="col" className="r">Produce throughput</th>
                 <th scope="col">Version</th>
                 <th scope="col">Status</th>
               </tr>
@@ -110,7 +112,7 @@ export function Overview() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
         {o.nodes.some((n) => n.disk_free_limit_bytes) && (
           <p className="small muted" style={{ margin: 0 }}>
             The tick on the disk bar marks each node's free space limit. Below it, streams and queues with a replica on the node take no new data; reads and acks go on.
@@ -122,14 +124,14 @@ export function Overview() {
         <section className="stack" aria-labelledby="streams-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="streams-title" className="h2">Busiest streams</h2>
-            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'The one stream' : `All ${count(o.stream_count)} streams`}</Link>
+            <Link to={`${base}/streams`} className="small" style={{ fontWeight: 600 }}>{o.stream_count === 1 ? 'View the stream' : `All ${count(o.stream_count)} streams`}</Link>
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             <table>
               <thead>
                 <tr>
                   <th scope="col">Stream</th>
-                  <th scope="col" className="r">Parts</th>
+                  <th scope="col" className="r">Partitions</th>
                   <th scope="col" className="r">In</th>
                   <th scope="col" className="r">Stored</th>
                 </tr>
@@ -148,15 +150,15 @@ export function Overview() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableWrap>
         </section>
 
         <section className="stack" aria-labelledby="queues-title" style={{ flex: '1 1 520px' }}>
           <div className="between">
             <h2 id="queues-title" className="h2">Queues that need attention</h2>
-            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'The one queue' : `All ${count(o.queue_count)} queues`}</Link>
+            <Link to={`${base}/queues`} className="small" style={{ fontWeight: 600 }}>{o.queue_count === 1 ? 'View the queue' : `All ${count(o.queue_count)} queues`}</Link>
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             {o.attention_queues.length === 0 ? (
               <p className="empty">No queue needs attention.</p>
             ) : (
@@ -165,7 +167,7 @@ export function Overview() {
                   <tr>
                     <th scope="col">Queue</th>
                     <th scope="col" className="r">Ready</th>
-                    <th scope="col" className="r">DLQ</th>
+                    <th scope="col" className="r">Dead letters</th>
                     <th scope="col">Why</th>
                   </tr>
                 </thead>
@@ -184,7 +186,7 @@ export function Overview() {
                 </tbody>
               </table>
             )}
-          </div>
+          </TableWrap>
         </section>
       </div>
     </main>

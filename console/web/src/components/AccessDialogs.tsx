@@ -1,10 +1,11 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError, type S } from '../api/client';
 import { useAlterBinding, useRequestCertificate, useSetCredential, useTenants } from '../api/queries';
 import { canRequest, makeCertificateRequest, principalError } from '../certificateRequest';
 import { canDerive, deriveCredential } from '../scramCredential';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useToast } from './toast';
 import { Icon, Select } from './ui';
 
@@ -27,7 +28,7 @@ export function TypedConfirmButton({
   pending,
   onConfirm,
 }: {
-  trigger: string;
+  trigger: ReactNode;
   title: string;
   body: ReactNode;
   name: string;
@@ -38,42 +39,18 @@ export function TypedConfirmButton({
   pending?: boolean;
   onConfirm: (typed: string) => void;
 }) {
-  const [typed, setTyped] = useState('');
   return (
-    <AlertDialog.Root onOpenChange={(open) => !open && setTyped('')}>
-      <AlertDialog.Trigger className={`btn${small ? ' small' : ''}`}>{trigger}</AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
-          <div className="dialog-head">
-            <div>
-              <AlertDialog.Title className="h2">{title}</AlertDialog.Title>
-              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                {body}
-              </AlertDialog.Description>
-            </div>
-          </div>
-          <div className="field" style={{ padding: '4px 24px 8px' }}>
-            <label htmlFor="typed-confirm">{prompt}</label>
-            <input
-              id="typed-confirm"
-              className="input mono"
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              placeholder={name}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-          <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">{keep}</AlertDialog.Cancel>
-            <AlertDialog.Action className="btn danger" disabled={typed !== name || pending} onClick={() => onConfirm(typed)}>
-              {action}
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <ConfirmDialog
+      trigger={<AlertDialog.Trigger className={`btn${small ? ' small' : ''}`}>{trigger}</AlertDialog.Trigger>}
+      title={title}
+      body={body}
+      name={name}
+      prompt={prompt}
+      action={action}
+      keep={keep}
+      pending={pending}
+      onConfirm={onConfirm}
+    />
   );
 }
 
@@ -81,14 +58,34 @@ export function TypedConfirmButton({
  * Creates a user or sets a new password. The browser derives the SCRAM
  * credential; the console and the cluster never see the password (ADR 0089).
  */
-export function PasswordDialog({ cluster, user }: { cluster: string; user?: string }) {
-  const [open, setOpen] = useState(false);
+export function PasswordDialog({
+  cluster,
+  user,
+  controlled,
+}: {
+  cluster: string;
+  user?: string;
+  /** The caller opens it, from a row menu; the dialog then has no trigger of its own. */
+  controlled?: { open: boolean; onOpenChange: (open: boolean) => void; returnFocus?: RefObject<HTMLElement | null> };
+}) {
+  const [inner, setInner] = useState(false);
+  const open = controlled ? controlled.open : inner;
+  const setOpen = controlled ? controlled.onOpenChange : setInner;
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [again, setAgain] = useState('');
   const [error, setError] = useState<string | null>(null);
   const set = useSetCredential(cluster);
   const toast = useToast();
+  // Opened from a row menu, the dialog is not asked to open by its own trigger, so it clears itself when it opens.
+  useEffect(() => {
+    if (open) {
+      setName('');
+      setPassword('');
+      setAgain('');
+      setError(null);
+    }
+  }, [open]);
   const target = user ?? name.trim();
   const mismatch = again !== '' && again !== password;
   const secure = canDerive();
@@ -129,12 +126,19 @@ export function PasswordDialog({ cluster, user }: { cluster: string; user?: stri
         }
       }}
     >
-      <Dialog.Trigger className={user ? 'btn small' : 'btn primary'}>
-        {user ? 'Set password' : <><Icon name="plus" /> Add user</>}
-      </Dialog.Trigger>
+      {!controlled && (
+        <Dialog.Trigger className={user ? 'btn small' : 'btn primary'}>
+          {user ? 'Set password' : <><Icon name="plus" /> Create user</>}
+        </Dialog.Trigger>
+      )}
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="dialog" style={narrow} aria-describedby="pw-desc">
+        <Dialog.Content
+          className="dialog"
+          style={narrow}
+          aria-describedby="pw-desc"
+          onCloseAutoFocus={controlled?.returnFocus ? (e) => (e.preventDefault(), controlled.returnFocus?.current?.focus()) : undefined}
+        >
           <form onSubmit={submit} style={{ display: 'contents' }} noValidate>
             <div className="dialog-head">
               <div>
@@ -404,7 +408,7 @@ export function BindingDialog({ cluster }: { cluster: string }) {
       }}
     >
       <Dialog.Trigger className="btn primary">
-        <Icon name="plus" /> Add binding
+        <Icon name="plus" /> Add role binding
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
@@ -429,8 +433,8 @@ export function BindingDialog({ cluster }: { cluster: string }) {
               )}
               <div className="two">
                 <div className="field">
-                  <span className="field-label">Kind</span>
-                  <Select label="Kind" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'group (identity provider)' }]} />
+                  <span className="field-label">Applies to</span>
+                  <Select label="Applies to" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'Group from your identity provider' }]} />
                 </div>
                 <div className="field">
                   <label htmlFor="bind-subject">{kind === 'group' ? 'Group name' : 'User name'}</label>

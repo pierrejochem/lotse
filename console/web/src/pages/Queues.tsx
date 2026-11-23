@@ -1,9 +1,31 @@
-import { Link, useParams } from 'react-router-dom';
+import { useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQueue, useQueues } from '../api/queries';
-import { MoveLeaderButton, PlaceButton, PurgeButton, ReplicationButton, RequeueButton } from '../components/Actions';
+import { MoveLeaderButton, PlaceButton, PurgeButton, PurgeDialog, ReplicationButton, RequeueButton } from '../components/Actions';
+import { RowMenu } from '../components/RowMenu';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
-import { Bar, Chip, Failed, Loading, Stats } from '../components/ui';
+import { Bar, Chip, Failed, Loading, Stats, TableWrap } from '../components/ui';
 import { NONE, bytes, clock, count, duration } from '../format';
+
+/** The "…" menu of a queue row: open it, or purge it (which asks for its name first). */
+function QueueRowMenu({ cluster, name, ready }: { cluster: string; name: string; ready: number }) {
+  const navigate = useNavigate();
+  const menu = useRef<HTMLButtonElement>(null);
+  const [asking, setAsking] = useState(false);
+  return (
+    <>
+      <RowMenu
+        triggerRef={menu}
+        label={`Actions for ${name}`}
+        actions={[
+          { label: 'Open queue', onSelect: () => navigate(`/clusters/${encodeURIComponent(cluster)}/queues/${encodeURIComponent(name)}`) },
+          { label: 'Purge queue', danger: true, onSelect: () => setAsking(true) },
+        ]}
+      />
+      <PurgeDialog cluster={cluster} queue={name} ready={ready} open={asking} onOpenChange={setAsking} returnFocus={menu} />
+    </>
+  );
+}
 
 export function QueueList() {
   const { cluster = '' } = useParams();
@@ -19,8 +41,10 @@ export function QueueList() {
         <Loading />
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
+      ) : q.data.length === 0 ? (
+        <p className="empty">No queues yet. Use Create queue to make one.</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -29,6 +53,7 @@ export function QueueList() {
                 <th scope="col" className="r">Ready</th>
                 <th scope="col" className="r">Dead-lettered</th>
                 <th scope="col">Attention</th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -39,11 +64,12 @@ export function QueueList() {
                   <td className="r">{count(r.ready)}</td>
                   <td className="r">{count(r.dead_lettered)}</td>
                   <td>{r.attention ? <Chip chip={r.attention} /> : <span className="muted">None</span>}</td>
+                  <td className="r"><QueueRowMenu cluster={cluster} name={r.name} ready={r.ready} /></td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </main>
   );
@@ -93,7 +119,7 @@ export function QueueDetail() {
           { label: 'In open txns', value: count(d.in_open_txns), note: 'acks waiting for commit' },
           { label: 'Publish', value: `${count(d.publish_per_sec)}/s` },
           { label: 'Ack', value: `${count(d.ack_per_sec)}/s` },
-          { label: 'Dead-lettered', value: count(d.dead_lettered), note: d.dlq ?? 'no DLQ' },
+          { label: 'Dead-lettered', value: count(d.dead_lettered), note: d.dlq ?? 'no dead-letter queue' },
         ]}
       />
 
@@ -146,9 +172,9 @@ export function QueueDetail() {
 
       <section className="stack" aria-labelledby="consumers-title">
         <h2 id="consumers-title" className="h2">Consumers</h2>
-        <div className="table-wrap">
+        <TableWrap>
           {d.consumers.length === 0 ? (
-            <p className="empty">No consumer is subscribed.</p>
+            <p className="empty">No consumer is subscribed. Messages wait here until one is.</p>
           ) : (
             <table>
               <thead>
@@ -156,7 +182,7 @@ export function QueueDetail() {
                   <th scope="col">Consumer</th>
                   <th scope="col">Principal</th>
                   <th scope="col">Connection</th>
-                  <th scope="col">Credit in use</th>
+                  <th scope="col">Credit in use (messages)</th>
                   <th scope="col" className="r">Acks/s</th>
                   <th scope="col">State</th>
                 </tr>
@@ -180,7 +206,7 @@ export function QueueDetail() {
               </tbody>
             </table>
           )}
-        </div>
+        </TableWrap>
       </section>
 
       {d.dlq && (
@@ -191,7 +217,7 @@ export function QueueDetail() {
             </h2>
             <RequeueButton cluster={cluster} dlq={d.dlq} />
           </div>
-          <div className="table-wrap">
+          <TableWrap>
             {d.dead_letters.length === 0 ? (
               <p className="empty">No dead letters.</p>
             ) : (
@@ -218,7 +244,7 @@ export function QueueDetail() {
                 </tbody>
               </table>
             )}
-          </div>
+          </TableWrap>
         </section>
       )}
     </main>

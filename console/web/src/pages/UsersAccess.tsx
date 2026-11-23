@@ -1,13 +1,17 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { credentialTab } from './credentialTabs';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
+import { counted } from '../format';
 import {
   useAlterBinding,
   useBindings,
   useCertificateRequests,
   useCertificates,
   useDeleteUser,
+  useMe,
   useRevokeCertificate,
   useRevokeSessions,
   useSessions,
@@ -15,30 +19,100 @@ import {
 } from '../api/queries';
 import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { RowMenu } from '../components/RowMenu';
 import { Tokens } from './Tokens';
-import { Chip, Failed, Loading, Select } from '../components/ui';
+import { Chip, Failed, Loading, Select, TableWrap } from '../components/ui';
 
 const failure = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
-function Users({ cluster }: { cluster: string }) {
-  const q = useUsers(cluster);
+/** What can be done to a user made at runtime: set a password, end their sessions, delete them. Each asks first. */
+function UserActions({ cluster, name, only, self }: { cluster: string; name: string; only: boolean; self: boolean }) {
   const del = useDeleteUser(cluster);
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
+  const [asking, setAsking] = useState<'password' | 'sessions' | 'delete' | null>(null);
+  const menu = useRef<HTMLButtonElement>(null);
+  const close = (o: boolean) => !o && setAsking(null);
+  return (
+    <div className="row" style={{ justifyContent: 'flex-end' }}>
+      <RowMenu
+        triggerRef={menu}
+        label={`Actions for ${name}`}
+        actions={[
+          { label: 'Set password', onSelect: () => setAsking('password') },
+          { label: 'Revoke sessions', onSelect: () => setAsking('sessions') },
+          { label: 'Delete user', danger: true, onSelect: () => setAsking('delete') },
+        ]}
+      />
+      <PasswordDialog cluster={cluster} user={name} controlled={{ open: asking === 'password', onOpenChange: close, returnFocus: menu }} />
+      <ConfirmDialog
+        open={asking === 'sessions'}
+        onOpenChange={close}
+        returnFocus={menu}
+        title={`Revoke the sessions of ${name}?`}
+        body="Sessions that began before now end. The user can sign in again with their password or certificate. Their access tokens stop working; revoke a token on the Tokens page to remove it."
+        name={name}
+        prompt="Type the user's name to revoke their sessions"
+        action="Revoke sessions"
+        keep="Keep the sessions"
+        pending={revoke.isPending}
+        onConfirm={(confirm) =>
+          revoke.mutate(
+            { subject: name, group: false, confirm },
+            {
+              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+              onError: (e) => toast({ title: failure(e, `Could not revoke the sessions of ${name}.`), error: true }),
+            },
+          )
+        }
+      />
+      <ConfirmDialog
+        open={asking === 'delete'}
+        onOpenChange={close}
+        returnFocus={menu}
+        title={`Delete ${name}?`}
+        body={`Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now. Scripts that sign in as ${name} fail with an authentication error. To restore access, create the user again with a new password.${self ? ' This is the user you are signed in as; you will be signed out when your session ends.' : ''}`}
+        refuse={only ? `${name} is the only cluster admin. Make another user a cluster admin first.` : undefined}
+        name={name}
+        prompt="Type the user's name to delete them"
+        action={`Delete ${name}`}
+        keep="Keep the user"
+        pending={del.isPending}
+        onConfirm={(confirm) =>
+          del.mutate(
+            { name, confirm },
+            {
+              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+              onError: (e) => toast({ title: failure(e, `Could not delete ${name}.`), error: true }),
+            },
+          )
+        }
+      />
+    </div>
+  );
+}
+
+function Users({ cluster }: { cluster: string }) {
+  const q = useUsers(cluster);
+  const me = useMe();
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list users. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list users.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
+  const isAdmin = (roles: string[]) => roles.some((r) => r.startsWith('cluster-admin'));
+  const admins = q.data.users.filter((u) => isAdmin(u.roles));
+  const onlyAdmin = (name: string) => admins.length === 1 && admins[0]?.name === name;
   return (
     <div className="stack">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <p className="sub" style={{ margin: 0 }}>SCRAM-SHA-512 users. Users from the node configuration are read only.</p>
         <PasswordDialog cluster={cluster} />
       </div>
-      <section className="table-wrap" aria-label="Users">
+      <TableWrap label="Users">
         <table>
           <thead>
             <tr>
@@ -58,49 +132,7 @@ function Users({ cluster }: { cluster: string }) {
                 <td>{u.roles.length ? u.roles.join(', ') : <span className="muted">none</span>}</td>
                 <td>
                   {u.source === 'runtime' ? (
-                    <div className="row" style={{ justifyContent: 'flex-end' }}>
-                      <PasswordDialog cluster={cluster} user={u.name} />
-                      <TypedConfirmButton
-                        small
-                        trigger="Delete"
-                        title={`Delete ${u.name}?`}
-                        body="Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now."
-                        name={u.name}
-                        prompt="Type the user's name to delete it"
-                        action={`Delete ${u.name}`}
-                        keep="Keep the user"
-                        pending={del.isPending}
-                        onConfirm={(confirm) =>
-                          del.mutate(
-                            { name: u.name, confirm },
-                            {
-                              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                              onError: (e) => toast({ title: failure(e, `Could not delete ${u.name}.`), error: true }),
-                            },
-                          )
-                        }
-                      />
-                      <TypedConfirmButton
-                        small
-                        trigger="Revoke sessions"
-                        title={`Revoke the sessions of ${u.name}?`}
-                        body="Sessions that began before now end. The user can sign in again with the password."
-                        name={u.name}
-                        prompt="Type the user's name to revoke its sessions"
-                        action="Revoke sessions"
-                        keep="Keep the sessions"
-                        pending={revoke.isPending}
-                        onConfirm={(confirm) =>
-                          revoke.mutate(
-                            { subject: u.name, group: false, confirm },
-                            {
-                              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                              onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
-                            },
-                          )
-                        }
-                      />
-                    </div>
+                    <UserActions cluster={cluster} name={u.name} only={onlyAdmin(u.name)} self={u.name === me.data?.principal} />
                   ) : (
                     <span className="muted small">Configured on the nodes</span>
                   )}
@@ -109,7 +141,7 @@ function Users({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -137,7 +169,7 @@ function Bindings({ cluster }: { cluster: string }) {
           {can_edit && <BindingDialog cluster={cluster} />}
         </div>
       </div>
-      <section className="table-wrap" aria-label="Role bindings">
+      <TableWrap label="Role bindings">
         <table>
           <thead>
             <tr>
@@ -182,7 +214,7 @@ function Bindings({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -199,6 +231,7 @@ function ago(ms: number, now: number): string {
 /** The open client sessions on every node (ADR 0121): all for a cluster admin or viewer, one's own otherwise. */
 function OpenSessions({ cluster }: { cluster: string }) {
   const q = useSessions(cluster);
+  const me = useMe();
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
   if (q.isPending) return <Loading />;
@@ -215,9 +248,9 @@ function OpenSessions({ cluster }: { cluster: string }) {
         </p>
       </div>
       {v.sessions.length === 0 ? (
-        <p className="empty">No open sessions.</p>
+        <p className="empty">No open sessions. A session appears when a client signs in.</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -235,6 +268,9 @@ function OpenSessions({ cluster }: { cluster: string }) {
                 <tr key={`${x.node}-${x.peer}-${i}`}>
                   <th scope="row">
                     <span className="mono">{x.principal}</span>
+                    {x.principal === me.data?.principal && <span className="small muted"> · you</span>}
+                    {' '}
+                    <span className="sr-only">from {x.peer}</span>
                     {x.groups.length > 0 && <span className="small muted"> · {x.groups.join(', ')}</span>}
                   </th>
                   <td>{x.mechanism}</td>
@@ -246,11 +282,11 @@ function OpenSessions({ cluster }: { cluster: string }) {
                     <td>
                       {x.kind === 'user' && (
                         <TypedConfirmButton
-                          trigger="Revoke"
-                          title={`Revoke the sessions of ${x.principal}?`}
+                          trigger={<>Revoke all{' '}<span className="sr-only">sessions of {x.principal}</span></>}
+                          title={`Revoke all sessions of ${x.principal}?`}
                           body="Every session of this user that began before now ends, on every node, and older tokens are refused. This cannot be undone."
                           name={x.principal}
-                          prompt="Type the user's name to revoke its sessions"
+                          prompt="Type the user's name to revoke their sessions"
                           action="Revoke sessions"
                           keep="Keep the sessions"
                           pending={revoke.isPending}
@@ -259,7 +295,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
                               { subject: x.principal, group: false, confirm },
                               {
                                 onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                                onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
+                                onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions. The cluster did not accept the change; try again.'), error: true }),
                               },
                             )
                           }
@@ -271,7 +307,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </section>
   );
@@ -282,7 +318,7 @@ function Sessions({ cluster }: { cluster: string }) {
     <div className="stack" style={{ gap: 32 }}>
       <OpenSessions cluster={cluster} />
       <details>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke the sessions of a user or group by name</summary>
+        <summary className="disclosure">Revoke the sessions of a user or group by name</summary>
         <div style={{ paddingTop: 16 }}><RevokeByName cluster={cluster} /></div>
       </details>
     </div>
@@ -302,8 +338,8 @@ function RevokeByName({ cluster }: { cluster: string }) {
       </p>
       <div className="two">
         <div className="field">
-          <span className="field-label">Kind</span>
-          <Select label="Kind" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'group (identity provider)' }]} />
+          <span className="field-label">Applies to</span>
+          <Select label="Applies to" sans value={kind} onChange={setKind} options={[{ value: 'user' }, { value: 'group', label: 'Group from your identity provider' }]} />
         </div>
         <div className="field">
           <label htmlFor="rev-name">{kind === 'group' ? 'Group name' : 'User name'}</label>
@@ -329,7 +365,7 @@ function RevokeByName({ cluster }: { cluster: string }) {
                     toast({ title: d.message, cli: d.cli });
                     setName('');
                   },
-                  onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
+                  onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions. The cluster did not accept the change; try again.'), error: true }),
                 },
               )
             }
@@ -357,7 +393,7 @@ function CertificateList({ cluster }: { cluster: string }) {
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list certificates. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list certificates.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
@@ -377,7 +413,7 @@ function CertificateList({ cluster }: { cluster: string }) {
           options={[{ value: 'all', label: 'All' }, { value: 'expiring', label: 'Expiring within 30 days' }, { value: 'revoked', label: 'Revoked' }, { value: 'expired', label: 'Expired' }]}
         />
       </div>
-      <section className="table-wrap" aria-label="Client certificates">
+      <TableWrap label="Client certificates">
         <table>
           <thead>
             <tr>
@@ -396,7 +432,7 @@ function CertificateList({ cluster }: { cluster: string }) {
                 <td className="mono">{c.serial}</td>
                 <td>
                   {when(c.not_after_ms)}
-                  {c.state === 'valid' || c.state === 'expiring' ? <span className="muted small"> ({Math.max(0, Math.round((c.not_after_ms - now_ms) / DAY))} days)</span> : null}
+                  {c.state === 'valid' || c.state === 'expiring' ? <span className="muted small"> ({counted(Math.max(0, Math.round((c.not_after_ms - now_ms) / DAY)), 'day')})</span> : null}
                 </td>
                 <td>{when(c.last_seen_ms)}</td>
                 <td>
@@ -430,11 +466,11 @@ function CertificateList({ cluster }: { cluster: string }) {
               </tr>
             ))}
             {shown.length === 0 && (
-              <tr><td colSpan={6} className="muted">No certificates{filter === 'all' ? ' seen yet' : ' match'}.</td></tr>
+              <tr><td colSpan={6} className="muted">No certificates{filter === 'all' ? ' seen yet. A certificate shows here after a node accepts it' : ' match'}.</td></tr>
             )}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -451,7 +487,7 @@ function CertificateRequests({ cluster }: { cluster: string }) {
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
-      return <p className="muted">Only cluster admins can list certificate requests. {q.error.message}</p>;
+      return <p className="muted">You need the cluster-admin role to list certificate requests.</p>;
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
@@ -478,13 +514,13 @@ function CertificateRequests({ cluster }: { cluster: string }) {
           No role is bound to {principal} itself. A certificate signs in without your identity provider&apos;s groups, so it would grant nothing until a cluster admin binds a role to {principal}.
         </p>
       )}
-      <section className="table-wrap" aria-label="Certificate requests">
+      <TableWrap label="Certificate requests">
         <table>
           <thead>
             <tr>
               <th scope="col">Principal</th>
-              <th scope="col">Asked by</th>
-              <th scope="col">Asked</th>
+              <th scope="col">Requested by</th>
+              <th scope="col">Requested</th>
               <th scope="col">Key fingerprint</th>
               <th scope="col">State</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
@@ -513,10 +549,10 @@ function CertificateRequests({ cluster }: { cluster: string }) {
                 </td>
               </tr>
             ))}
-            {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests.' : 'No requests.'}</td></tr>}
+            {requests.length === 0 && <tr><td colSpan={6} className="muted">{mine ? 'You have no requests. Use Request certificate to ask for one.' : 'No requests. Use Request certificate to ask for one.'}</td></tr>}
           </tbody>
         </table>
-      </section>
+      </TableWrap>
     </div>
   );
 }
@@ -541,12 +577,14 @@ function RevokeBySerial({ cluster }: { cluster: string }) {
       </p>
       <div className="field">
         <label htmlFor="cert-issuer">Issuer (SHA-256 of the issuer name, 64 hex digits)</label>
-        <input id="cert-issuer" className="input" value={issuer} onChange={(e) => setIssuer(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={issuer !== '' && !issuerOk ? true : undefined} />
+        <input id="cert-issuer" className="input" value={issuer} onChange={(e) => setIssuer(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={issuer !== '' && !issuerOk ? true : undefined} aria-describedby="cert-issuer-err" />
+        <span id="cert-issuer-err" className="error-text">{issuer !== '' && !issuerOk ? 'Enter the issuer as 64 hexadecimal digits.' : ''}</span>
       </div>
       <div className="two">
         <div className="field">
           <label htmlFor="cert-serial">Serial (hex)</label>
-          <input id="cert-serial" className="input" value={serial} onChange={(e) => setSerial(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={serial !== '' && !serialOk ? true : undefined} />
+          <input id="cert-serial" className="input" value={serial} onChange={(e) => setSerial(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={serial !== '' && !serialOk ? true : undefined} aria-describedby="cert-serial-err" />
+          <span id="cert-serial-err" className="error-text">{serial !== '' && !serialOk ? 'Enter the serial as hexadecimal digits.' : ''}</span>
         </div>
         <div className="field">
           <label htmlFor="cert-until">Valid until</label>
@@ -597,44 +635,75 @@ function CertificatesTab({ cluster }: { cluster: string }) {
     <Tabs.Trigger value="certificates">
       Certificates
       {waiting > 0 && (
-        <span className="chip warn" style={{ marginLeft: 6 }} aria-label={`${waiting} waiting for the CA holder`}>
-          {waiting}
-        </span>
+        <>
+          <span className="chip warn" style={{ marginLeft: 6 }} aria-hidden="true">
+            {waiting}
+          </span>
+          <span className="sr-only"> ({waiting} waiting for the CA holder)</span>
+        </>
       )}
     </Tabs.Trigger>
   );
 }
 
+/** Requests wait for someone with the CA key; Accepted lists what nodes have seen. Two views, one at a time. */
+function Certificates({ cluster }: { cluster: string }) {
+  const [view, setView] = useState<'requests' | 'accepted'>('requests');
+  return (
+    <div className="stack" style={{ gap: 24 }}>
+      <div className="seg" role="group" aria-label="Certificate view">
+        <button type="button" aria-pressed={view === 'requests'} onClick={() => setView('requests')}>Requests</button>
+        <button type="button" aria-pressed={view === 'accepted'} onClick={() => setView('accepted')}>Accepted</button>
+      </div>
+      {view === 'requests' ? (
+        <CertificateRequests cluster={cluster} />
+      ) : (
+        <>
+          <CertificateList cluster={cluster} />
+          <details>
+            <summary className="disclosure">Revoke a certificate that is not listed</summary>
+            <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
+          </details>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function UsersAccess() {
-  const { cluster = '' } = useParams();
+  const { cluster = '', tab } = useParams();
+  const navigate = useNavigate();
+  const current = credentialTab(tab);
+  if (!current) return <Navigate to={`/clusters/${encodeURIComponent(cluster)}/users`} replace />;
   return (
     <main className="page">
       <div>
-        <h1 className="h1">Users and access</h1>
-        <p className="sub">Passwords, role bindings, sessions and access tokens. Every change is made as you, and the cluster checks your roles.</p>
+        <h1 className="h1">{current.label}</h1>
+        <p className="sub">
+          People and credentials. Every change is made as you, and the cluster checks your roles.
+        </p>
       </div>
-      <Tabs.Root defaultValue="users">
-        <Tabs.List className="tabs-list" aria-label="Users and access">
+      <Tabs.Root
+        value={current.id}
+        onValueChange={(v) =>
+          navigate(`/clusters/${encodeURIComponent(cluster)}/users${v === 'users' ? '' : `/${v}`}`)
+        }
+      >
+        {/* Shown only where the sidebar does not list the five pages (1099 px and below). */}
+        <Tabs.List className="tabs-list tabs-narrow" aria-label="Credentials">
           <Tabs.Trigger value="users">Users</Tabs.Trigger>
           <Tabs.Trigger value="bindings">Role bindings</Tabs.Trigger>
-          <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
           <Tabs.Trigger value="tokens">Tokens</Tabs.Trigger>
           <CertificatesTab cluster={cluster} />
+          <Tabs.Trigger value="sessions">Sessions</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="users" className="tabs-content"><Users cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
-        <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="tokens" className="tabs-content"><Tokens cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="certificates" className="tabs-content">
-          <div className="stack" style={{ gap: 32 }}>
-            <CertificateRequests cluster={cluster} />
-            <CertificateList cluster={cluster} />
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>
-              <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
-            </details>
-          </div>
+          <Certificates cluster={cluster} />
         </Tabs.Content>
+        <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
       </Tabs.Root>
     </main>
   );

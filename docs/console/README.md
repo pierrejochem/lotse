@@ -10,9 +10,10 @@
 | Stream detail | ![Stream detail](stream-detail.png) |
 | Queues | ![Queues](queues.png) |
 | Queue detail | ![Queue detail](queue-detail.png) |
-| Message browser | ![Message browser](messages.png) |
-| Tenants and access | ![Tenants](tenants.png) |
-| Access tokens (*Users and access*, *Tokens*) | Screenshot to be taken |
+| Record browser | ![Record browser](messages.png) |
+| Tenants | ![Tenants](tenants.png) |
+| People and credentials: users | ![Users](users.png) |
+| People and credentials: access tokens | ![Tokens](tokens.png) |
 
 ## Against a real cluster
 
@@ -25,7 +26,7 @@ The same console in front of three nodes on localhost (`cargo run -p lotse-conso
 
 ## Mockups
 
-[`mockups/`](mockups/) holds the mockups the console was built from, one page per file, as made on a design canvas (`canvas.json` lays them out). They are HTML with template placeholders that a canvas runtime fills in, so they do not render on their own in a browser; read them as markup, or look at the screenshots above for what was built.
+[`mockups/v2/`](mockups/v2/) holds the mockups of the current design: open `index.html`; its README lists the decisions. [`mockups/`](mockups/) holds the earlier mockups the console was first built from, one page per file, as made on a design canvas (`canvas.json` lays them out). They are HTML with template placeholders that a canvas runtime fills in, so they do not render on their own in a browser; read them as markup, or look at the screenshots above for what was built.
 
 Styling follows the [brand](../brand/): tokens from [`tokens.json`](../brand/tokens.json), the same values as `console/web/src/styles.css`.
 

@@ -53,8 +53,10 @@ export const useStreams = (cluster: string) =>
   });
 
 export function useStream(cluster: string, name: string) {
-  useLive({ kind: 'stream', cluster, name }, keys.stream(cluster, name));
+  useLive(name ? { kind: 'stream', cluster, name } : null, keys.stream(cluster, name));
   return useQuery({
+    // The record browser asks before its stream list has arrived; an empty name is not a stream.
+    enabled: name !== '',
     queryKey: keys.stream(cluster, name),
     queryFn: () =>
       unwrap(api.GET('/api/v1/clusters/{cluster}/streams/{name}', { params: { path: { cluster, name } } })),
@@ -222,8 +224,9 @@ export const useSessions = (cluster: string) =>
   });
 
 /** SCRAM users; only a cluster admin gets the list (403 for everyone else). */
-export const useUsers = (cluster: string) =>
+export const useUsers = (cluster: string, enabled = true) =>
   useQuery({
+    enabled,
     queryKey: keys.users(cluster),
     queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/users', path(cluster))),
   });

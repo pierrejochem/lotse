@@ -17,6 +17,7 @@ import { Overview } from './pages/Overview';
 import { QueueDetail, QueueList } from './pages/Queues';
 import { StreamDetail, StreamList } from './pages/Streams';
 import { Tenants } from './pages/Tenants';
+import { credentialTab } from './pages/credentialTabs';
 import { UsersAccess } from './pages/UsersAccess';
 
 const queryClient = new QueryClient({
@@ -71,9 +72,17 @@ const router = createBrowserRouter([
         element: <QueueDetail />,
         handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Queues', to: `${c(p)}/queues` }, { label: p.name ?? '', mono: true }]),
       },
-      { path: 'messages', element: <Messages />, handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Message browser' }]) },
-      { path: 'tenants', element: <Tenants />, handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Tenants and access' }]) },
-      { path: 'users', element: <UsersAccess />, handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Users and access' }]) },
+      { path: 'messages', element: <Messages />, handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Record browser' }]) },
+      { path: 'tenants', element: <Tenants />, handle: h((p) => [{ label: p.cluster ?? '', to: c(p), mono: true }, { label: 'Tenants' }]) },
+      {
+        path: 'users/:tab?',
+        element: <UsersAccess />,
+        handle: h((p) => [
+          { label: p.cluster ?? '', to: c(p), mono: true },
+          { label: 'People and credentials', to: `${c(p)}/users` },
+          { label: credentialTab(p.tab)?.label ?? 'Users' },
+        ]),
+      },
       { path: '*', element: <NotFound /> },
     ],
   },

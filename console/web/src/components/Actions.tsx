@@ -1,62 +1,58 @@
-import { useState } from 'react';
+import { useState, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../api/client';
 import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetReplication } from '../api/queries';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useToast } from './toast';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
 
-/** Purge: destructive, so the queue's name is typed again before it can run (ADR 0064). */
-export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue: string; ready: number }) {
+/** The purge confirmation, opened by its caller (a row menu) or by PurgeButton: the queue's name is typed again (ADR 0064). */
+export function PurgeDialog({
+  cluster,
+  queue,
+  ready,
+  open,
+  onOpenChange,
+  trigger,
+  returnFocus,
+}: {
+  cluster: string;
+  queue: string;
+  ready: number;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  trigger?: ReactNode;
+  returnFocus?: RefObject<HTMLElement | null>;
+}) {
   const purge = usePurgeQueue(cluster, queue);
   const toast = useToast();
-  const [typed, setTyped] = useState('');
   return (
-    <AlertDialog.Root onOpenChange={(open) => !open && setTyped('')}>
-      <AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
-          <div className="dialog-head">
-            <div>
-              <AlertDialog.Title className="h2">Purge {queue}?</AlertDialog.Title>
-              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                Settles the messages that are ready now, about {ready.toLocaleString('en-US')}. Messages consumers hold stay theirs, and
-                messages published meanwhile stay. This cannot be undone.
-              </AlertDialog.Description>
-            </div>
-          </div>
-          <div className="field" style={{ padding: '4px 24px 8px' }}>
-            <label htmlFor="purge-confirm">Type the queue's name to purge it</label>
-            <input
-              id="purge-confirm"
-              className="input mono"
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              placeholder={queue}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-          <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep the messages</AlertDialog.Cancel>
-            <AlertDialog.Action
-              className="btn danger"
-              disabled={typed !== queue || purge.isPending}
-              onClick={() =>
-                purge.mutate(typed, {
-                  onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                  onError: (e) => toast({ title: e instanceof ApiError ? e.message : `Could not purge ${queue}.`, error: true }),
-                })
-              }
-            >
-              Purge {queue}
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      trigger={trigger}
+      returnFocus={returnFocus}
+      title={`Purge ${queue}?`}
+      body={`Deletes the ${ready.toLocaleString('en-US')} messages that are ready now. Messages that consumers hold are not deleted, and messages published meanwhile stay. This cannot be undone.`}
+      name={queue}
+      prompt={`Type ${queue} to confirm`}
+      action={`Purge ${queue}`}
+      keep="Keep the messages"
+      pending={purge.isPending}
+      onConfirm={(typed) =>
+        purge.mutate(typed, {
+          onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+          onError: (e) => toast({ title: e instanceof ApiError ? e.message : `Could not purge ${queue}.`, error: true }),
+        })
+      }
+    />
   );
+}
+
+/** Purge, with its own button (on the queue's page). */
+export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue: string; ready: number }) {
+  return <PurgeDialog cluster={cluster} queue={queue} ready={ready} trigger={<AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>} />;
 }
 
 /** Requeue: moves a dead-letter queue's messages back to the queues they came from, once each. */
@@ -79,9 +75,9 @@ export function RequeueButton({ cluster, dlq }: { cluster: string; dlq: string }
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Not now</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 requeue.mutate(dlq, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -121,7 +117,7 @@ export function MoveLeaderButton({
       { resource, partition, node },
       {
         onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not move the leader.', error: true }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not pin the leader. The cluster did not accept the change; try again.', error: true }),
       },
     );
   return (
@@ -156,7 +152,7 @@ export function MoveLeaderButton({
               Unpin
             </AlertDialog.Action>
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action className="btn dark" disabled={!to} onClick={() => run(to)}>
+            <AlertDialog.Action className="btn primary" disabled={!to} onClick={() => run(to)}>
               Pin to {to || '…'}
             </AlertDialog.Action>
           </div>
@@ -204,19 +200,19 @@ export function ReplicationButton({ cluster, resource, current }: { cluster: str
           <div className="dialog-foot">
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               disabled={!valid || factor === current || set.isPending}
               onClick={() =>
                 set.mutate(
                   { resource, factor },
                   {
                     onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                    onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the replication.', error: true }),
+                    onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the replication factor.', error: true }),
                   },
                 )
               }
             >
-              Set {valid ? factor : '…'} replicas
+              {valid ? `Set ${factor} ${factor === 1 ? 'replica' : 'replicas'}` : 'Set replicas'}
             </AlertDialog.Action>
           </div>
         </AlertDialog.Content>
@@ -250,7 +246,7 @@ export function PlaceButton({
       { resource, partition, nodes: to },
       {
         onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not place the partition.', error: true }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not place the partition on those nodes.', error: true }),
       },
     );
   const same = chosen.length === replicas.length && chosen.every((n) => replicas.includes(n));
@@ -274,7 +270,7 @@ export function PlaceButton({
           <fieldset className="field" style={{ padding: '4px 24px 8px', border: 0, margin: 0 }}>
             <legend className="small muted" style={{ padding: 0, margin: '8px 0 6px' }}>Nodes</legend>
             {all.map((n) => (
-              <label key={n} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label key={n} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 28 }}>
                 <input type="checkbox" checked={chosen.includes(n)} onChange={() => toggle(n)} />
                 <span className="mono">{n}</span>
               </label>
@@ -287,7 +283,7 @@ export function PlaceButton({
               </AlertDialog.Action>
             )}
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action className="btn dark" disabled={chosen.length === 0 || (placed && same) || place.isPending} onClick={() => run(chosen)}>
+            <AlertDialog.Action className="btn primary" disabled={chosen.length === 0 || (placed && same) || place.isPending} onClick={() => run(chosen)}>
               Place on {chosen.length} node{chosen.length === 1 ? '' : 's'}
             </AlertDialog.Action>
           </div>

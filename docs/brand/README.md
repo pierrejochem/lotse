@@ -34,10 +34,13 @@ The mark, Fairway, is a rounded square split down the middle: `elbe` on the left
 Two identity colours carry the brand: `elbe` (navy) and `signal` (pilot red). Everything else is neutral, tinted slightly toward the navy.
 
 - Pages sit on `surface`; cards and code blocks on `surface-raised`; quiet bands on `fog`.
-- `signal` is spent sparingly: the primary action, the active item, the one thing that needs attention. One red element per view is the target.
+- `signal` is spent sparingly: the one thing that needs attention, an error, a danger. It is not the colour of the primary action or of links ([ADR 0140](../adr/0140-the-console-has-a-navy-primary-action-and-red-only-for-danger.md)). One red element per view is the target.
+- `primary` is the colour of the primary action, the active toggle and the switch: `elbe` navy in light, a lifted blue in dark. Links use `link`, selection uses `selected` with a bar and a word, focus uses `focus-ring`, which is never red.
+- Borders of inputs, selects and switches use `control` (3:1 on the page colours), not `line`; `line` is for hairlines.
+- The solid danger button (`danger-solid`) appears only in the confirm dialog of a destructive action; rows and menus keep the tinted one.
 - `brass` is a small accent for offsets, markers and highlights in diagrams, never for buttons.
 - States use `ok`, `warn` and `critical`. Because `critical` shares the brand red, every error carries an icon and a word, never colour alone.
-- Text pairs that pass 4.5:1 in both themes: `ink` and `ink-muted` on `surface` and `surface-raised`; `signal` on `surface`, `surface-raised` and `signal-soft`; `on-signal` on `signal`; `on-elbe` on `elbe`.
+- Text pairs that pass 4.5:1 in both themes: `ink` and `ink-muted` on `surface` and `surface-raised`; `signal` on `surface`, `surface-raised` and `signal-soft`; `link` on `surface`, `surface-raised` and `fog`; `on-primary` on `primary`; `on-danger-solid` on `danger-solid`; `on-elbe` on `elbe`. Non-text pairs that pass 3:1: `control` and `focus-ring` on `surface`, `surface-raised` and `fog`; `primary` on `surface-raised`.
 
 ## Typography
 
@@ -58,7 +61,7 @@ Two identity colours carry the brand: `elbe` (navy) and `signal` (pilot red). Ev
 
 ## Iconography
 
-No custom icon set yet. Use a plain 1.5px-stroke outline set at 16 and 20px, coloured with `ink` or `ink-muted`, and `signal` only for the active state. Avoid ship, anchor and wheel icons for product features.
+No custom icon set yet. Use a plain 1.5px-stroke outline set at 16 and 20px, coloured with `ink` or `ink-muted`, and `selected` or `link` only for the active state. Avoid ship, anchor and wheel icons for product features.
 
 ## Files
 

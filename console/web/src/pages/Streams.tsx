@@ -1,13 +1,15 @@
 import * as Tabs from '@radix-ui/react-tabs';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
 import { MoveLeaderButton, PlaceButton, ReplicationButton } from '../components/Actions';
-import { Chip, Failed, Hint, Loading, Sparkline, Stats } from '../components/ui';
-import { NONE, bytes, count, duration, rate } from '../format';
+import { RowMenu } from '../components/RowMenu';
+import { Chip, Failed, Hint, Loading, Sparkline, Stats, TableWrap } from '../components/ui';
+import { NONE, bytes, count, counted, duration, rate } from '../format';
 
 export function StreamList() {
   const { cluster = '' } = useParams();
+  const navigate = useNavigate();
   const q = useStreams(cluster);
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   return (
@@ -17,8 +19,10 @@ export function StreamList() {
         <Loading />
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
+      ) : q.data.length === 0 ? (
+        <p className="empty">No streams yet. Create one from a client, or with <span className="mono">lotse-cli</span>; it appears here at once.</p>
       ) : (
-        <div className="table-wrap">
+        <TableWrap>
           <table>
             <thead>
               <tr>
@@ -27,6 +31,7 @@ export function StreamList() {
                 <th scope="col" className="r">Partitions</th>
                 <th scope="col" className="r">In</th>
                 <th scope="col" className="r">Stored</th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -37,11 +42,20 @@ export function StreamList() {
                   <td className="r">{s.partitions}</td>
                   <td className="r">{rate(s.in_bytes_per_sec)}</td>
                   <td className="r">{bytes(s.stored_bytes)}</td>
+                  <td className="r">
+                    <RowMenu
+                      label={`Actions for ${s.name}`}
+                      actions={[
+                        { label: 'Open stream', onSelect: () => navigate(`${base}/streams/${encodeURIComponent(s.name)}`) },
+                        { label: 'Read records', onSelect: () => navigate(`${base}/messages?stream=${encodeURIComponent(s.name)}`) },
+                      ]}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </main>
   );
@@ -63,7 +77,7 @@ function replicaLabel(r: S['Replica']) {
 function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
   return (
     <section className="stack" aria-label="Partitions">
-      <div className="table-wrap">
+      <TableWrap>
         <table>
           <thead>
             <tr>
@@ -96,7 +110,7 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
                     <span style={{ display: 'inline-flex', gap: 4 }}>
                       {p.replicas.map((r) => (
                         <Hint key={r.node} text={replicaLabel(r)}>
-                          <span tabIndex={0} style={replicaStyle(r)} aria-label={replicaLabel(r)}>{r.node.slice(-1)}</span>
+                          <span tabIndex={0} role="img" style={replicaStyle(r)} aria-label={replicaLabel(r)}>{r.node.slice(-1)}</span>
                         </Hint>
                       ))}
                     </span>{' '}
@@ -123,9 +137,9 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
             })}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
       <p className="small muted" style={{ margin: 0 }}>
-        Replica squares show the broker number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
+        Replica squares show the node number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
         node; a placed partition stays on the nodes it was placed on. Last stable sits below the high
         watermark while a transaction is open; <code>read_committed</code> consumers stop there.
       </p>
@@ -138,7 +152,7 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
   const a = d.assignment;
   return (
     <div className="row">
-      <div className="table-wrap" style={{ flex: '3 1 560px' }}>
+      <TableWrap style={{ flex: '3 1 560px' }}>
         <table>
           <thead>
             <tr>
@@ -166,7 +180,7 @@ function Groups({ d }: { d: S['StreamDetail'] }) {
             })}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
       {a && (
         <aside className="card stack" aria-labelledby="assign-title" style={{ flex: '2 1 340px', '--gap': '14px' } as React.CSSProperties}>
           <div>
@@ -209,7 +223,7 @@ function Config({ d }: { d: S['StreamDetail'] }) {
     ['Compaction', d.compaction ? 'On, latest value per key' : 'Off'],
   ];
   return (
-    <div className="table-wrap" style={{ maxWidth: 640 }}>
+    <TableWrap style={{ maxWidth: 640 }}>
       <table>
         <tbody>
           {rows.map(([k, v]) => (
@@ -220,7 +234,7 @@ function Config({ d }: { d: S['StreamDetail'] }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableWrap>
   );
 }
 
@@ -238,7 +252,7 @@ export function StreamDetail() {
           <span className="label">Stream{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
           <h1 className="h1 mono">{d.name}</h1>
           <div className="row" style={{ gap: 8 }}>
-            <span className="tag">{d.partitions.length} partitions</span>
+            <span className="tag">{counted(d.partitions.length, 'partition')}</span>
             <span className="tag">Replication {d.replication}</span>
             <span className="tag">Retention {retention(d.retention)}</span>
             <span className="tag">Compaction {d.compaction ? 'on' : 'off'}</span>
@@ -253,7 +267,7 @@ export function StreamDetail() {
       <Stats
         items={[
           { label: 'In', value: rate(d.in_bytes_per_sec), note: `${count(d.records_per_sec)} records/s` },
-          { label: 'Out', value: rate(d.out_bytes_per_sec), note: `${d.groups.length} groups` },
+          { label: 'Out', value: rate(d.out_bytes_per_sec), note: counted(d.groups.length, 'group') },
           { label: 'Stored', value: bytes(d.stored_bytes), note: `all ${d.replication} replicas` },
           { label: 'Oldest record', value: duration(d.oldest_record_age_ms), note: d.retention?.ms ? `retention ${duration(d.retention.ms)}` : d.retention ? 'no limit by age' : 'retention unknown' },
           { label: 'Open transactions', value: count(d.open_transactions), note: 'summed over partitions' },
@@ -264,7 +278,7 @@ export function StreamDetail() {
         <Tabs.List className="tabs-list" aria-label="Stream sections">
           <Tabs.Trigger value="partitions">Partitions</Tabs.Trigger>
           <Tabs.Trigger value="groups">Consumer groups <span className="tag" style={{ marginLeft: 4, padding: '0 6px', fontSize: 12 }}>{d.groups.length}</span></Tabs.Trigger>
-          <Tabs.Trigger value="config">Config</Tabs.Trigger>
+          <Tabs.Trigger value="config">Settings</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="partitions" className="tabs-content"><Partitions d={d} cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="groups" className="tabs-content"><Groups d={d} /></Tabs.Content>

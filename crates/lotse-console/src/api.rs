@@ -303,7 +303,10 @@ pub async fn move_leader(
             "Partition {} of {} is pinned to {node}. Its leader moves there within a few seconds.",
             req.partition, req.resource
         ),
-        None => format!("Partition {} of {} is unpinned. Leaders spread by themselves.", req.partition, req.resource),
+        None => format!(
+            "Partition {} of {} is unpinned. The cluster places leaders again by itself.",
+            req.partition, req.resource
+        ),
     };
     Ok(Json(Done { message, cli: cli::move_leader(&req) }))
 }
@@ -353,10 +356,10 @@ pub async fn place_partition(
     cluster(&st, &id)?.place_partition(&who, &req).await?;
     tracing::info!(principal = %who.principal, cluster = %id, resource = %req.resource, partition = req.partition, nodes = ?req.nodes, "partition placed");
     let message = if req.nodes.is_empty() {
-        format!("Partition {} of {} is released. The planner places it again.", req.partition, req.resource)
+        format!("Partition {} of {} is released. The cluster places it again.", req.partition, req.resource)
     } else {
         format!(
-            "Partition {} of {} moves to {}. Rebalancing and the replication factor leave it there.",
+            "Partition {} of {} moves to {}. Rebalancing and replication factor changes do not move it.",
             req.partition,
             req.resource,
             req.nodes.join(", ")
@@ -648,7 +651,7 @@ pub async fn request_certificate(
     cluster(&st, &id)?.request_certificate(&who, &req.principal, csr).await?;
     tracing::info!(principal = %who.principal, cluster = %id, requested = %req.principal, "certificate requested");
     let message = format!(
-        "Asked for a certificate for {}. The CA holder signs it with `lotse certs --sign`; the request lapses after 7 days.",
+        "Requested a certificate for {}. The CA holder signs it with `lotse certs --sign`; the request lapses after 7 days.",
         req.principal
     );
     Ok(Json(Done { message, cli: cli::sign_certificates() }))

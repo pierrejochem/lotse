@@ -5,13 +5,13 @@ import type { S } from '../api/client';
 import { ApiError } from '../api/client';
 import { useNodes, usePauseUpgrade, useRaiseClusterVersion, useResumeUpgrade } from '../api/queries';
 import { useToast } from '../components/toast';
-import { Chip, DiskBar, Failed, Loading } from '../components/ui';
+import { Chip, DiskBar, Failed, Loading, TableWrap } from '../components/ui';
 import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, rate } from '../format';
 
-/** "3 broker nodes in 3 zones · managed by the Lotse operator", from what is known. */
+/** "3 nodes in 3 zones · managed by the Lotse operator", from what is known. */
 function nodesLine(v: S['NodesView']) {
   const zones = new Set(v.nodes.map((n) => n.zone).filter(Boolean));
-  const parts = [counted(v.nodes.length, 'broker node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
+  const parts = [counted(v.nodes.length, 'node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
   if (v.events.length > 0) parts.push('managed by the Lotse operator');
   return parts.join(' · ');
 }
@@ -34,9 +34,9 @@ function PauseButton({ cluster, node }: { cluster: string; node: string }) {
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep going</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Do not pause</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 pause.mutate(undefined, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -90,9 +90,9 @@ function RaiseButton({ cluster, from, to }: { cluster: string; from: string | nu
             </div>
           </div>
           <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Not yet</AlertDialog.Cancel>
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 raise.mutate(undefined, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -198,7 +198,7 @@ export function Nodes() {
       {v.upgrade && <Upgrade u={v.upgrade} cluster={cluster} />}
 
       <section className="stack" aria-labelledby="cards-title">
-        <h2 id="cards-title" className="h2">Broker nodes</h2>
+        <h2 id="cards-title" className="h2">Node details</h2>
         <div className="grid-auto" style={{ '--min': '300px' } as React.CSSProperties}>
           {v.nodes.map((n) => (
             <article key={n.id} className="card stack" style={{ '--gap': '14px' } as React.CSSProperties}>
@@ -225,7 +225,7 @@ export function Nodes() {
               </div>
               <dl className="two" style={{ margin: 0, gap: '10px 16px', fontSize: 14 }}>
                 {[
-                  ['Leads / replicas', `${count(n.leads)} / ${count(n.replicas)}`],
+                  ['Leader of / replicas', `${count(n.leads)} / ${count(n.replicas)}`],
                   ['Version', n.version],
                   ['Connections', count(n.connections)],
                   ['Network in / out', `${rate(n.net_in_bytes_per_sec)} / ${rate(n.net_out_bytes_per_sec)}`],
@@ -249,9 +249,9 @@ export function Nodes() {
 
       <section className="stack" aria-labelledby="events-title">
         <h2 id="events-title" className="h2">Operator events</h2>
-        <div className="table-wrap">
+        <TableWrap>
           {v.events.length === 0 ? (
-            <p className="empty">No operator events.</p>
+            <p className="empty">No operator events yet. They appear when the operator restarts or moves a node.</p>
           ) : (
             <table>
               <tbody>
@@ -265,7 +265,7 @@ export function Nodes() {
               </tbody>
             </table>
           )}
-        </div>
+        </TableWrap>
       </section>
     </main>
   );

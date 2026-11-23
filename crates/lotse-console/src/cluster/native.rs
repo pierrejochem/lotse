@@ -408,13 +408,18 @@ fn chip(tone: Tone, text: &str) -> Chip {
 /// What the user is told when a call fails.
 fn failed(e: ClientError) -> ApiError {
     match e {
-        ClientError::Authentication(why) => {
-            ApiError::Forbidden(format!("The cluster did not accept your sign-in: {why}"))
-        }
+        ClientError::Authentication(why) => ApiError::Forbidden(format!(
+            "The cluster did not accept your sign-in: {}. Sign in again.",
+            why.trim_end_matches('.')
+        )),
         ClientError::Broker { code: ErrorCode::UNAUTHORIZED, message } => {
-            ApiError::Forbidden(message.unwrap_or_else(|| "Your roles on this cluster do not allow this.".into()))
+            ApiError::Forbidden(message.unwrap_or_else(|| {
+                "Your roles on this cluster do not allow this. Ask a cluster admin for the role.".into()
+            }))
         }
-        e => ApiError::Unavailable(format!("The cluster does not answer: {e}")),
+        e => ApiError::Unavailable(format!(
+            "No node answered: {e}. Check that the nodes run and that the console can reach them."
+        )),
     }
 }
 
@@ -427,12 +432,12 @@ fn refused(what: &str, e: ClientError) -> ApiError {
             message.unwrap_or_else(|| "invalid request".into())
         )),
         ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, message } => {
-            ApiError::NotFound(message.unwrap_or_else(|| "The cluster does not know that name.".into()))
+            ApiError::NotFound(message.unwrap_or_else(|| "No such resource. It may be deleted, or you may lack the role to see it.".into()))
         }
         // The cluster has not taken the version that introduced the feature
         // (ADR 0127); its message says what to do.
         ClientError::Broker { code: ErrorCode::UNSUPPORTED_VERSION, message } => ApiError::Conflict(
-            message.unwrap_or_else(|| "The cluster's version does not support this yet; finish the upgrade.".into()),
+            message.unwrap_or_else(|| "The cluster's version does not support this yet. Raise the cluster version on the Nodes page first.".into()),
         ),
         ClientError::UnknownStream(name, _) => ApiError::NotFound(format!("There is no \"{name}\" on this cluster.")),
         e => failed(e),

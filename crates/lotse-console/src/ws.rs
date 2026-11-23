@@ -100,7 +100,7 @@ async fn session(st: AppState, who: Identity, sid: Option<String>, socket: WebSo
                 }
             }
             Err(e) => {
-                let body = serde_json::json!({ "error": { "code": "BAD_REQUEST", "message": format!("Unreadable message: {e}") } });
+                let body = serde_json::json!({ "error": { "code": "BAD_REQUEST", "message": format!("The console could not read the message it received: {e}. Reload the page.") } });
                 let _ = out_tx.send(body.to_string()).await;
             }
         }
