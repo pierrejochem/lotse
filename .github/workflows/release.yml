@@ -26,6 +26,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag needs its notes and matching versions (ADR 0138). This takes
+  # seconds, so a tag that lacks them fails before anything is built.
+  notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Notes and versions match the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          test -s "docs/releases/$version.md" || { echo "no notes: docs/releases/$version.md" >&2; exit 1; }
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          chart=$(sed -n 's/^version: *//p' packaging/helm/lotse/Chart.yaml)
+          app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' packaging/helm/lotse/Chart.yaml)
+          echo "tag $version, Cargo.toml $cargo, chart $chart, appVersion $app"
+          test "$cargo" = "$version" && test "$chart" = "$version" && test "$app" = "$version"
+
   simulation:
     name: simulation (${{ matrix.shard }})
     strategy:
@@ -187,6 +204,7 @@ jobs:
   # through unless every file matches.
   build:
     needs:
+      - notes
       - simulation
       - client-simulation
       - queue-simulation
@@ -218,6 +236,7 @@ jobs:
           path: dist/
   reproduce:
     needs:
+      - notes
       - simulation
       - client-simulation
       - queue-simulation
@@ -338,6 +357,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          path: src
       - uses: actions/download-artifact@v8
         with:
           name: dist
@@ -348,11 +370,15 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/lotse
         run: |
           {
+            cat "src/docs/releases/${GITHUB_REF_NAME#v}.md"
+            echo
+            echo "## Build"
+            echo
             echo "Built twice and compared byte for byte (ADR 0126); \`packaging/release.sh --verify SHA256SUMS ${GITHUB_REF_NAME#v}\` checks it again."
             echo
-            echo "Image: \`${IMAGE,,}:$GITHUB_REF_NAME\`, index digest \`${{ needs.image.outputs.digest }}\`, on \`${{ needs.image.outputs.base }}\`."
+            echo "Image: \`${IMAGE,,}:${GITHUB_REF_NAME#v}\` (also \`$GITHUB_REF_NAME\` and \`latest\`), index digest \`${{ needs.image.outputs.digest }}\`, on \`${{ needs.image.outputs.base }}\`."
             echo
-            echo "Console image: \`${IMAGE,,}-console:$GITHUB_REF_NAME\`, index digest \`${{ needs.image.outputs.console_digest }}\`, on the same base."
+            echo "Console image: \`${IMAGE,,}-console:${GITHUB_REF_NAME#v}\`, index digest \`${{ needs.image.outputs.console_digest }}\`, on the same base."
             echo
             echo '```'
             cat dist/BUILDINFO
@@ -378,7 +404,8 @@ jobs:
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           echo "$TOKEN" | skopeo login ghcr.io --username "${{ github.actor }}" --password-stdin
           push() { # archive, image, digest
-            for tag in "$GITHUB_REF_NAME" latest; do
+            # The plain version is what the Helm chart's appVersion names.
+            for tag in "${GITHUB_REF_NAME#v}" "$GITHUB_REF_NAME" latest; do
               skopeo copy --all --preserve-digests "oci-archive:$1" "docker://$2:$tag"
             done
             pushed=$(skopeo inspect --raw "docker://$2:$GITHUB_REF_NAME" | sha256sum | cut -d' ' -f1)
