@@ -16,7 +16,7 @@ lotse-record.workspace = true
 lotse-route.workspace = true
 lotse-rt.workspace = true
 ring.workspace = true
-lotse-rt-tokio.workspace = true
+lotse-rt-tokio = { workspace = true, features = ["https"] }
 async-trait = "0.1"
 axum = { workspace = true, features = ["ws"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -42,6 +42,8 @@ lotse-raft.workspace = true
 lotse-server.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+rustls.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

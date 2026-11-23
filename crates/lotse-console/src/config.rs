@@ -1,7 +1,12 @@
 //! `lotse-console.toml`.
 //!
 //! ```toml
-//! listen = "127.0.0.1:8080"
+//! listen = "127.0.0.1:8080"   # plain HTTP: loopback only
+//!
+//! # listen = "0.0.0.0:8443"   # anywhere else: HTTPS
+//! # [https]
+//! # cert = "/etc/lotse-console/console.pem"   # chain, PEM
+//! # key = "/etc/lotse-console/console.key"
 //!
 //! [auth]
 //! mode = "dev"          # or "oidc", see below
@@ -48,6 +53,10 @@ use crate::auth::AuthConfig;
 pub struct Config {
     /// Address to serve the UI and API on.
     pub listen: SocketAddr,
+    /// The certificate and key to serve HTTPS with. Without them the
+    /// console serves plain HTTP, and only on a loopback address.
+    #[serde(default)]
+    pub https: Option<HttpsConfig>,
     /// Where the console keeps what must outlive a restart (the session
     /// key); relative paths are relative to the config file. Default:
     /// `data` next to the config file.
@@ -63,6 +72,17 @@ pub struct Config {
     pub live: LiveConfig,
     /// Clusters this console manages; at least one.
     pub clusters: Vec<ClusterConfig>,
+}
+
+/// HTTPS (ADR 0137): TLS 1.3 with a certificate chain and its key, PEM.
+/// Relative paths are relative to the config file. Read at start.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpsConfig {
+    /// The certificate chain, the console's own certificate first.
+    pub cert: std::path::PathBuf,
+    /// Its private key.
+    pub key: std::path::PathBuf,
 }
 
 /// Chart history settings.
@@ -194,6 +214,13 @@ impl Config {
         let base = path.parent().unwrap_or(Path::new("."));
         let data = cfg.data_dir.take().unwrap_or_else(|| "data".into());
         cfg.data_dir = Some(if data.is_absolute() { data } else { base.join(data) });
+        if let Some(h) = &mut cfg.https {
+            for f in [&mut h.cert, &mut h.key] {
+                if f.is_relative() {
+                    *f = base.join(&*f);
+                }
+            }
+        }
         Ok(cfg)
     }
 
@@ -232,6 +259,14 @@ impl Config {
                 c.id()
             )));
         }
+        // No plaintext by accident: plain HTTP only where nobody else can
+        // listen in (AGENTS.md, rule 7).
+        if cfg.https.is_none() && !cfg.listen.ip().is_loopback() {
+            return Err(ConfigError::Invalid(format!(
+                "listen = \"{}\" is not a loopback address, and the console serves plain HTTP only on loopback. Add [https] with cert and key (PEM) to serve HTTPS there.",
+                cfg.listen
+            )));
+        }
         if let AuthConfig::Oidc(o) = &cfg.auth {
             if !o.redirect_url.ends_with("/auth/callback") {
                 return Err(ConfigError::Invalid(format!(
@@ -239,9 +274,9 @@ impl Config {
                     o.redirect_url
                 )));
             }
-            if !o.redirect_url.starts_with("https://") && !cfg.listen.ip().is_loopback() {
+            if !o.redirect_url.starts_with("https://") && (cfg.https.is_some() || !cfg.listen.ip().is_loopback()) {
                 return Err(ConfigError::Invalid(
-                    "auth.redirect_url must use https:// unless the console listens on loopback: the session cookie would travel in the clear.".into(),
+                    "auth.redirect_url must use https:// unless the console serves plain HTTP on loopback: the session cookie would travel in the clear.".into(),
                 ));
             }
         }
@@ -290,6 +325,41 @@ mod tests {
         assert_eq!(c.metrics.retention(), Duration::from_secs(86_400));
         assert_eq!(c.live.interval_ms, 2000);
         assert_eq!(c.clusters[0].id(), "prod-hamburg-1");
+    }
+
+    #[test]
+    fn plain_http_only_on_loopback() {
+        let public = OK.replace("127.0.0.1:8080", "0.0.0.0:8443");
+        let e = Config::parse(&public).unwrap_err().to_string();
+        assert!(e.contains("loopback") && e.contains("[https]"), "{e}");
+        let v6 = OK.replace("127.0.0.1:8080", "[::]:8443");
+        assert!(Config::parse(&v6).is_err(), "nor on every IPv6 address");
+        assert!(Config::parse(&OK.replace("127.0.0.1:8080", "[::1]:8080")).is_ok(), "IPv6 loopback is loopback");
+
+        let https = format!("{public}\n[https]\ncert = \"c.pem\"\nkey = \"/abs/c.key\"\n");
+        let c = Config::parse(&https).unwrap();
+        let h = c.https.as_ref().unwrap();
+        assert_eq!((h.cert.as_path(), h.key.as_path()), (Path::new("c.pem"), Path::new("/abs/c.key")));
+        assert!(Config::parse(&https.replace("key = ", "ky = ")).is_err(), "unknown keys are refused");
+
+        // Relative paths are the config file's.
+        let dir = std::env::temp_dir().join(format!("lotse-console-https-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lotse-console.toml");
+        std::fs::write(&file, &https).unwrap();
+        let loaded = Config::load(&file).unwrap();
+        let h = loaded.https.unwrap();
+        assert_eq!((h.cert, h.key), (dir.join("c.pem"), "/abs/c.key".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // With HTTPS, the sign-in comes back over HTTPS too.
+        let oidc = https.replace(
+            "mode = \"dev\"\n        user = \"pierre\"",
+            "mode = \"oidc\"\nissuer = \"https://id\"\nclient_id = \"c\"\nredirect_url = \"REDIRECT\"",
+        );
+        assert!(Config::parse(&oidc.replace("REDIRECT", "https://console:8443/auth/callback")).is_ok());
+        let e = Config::parse(&oidc.replace("REDIRECT", "http://console:8443/auth/callback")).unwrap_err();
+        assert!(e.to_string().contains("https://"), "{e}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ path = "src/main.rs"
 lotse-server.workspace = true
 lotse-client.workspace = true
 lotse-proto.workspace = true
-lotse-rt-tokio.workspace = true
+lotse-rt-tokio = { workspace = true, features = ["https"] }
 lotse-log.workspace = true
 lotse-record.workspace = true
 lotse-rt.workspace = true
