@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { credentialTab } from './credentialTabs';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
+import { counted } from '../format';
 import {
   useAlterBinding,
   useBindings,
@@ -31,10 +32,12 @@ function UserActions({ cluster, name, only, self }: { cluster: string; name: str
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
   const [asking, setAsking] = useState<'password' | 'sessions' | 'delete' | null>(null);
+  const menu = useRef<HTMLButtonElement>(null);
   const close = (o: boolean) => !o && setAsking(null);
   return (
     <div className="row" style={{ justifyContent: 'flex-end' }}>
       <RowMenu
+        triggerRef={menu}
         label={`Actions for ${name}`}
         actions={[
           { label: 'Set password', onSelect: () => setAsking('password') },
@@ -42,10 +45,11 @@ function UserActions({ cluster, name, only, self }: { cluster: string; name: str
           { label: 'Delete user', danger: true, onSelect: () => setAsking('delete') },
         ]}
       />
-      <PasswordDialog cluster={cluster} user={name} controlled={{ open: asking === 'password', onOpenChange: close }} />
+      <PasswordDialog cluster={cluster} user={name} controlled={{ open: asking === 'password', onOpenChange: close, returnFocus: menu }} />
       <ConfirmDialog
         open={asking === 'sessions'}
         onOpenChange={close}
+        returnFocus={menu}
         title={`Revoke the sessions of ${name}?`}
         body="Sessions that began before now end. The user can sign in again with their password or certificate. Their access tokens stop working; revoke a token on the Tokens page to remove it."
         name={name}
@@ -66,6 +70,7 @@ function UserActions({ cluster, name, only, self }: { cluster: string; name: str
       <ConfirmDialog
         open={asking === 'delete'}
         onOpenChange={close}
+        returnFocus={menu}
         title={`Delete ${name}?`}
         body={`Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now. Scripts that sign in as ${name} fail with an authentication error. To restore access, create the user again with a new password.${self ? ' This is the user you are signed in as; you will be signed out when your session ends.' : ''}`}
         refuse={only ? `${name} is the only cluster admin. Make another user a cluster admin first.` : undefined}
@@ -427,7 +432,7 @@ function CertificateList({ cluster }: { cluster: string }) {
                 <td className="mono">{c.serial}</td>
                 <td>
                   {when(c.not_after_ms)}
-                  {c.state === 'valid' || c.state === 'expiring' ? <span className="muted small"> ({Math.max(0, Math.round((c.not_after_ms - now_ms) / DAY))} days)</span> : null}
+                  {c.state === 'valid' || c.state === 'expiring' ? <span className="muted small"> ({counted(Math.max(0, Math.round((c.not_after_ms - now_ms) / DAY)), 'day')})</span> : null}
                 </td>
                 <td>{when(c.last_seen_ms)}</td>
                 <td>
@@ -572,12 +577,14 @@ function RevokeBySerial({ cluster }: { cluster: string }) {
       </p>
       <div className="field">
         <label htmlFor="cert-issuer">Issuer (SHA-256 of the issuer name, 64 hex digits)</label>
-        <input id="cert-issuer" className="input" value={issuer} onChange={(e) => setIssuer(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={issuer !== '' && !issuerOk ? true : undefined} />
+        <input id="cert-issuer" className="input" value={issuer} onChange={(e) => setIssuer(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={issuer !== '' && !issuerOk ? true : undefined} aria-describedby="cert-issuer-err" />
+        <span id="cert-issuer-err" className="error-text">{issuer !== '' && !issuerOk ? 'Enter the issuer as 64 hexadecimal digits.' : ''}</span>
       </div>
       <div className="two">
         <div className="field">
           <label htmlFor="cert-serial">Serial (hex)</label>
-          <input id="cert-serial" className="input" value={serial} onChange={(e) => setSerial(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={serial !== '' && !serialOk ? true : undefined} />
+          <input id="cert-serial" className="input" value={serial} onChange={(e) => setSerial(e.target.value)} autoComplete="off" spellCheck={false} aria-invalid={serial !== '' && !serialOk ? true : undefined} aria-describedby="cert-serial-err" />
+          <span id="cert-serial-err" className="error-text">{serial !== '' && !serialOk ? 'Enter the serial as hexadecimal digits.' : ''}</span>
         </div>
         <div className="field">
           <label htmlFor="cert-until">Valid until</label>

@@ -165,7 +165,7 @@ export function Overview() {
                   <tr>
                     <th scope="col">Queue</th>
                     <th scope="col" className="r">Ready</th>
-                    <th scope="col" className="r">DLQ</th>
+                    <th scope="col" className="r">Dead letters</th>
                     <th scope="col">Why</th>
                   </tr>
                 </thead>

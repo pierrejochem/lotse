@@ -110,16 +110,16 @@ export function ThroughputChart({ cluster }: { cluster: string }) {
               <thead>
                 <tr>
                   <th scope="col">Time</th>
-                  <th scope="col" className="r">Out (bytes/s)</th>
-                  <th scope="col" className="r">In (bytes/s)</th>
+                  <th scope="col" className="r">Out</th>
+                  <th scope="col" className="r">In</th>
                 </tr>
               </thead>
               <tbody>
                 {ins.map((p, i) => (
                   <tr key={p.t}>
                     <th scope="row">{fmtTime(p.t)}</th>
-                    <td className="r num">{outs[i] ? bytes(outs[i]!.v) : '—'}</td>
-                    <td className="r num">{bytes(p.v)}</td>
+                    <td className="r num">{outs[i] ? `${bytes(outs[i]!.v)}/s` : '—'}</td>
+                    <td className="r num">{bytes(p.v)}/s</td>
                   </tr>
                 ))}
               </tbody>

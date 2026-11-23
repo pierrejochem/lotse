@@ -53,7 +53,7 @@ export function RequeueButton({ cluster, dlq }: { cluster: string; dlq: string }
           <div className="dialog-foot">
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               onClick={() =>
                 requeue.mutate(dlq, {
                   onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
@@ -128,7 +128,7 @@ export function MoveLeaderButton({
               Unpin
             </AlertDialog.Action>
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action className="btn dark" disabled={!to} onClick={() => run(to)}>
+            <AlertDialog.Action className="btn primary" disabled={!to} onClick={() => run(to)}>
               Pin to {to || '…'}
             </AlertDialog.Action>
           </div>
@@ -176,7 +176,7 @@ export function ReplicationButton({ cluster, resource, current }: { cluster: str
           <div className="dialog-foot">
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
-              className="btn dark"
+              className="btn primary"
               disabled={!valid || factor === current || set.isPending}
               onClick={() =>
                 set.mutate(
@@ -188,7 +188,7 @@ export function ReplicationButton({ cluster, resource, current }: { cluster: str
                 )
               }
             >
-              Set {valid ? factor : '…'} replicas
+              {valid ? `Set ${factor} ${factor === 1 ? 'replica' : 'replicas'}` : 'Set replicas'}
             </AlertDialog.Action>
           </div>
         </AlertDialog.Content>
@@ -246,7 +246,7 @@ export function PlaceButton({
           <fieldset className="field" style={{ padding: '4px 24px 8px', border: 0, margin: 0 }}>
             <legend className="small muted" style={{ padding: 0, margin: '8px 0 6px' }}>Nodes</legend>
             {all.map((n) => (
-              <label key={n} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label key={n} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 28 }}>
                 <input type="checkbox" checked={chosen.includes(n)} onChange={() => toggle(n)} />
                 <span className="mono">{n}</span>
               </label>
@@ -259,7 +259,7 @@ export function PlaceButton({
               </AlertDialog.Action>
             )}
             <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action className="btn dark" disabled={chosen.length === 0 || (placed && same) || place.isPending} onClick={() => run(chosen)}>
+            <AlertDialog.Action className="btn primary" disabled={chosen.length === 0 || (placed && same) || place.isPending} onClick={() => run(chosen)}>
               Place on {chosen.length} node{chosen.length === 1 ? '' : 's'}
             </AlertDialog.Action>
           </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError, type S } from '../api/client';
@@ -66,7 +66,7 @@ export function PasswordDialog({
   cluster: string;
   user?: string;
   /** The caller opens it, from a row menu; the dialog then has no trigger of its own. */
-  controlled?: { open: boolean; onOpenChange: (open: boolean) => void };
+  controlled?: { open: boolean; onOpenChange: (open: boolean) => void; returnFocus?: RefObject<HTMLElement | null> };
 }) {
   const [inner, setInner] = useState(false);
   const open = controlled ? controlled.open : inner;
@@ -133,7 +133,12 @@ export function PasswordDialog({
       )}
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="dialog" style={narrow} aria-describedby="pw-desc">
+        <Dialog.Content
+          className="dialog"
+          style={narrow}
+          aria-describedby="pw-desc"
+          onCloseAutoFocus={controlled?.returnFocus ? (e) => (e.preventDefault(), controlled.returnFocus?.current?.focus()) : undefined}
+        >
           <form onSubmit={submit} style={{ display: 'contents' }} noValidate>
             <div className="dialog-head">
               <div>

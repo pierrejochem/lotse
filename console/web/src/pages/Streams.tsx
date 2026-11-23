@@ -4,7 +4,7 @@ import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
 import { MoveLeaderButton, PlaceButton, ReplicationButton } from '../components/Actions';
 import { Chip, Failed, Hint, Loading, Sparkline, Stats, TableWrap } from '../components/ui';
-import { NONE, bytes, count, duration, rate } from '../format';
+import { NONE, bytes, count, counted, duration, rate } from '../format';
 
 export function StreamList() {
   const { cluster = '' } = useParams();
@@ -96,7 +96,7 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
                     <span style={{ display: 'inline-flex', gap: 4 }}>
                       {p.replicas.map((r) => (
                         <Hint key={r.node} text={replicaLabel(r)}>
-                          <span tabIndex={0} style={replicaStyle(r)} aria-label={replicaLabel(r)}>{r.node.slice(-1)}</span>
+                          <span tabIndex={0} role="img" style={replicaStyle(r)} aria-label={replicaLabel(r)}>{r.node.slice(-1)}</span>
                         </Hint>
                       ))}
                     </span>{' '}
@@ -125,7 +125,7 @@ function Partitions({ d, cluster }: { d: S['StreamDetail']; cluster: string }) {
         </table>
       </TableWrap>
       <p className="small muted" style={{ margin: 0 }}>
-        Replica squares show the broker number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
+        Replica squares show the node number: filled = leader, outlined = in sync, amber = catching up. A pinned leader stays on its
         node; a placed partition stays on the nodes it was placed on. Last stable sits below the high
         watermark while a transaction is open; <code>read_committed</code> consumers stop there.
       </p>
@@ -238,7 +238,7 @@ export function StreamDetail() {
           <span className="label">Stream{d.tenant ? ` · tenant ${d.tenant}` : ''}</span>
           <h1 className="h1 mono">{d.name}</h1>
           <div className="row" style={{ gap: 8 }}>
-            <span className="tag">{d.partitions.length} partitions</span>
+            <span className="tag">{counted(d.partitions.length, 'partition')}</span>
             <span className="tag">Replication {d.replication}</span>
             <span className="tag">Retention {retention(d.retention)}</span>
             <span className="tag">Compaction {d.compaction ? 'on' : 'off'}</span>
@@ -253,7 +253,7 @@ export function StreamDetail() {
       <Stats
         items={[
           { label: 'In', value: rate(d.in_bytes_per_sec), note: `${count(d.records_per_sec)} records/s` },
-          { label: 'Out', value: rate(d.out_bytes_per_sec), note: `${d.groups.length} groups` },
+          { label: 'Out', value: rate(d.out_bytes_per_sec), note: counted(d.groups.length, 'group') },
           { label: 'Stored', value: bytes(d.stored_bytes), note: `all ${d.replication} replicas` },
           { label: 'Oldest record', value: duration(d.oldest_record_age_ms), note: d.retention?.ms ? `retention ${duration(d.retention.ms)}` : d.retention ? 'no limit by age' : 'retention unknown' },
           { label: 'Open transactions', value: count(d.open_transactions), note: 'summed over partitions' },

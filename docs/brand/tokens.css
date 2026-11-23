@@ -21,6 +21,7 @@
   --primary-hover: #1D4560;
   --on-primary: #FFFFFF;
   --link: #1F6AA5;
+  --link-hover: #1D4560;
   --selected: #0F2B3D;
   --selected-bg: #E9F0F5;
   --danger-solid: #A8261F;
@@ -60,9 +61,10 @@
     --critical: #F0645A;
     --control: #5F7686;
     --primary: #3B7BA8;
-    --primary-hover: #4A8BB8;
+    --primary-hover: #356FA0;
     --on-primary: #FFFFFF;
     --link: #7CC0F0;
+    --link-hover: #A6D6F6;
     --selected: #7CC0F0;
     --selected-bg: #16303F;
     --danger-solid: #FF8F86;
@@ -90,9 +92,10 @@
   --critical: #F0645A;
   --control: #5F7686;
   --primary: #3B7BA8;
-  --primary-hover: #4A8BB8;
+  --primary-hover: #356FA0;
   --on-primary: #FFFFFF;
   --link: #7CC0F0;
+  --link-hover: #A6D6F6;
   --selected: #7CC0F0;
   --selected-bg: #16303F;
   --danger-solid: #FF8F86;

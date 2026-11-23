@@ -16,9 +16,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           key={t.id}
           className={`toast${t.error ? ' error' : ''}`}
           type={t.error ? 'foreground' : 'background'}
+          // An error says what to do next, so it stays until it is dismissed.
+          duration={t.error ? Infinity : undefined}
           onOpenChange={(open) => !open && setItems((xs) => xs.filter((x) => x.id !== t.id))}
         >
           <Toast.Title className="toast-title">{t.title}</Toast.Title>
+          {t.error && <Toast.Close className="btn small" aria-label="Dismiss">Dismiss</Toast.Close>}
           {t.cli && (
             <Toast.Description>
               <code>{t.cli}</code>

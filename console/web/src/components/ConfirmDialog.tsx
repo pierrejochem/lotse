@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
@@ -20,6 +20,7 @@ export function ConfirmDialog({
   keep,
   pending,
   refuse,
+  returnFocus,
   onConfirm,
 }: {
   open?: boolean;
@@ -36,6 +37,8 @@ export function ConfirmDialog({
   pending?: boolean;
   /** Why it cannot be done at all; the action stays off and this is said in place of asking. */
   refuse?: string;
+  /** Where focus goes when the dialog closes, for a dialog opened from a menu item. */
+  returnFocus?: RefObject<HTMLElement | null>;
   onConfirm: (typed: string) => void;
 }) {
   const [typed, setTyped] = useState('');
@@ -53,7 +56,11 @@ export function ConfirmDialog({
       {trigger}
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
+        <AlertDialog.Content
+          className="dialog"
+          style={narrow}
+          onCloseAutoFocus={returnFocus ? (e) => (e.preventDefault(), returnFocus.current?.focus()) : undefined}
+        >
           <div className="dialog-head">
             <div>
               <AlertDialog.Title className="h2">{title}</AlertDialog.Title>

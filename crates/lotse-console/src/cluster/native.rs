@@ -408,9 +408,10 @@ fn chip(tone: Tone, text: &str) -> Chip {
 /// What the user is told when a call fails.
 fn failed(e: ClientError) -> ApiError {
     match e {
-        ClientError::Authentication(why) => {
-            ApiError::Forbidden(format!("The cluster did not accept your sign-in: {why}. Sign in again."))
-        }
+        ClientError::Authentication(why) => ApiError::Forbidden(format!(
+            "The cluster did not accept your sign-in: {}. Sign in again.",
+            why.trim_end_matches('.')
+        )),
         ClientError::Broker { code: ErrorCode::UNAUTHORIZED, message } => {
             ApiError::Forbidden(message.unwrap_or_else(|| {
                 "Your roles on this cluster do not allow this. Ask a cluster admin for the role.".into()

@@ -42,7 +42,7 @@ function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream:
   // Choosing a record moves focus to its panel, which is also what tells a screen reader that something opened.
   useEffect(() => title.current?.focus({ preventScroll: true }), [r.offset]);
   return (
-    <aside className="card stack" aria-labelledby="rec-title" style={{ flex: '2 1 380px', '--gap': '18px' } as React.CSSProperties}>
+    <aside className="card stack" aria-labelledby="rec-title" style={{ flex: '1 1 340px', '--gap': '18px' } as React.CSSProperties}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
         <div>
           <span className="label">Record</span>
@@ -219,9 +219,14 @@ export function Messages() {
         </div>
       </form>
 
+      {/* Announces what a read or a page turned up; the table itself is not a live region. */}
+      <p role="status" className="sr-only">
+        {read.isPending ? 'Reading records.' : read.data ? (records.length === 0 ? 'No records at these offsets.' : `Read ${records.length} records, offsets ${count(records[0]!.offset)} to ${count(records[records.length - 1]!.offset)}.`) : ''}
+      </p>
+
       {read.error && (
         <p role="alert" className="error-text" style={{ margin: 0 }}>
-          {read.error instanceof ApiError ? read.error.message : 'The read failed.'}
+          {read.error instanceof ApiError ? read.error.message : 'The read failed. Check that the nodes are reachable and try again.'}
         </p>
       )}
 
@@ -238,7 +243,7 @@ export function Messages() {
                     <th scope="col">Time</th>
                     <th scope="col">Key</th>
                     <th scope="col" className="r">Size (bytes)</th>
-                    <th scope="col">Transaction</th>
+                    <th scope="col">Txn</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -250,7 +255,7 @@ export function Messages() {
                       aria-current={r.offset === selected ? 'true' : undefined}
                     >
                       <td className="r mono">
-                        <button type="button" className="rowlink mono" aria-pressed={r.offset === selected} onClick={() => setSelected(r.offset)}>
+                        <button type="button" className="rowlink mono" data-offset={r.offset} aria-pressed={r.offset === selected} onClick={() => setSelected(r.offset)}>
                           {count(r.offset)}
                         </button>
                         {r.offset === selected && <span className="selmark">Selected</span>}
@@ -280,7 +285,12 @@ export function Messages() {
               <pre className="code" style={{ marginTop: 8 }}>{read.data.cli}</pre>
             </div>
           </TableWrap>
-          {sel && <Detail r={sel} stream={stream} partition={partition} onClose={() => setSelected(null)} />}
+          {sel && <Detail r={sel} stream={stream} partition={partition} onClose={() => {
+            const back = selected;
+            setSelected(null);
+            // The panel closes with the focus in it; give it back to the record that opened it.
+            requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-offset="${back}"]`)?.focus());
+          }} />}
         </div>
       )}
     </main>

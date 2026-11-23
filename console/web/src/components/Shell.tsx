@@ -93,7 +93,8 @@ function Nav({ cluster }: { cluster: string }) {
   const current = clusters.data?.find((c) => c.id === cluster);
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   const path = location.pathname.replace(/\/$/, '');
-  const mark = (to: string, end = false): Mark => (path === to || (!end && path.startsWith(`${to}/`)) ? 'page' : undefined);
+  // A list is "true" while one of its items is open, so the breadcrumb is not repeated by the navigation.
+  const mark = (to: string, end = false): Mark => (path === to ? 'page' : !end && path.startsWith(`${to}/`) ? 'true' : undefined);
   const peopleBase = `${base}/users`;
   const inPeople = path === peopleBase || path.startsWith(`${peopleBase}/`);
   const tabPath = (id: string) => (id === 'users' ? peopleBase : `${peopleBase}/${id}`);
@@ -311,6 +312,8 @@ function usePageAnnouncer(cluster: string) {
       first.current = false;
       return;
     }
+    // Arrow keys in a tab list move between pages; the focus stays on the tabs.
+    if (document.activeElement?.closest('[role="tablist"]')) return;
     const target = document.querySelector<HTMLElement>('main h1') ?? main;
     if (target) {
       target.tabIndex = -1;

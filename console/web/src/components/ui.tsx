@@ -182,7 +182,8 @@ export function Banner({ tone, title, children, actions }: { tone: 'warn' | 'cri
 
 export function Loading({ label = 'Loading' }: { label?: string }) {
   return (
-    <div className="stack" aria-busy="true" aria-label={label}>
+    <div className="stack" role="status" aria-busy="true">
+      <span className="sr-only">{label}</span>
       <div className="skeleton" />
       <div className="skeleton" style={{ height: 240 }} />
     </div>

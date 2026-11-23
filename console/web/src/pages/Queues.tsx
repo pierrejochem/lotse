@@ -93,7 +93,7 @@ export function QueueDetail() {
           { label: 'In open txns', value: count(d.in_open_txns), note: 'acks waiting for commit' },
           { label: 'Publish', value: `${count(d.publish_per_sec)}/s` },
           { label: 'Ack', value: `${count(d.ack_per_sec)}/s` },
-          { label: 'Dead-lettered', value: count(d.dead_lettered), note: d.dlq ?? 'no DLQ' },
+          { label: 'Dead-lettered', value: count(d.dead_lettered), note: d.dlq ?? 'no dead-letter queue' },
         ]}
       />
 
