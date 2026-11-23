@@ -10,7 +10,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 ### Weaknesses
 
-None known. Report one as an issue.
+- **Groups without a leader on loaded machines:** tests against real nodes fail now and then on CI runners because a group answers `NOT_LEADER` or delivers nothing for seconds, far longer than an election takes. The cause is not found yet; the suspicion is a node loop that falls behind on a slow disk or a starved CPU. Nodes log their groups' elections and their loop's stalls (ADR 0139), and CI turns that on, so the next failure shows where the time went.
 
 ### Not built yet
 
