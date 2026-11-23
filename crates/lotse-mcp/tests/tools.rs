@@ -343,10 +343,22 @@ fn exchanges_bindings_settings_and_partitions_change_through_the_tools() {
             )
             .await;
 
-            ok(&t, "alter_configs", json!({"name": "eu", "set": {"max.deliveries": "7"}})).await;
+            // A setting that deletes nothing changes without confirm.
+            ok(&t, "alter_configs", json!({"name": "eu", "set": {"ack.timeout.ms": "45000"}})).await;
+            let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
+            assert_eq!(eu["configs"]["ack.timeout.ms"], "45000", "{eu}");
+            // Without a dead-letter queue, a delivery limit or a lifetime drops messages.
+            for args in [
+                json!({"name": "eu", "set": {"max.deliveries": "7"}}),
+                json!({"name": "eu", "set": {"message.ttl.ms": "1000"}}),
+                json!({"name": "eu", "reset": ["max.deliveries"]}),
+            ] {
+                fails(&t, "alter_configs", args, "CONFIRMATION_MISMATCH").await;
+            }
+            ok(&t, "alter_configs", json!({"name": "eu", "set": {"max.deliveries": "7"}, "confirm": "eu"})).await;
             let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
             assert_eq!(eu["configs"]["max.deliveries"], "7", "{eu}");
-            ok(&t, "alter_configs", json!({"name": "eu", "reset": ["max.deliveries"]})).await;
+            ok(&t, "alter_configs", json!({"name": "eu", "reset": ["max.deliveries"], "confirm": "eu"})).await;
             let eu = ok(&t, "describe_queue", json!({"name": "eu"})).await;
             assert_ne!(eu["configs"]["max.deliveries"], "7", "{eu}");
             // A length limit can drop messages: without confirm nothing changes.

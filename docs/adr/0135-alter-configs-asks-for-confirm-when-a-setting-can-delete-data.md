@@ -1,6 +1,6 @@
 # 135. `alter_configs` asks for `confirm` when a setting can delete data
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR 0136](0136-message-lifetime-and-delivery-limit-need-confirm-too.md)
 - Date: 2026-11-23
 
 ## Context
@@ -10,10 +10,10 @@ ADR 0134 gave `lotse mcp` a `confirm` argument for the tools that destroy data (
 ## Decision
 
 - `alter_configs` runs a change that sets or resets `retention.ms`, `retention.bytes`, `delete.retention.ms`, `cleanup.policy`, `max.length`, `max.length.bytes` or `overflow` only when its `confirm` argument is the resource's name, exactly, as the destroying tools do. Otherwise it answers `CONFIRMATION_MISMATCH`, names the setting and changes nothing, not even the other settings of the same call.
-- `confirm` is an optional property of `alter_configs`: a change of only other settings (`ack.timeout.ms`, `max.deliveries`, `replication.factor` and the rest) runs without it.
+- `confirm` is an optional property of `alter_configs`: a change of only other settings (`ack.timeout.ms`, `replication.factor` and the rest) runs without it.
 - The tool keeps its `destructiveHint`. The check is in `lotse mcp` only; `AlterConfigs` over the native protocol and in the console is unchanged.
 
 ## Consequences
 
 - An agent cannot cut a stream's retention or limit a queue in one step. It has to name the resource twice, which shows the user what is about to change.
-- `message.ttl.ms` and `max.deliveries` can also retire messages, but without a dead-letter queue only; they stay without `confirm`, as decided here. Adding a key to the list is a change of `DATA_LOSING` in `crates/lotse-mcp/src/change.rs` and of this record.
+- `message.ttl.ms` and `max.deliveries` can also drop messages, when the queue has no dead-letter queue; ADR 0136 adds them to the list. Adding a key to the list is a change of `DATA_LOSING` in `crates/lotse-mcp/src/change.rs` and of this record.

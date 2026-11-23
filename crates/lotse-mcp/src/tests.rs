@@ -120,7 +120,7 @@ fn arguments_are_checked_against_the_schema() {
 }
 
 #[test]
-fn retention_cleanup_and_length_limits_are_the_settings_that_need_confirm() {
+fn settings_that_can_delete_data_need_confirm() {
     for key in [
         "retention.ms",
         "retention.bytes",
@@ -129,11 +129,12 @@ fn retention_cleanup_and_length_limits_are_the_settings_that_need_confirm() {
         "max.length",
         "max.length.bytes",
         "overflow",
+        "message.ttl.ms",
+        "max.deliveries",
     ] {
         assert_eq!(change::data_losing([key].into_iter()), Some(key), "{key}");
     }
-    for key in ["max.deliveries", "ack.timeout.ms", "replication.factor", "single.active.consumer", "retention", "max"]
-    {
+    for key in ["ack.timeout.ms", "replication.factor", "single.active.consumer", "retention", "max"] {
         assert_eq!(change::data_losing([key].into_iter()), None, "{key}");
     }
     assert_eq!(change::data_losing(["ack.timeout.ms", "overflow"].into_iter()), Some("overflow"), "any of them counts");
