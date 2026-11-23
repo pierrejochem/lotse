@@ -75,6 +75,32 @@ async fn leader_term(client: &Client<TokioRuntime>, name: &str) -> (u32, u64) {
         .map_or((0, 0), |p| (p.leader, p.leader_term))
 }
 
+/// Which node leads each Raft group with a recent quorum (ADR 0095), as the
+/// nodes report it: `(every group led, what each node says)`.
+async fn led(client: &Client<TokioRuntime>, groups: &[u64]) -> (bool, String) {
+    let Ok(all) = client.node_metrics().await else { return (false, "no node answered".into()) };
+    let mut seen = Vec::new();
+    let mut leaders = BTreeSet::new();
+    for (id, m) in all {
+        let Ok(m) = m else {
+            seen.push(format!("node {id}: no answer"));
+            continue;
+        };
+        for p in m.partitions.iter().filter(|p| groups.contains(&p.group)) {
+            seen.push(format!(
+                "node {id} group {}: {} term {}",
+                p.group,
+                if p.leader { "leads" } else { "follows" },
+                p.term
+            ));
+            if p.leader {
+                leaders.insert(p.group);
+            }
+        }
+    }
+    (groups.iter().all(|g| leaders.contains(g)), seen.join(", "))
+}
+
 async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut req = Request::builder().method(method).uri(uri);
     let body = match body {
@@ -152,6 +178,20 @@ async fn the_console_shows_a_real_cluster() {
         client.produce("jobs", 0, batch(&format!("job {i}"))).await.expect("queue message");
     }
 
+    // The overview below reports the cluster as it is now. A new cluster may
+    // still be electing (a stalled runner loses a leader's quorum for an
+    // election timeout, 100 to 200 ms here): its alerts are right then, but
+    // not what the checks below are about. They start once every group is
+    // led.
+    let mut settled = (false, String::new());
+    for _ in 0..150 {
+        settled = led(&client, &[1, 2, 3, 4]).await;
+        if settled.0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(settled.0, "every group gets a leader within 15 s: {}", settled.1);
     let store = Arc::new(MetricsStore::new(Duration::from_secs(3600), Duration::from_secs(10)));
     let clusters: Vec<Arc<dyn Cluster>> = vec![Arc::new(NativeCluster::new("local", bootstrap))];
     let app = router(AppState::new(
@@ -226,7 +266,11 @@ async fn the_console_shows_a_real_cluster() {
     // refused with a reason.
     let plain = json!({"name": "emails", "priority_levels": 1, "single_active": false, "create_dlq": false});
     let (status, done) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(plain.clone())).await;
-    assert_eq!(status, StatusCode::CREATED, "{done}");
+    if status != StatusCode::CREATED {
+        // Once in many hundred CI runs the metadata group answered
+        // NOT_LEADER for the console's whole 5 s; say who led it then.
+        panic!("{status}: {done}; the metadata group now: {}", led(&client, &[1]).await.1);
+    }
     let (status, _) = call(&app, "POST", "/api/v1/clusters/local/queues", Some(plain)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     // Priority levels (ADR 0078) go through as well.
