@@ -51,7 +51,7 @@ fn tools_are_listed_in_a_fixed_order_with_schemas() {
         "list_offsets",
         "list_tokens",
     ];
-    let destructive = ["delete_resource", "purge_queue", "requeue_dead_letters"];
+    let destructive = ["delete_resource", "purge_queue", "requeue_dead_letters", "alter_configs"];
     for s in &specs {
         assert_eq!(s.read_only, read_only.contains(&s.name), "{}", s.name);
         assert_eq!(s.destructive, destructive.contains(&s.name), "{}", s.name);
@@ -69,10 +69,19 @@ fn tools_are_listed_in_a_fixed_order_with_schemas() {
         for r in required {
             assert!(props.contains_key(r.as_str().unwrap()), "{}: required {r} is a property", s.name);
         }
-        if s.destructive {
+        // alter_configs only hints: most of its settings destroy nothing, so
+        // the client's confirmation (destructiveHint) stands in for `confirm`.
+        if s.destructive && s.name != "alter_configs" {
             assert!(required.contains(&json!("confirm")), "{} needs confirm", s.name);
         }
     }
+}
+
+#[test]
+fn a_token_id_is_sixteen_lowercase_hex_digits_in_every_tool() {
+    assert_eq!(tokens::token_id(0xab12), json!("000000000000ab12"));
+    assert_eq!(look::session_token_id(Some(0xab12)), json!("000000000000ab12"), "list_sessions as list_tokens");
+    assert_eq!(look::session_token_id(None), Value::Null, "a session without a token");
 }
 
 #[test]
