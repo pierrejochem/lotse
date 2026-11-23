@@ -87,14 +87,15 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             "alter_configs",
             "Changes settings of a stream or queue created at runtime: set gives settings new values, reset returns \
              them to their defaults. replication.factor is set on its own and moves every partition to that many \
-             nodes. Destructive: retention, cleanup policy and length limits can delete data, so a change to \
-             retention.ms, retention.bytes, delete.retention.ms, cleanup.policy, max.length, max.length.bytes or \
-             overflow runs only when confirm is the resource's name.",
+             nodes. Destructive: retention, cleanup policy, length limits, message lifetime and the delivery \
+             limit can delete data, so a change to retention.ms, retention.bytes, delete.retention.ms, \
+             cleanup.policy, max.length, max.length.bytes, overflow, message.ttl.ms or max.deliveries runs only when \
+             confirm is the resource's name.",
             json!({
                 "name": {"type": "string", "description": "The stream's or queue's name."},
                 "set": configs,
                 "reset": {"type": "array", "items": {"type": "string"}, "description": "Settings to return to their defaults."},
-                "confirm": {"type": "string", "description": "The same name again, exactly; needed when retention, cleanup policy or a length limit changes, and nothing is changed without it."},
+                "confirm": {"type": "string", "description": "The same name again, exactly; needed when a setting that can delete data changes, and nothing is changed without it."},
             }),
             &["name"],
             false,
@@ -182,9 +183,11 @@ pub(crate) async fn bind<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'
     done(json!({"exchange": exchange, "queue": queue, "routing_key": key}), text)
 }
 
-/// Settings whose change can delete data: retention, the cleanup policy and
-/// a queue's length limits. `alter_configs` changes them only with `confirm`.
-pub(crate) const DATA_LOSING: [&str; 7] = [
+/// Settings whose change can delete data: retention, the cleanup policy, a
+/// queue's length limits, and its message lifetime and delivery limit, which
+/// drop messages when the queue has no dead-letter queue. `alter_configs`
+/// changes them only with `confirm`.
+pub(crate) const DATA_LOSING: [&str; 9] = [
     "retention.ms",
     "retention.bytes",
     "delete.retention.ms",
@@ -192,6 +195,8 @@ pub(crate) const DATA_LOSING: [&str; 7] = [
     "max.length",
     "max.length.bytes",
     "overflow",
+    "message.ttl.ms",
+    "max.deliveries",
 ];
 
 /// The first of `keys` whose change can delete data.
