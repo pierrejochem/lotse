@@ -121,34 +121,41 @@ pub struct Reach {
     pub plaintext_on_loopback: bool,
 }
 
+impl Reach {
+    /// Whether the ways to reach the cluster agree: TLS with the cluster's
+    /// CA, or plain TCP on loopback when asked, and a client certificate
+    /// only over TLS. A mistake here is a usage error, found before any
+    /// connection is made.
+    pub fn validate(&self, with_certificate: bool) -> Result<(), String> {
+        if self.bootstrap.is_empty() {
+            return Err("no node address to reach the cluster at".into());
+        }
+        match (&self.ca, self.plaintext_on_loopback) {
+            (Some(_), true) => Err("--plaintext-on-loopback goes without a CA: the cluster's CA means TLS".into()),
+            (None, true) if with_certificate => {
+                Err("a client certificate needs TLS: give the cluster's CA, not --plaintext-on-loopback".into())
+            }
+            (None, false) => Err("no CA to reach the cluster with TLS: the cluster file's [tls] ca, or --ca <file>; \
+                                  plain TCP only with --plaintext-on-loopback, to a loopback address"
+                .into()),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The client the tools act through, signed in as `sign_in`. TLS always,
 /// unless plain TCP on loopback was asked for and there is no CA.
 pub fn client(reach: &Reach, sign_in: SignIn) -> Result<Client<TokioRuntime>, String> {
-    if reach.bootstrap.is_empty() {
-        return Err("no node address to reach the cluster at".into());
-    }
     let rt = TokioRuntime::new(std::env::temp_dir());
     let (identity, credentials) = match sign_in {
         SignIn::Token(t) => (None, Some(Credentials::Token(t))),
         SignIn::Scram { user, password } => (None, Some(Credentials::Scram { user, password })),
         SignIn::Certificate { cert, key } => (Some((cert, key)), None),
     };
-    let rt = match (&reach.ca, reach.plaintext_on_loopback) {
-        (Some(_), true) => {
-            return Err("--plaintext-on-loopback goes without a CA: the cluster's CA means TLS".into());
-        }
-        (Some(ca), false) => {
-            rt.with_tls(TlsConfig::from_files(ca, identity).map_err(|e| format!("{}: {e}", ca.display()))?)
-        }
-        (None, true) if identity.is_some() => {
-            return Err("a client certificate needs TLS: give the cluster's CA, not --plaintext-on-loopback".into());
-        }
-        (None, true) => rt.plaintext_on_loopback(),
-        (None, false) => {
-            return Err("no CA to reach the cluster with TLS: the cluster file's [tls] ca, or --ca <file>; plain \
-                        TCP only with --plaintext-on-loopback, to a loopback address"
-                .into());
-        }
+    reach.validate(identity.is_some())?;
+    let rt = match &reach.ca {
+        Some(ca) => rt.with_tls(TlsConfig::from_files(ca, identity).map_err(|e| format!("{}: {e}", ca.display()))?),
+        None => rt.plaintext_on_loopback(),
     };
     let cfg = ClientConfig {
         retry_for: std::time::Duration::from_secs(15),

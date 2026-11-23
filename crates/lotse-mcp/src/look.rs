@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 
 use lotse_client::{Client, ClientError};
-use lotse_proto::{DescribeMetricsResponse, ErrorCode, MetadataResponse, PartitionMetrics, ResourceMetadata, kind};
+use lotse_proto::{
+    ConfigEntry, DescribeMetricsResponse, DescribeUpgradeResponse, ErrorCode, GroupMetrics, MetadataResponse,
+    PartitionMetrics, QueueMetrics, ResourceMetadata, kind,
+};
 use lotse_rt::{Clock, Net, Rng, Spawn};
 use serde_json::{Value, json};
 
@@ -37,7 +40,7 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             "describe_stream",
             "One stream: per partition the leader, offsets (log start, high watermark, last stable offset), size in \
              bytes, replicas behind the leader in offsets and open transactions; its settings; and the consumer \
-             groups reading it with their lag in offsets.",
+             groups reading it with their lag in offsets to the last stable offset.",
             json!({
                 "name": {"type": "string", "description": "The stream's name."},
             }),
@@ -59,7 +62,8 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         spec(
             "describe_consumer_group",
             "One consumer group: its members and the partitions each owns, and per partition the committed offset, \
-             the high watermark and the lag in offsets.",
+             the last stable offset, the high watermark and the lag in offsets: to the last stable offset (what a \
+             read_committed group can read, `lag`) and to the high watermark.",
             json!({
                 "group_id": {"type": "string", "description": "The consumer group's id."},
                 "tenant": {"type": "string", "description": "The tenant the group id lives in. Without it, the group in every tenant you may see."},
@@ -127,6 +131,91 @@ fn led(metrics: &[DescribeMetricsResponse], resource_id: u64, partition: u32) ->
         .max_by_key(|p| p.term)
 }
 
+/// The queue's counts from the node that leads it now: the reporter with the
+/// highest term, as [`led`] picks a partition's leader. A node reports a
+/// queue only while it leads it, and for a moment two may.
+pub(crate) fn led_queue(metrics: &[DescribeMetricsResponse], resource_id: u64) -> Option<&QueueMetrics> {
+    let term = |m: &DescribeMetricsResponse| {
+        m.partitions.iter().filter(|p| p.leader && p.resource_id == resource_id).map(|p| p.term).max().unwrap_or(0)
+    };
+    metrics
+        .iter()
+        .filter_map(|m| m.queues.iter().find(|q| q.resource_id == resource_id).map(|q| (term(m), q)))
+        .reduce(|best, next| if next.0 > best.0 { next } else { best })
+        .map(|(_, q)| q)
+}
+
+/// Every consumer group once. Only the coordinator group's leader reports
+/// groups, but while its leadership moves two nodes may; the report of the
+/// node with the highest coordinator term wins.
+pub(crate) fn group_reports(metrics: &[DescribeMetricsResponse]) -> Vec<&GroupMetrics> {
+    let mut best: BTreeMap<(&str, &str), (u64, &GroupMetrics)> = BTreeMap::new();
+    for m in metrics {
+        let term = m
+            .partitions
+            .iter()
+            .filter(|p| p.leader && p.group == m.coordinator_group)
+            .map(|p| p.term)
+            .max()
+            .unwrap_or(0);
+        for g in &m.groups {
+            let slot = best.entry((g.tenant.as_str(), g.group_id.as_str())).or_insert((term, g));
+            if term > slot.0 {
+                *slot = (term, g);
+            }
+        }
+    }
+    best.into_values().map(|(_, g)| g).collect()
+}
+
+/// How far a committed offset is behind a partition's end, to each of the
+/// two ends `DescribeMetrics` gives.
+pub(crate) struct Lag {
+    /// To the last stable offset: all a read_committed group can read.
+    pub(crate) stable: u64,
+    /// To the high watermark: all a read_uncommitted group can read.
+    pub(crate) high_watermark: u64,
+}
+
+pub(crate) fn lag(p: &PartitionMetrics, committed: u64) -> Lag {
+    Lag { stable: p.last_stable.saturating_sub(committed), high_watermark: p.high_watermark.saturating_sub(committed) }
+}
+
+/// Whether the cluster did not show a thing to this principal, as opposed to
+/// failing to answer: a refusal and an unknown name look alike on purpose
+/// (what a principal may not see is unknown to it). Anything else, such as
+/// no node answering, is a failure the agent should hear about.
+pub(crate) fn not_shown(e: &ClientError) -> bool {
+    match e {
+        ClientError::Broker { code, .. } => *code == ErrorCode::UNAUTHORIZED || *code == ErrorCode::UNKNOWN_RESOURCE,
+        ClientError::UnknownStream(..) => true,
+        _ => false,
+    }
+}
+
+/// A resource's settings as JSON, or null with the reason: null alone when
+/// the principal may not read them, null and the error when the read failed.
+pub(crate) fn settings(r: Result<Vec<ConfigEntry>, ClientError>) -> (Value, Option<String>) {
+    match r {
+        Ok(entries) => {
+            let map: serde_json::Map<String, Value> = entries.into_iter().map(|e| (e.key, json!(e.value))).collect();
+            (Value::Object(map), None)
+        }
+        Err(e) if not_shown(&e) => (Value::Null, None),
+        Err(e) => (Value::Null, Some(e.to_string())),
+    }
+}
+
+/// The cluster version of an upgrade answer, or why there is none: nothing
+/// for a principal that may not read it, the error for a failed read.
+pub(crate) fn upgrade_version(r: Result<DescribeUpgradeResponse, ClientError>) -> (Option<String>, Option<String>) {
+    match r {
+        Ok(u) => (u.cluster_version.map(version), None),
+        Err(e) if not_shown(&e) => (None, None),
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
 /// The resource called `name` of `want` kind, as the principal sees it.
 fn find(m: &MetadataResponse, name: &str, want: u8) -> Result<ResourceMetadata, ToolError> {
     m.resources
@@ -139,8 +228,9 @@ fn find(m: &MetadataResponse, name: &str, want: u8) -> Result<ResourceMetadata, 
 pub(crate) async fn cluster_overview<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {
     let m = c.metadata(&[]).await?;
     let (metrics, silent) = split(c.node_metrics().await?);
-    // Only cluster admins and viewers may read it; everyone else gets the rest.
-    let upgrade = c.describe_upgrade().await.ok();
+    // Only cluster admins and viewers may read it; everyone else gets the
+    // rest, and a failed read is named, not mistaken for a refusal.
+    let (cluster_version, cluster_version_error) = upgrade_version(c.describe_upgrade().await);
     let nodes: Vec<Value> = m
         .brokers
         .iter()
@@ -191,7 +281,6 @@ pub(crate) async fn cluster_overview<R: Net + Clock + Spawn + Rng>(c: &Client<R>
     if !low.is_empty() {
         problems.push(format!("{} nodes are low on disk", low.len()));
     }
-    let cluster_version = upgrade.as_ref().and_then(|u| u.cluster_version).map(version);
     let text = format!(
         "{} nodes, {} answered; {} resources you may see; {}.",
         m.brokers.len(),
@@ -208,6 +297,7 @@ pub(crate) async fn cluster_overview<R: Net + Clock + Spawn + Rng>(c: &Client<R>
             "partitions_without_leader": leaderless,
             "nodes_low_on_disk": low,
             "cluster_version": cluster_version,
+            "cluster_version_error": cluster_version_error,
         }),
         text,
     )
@@ -273,22 +363,17 @@ pub(crate) async fn list_resources<R: Net + Clock + Spawn + Rng>(c: &Client<R>, 
     done(json!({ "resources": resources }), text)
 }
 
-/// A resource's settings, or null if the principal may not read them.
-async fn configs<R: Net + Clock + Spawn + Rng>(c: &Client<R>, name: &str) -> Value {
-    match c.describe_configs(name).await {
-        Ok(entries) => {
-            let map: serde_json::Map<String, Value> = entries.into_iter().map(|e| (e.key, json!(e.value))).collect();
-            Value::Object(map)
-        }
-        Err(_) => Value::Null,
-    }
+/// A resource's settings, or null if the principal may not read them, and
+/// the error if reading them failed.
+async fn configs<R: Net + Clock + Spawn + Rng>(c: &Client<R>, name: &str) -> (Value, Option<String>) {
+    settings(c.describe_configs(name).await)
 }
 
 pub(crate) async fn describe_stream<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
     let name = a.str("name")?;
     let r = find(&c.metadata(&[name]).await?, name, kind::STREAM)?;
     let (metrics, _) = split(c.node_metrics().await?);
-    let mut high_watermarks = BTreeMap::new();
+    let mut ends = BTreeMap::new();
     let partitions: Vec<Value> = r
         .partitions
         .iter()
@@ -299,7 +384,7 @@ pub(crate) async fn describe_stream<R: Net + Clock + Spawn + Rng>(c: &Client<R>,
                 "voters": p.voters,
             });
             if let Some(m) = led(&metrics, r.resource_id, p.partition) {
-                high_watermarks.insert(p.partition, m.high_watermark);
+                ends.insert(p.partition, m);
                 v["log_start"] = json!(m.log_start);
                 v["high_watermark"] = json!(m.high_watermark);
                 v["last_stable_offset"] = json!(m.last_stable);
@@ -315,30 +400,40 @@ pub(crate) async fn describe_stream<R: Net + Clock + Spawn + Rng>(c: &Client<R>,
             v
         })
         .collect();
-    let groups: Vec<Value> = metrics
-        .iter()
-        .flat_map(|m| &m.groups)
+    let groups: Vec<Value> = group_reports(&metrics)
+        .into_iter()
         .filter(|g| {
             g.offsets.iter().any(|o| o.resource_id == r.resource_id)
                 || g.members.iter().any(|m| m.owned.iter().any(|o| o.resource_id == r.resource_id))
         })
         .map(|g| {
-            let lag: u64 = g
-                .offsets
-                .iter()
-                .filter(|o| o.resource_id == r.resource_id)
-                .map(|o| high_watermarks.get(&o.partition).copied().unwrap_or(0).saturating_sub(o.offset))
-                .sum();
-            json!({"group_id": g.group_id, "tenant": g.tenant, "members": g.members.len(), "lag": lag})
+            let (mut stable, mut high) = (0u64, 0u64);
+            for o in g.offsets.iter().filter(|o| o.resource_id == r.resource_id) {
+                if let Some(p) = ends.get(&o.partition) {
+                    let l = lag(p, o.offset);
+                    stable += l.stable;
+                    high += l.high_watermark;
+                }
+            }
+            json!({
+                "group_id": g.group_id,
+                "tenant": g.tenant,
+                "members": g.members.len(),
+                "lag": stable,
+                "lag_against": "last_stable_offset",
+                "lag_to_high_watermark": high,
+            })
         })
         .collect();
     let text = format!("Stream {name}: {} partitions, {} consumer groups.", partitions.len(), groups.len());
+    let (settings, settings_error) = configs(c, name).await;
     done(
         json!({
             "name": r.name,
             "tenant": r.tenant,
             "partitions": partitions,
-            "configs": configs(c, name).await,
+            "configs": settings,
+            "configs_error": settings_error,
             "consumer_groups": groups,
         }),
         text,
@@ -349,14 +444,15 @@ pub(crate) async fn describe_queue<R: Net + Clock + Spawn + Rng>(c: &Client<R>, 
     let name = a.str("name")?;
     let r = find(&c.metadata(&[name]).await?, name, kind::QUEUE)?;
     let (metrics, _) = split(c.node_metrics().await?);
-    let settings = configs(c, name).await;
-    let queue = |id: u64| metrics.iter().flat_map(|m| &m.queues).find(|q| q.resource_id == id);
+    let (settings, settings_error) = configs(c, name).await;
+    let queue = |id: u64| led_queue(&metrics, id);
     let leader = r.partitions.first().map(|p| p.leader).filter(|l| *l != 0);
     let mut v = json!({
         "name": r.name,
         "tenant": r.tenant,
         "leader": leader,
         "configs": settings,
+        "configs_error": settings_error,
     });
     match queue(r.resource_id) {
         Some(q) => {
@@ -410,9 +506,8 @@ pub(crate) async fn describe_consumer_group<R: Net + Clock + Spawn + Rng>(c: &Cl
     let (metrics, _) = split(c.node_metrics().await?);
     let names: BTreeMap<u64, &str> = m.resources.iter().map(|r| (r.resource_id, r.name.as_str())).collect();
     let stream = |id: u64| names.get(&id).map_or_else(|| json!(id), |n| json!(n));
-    let groups: Vec<Value> = metrics
-        .iter()
-        .flat_map(|n| &n.groups)
+    let groups: Vec<Value> = group_reports(&metrics)
+        .into_iter()
         .filter(|g| g.group_id == group_id && tenant.is_none_or(|t| t == g.tenant))
         .map(|g| {
             let members: Vec<Value> = g
@@ -429,19 +524,23 @@ pub(crate) async fn describe_consumer_group<R: Net + Clock + Spawn + Rng>(c: &Cl
                 })
                 .collect();
             let mut total = 0u64;
+            let mut total_high = 0u64;
             let partitions: Vec<Value> = g
                 .offsets
                 .iter()
                 .map(|o| {
-                    let hw = led(&metrics, o.resource_id, o.partition).map(|p| p.high_watermark);
-                    let lag = hw.map(|hw| hw.saturating_sub(o.offset));
-                    total += lag.unwrap_or(0);
+                    let end = led(&metrics, o.resource_id, o.partition);
+                    let l = end.map(|p| lag(p, o.offset));
+                    total += l.as_ref().map_or(0, |l| l.stable);
+                    total_high += l.as_ref().map_or(0, |l| l.high_watermark);
                     json!({
                         "stream": stream(o.resource_id),
                         "partition": o.partition,
                         "committed_offset": o.offset,
-                        "high_watermark": hw,
-                        "lag": lag,
+                        "last_stable_offset": end.map(|p| p.last_stable),
+                        "high_watermark": end.map(|p| p.high_watermark),
+                        "lag": l.as_ref().map(|l| l.stable),
+                        "lag_to_high_watermark": l.as_ref().map(|l| l.high_watermark),
                     })
                 })
                 .collect();
@@ -452,6 +551,8 @@ pub(crate) async fn describe_consumer_group<R: Net + Clock + Spawn + Rng>(c: &Cl
                 "members": members,
                 "partitions": partitions,
                 "total_lag": total,
+                "total_lag_to_high_watermark": total_high,
+                "lag_against": "last_stable_offset",
             })
         })
         .collect();

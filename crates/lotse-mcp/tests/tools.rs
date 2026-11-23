@@ -178,6 +178,9 @@ fn a_viewer_can_look_but_not_produce() {
             let v = tools(&rt, "v", "shop");
             let overview = ok(&v, "cluster_overview", json!({})).await;
             assert_eq!(overview["nodes"].as_array().unwrap().len(), 3, "{overview}");
+            // A viewer of one tenant is refused the upgrade state: that is "not shown", not a failure.
+            assert_eq!(overview["cluster_version"], Value::Null, "{overview}");
+            assert_eq!(overview["cluster_version_error"], Value::Null, "a refusal is not an error: {overview}");
             let mut seen = names(&ok(&v, "list_resources", json!({})).await);
             seen.sort();
             assert_eq!(seen, vec!["jobs".to_string(), "orders".to_string()], "what the viewer may see");
