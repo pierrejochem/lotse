@@ -69,10 +69,13 @@ fn tools_are_listed_in_a_fixed_order_with_schemas() {
         for r in required {
             assert!(props.contains_key(r.as_str().unwrap()), "{}: required {r} is a property", s.name);
         }
-        // alter_configs only hints: most of its settings destroy nothing, so
-        // the client's confirmation (destructiveHint) stands in for `confirm`.
+        // alter_configs asks for `confirm` only for settings that can delete
+        // data, so it is a property there but not a required one.
         if s.destructive && s.name != "alter_configs" {
             assert!(required.contains(&json!("confirm")), "{} needs confirm", s.name);
+        }
+        if s.destructive {
+            assert!(props.contains_key("confirm"), "{} takes confirm", s.name);
         }
     }
 }
@@ -114,6 +117,26 @@ fn arguments_are_checked_against_the_schema() {
     assert_eq!(check(json!(null)), Err("INVALID_ARGUMENT".to_string()), "create_stream has required arguments");
     let none = Tools::<lotse_sim::SimRuntime>::list().into_iter().find(|s| s.name == "cluster_overview").unwrap();
     assert!(check_args(&none, &json!(null)).is_ok(), "no arguments may be null");
+}
+
+#[test]
+fn retention_cleanup_and_length_limits_are_the_settings_that_need_confirm() {
+    for key in [
+        "retention.ms",
+        "retention.bytes",
+        "delete.retention.ms",
+        "cleanup.policy",
+        "max.length",
+        "max.length.bytes",
+        "overflow",
+    ] {
+        assert_eq!(change::data_losing([key].into_iter()), Some(key), "{key}");
+    }
+    for key in ["max.deliveries", "ack.timeout.ms", "replication.factor", "single.active.consumer", "retention", "max"]
+    {
+        assert_eq!(change::data_losing([key].into_iter()), None, "{key}");
+    }
+    assert_eq!(change::data_losing(["ack.timeout.ms", "overflow"].into_iter()), Some("overflow"), "any of them counts");
 }
 
 #[test]

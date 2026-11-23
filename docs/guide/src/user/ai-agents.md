@@ -94,7 +94,7 @@ No tool takes messages from a queue. A consumer that reads takes them out of fli
 
 **Change**
 
-`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs` and `create_partitions`. They work on resources created at runtime, as the same requests do over the native protocol. `alter_configs` is marked `destructiveHint` too, without a `confirm` argument: a shorter retention, a cleanup policy or an overflow setting can delete data, so a client may ask you first.
+`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs` and `create_partitions`. They work on resources created at runtime, as the same requests do over the native protocol. `alter_configs` is marked `destructiveHint` too. A change to `retention.ms`, `retention.bytes`, `delete.retention.ms`, `cleanup.policy`, `max.length`, `max.length.bytes` or `overflow` can delete data, so it runs only when `confirm` is the resource's name; without it the call changes nothing, not even the other settings it names. Other settings change without `confirm`.
 
 **Destroy**
 
