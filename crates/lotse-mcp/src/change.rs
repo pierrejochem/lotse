@@ -87,11 +87,14 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             "alter_configs",
             "Changes settings of a stream or queue created at runtime: set gives settings new values, reset returns \
              them to their defaults. replication.factor is set on its own and moves every partition to that many \
-             nodes. Destructive: a shorter retention, a cleanup policy or an overflow setting can delete data.",
+             nodes. Destructive: retention, cleanup policy and length limits can delete data, so a change to \
+             retention.ms, retention.bytes, delete.retention.ms, cleanup.policy, max.length, max.length.bytes or \
+             overflow runs only when confirm is the resource's name.",
             json!({
                 "name": {"type": "string", "description": "The stream's or queue's name."},
                 "set": configs,
                 "reset": {"type": "array", "items": {"type": "string"}, "description": "Settings to return to their defaults."},
+                "confirm": {"type": "string", "description": "The same name again, exactly; needed when retention, cleanup policy or a length limit changes, and nothing is changed without it."},
             }),
             &["name"],
             false,
@@ -179,12 +182,33 @@ pub(crate) async fn bind<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'
     done(json!({"exchange": exchange, "queue": queue, "routing_key": key}), text)
 }
 
+/// Settings whose change can delete data: retention, the cleanup policy and
+/// a queue's length limits. `alter_configs` changes them only with `confirm`.
+pub(crate) const DATA_LOSING: [&str; 7] = [
+    "retention.ms",
+    "retention.bytes",
+    "delete.retention.ms",
+    "cleanup.policy",
+    "max.length",
+    "max.length.bytes",
+    "overflow",
+];
+
+/// The first of `keys` whose change can delete data.
+pub(crate) fn data_losing<'k>(mut keys: impl Iterator<Item = &'k str>) -> Option<&'k str> {
+    keys.find(|k| DATA_LOSING.contains(k))
+}
+
 pub(crate) async fn alter_configs<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
     let name = a.str("name")?;
     let set = a.opt_strings("set")?;
     let reset = a.opt_str_list("reset")?;
     if set.is_empty() && reset.is_empty() {
         return Err(ToolError::invalid("give settings to change in \"set\" or \"reset\""));
+    }
+    if let Some(key) = data_losing(set.iter().map(|(k, _)| k.as_str()).chain(reset.iter().map(String::as_str))) {
+        crate::destroy::confirmed(name, a.opt_str("confirm")?)
+            .map_err(|e| ToolError::new(&e.code, format!("{key} can delete data: {}", e.message)))?;
     }
     let reset_refs: Vec<&str> = reset.iter().map(String::as_str).collect();
     c.alter_configs(name, &pairs(&set), &reset_refs).await?;

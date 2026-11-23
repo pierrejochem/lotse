@@ -138,5 +138,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0132 | [The Rust client renews its certificate through a store on the runtime seam](0132-the-rust-client-renews-its-certificate-through-a-store-on-the-runtime-seam.md) | Accepted |
 | 0133 | [Access tokens with fixed lifetimes](0133-access-tokens-with-fixed-lifetimes.md) | Accepted |
 | 0134 | [`lotse mcp`, a separate command for AI agents](0134-lotse-mcp-a-separate-command-for-ai-agents.md) | Accepted |
+| 0135 | [`alter_configs` asks for `confirm` when a setting can delete data](0135-alter-configs-asks-for-confirm-when-a-setting-can-delete-data.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.
