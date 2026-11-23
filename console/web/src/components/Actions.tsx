@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../api/client';
 import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetReplication } from '../api/queries';
@@ -7,13 +7,32 @@ import { useToast } from './toast';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
 
-/** Purge: destructive, so the queue's name is typed again before it can run (ADR 0064). */
-export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue: string; ready: number }) {
+/** The purge confirmation, opened by its caller (a row menu) or by PurgeButton: the queue's name is typed again (ADR 0064). */
+export function PurgeDialog({
+  cluster,
+  queue,
+  ready,
+  open,
+  onOpenChange,
+  trigger,
+  returnFocus,
+}: {
+  cluster: string;
+  queue: string;
+  ready: number;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  trigger?: ReactNode;
+  returnFocus?: RefObject<HTMLElement | null>;
+}) {
   const purge = usePurgeQueue(cluster, queue);
   const toast = useToast();
   return (
     <ConfirmDialog
-      trigger={<AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>}
+      open={open}
+      onOpenChange={onOpenChange}
+      trigger={trigger}
+      returnFocus={returnFocus}
       title={`Purge ${queue}?`}
       body={`Deletes the ${ready.toLocaleString('en-US')} messages that are ready now. Messages that consumers hold are not deleted, and messages published meanwhile stay. This cannot be undone.`}
       name={queue}
@@ -29,6 +48,11 @@ export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue:
       }
     />
   );
+}
+
+/** Purge, with its own button (on the queue's page). */
+export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue: string; ready: number }) {
+  return <PurgeDialog cluster={cluster} queue={queue} ready={ready} trigger={<AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>} />;
 }
 
 /** Requeue: moves a dead-letter queue's messages back to the queues they came from, once each. */

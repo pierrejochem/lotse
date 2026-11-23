@@ -1,9 +1,31 @@
-import { Link, useParams } from 'react-router-dom';
+import { useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQueue, useQueues } from '../api/queries';
-import { MoveLeaderButton, PlaceButton, PurgeButton, ReplicationButton, RequeueButton } from '../components/Actions';
+import { MoveLeaderButton, PlaceButton, PurgeButton, PurgeDialog, ReplicationButton, RequeueButton } from '../components/Actions';
+import { RowMenu } from '../components/RowMenu';
 import { CreateQueueDialog } from '../components/CreateQueueDialog';
 import { Bar, Chip, Failed, Loading, Stats, TableWrap } from '../components/ui';
 import { NONE, bytes, clock, count, duration } from '../format';
+
+/** The "…" menu of a queue row: open it, or purge it (which asks for its name first). */
+function QueueRowMenu({ cluster, name, ready }: { cluster: string; name: string; ready: number }) {
+  const navigate = useNavigate();
+  const menu = useRef<HTMLButtonElement>(null);
+  const [asking, setAsking] = useState(false);
+  return (
+    <>
+      <RowMenu
+        triggerRef={menu}
+        label={`Actions for ${name}`}
+        actions={[
+          { label: 'Open queue', onSelect: () => navigate(`/clusters/${encodeURIComponent(cluster)}/queues/${encodeURIComponent(name)}`) },
+          { label: 'Purge queue', danger: true, onSelect: () => setAsking(true) },
+        ]}
+      />
+      <PurgeDialog cluster={cluster} queue={name} ready={ready} open={asking} onOpenChange={setAsking} returnFocus={menu} />
+    </>
+  );
+}
 
 export function QueueList() {
   const { cluster = '' } = useParams();
@@ -31,6 +53,7 @@ export function QueueList() {
                 <th scope="col" className="r">Ready</th>
                 <th scope="col" className="r">Dead-lettered</th>
                 <th scope="col">Attention</th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -41,6 +64,7 @@ export function QueueList() {
                   <td className="r">{count(r.ready)}</td>
                   <td className="r">{count(r.dead_lettered)}</td>
                   <td>{r.attention ? <Chip chip={r.attention} /> : <span className="muted">None</span>}</td>
+                  <td className="r"><QueueRowMenu cluster={cluster} name={r.name} ready={r.ready} /></td>
                 </tr>
               ))}
             </tbody>

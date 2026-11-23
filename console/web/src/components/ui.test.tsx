@@ -35,7 +35,57 @@ function phone(matches: boolean) {
   vi.stubGlobal('matchMedia', () => ({ matches, addEventListener: () => undefined, removeEventListener: () => undefined }));
 }
 
+const wide = (
+  <TableWrap label="Queues">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Queue</th>
+          <th scope="col">Tenant</th>
+          <th scope="col">Ready</th>
+          <th scope="col">Dead letters</th>
+          <th scope="col">Why</th>
+          <th scope="col">
+            <span className="sr-only">Actions</span>
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">orders</th>
+          <td>commerce</td>
+          <td>12</td>
+          <td>0</td>
+          <td>None</td>
+          <td>
+            <button type="button">Actions for orders</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </TableWrap>
+);
+
 describe('TableWrap', () => {
+  it('puts the cells after the third behind More on a phone, and keeps what can be pressed', async () => {
+    phone(true);
+    const { container } = render(wide);
+    const row = container.querySelector('tbody tr')!;
+    const extra = Array.from(row.children).filter((c) => c.hasAttribute('data-extra')).map((c) => c.getAttribute('data-label'));
+    expect(extra).toEqual(['Dead letters', 'Why']);
+    const more = screen.getByRole('button', { name: 'More' });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    more.click();
+    expect(row.hasAttribute('data-open')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Fewer' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('has no More on a wide screen', () => {
+    phone(false);
+    const { container } = render(wide);
+    expect(container.querySelector('.morec')).toBeNull();
+  });
+
   it('turns rows into cards on a phone, naming each cell by its column and keeping the table roles', () => {
     phone(true);
     const { container } = render(table);

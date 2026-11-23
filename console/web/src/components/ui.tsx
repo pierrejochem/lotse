@@ -282,7 +282,34 @@ export function TableWrap({ label, style, children }: { label?: string; style?: 
           }
         }
         table.querySelectorAll('tbody tr').forEach((tr) => {
-          Array.from(tr.children).forEach((c, i) => c.setAttribute('data-label', heads[i] ?? ''));
+          const cells = Array.from(tr.children).filter((c) => !c.classList.contains('morec'));
+          cells.forEach((c, i) => c.setAttribute('data-label', heads[i] ?? ''));
+          // A card shows its name and two more cells; the rest waits behind "More". Cells with something to press stay.
+          const extra = cells.filter((c, i) => i >= 3 && !c.querySelector('button, a, input, select'));
+          cells.forEach((c) => (extra.includes(c) ? c.setAttribute('data-extra', '') : c.removeAttribute('data-extra')));
+          let more = tr.querySelector<HTMLElement>(':scope > .morec');
+          if (cards && extra.length > 0 && cells.length > 1 && cells[0]?.tagName !== 'TD') {
+            if (!more) {
+              more = document.createElement('td');
+              more.className = 'morec';
+              more.setAttribute('role', 'cell');
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'btn small';
+              b.setAttribute('aria-expanded', 'false');
+              b.textContent = 'More';
+              b.addEventListener('click', () => {
+                const open = tr.toggleAttribute('data-open');
+                b.setAttribute('aria-expanded', String(open));
+                b.textContent = open ? 'Fewer' : 'More';
+              });
+              more.append(b);
+              tr.append(more);
+            }
+          } else if (more) {
+            more.remove();
+            tr.removeAttribute('data-open');
+          }
         });
       }
       const scrolls = !(mq?.matches ?? false) && el.scrollWidth > el.clientWidth + 1;

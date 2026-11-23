@@ -396,6 +396,9 @@ pre.value { margin: 0; padding: 14px 16px; overflow-x: auto; border-radius: var(
   table.cards tbody tr > :first-child { justify-content: flex-start; font-weight: 600; text-align: left; box-shadow: none; }
   table.cards tbody tr > *::before { content: attr(data-label); flex: 0 0 auto; color: var(--ink-muted); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; text-align: left; }
   table.cards tbody tr > :first-child::before, table.cards tbody tr > [data-label='']::before { display: none; }
+  table.cards tbody tr:not([data-open]) > [data-extra] { display: none; }
+  table.cards tbody tr > .morec { justify-content: flex-start; padding-top: 8px; }
+  table.cards tbody tr > .morec::before { display: none; }
   .app { grid-template-columns: minmax(0, 1fr); }
   .demo-pill, .live { display: none; }
   .demo-strip { display: block; padding: 6px 16px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; font-weight: 600; }

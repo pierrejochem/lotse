@@ -1,13 +1,15 @@
 import * as Tabs from '@radix-ui/react-tabs';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { S } from '../api/client';
 import { useStream, useStreams } from '../api/queries';
 import { MoveLeaderButton, PlaceButton, ReplicationButton } from '../components/Actions';
+import { RowMenu } from '../components/RowMenu';
 import { Chip, Failed, Hint, Loading, Sparkline, Stats, TableWrap } from '../components/ui';
 import { NONE, bytes, count, counted, duration, rate } from '../format';
 
 export function StreamList() {
   const { cluster = '' } = useParams();
+  const navigate = useNavigate();
   const q = useStreams(cluster);
   const base = `/clusters/${encodeURIComponent(cluster)}`;
   return (
@@ -29,6 +31,7 @@ export function StreamList() {
                 <th scope="col" className="r">Partitions</th>
                 <th scope="col" className="r">In</th>
                 <th scope="col" className="r">Stored</th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -39,6 +42,15 @@ export function StreamList() {
                   <td className="r">{s.partitions}</td>
                   <td className="r">{rate(s.in_bytes_per_sec)}</td>
                   <td className="r">{bytes(s.stored_bytes)}</td>
+                  <td className="r">
+                    <RowMenu
+                      label={`Actions for ${s.name}`}
+                      actions={[
+                        { label: 'Open stream', onSelect: () => navigate(`${base}/streams/${encodeURIComponent(s.name)}`) },
+                        { label: 'Read records', onSelect: () => navigate(`${base}/messages?stream=${encodeURIComponent(s.name)}`) },
+                      ]}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
