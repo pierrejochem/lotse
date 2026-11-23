@@ -1,16 +1,24 @@
 #!/bin/sh
-# Builds the release image for linux/amd64 and linux/arm64 into an OCI
-# archive (ADR 0126), from the binaries packaging/release.sh wrote to DIST and
-# on BASE, a distroless image named by its digest. Every timestamp is the
+# Builds a release image for linux/amd64 and linux/arm64 into an OCI archive
+# (ADR 0126), from the binaries packaging/release.sh wrote to DIST and on
+# BASE, a distroless image named by its digest: the node's image, or with
+# PROGRAM lotse-console the console's (ADR 0137). Every timestamp is the
 # commit's and no attestation is added, so the same binaries on the same base
 # give the same index digest; it is printed, and written to $GITHUB_OUTPUT
-# as `digest` when that is set. Needs docker buildx with a builder that
+# when that is set, as `digest` for the node's image and `console_digest`
+# for the console's. Needs docker buildx with a builder that
 # exports OCI archives (docker buildx create --use).
 #
 #   packaging/image.sh dist gcr.io/distroless/static-debian12@sha256:... image.tar
+#   packaging/image.sh dist gcr.io/distroless/static-debian12@sha256:... console.tar lotse-console
 set -eu
-[ $# -eq 3 ] || { echo "usage: $0 DIST BASE ARCHIVE" >&2; exit 2; }
-dist=$1 base=$2 archive=$3
+[ $# -eq 3 ] || [ $# -eq 4 ] || { echo "usage: $0 DIST BASE ARCHIVE [lotse|lotse-console]" >&2; exit 2; }
+dist=$1 base=$2 archive=$3 program=${4:-lotse}
+case $program in
+    lotse) dockerfile=packaging/Dockerfile.prebuilt ;;
+    lotse-console) dockerfile=packaging/Dockerfile.console.prebuilt ;;
+    *) echo "PROGRAM is lotse or lotse-console, not $program" >&2; exit 2 ;;
+esac
 case $base in
     *@sha256:*) ;;
     *) echo "BASE must name a digest (…@sha256:…), not a tag: $base" >&2; exit 2 ;;
@@ -21,7 +29,7 @@ export SOURCE_DATE_EPOCH
 
 docker buildx build \
     --platform linux/amd64,linux/arm64 \
-    --file packaging/Dockerfile.prebuilt \
+    --file "$dockerfile" \
     --build-arg BASE="$base" \
     --build-arg VERSION="$version" \
     --build-arg DIST="$dist" \
@@ -30,5 +38,7 @@ docker buildx build \
     .
 
 digest=$(tar -xOf "$archive" index.json | python3 -c 'import json, sys; print(json.load(sys.stdin)["manifests"][0]["digest"])')
-echo "image index digest: $digest"
-if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "digest=$digest" >>"$GITHUB_OUTPUT"; fi
+echo "$program image index digest: $digest"
+key=digest
+[ "$program" = lotse ] || key=console_digest
+if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$key=$digest" >>"$GITHUB_OUTPUT"; fi

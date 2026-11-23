@@ -1,0 +1,168 @@
+{{- if .Values.console.enabled }}
+{{- $c := .Values.console }}
+{{- if not $c.tlsSecretName }}
+{{- fail "console.tlsSecretName must name a Secret with the console's HTTPS certificate (tls.crt, tls.key)" }}
+{{- end }}
+# The management console (ADR 0137): one pod that serves HTTPS with the
+# certificate in console.tlsSecretName and reaches this cluster through its
+# client Service, acting as the user who signed in (ADR 0019).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lotse.console.fullname" . }}
+  labels:
+    {{- include "lotse.console.labels" . | nindent 4 }}
+data:
+  lotse-console.toml: |
+    # Rendered by the Lotse chart (ADR 0137).
+    listen = "0.0.0.0:{{ $c.port }}"
+    data_dir = "/var/lib/lotse-console"
+
+    [https]
+    cert = "/etc/lotse-console/https/tls.crt"
+    key = "/etc/lotse-console/https/tls.key"
+
+    {{- with $c.config }}
+
+    {{ . | nindent 4 | trim }}
+    {{- end }}
+
+    [[clusters]]
+    id = {{ $c.clusterId | default .Release.Name | toJson }}
+    kind = "native"
+    bootstrap = [{{ printf "%s.%s.svc.cluster.local:%d" (include "lotse.fullname" .) .Release.Namespace (int .Values.ports.client) | toJson }}]
+    ca_file = "/etc/lotse-console/cluster/ca.pem"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lotse.console.fullname" . }}
+  labels:
+    {{- include "lotse.console.labels" . | nindent 4 }}
+spec:
+  # One console: its chart history and sessions live in the pod.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lotse.console.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lotse.console.selectorLabels" . | nindent 8 }}
+      annotations:
+        # A changed config restarts the pod.
+        checksum/config: {{ $c.config | sha256sum }}
+        {{- with $c.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: console
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          args: [--config, /etc/lotse-console/lotse-console.toml]
+          ports:
+            - name: https
+              containerPort: {{ $c.port }}
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /
+              port: https
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /
+              port: https
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lotse-console/lotse-console.toml
+              subPath: lotse-console.toml
+              readOnly: true
+            - name: https
+              mountPath: /etc/lotse-console/https
+              readOnly: true
+            # Only the cluster's CA, not the nodes' keys.
+            - name: cluster-ca
+              mountPath: /etc/lotse-console/cluster
+              readOnly: true
+            {{- if $c.secretName }}
+            - name: secrets
+              mountPath: /etc/lotse-console/secrets
+              readOnly: true
+            {{- end }}
+            - name: data
+              mountPath: /var/lib/lotse-console
+            - name: tmp
+              mountPath: /tmp
+          {{- with $c.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "lotse.console.fullname" . }}
+        - name: https
+          secret:
+            secretName: {{ $c.tlsSecretName }}
+            defaultMode: 0440
+        - name: cluster-ca
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            items:
+              - key: ca.pem
+                path: ca.pem
+            defaultMode: 0440
+        {{- if $c.secretName }}
+        - name: secrets
+          secret:
+            secretName: {{ $c.secretName }}
+            defaultMode: 0440
+        {{- end }}
+        # The session key and chart history live as long as the pod.
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lotse.console.fullname" . }}
+  labels:
+    {{- include "lotse.console.labels" . | nindent 4 }}
+  {{- with $c.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $c.service.type }}
+  selector:
+    {{- include "lotse.console.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ $c.port }}
+      targetPort: https
+{{- end }}

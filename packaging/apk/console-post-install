@@ -1,0 +1,8 @@
+#!/bin/sh
+# The user lotse-console and its directories. Start it with
+# rc-update add lotse-console default once its config is in place.
+addgroup -S lotse-console 2>/dev/null || true
+adduser -S -D -H -h /var/lib/lotse-console -s /sbin/nologin -G lotse-console -g "Lotse management console" lotse-console 2>/dev/null || true
+install -d -o lotse-console -g lotse-console -m 0750 /var/lib/lotse-console /var/log/lotse-console
+install -d -o root -g lotse-console -m 0750 /etc/lotse-console
+exit 0

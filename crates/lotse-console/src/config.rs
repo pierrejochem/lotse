@@ -328,6 +328,14 @@ mod tests {
     }
 
     #[test]
+    fn the_packaged_example_is_a_valid_config() {
+        let c = Config::parse(include_str!("../../../packaging/lotse-console.toml.example")).unwrap();
+        assert!(c.https.is_some() && !c.listen.ip().is_loopback(), "HTTPS on every address");
+        assert!(matches!(c.auth, AuthConfig::Oidc(_)));
+        Config::parse(include_str!("../../../console/lotse-console.example.toml")).unwrap();
+    }
+
+    #[test]
     fn plain_http_only_on_loopback() {
         let public = OK.replace("127.0.0.1:8080", "0.0.0.0:8443");
         let e = Config::parse(&public).unwrap_err().to_string();

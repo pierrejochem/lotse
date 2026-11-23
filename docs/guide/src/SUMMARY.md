@@ -20,6 +20,7 @@
 - [Monitoring](admin/monitoring.md)
 - [Operations](admin/operations.md)
 - [Upgrades](admin/upgrades.md)
+- [The console](admin/console.md)
 
 # Development
 

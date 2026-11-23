@@ -1,0 +1,2 @@
+# The user the Lotse console runs as (systemd-sysusers).
+u lotse-console - "Lotse management console" /var/lib/lotse-console

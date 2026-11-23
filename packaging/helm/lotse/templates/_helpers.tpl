@@ -29,3 +29,21 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- $i := index . 1 -}}
 {{- printf "%s-%d.%s.%s.svc.cluster.local" (include "lotse.fullname" $root) $i (include "lotse.headless" $root) $root.Release.Namespace -}}
 {{- end -}}
+
+{{/* The console's resources (ADR 0137). Its pods carry another name label,
+     so the nodes' Services never select them. */}}
+{{- define "lotse.console.fullname" -}}
+{{- printf "%s-console" (include "lotse.fullname" .) -}}
+{{- end -}}
+
+{{- define "lotse.console.selectorLabels" -}}
+app.kubernetes.io/name: {{ printf "%s-console" .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "lotse.console.labels" -}}
+{{ include "lotse.console.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Values.console.image.tag | default .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- end -}}

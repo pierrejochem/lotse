@@ -1,0 +1,55 @@
+# The Lotse management console (ADR 0137):
+#
+#   systemctl enable --now lotse-console
+#
+# Its config is /etc/lotse-console/lotse-console.toml (an example is in
+# /usr/share/doc/lotse-console); its data_dir should be
+# /var/lib/lotse-console. The certificate, key and secrets it names go under
+# /etc/lotse-console, readable by the lotse-console user.
+
+[Unit]
+Description=Lotse management console
+Documentation=https://github.com/pierrejochem/lotse
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/lotse-console/lotse-console.toml
+
+[Service]
+Type=exec
+User=lotse-console
+Group=lotse-console
+ExecStart=/usr/bin/lotse-console --config /etc/lotse-console/lotse-console.toml
+Restart=on-failure
+RestartSec=5
+StateDirectory=lotse-console
+StateDirectoryMode=0750
+ConfigurationDirectory=lotse-console
+
+# Nothing but its data directory is writable, and it gets no privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lotse-console
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# The Lotse management console under OpenRC (ADR 0137):
+#
+#   rc-update add lotse-console default
+#   rc-service lotse-console start
+#
+# Its config is /etc/lotse-console/lotse-console.toml; settings of this
+# script go to /etc/conf.d/lotse-console. The console writes its log to
+# /var/log/lotse-console/lotse-console.log.
+
+name="Lotse console"
+description="Lotse management console"
+
+supervisor=supervise-daemon
+command=/usr/bin/lotse-console
+command_args="--config ${LOTSE_CONSOLE_CONFIG:-/etc/lotse-console/lotse-console.toml}"
+command_user="lotse-console:lotse-console"
+directory=/var/lib/lotse-console
+output_log=/var/log/lotse-console/lotse-console.log
+error_log=/var/log/lotse-console/lotse-console.log
+respawn_delay=5
+respawn_max=0
+umask=027
+
+[ -n "${RUST_LOG:-}" ] && export RUST_LOG
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    if [ ! -r "${LOTSE_CONSOLE_CONFIG:-/etc/lotse-console/lotse-console.toml}" ]; then
+        eerror "No config: copy /usr/share/doc/lotse-console/lotse-console.toml.example to /etc/lotse-console/lotse-console.toml"
+        return 1
+    fi
+    checkpath --directory --owner lotse-console:lotse-console --mode 0750 /var/lib/lotse-console /var/log/lotse-console
+}
