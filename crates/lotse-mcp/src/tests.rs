@@ -115,3 +115,111 @@ fn confirm_must_equal_the_name_exactly() {
         assert!(e.message.contains("orders"), "{}", e.message);
     }
 }
+
+mod look_tests {
+    use std::time::Duration;
+
+    use lotse_client::ClientError;
+    use lotse_proto::{
+        CommittedOffset, ConfigEntry, DescribeMetricsResponse, ErrorCode, GroupMetrics, PartitionMetrics, QueueMetrics,
+    };
+    use serde_json::json;
+
+    use crate::look;
+
+    fn refused() -> ClientError {
+        ClientError::Broker { code: ErrorCode::UNAUTHORIZED, message: None }
+    }
+
+    fn unreachable() -> ClientError {
+        ClientError::GaveUp(Duration::from_secs(10), "no broker answered".into())
+    }
+
+    #[test]
+    fn a_refused_call_is_not_shown_but_a_failed_one_is() {
+        assert!(look::not_shown(&refused()));
+        assert!(look::not_shown(&ClientError::Broker { code: ErrorCode::UNKNOWN_RESOURCE, message: None }));
+        assert!(look::not_shown(&ClientError::UnknownStream("q".into(), 0)));
+        assert!(!look::not_shown(&unreachable()));
+        assert!(!look::not_shown(&ClientError::Unknown("lost the answer".into())));
+        assert!(!look::not_shown(&ClientError::Broker { code: ErrorCode::NOT_LEADER, message: None }));
+
+        let entry = ConfigEntry { key: "retention.ms".into(), value: "5".into(), source: 0 };
+        let (shown, why) = look::settings(Ok(vec![entry]));
+        assert_eq!(shown, json!({"retention.ms": "5"}));
+        assert_eq!(why, None);
+        let (hidden, why) = look::settings(Err(refused()));
+        assert_eq!((hidden, why), (serde_json::Value::Null, None), "not allowed: null, no error");
+        let (none, why) = look::settings(Err(unreachable()));
+        assert_eq!(none, serde_json::Value::Null);
+        assert!(why.expect("a failure is named").contains("gave up"), "the agent can tell it failed");
+
+        let (version, why) = look::upgrade_version(Err(refused()));
+        assert_eq!((version, why), (None, None));
+        let (version, why) = look::upgrade_version(Err(unreachable()));
+        assert_eq!(version, None);
+        assert!(why.is_some());
+    }
+
+    fn partition(resource_id: u64, leader: bool, term: u64) -> PartitionMetrics {
+        PartitionMetrics { resource_id, partition: 0, leader, term, ..Default::default() }
+    }
+
+    fn queue(ready: u64) -> QueueMetrics {
+        QueueMetrics { resource_id: 7, ready, ..Default::default() }
+    }
+
+    #[test]
+    fn a_queues_counts_come_from_the_node_that_leads_it_now() {
+        let old = DescribeMetricsResponse {
+            node_id: 1,
+            partitions: vec![partition(7, true, 3)],
+            queues: vec![queue(100)],
+            ..Default::default()
+        };
+        let new = DescribeMetricsResponse {
+            node_id: 2,
+            partitions: vec![partition(7, true, 4)],
+            queues: vec![queue(5)],
+            ..Default::default()
+        };
+        for metrics in [vec![old.clone(), new.clone()], vec![new, old]] {
+            let q = look::led_queue(&metrics, 7).expect("a leader");
+            assert_eq!(q.ready, 5, "the highest term, whatever the order");
+        }
+    }
+
+    fn group(offset: u64) -> GroupMetrics {
+        GroupMetrics {
+            group_id: "g".into(),
+            tenant: "t".into(),
+            offsets: vec![CommittedOffset { resource_id: 7, partition: 0, offset }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_consumer_group_is_reported_once_from_the_newest_coordinator_term() {
+        let report = |node_id, term, offset| DescribeMetricsResponse {
+            node_id,
+            coordinator_group: 2,
+            partitions: vec![PartitionMetrics { group: 2, leader: true, term, ..Default::default() }],
+            groups: vec![group(offset)],
+            ..Default::default()
+        };
+        for metrics in [vec![report(1, 5, 10), report(2, 6, 20)], vec![report(2, 6, 20), report(1, 5, 10)]] {
+            let groups = look::group_reports(&metrics);
+            assert_eq!(groups.len(), 1, "once, not once per reporter");
+            assert_eq!(groups[0].offsets[0].offset, 20, "from the coordinator term 6");
+        }
+    }
+
+    #[test]
+    fn lag_is_measured_to_the_last_stable_offset_and_to_the_high_watermark() {
+        let p = PartitionMetrics { high_watermark: 100, last_stable: 80, ..Default::default() };
+        let lag = look::lag(&p, 60);
+        assert_eq!(lag.stable, 20, "what a read_committed group can still read");
+        assert_eq!(lag.high_watermark, 40);
+        assert_eq!(look::lag(&p, 90).stable, 0, "never below zero");
+    }
+}

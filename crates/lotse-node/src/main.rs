@@ -861,6 +861,12 @@ fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
             }
         }
     };
+    let with_certificate = match &mode {
+        McpMode::Stdio(lotse_node::mcp::SignIn::Certificate { .. }) => true,
+        McpMode::Stdio(_) => false,
+        McpMode::Http(_) => a.cert.is_some(),
+    };
+    reach.validate(with_certificate)?;
     Ok(McpSetup { reach, mode })
 }
 

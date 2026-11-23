@@ -156,10 +156,15 @@ fn mcp_command(config: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
 
 impl Mcp {
     fn spawn(config: &Path, args: &[&str], env: &[(&str, &str)]) -> Mcp {
+        Mcp::spawn_logging(config, args, env, Stdio::null())
+    }
+
+    /// As [`Mcp::spawn`], with its log (debug) going to `stderr`.
+    fn spawn_logging(config: &Path, args: &[&str], env: &[(&str, &str)], stderr: Stdio) -> Mcp {
         let mut child = mcp_command(config, args, env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("the lotse executable runs");
         let stdout = child.stdout.take().unwrap();
@@ -397,6 +402,129 @@ async fn stdio_refuses_to_start_without_a_credential() {
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("LOTSE_PASSWORD"), "{stderr}");
     cluster.stop().await;
+}
+
+/// A token owner Dave and a token of his; `lotse mcp` is given it in the
+/// environment.
+async fn daves_token(cluster: &Cluster) -> lotse_client::CreatedToken {
+    let alice = cluster.alice();
+    bind_own_prefix(&alice, "dave").await;
+    alice.create_token("agent", Some("dave"), lotse_client::Lifetime::Week).await.expect("a token")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stdio_never_logs_the_token_even_at_debug() {
+    let cluster = Cluster::start("mcp-token-log").await;
+    let token = daves_token(&cluster).await;
+    let config = cluster.config.clone();
+    let log = cluster.root.join("stdio.log");
+    let (text, file) = (token.text.clone(), log.clone());
+    tokio::task::spawn_blocking(move || {
+        let stderr = Stdio::from(std::fs::File::create(&file).unwrap());
+        let mut m = Mcp::spawn_logging(&config, &[], &[("LOTSE_TOKEN", text.as_str())], stderr);
+        m.request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}),
+        );
+        m.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        let r = m.request(2, "tools/call", json!({"name": "list_sessions", "arguments": {}}));
+        assert_eq!(r["result"]["isError"], false, "signed in with the token: {r}");
+        m.finish();
+    })
+    .await
+    .unwrap();
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(logged.contains("serving MCP on stdio"), "the log is written, at debug: {logged}");
+    let secret = token.text.rsplit('_').next().unwrap();
+    for (what, text) in [("token", token.text.as_str()), ("secret", secret)] {
+        assert!(!logged.contains(text), "the {what} is in the log:\n{logged}");
+    }
+
+    // A token the cluster refuses is not echoed in the failure either.
+    let unknown = "lotse_tok_00000000000000ff_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let config = cluster.config.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        mcp_command(&config, &[], &[("LOTSE_TOKEN", unknown)]).stdin(Stdio::null()).output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains(unknown) && !stderr.contains(&unknown[unknown.len() - 20..]), "{stderr}");
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_client_is_answered_with_the_newest_version_the_server_speaks() {
+    let cluster = Cluster::start("mcp-older").await;
+    let (cert, key) = (cluster.client("alice.pem"), cluster.client("alice.key"));
+    let (cert, key) = (cert.to_str().unwrap().to_string(), key.to_str().unwrap().to_string());
+    let config = cluster.config.clone();
+    tokio::task::spawn_blocking(move || {
+        let args = ["--cert", cert.as_str(), "--key", key.as_str()];
+        let mut m = Mcp::spawn(&config, &args, &[]);
+        let init = m.request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "old", "version": "1"}}),
+        );
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+        m.finish();
+    })
+    .await
+    .unwrap();
+    cluster.stop().await;
+}
+
+/// `lotse mcp` with `args`, no cluster behind it: its exit code and stderr.
+fn usage(args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lotse"));
+    cmd.arg("mcp").args(args);
+    for v in CREDENTIAL_VARS {
+        cmd.env_remove(v);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.stdin(Stdio::null()).output().expect("the lotse executable runs");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_contradicting_way_to_reach_the_cluster_is_a_usage_error() {
+    // Nothing listens on port 1: were a connection tried, the process would
+    // fail with 1 after its retries, not exit 2 at once.
+    let creds = [("LOTSE_USER", "dave"), ("LOTSE_PASSWORD", "pw")];
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], &'a str);
+    let cases: [Case; 4] = [
+        (
+            &["--bootstrap", "127.0.0.1:1", "--ca", "ca.pem", "--plaintext-on-loopback"],
+            &creds,
+            "--plaintext-on-loopback",
+        ),
+        (
+            &["--bootstrap", "127.0.0.1:1", "--plaintext-on-loopback", "--cert", "c.pem", "--key", "c.key"],
+            &[],
+            "client certificate",
+        ),
+        (&["--bootstrap", "127.0.0.1:1"], &creds, "no CA"),
+        (
+            &["--bootstrap", "127.0.0.1:1", "--listen", "127.0.0.1:0", "--ca", "ca.pem", "--plaintext-on-loopback"],
+            &[],
+            "--plaintext-on-loopback",
+        ),
+    ];
+    for (args, env, says) in cases {
+        let (code, stdout, stderr) = usage(args, env);
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(stderr.contains(says), "{args:?} names {says}: {stderr}");
+    }
 }
 
 // Streamable HTTP (`lotse mcp --listen`).
@@ -730,6 +858,27 @@ async fn http_bearer_token_and_basic_password_both_work() {
         assert!(!log.contains(text), "the {what} is in the log");
     }
     assert!(!log.contains(erin.trim_start_matches("Basic ")), "the Basic credential is in the log");
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_never_logs_a_bearer_token_even_at_debug() {
+    let cluster = Cluster::start("mcp-http-token-log").await;
+    let token = daves_token(&cluster).await;
+    let mcp = HttpMcp::start(&cluster, "mcp", &[]).await;
+    let unknown = "lotse_tok_00000000000000ff_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    // One request that is served and one that is refused.
+    let r = tool_result(&mcp, &bearer(&token.text), "list_sessions", json!({})).await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert_unauthorized(&call_http(&mcp.addr, None, Some(&bearer(unknown)), &[], "list_sessions", json!({})).await);
+
+    let log = mcp.log_text();
+    assert!(log.contains("listening") || !log.is_empty(), "the log is written at debug");
+    let secret = token.text.rsplit('_').next().unwrap();
+    for (what, text) in [("token", token.text.as_str()), ("secret", secret), ("refused token", unknown)] {
+        assert!(!log.contains(text), "the {what} is in the log:\n{log}");
+    }
     cluster.stop().await;
 }
 
