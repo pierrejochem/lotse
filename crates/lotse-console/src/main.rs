@@ -147,6 +147,17 @@ async fn main() -> ExitCode {
             state = state.with_sessions(Arc::new(Sessions::new(o.clone(), idp_rt.clone(), key)));
         }
     }
+    // The certificate is read now, so a bad one stops the start.
+    let https = match &cfg.https {
+        Some(h) => match lotse_rt_tokio::https_config(&h.cert, &h.key) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("lotse-console: [https] {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -154,11 +165,39 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %cfg.listen, "lotse-console ready");
+    // Ctrl-C, or SIGTERM from systemd, OpenRC or Kubernetes.
     let shutdown = async {
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
         let _ = tokio::signal::ctrl_c().await;
     };
-    if let Err(e) = axum::serve(listener, router(state)).with_graceful_shutdown(shutdown).await {
+    let app = router(state);
+    let served = match https {
+        Some(tls) => {
+            let listener = match lotse_rt_tokio::HttpsListener::new(listener, tls, "console") {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("lotse-console: cannot listen on {}: {e}", cfg.listen);
+                    return ExitCode::FAILURE;
+                }
+            };
+            tracing::info!(listen = %cfg.listen, "lotse-console ready, HTTPS");
+            axum::serve(listener, app).with_graceful_shutdown(shutdown).await
+        }
+        None => {
+            tracing::info!(listen = %cfg.listen, "lotse-console ready, plain HTTP on loopback");
+            axum::serve(listener, app).with_graceful_shutdown(shutdown).await
+        }
+    };
+    if let Err(e) = served {
         eprintln!("lotse-console: {e}");
         return ExitCode::FAILURE;
     }

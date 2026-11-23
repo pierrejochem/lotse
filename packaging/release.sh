@@ -1,8 +1,8 @@
 #!/bin/sh
-# Builds a release (ADR 0126): for x86_64 and aarch64, the static `lotse`
-# binary, a tarball with the binary, the systemd, OpenRC and sysvinit
-# scripts, and the .deb, .rpm and .apk packages; then BUILDINFO and
-# SHA256SUMS. The build is reproducible: the same commit with the tools of
+# Builds a release (ADR 0126, ADR 0137): for x86_64 and aarch64, the static
+# `lotse` and `lotse-console` binaries (the console with its web app built
+# in), a tarball of each with its systemd, OpenRC and sysvinit scripts, and
+# their .deb, .rpm and .apk packages; then BUILDINFO and SHA256SUMS. The build is reproducible: the same commit with the tools of
 # packaging/release.env gives the same bytes, wherever it runs.
 #
 #   packaging/release.sh 0.4.0                  # both architectures into dist/
@@ -67,6 +67,7 @@ zig=$(command -v zig || python3 -c 'import os, ziglang; print(os.path.join(os.pa
 need zig "$ZIG_VERSION" "$("$zig" version)"
 need cargo-zigbuild "$CARGO_ZIGBUILD_VERSION" "$(cargo-zigbuild --version | cut -d' ' -f2)"
 need nfpm "$NFPM_VERSION" "$(nfpm --version 2>&1 | sed -n 's/^GitVersion: *//p')"
+need node "$NODE_VERSION" "$(node --version 2>/dev/null | sed 's/^v//')"
 if [ -n "$fail" ]; then
     if [ "${LOTSE_RELEASE_UNPINNED:-}" = 1 ]; then
         echo "LOTSE_RELEASE_UNPINNED=1: building anyway; the bytes will differ from a release" >&2
@@ -94,6 +95,12 @@ export CFLAGS="-ffile-prefix-map=$root=/lotse -ffile-prefix-map=$cargo_home=/car
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
 export CARGO_PROFILE_RELEASE_DEBUG=0
 
+# The console's web app, once for both architectures: npm ci takes exactly
+# what the lock file pins, and Vite writes the same files from the same
+# sources. The console embeds them with fixed timestamps.
+(cd console/web && npm ci --no-audit --no-fund --loglevel=error && npm run build)
+[ -f console/web/dist/index.html ] || { echo "the web app did not build: no console/web/dist/index.html" >&2; exit 1; }
+
 case $arch in
     all) arches="amd64 arm64" ;;
     *) arches=$arch ;;
@@ -104,18 +111,24 @@ for a in $arches; do
         amd64) target=x86_64-unknown-linux-musl ;;
         arm64) target=aarch64-unknown-linux-musl ;;
     esac
-    cargo zigbuild --release --locked -p lotse-node --target "$target"
-    bin="$out/lotse-$version-linux-$a"
-    install -m 0755 "$CARGO_TARGET_DIR/$target/release/lotse" "$bin"
-    # A static binary has no program interpreter.
-    if LC_ALL=C readelf -l "$bin" 2>/dev/null | grep -q 'Requesting program interpreter'; then
-        echo "$bin is not statically linked" >&2
-        exit 1
-    fi
-    python3 packaging/tarball.py "$bin" "$version" "$a" "$out"
-    for format in deb rpm apk; do
-        VERSION=$version ARCH=$a BINARY=$bin nfpm package --config packaging/nfpm.yaml \
-            --packager "$format" --target "$out/"
+    cargo zigbuild --release --locked -p lotse-node -p lotse-console --target "$target"
+    for program in lotse lotse-console; do
+        bin="$out/$program-$version-linux-$a"
+        install -m 0755 "$CARGO_TARGET_DIR/$target/release/$program" "$bin"
+        # A static binary has no program interpreter.
+        if LC_ALL=C readelf -l "$bin" 2>/dev/null | grep -q 'Requesting program interpreter'; then
+            echo "$bin is not statically linked" >&2
+            exit 1
+        fi
+        python3 packaging/tarball.py --program "$program" "$bin" "$version" "$a" "$out"
+        case $program in
+            lotse) nfpm_config=packaging/nfpm.yaml ;;
+            lotse-console) nfpm_config=packaging/nfpm-console.yaml ;;
+        esac
+        for format in deb rpm apk; do
+            VERSION=$version ARCH=$a BINARY=$bin nfpm package --config "$nfpm_config" \
+                --packager "$format" --target "$out/"
+        done
     done
 done
 
@@ -128,6 +141,8 @@ done
     echo "zig: $("$zig" version)"
     echo "cargo-zigbuild: $(cargo-zigbuild --version | cut -d' ' -f2)"
     echo "nfpm: $(nfpm --version 2>&1 | sed -n 's/^GitVersion: *//p')"
+    echo "node: $(node --version | sed 's/^v//')"
+    echo "npm: $(npm --version)"
     echo "zlib: $(python3 -c 'import zlib; print(zlib.ZLIB_RUNTIME_VERSION)')"
 } >"$out/BUILDINFO"
 

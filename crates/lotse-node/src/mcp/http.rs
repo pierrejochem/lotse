@@ -25,8 +25,6 @@ use lotse_client::Client;
 use lotse_rt_tokio::TokioRuntime;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use super::cache::{ClientCache, CredentialKey, HttpCredential, SignInError};
 use super::{Reach, Server, SignIn, client};
@@ -35,10 +33,6 @@ use super::{Reach, Server, SignIn, client};
 pub const OWN_CREDENTIAL: &str = "lotse mcp --listen holds no credential of its own: every request signs in with \
      its own Authorization header. Unset LOTSE_TOKEN, LOTSE_USER and LOTSE_PASSWORD and leave out --cert and --key";
 
-/// How long a TLS handshake may take.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// TLS handshakes in progress at once; more wait in the kernel's backlog.
-const MAX_HANDSHAKES: usize = 64;
 /// How often clients unused for the cache's idle time are closed.
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
@@ -208,83 +202,6 @@ async fn guard(State(g): State<Arc<Guard>>, mut req: Request, next: Next) -> Res
     }
 }
 
-/// TLS 1.3 with the chain and key in `cert` and `key`.
-fn server_tls(cert: &PathBuf, key: &PathBuf) -> Result<Arc<rustls::ServerConfig>, String> {
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .and_then(|i| i.collect())
-        .map_err(|e| format!("--tls-cert {}: {e}", cert.display()))?;
-    if chain.is_empty() {
-        return Err(format!("--tls-cert {}: no certificate in it", cert.display()));
-    }
-    let key = PrivateKeyDer::from_pem_file(key).map_err(|e| format!("--tls-key {}: {e}", key.display()))?;
-    let mut cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?
-        .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .map_err(|e| format!("--tls-cert and --tls-key: {e}"))?;
-    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Arc::new(cfg))
-}
-
-/// A listener that hands axum connections whose TLS handshake finished;
-/// handshakes run in tasks of their own, so a slow one holds up no other.
-struct TlsListener {
-    accepted: tokio::sync::mpsc::Receiver<(tokio_rustls::server::TlsStream<tokio::net::TcpStream>, SocketAddr)>,
-    addr: SocketAddr,
-}
-
-impl TlsListener {
-    fn new(tcp: tokio::net::TcpListener, cfg: Arc<rustls::ServerConfig>) -> std::io::Result<TlsListener> {
-        let addr = tcp.local_addr()?;
-        let (tx, accepted) = tokio::sync::mpsc::channel(MAX_HANDSHAKES);
-        let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
-        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES));
-        tokio::spawn(async move {
-            loop {
-                let Ok(permit) = slots.clone().acquire_owned().await else { return };
-                let (stream, peer) = match tcp.accept().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "accepting an MCP connection failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                };
-                let (acceptor, tx) = (acceptor.clone(), tx.clone());
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
-                        Ok(Ok(tls)) => {
-                            let _ = tx.send((tls, peer)).await;
-                        }
-                        Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
-                        Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
-                    }
-                });
-            }
-        });
-        Ok(TlsListener { accepted, addr })
-    }
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.accepted.recv().await {
-            Some(c) => c,
-            // The accepting task ended: nothing more comes.
-            None => std::future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        Ok(self.addr)
-    }
-}
-
 /// Serves MCP over Streamable HTTP at `listen` until `shutdown` completes.
 pub async fn serve_http(
     reach: Reach,
@@ -295,7 +212,9 @@ pub async fn serve_http(
     // credential and without connecting, so a missing CA shows at start.
     drop(client(&reach, SignIn::Token(String::new()))?);
     let tls = match &listen.tls {
-        Some((cert, key)) => Some(server_tls(cert, key)?),
+        Some((cert, key)) => {
+            Some(lotse_rt_tokio::https_config(cert, key).map_err(|e| format!("--tls-cert and --tls-key: {e}"))?)
+        }
         None => None,
     };
     let cache = Arc::new(ClientCache::new(reach));
@@ -333,7 +252,7 @@ pub async fn serve_http(
     let served = match tls {
         None => axum::serve(tcp, app).with_graceful_shutdown(shutdown).await,
         Some(cfg) => {
-            let listener = TlsListener::new(tcp, cfg).map_err(|e| e.to_string())?;
+            let listener = lotse_rt_tokio::HttpsListener::new(tcp, cfg, "MCP").map_err(|e| e.to_string())?;
             axum::serve(listener, app).with_graceful_shutdown(shutdown).await
         }
     };

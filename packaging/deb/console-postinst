@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    systemd-sysusers lotse-console.conf >/dev/null 2>&1 || true
+    if ! getent passwd lotse-console >/dev/null; then
+        adduser --system --group --home /var/lib/lotse-console --no-create-home lotse-console >/dev/null
+    fi
+    install -d -o lotse-console -g lotse-console -m 0750 /var/lib/lotse-console
+    install -d -o root -g lotse-console -m 0750 /etc/lotse-console
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        # An upgrade restarts a running console; a fresh install starts
+        # nothing until it has a config and is enabled.
+        if [ -n "${2:-}" ]; then
+            systemctl try-restart lotse-console.service >/dev/null 2>&1 || true
+        fi
+    elif command -v update-rc.d >/dev/null; then
+        install -d -o lotse-console -g lotse-console -m 0750 /var/log/lotse-console
+        update-rc.d lotse-console defaults >/dev/null
+        if [ -n "${2:-}" ] && /etc/init.d/lotse-console status >/dev/null 2>&1; then
+            /etc/init.d/lotse-console restart || true
+        fi
+    fi
+fi

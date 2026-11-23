@@ -20,7 +20,8 @@ spec:
       port: {{ .Values.ports.client }}
       targetPort: client
 ---
-# Clients bootstrap through this Service, then talk to each leader by its pod
+# A stable name for the client port. Over TLS clients bootstrap at the pods'
+# names instead, which the node certificates carry; then each leader by its pod
 # name.
 apiVersion: v1
 kind: Service

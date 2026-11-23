@@ -1,0 +1,39 @@
+# The lotse-console image (ADR 0137): the web app built with Node.js, then a
+# static musl build of `lotse-console` with the app inside, on distroless, no
+# shell, running as a non-root user. Build from the repository root:
+#
+#   docker build -f packaging/Dockerfile.console -t lotse-console .
+#
+# Run it with its config, certificate and secrets mounted read-only and the
+# data directory (the session key) as a volume:
+#
+#   docker run -v /etc/lotse-console:/etc/lotse-console:ro \
+#     -v lotse-console:/var/lib/lotse-console -p 8443:8443 lotse-console
+#
+# The config's data_dir should be /var/lib/lotse-console; plain HTTP is
+# served only on loopback, so a container listens with [https].
+
+FROM node:22-alpine AS web
+WORKDIR /src/console/web
+COPY console/web/package.json console/web/package-lock.json ./
+RUN npm ci --no-audit --no-fund --loglevel=error
+COPY console/web ./
+RUN npm run build
+
+FROM rust:1-alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY . .
+COPY --from=web /src/console/web/dist console/web/dist
+RUN cargo build --release --locked -p lotse-console \
+    && install -D -m 0755 target/release/lotse-console /out/lotse-console \
+    && install -d -o 65532 -g 65532 /out/data
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/lotse-console /usr/bin/lotse-console
+COPY --from=build --chown=65532:65532 /out/data /var/lib/lotse-console
+VOLUME ["/var/lib/lotse-console"]
+EXPOSE 8443
+USER 65532:65532
+ENTRYPOINT ["/usr/bin/lotse-console"]
+CMD ["--config", "/etc/lotse-console/lotse-console.toml"]

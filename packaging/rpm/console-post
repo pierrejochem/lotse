@@ -1,0 +1,17 @@
+#!/bin/sh
+# After install and upgrade: the user lotse-console, its directories, and
+# systemd told about the unit; an upgrade restarts a running console.
+systemd-sysusers /usr/lib/sysusers.d/lotse-console.conf >/dev/null 2>&1 || true
+if ! getent passwd lotse-console >/dev/null; then
+    useradd --system --user-group --home-dir /var/lib/lotse-console --no-create-home \
+        --shell /sbin/nologin --comment "Lotse management console" lotse-console
+fi
+install -d -o lotse-console -g lotse-console -m 0750 /var/lib/lotse-console
+install -d -o root -g lotse-console -m 0750 /etc/lotse-console
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ "${1:-1}" -ge 2 ]; then
+        systemctl try-restart lotse-console.service >/dev/null 2>&1 || true
+    fi
+fi
+exit 0

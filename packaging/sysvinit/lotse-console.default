@@ -1,0 +1,8 @@
+# Settings of the Lotse console under sysvinit (ADR 0137). On systemd these
+# are not read: run lotse-console.service instead.
+
+# The console's config file. Nothing starts until it exists.
+LOTSE_CONSOLE_CONFIG=/etc/lotse-console/lotse-console.toml
+
+# The log filter, for instance info or lotse_console=debug.
+RUST_LOG=

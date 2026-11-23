@@ -71,7 +71,7 @@ Larger setups put certificates from their own CA at the same paths. Clients auth
 
 ## Packages, images and systemd
 
-Each release (ADR 0049, ADR 0126) has, for x86_64 and aarch64, a static binary, a tarball, a `.deb` (systemd, and sysvinit without it), an `.rpm` (systemd) and an `.apk` (OpenRC), and the image `ghcr.io/pierrejochem/lotse`. Releases are reproducible: built twice and compared before they are published, and checkable by anyone. A node takes its id from `--node` or `LOTSE_NODE`, its cluster file from `--config` or `LOTSE_CONFIG`, and joins with `--join` or `LOTSE_JOIN=1`.
+Each release (ADR 0049, ADR 0126) has, for x86_64 and aarch64, a static binary, a tarball, a `.deb` (systemd, and sysvinit without it), an `.rpm` (systemd) and an `.apk` (OpenRC), and the image `ghcr.io/pierrejochem/lotse`; the management console has the same, as `lotse-console` and `ghcr.io/pierrejochem/lotse-console`, serving HTTPS with a certificate of its own (ADR 0137, [the guide](guide/src/admin/console.md)). Releases are reproducible: built twice and compared before they are published, and checkable by anyone. A node takes its id from `--node` or `LOTSE_NODE`, its cluster file from `--config` or `LOTSE_CONFIG`, and joins with `--join` or `LOTSE_JOIN=1`.
 
 ```sh
 # Debian or Ubuntu: the binary, lotse@.service, the lotse user

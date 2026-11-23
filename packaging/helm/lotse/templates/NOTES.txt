@@ -1,6 +1,7 @@
 Lotse: {{ .Values.replicas }} nodes in the StatefulSet {{ include "lotse.fullname" . }}.
 
-Clients bootstrap through {{ include "lotse.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.ports.client }}
+Clients bootstrap at the pods' names, which the node certificates carry, for instance
+{{ include "lotse.podHost" (list . 0) }}:{{ .Values.ports.client }}
 and need a certificate from the cluster's CA in {{ .Values.tls.secretName }}.
 
 Where a rolling upgrade stands, from inside a pod:

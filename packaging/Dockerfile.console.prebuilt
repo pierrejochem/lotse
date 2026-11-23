@@ -1,0 +1,16 @@
+# The console's release image (ADR 0137): the same as
+# packaging/Dockerfile.console, from the static binaries packaging/release.sh
+# built, one per platform, in $DIST/lotse-console-$VERSION-linux-<arch>
+# (amd64, arm64). packaging/image.sh builds it reproducibly, on a base named
+# by its digest.
+ARG BASE=gcr.io/distroless/static-debian12:nonroot
+FROM ${BASE}
+ARG TARGETARCH
+ARG VERSION
+ARG DIST=dist
+COPY --chmod=0755 ${DIST}/lotse-console-${VERSION}-linux-${TARGETARCH} /usr/bin/lotse-console
+VOLUME ["/var/lib/lotse-console"]
+EXPOSE 8443
+USER 65532:65532
+ENTRYPOINT ["/usr/bin/lotse-console"]
+CMD ["--config", "/etc/lotse-console/lotse-console.toml"]
