@@ -23,11 +23,14 @@ webpki-roots.workspace = true
 ring.workspace = true
 rcgen = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "fs", "macros"] }
 
 [features]
 # A throwaway CA for tests and local clusters.
 dev-certs = ["dep:rcgen", "dep:time"]
+# HTTPS for an axum service (lotse mcp --listen, the console).
+https = ["dep:axum"]
 
 [dev-dependencies]
 lotse-rt-tokio = { path = ".", features = ["dev-certs"] }

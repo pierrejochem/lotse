@@ -1168,11 +1168,13 @@ dependencies = [
  "mime_guess",
  "ring",
  "rust-embed",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "toml",
  "tower",
  "tracing",
@@ -1302,6 +1304,7 @@ dependencies = [
 name = "lotse-rt-tokio"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bytes",
  "lotse-auth",
  "lotse-log",
