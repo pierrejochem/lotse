@@ -16,7 +16,17 @@
   --ok: #2C7552;
   --warn: #9A6412;
   --critical: #C8322B;
-  --focus-ring: #C8322B;
+  --control: #6B8090;
+  --primary: #0F2B3D;
+  --primary-hover: #1D4560;
+  --on-primary: #FFFFFF;
+  --link: #1F6AA5;
+  --selected: #0F2B3D;
+  --selected-bg: #E9F0F5;
+  --danger-solid: #A8261F;
+  --on-danger-solid: #FFFFFF;
+  --danger-solid-hover: #8A1D17;
+  --focus-ring: #1F6AA5;
   --font-sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
   --space-1: 4px;
@@ -48,7 +58,17 @@
     --ok: #5CC28F;
     --warn: #E0A84A;
     --critical: #F0645A;
-    --focus-ring: #F0645A;
+    --control: #5F7686;
+    --primary: #3B7BA8;
+    --primary-hover: #4A8BB8;
+    --on-primary: #FFFFFF;
+    --link: #7CC0F0;
+    --selected: #7CC0F0;
+    --selected-bg: #16303F;
+    --danger-solid: #FF8F86;
+    --on-danger-solid: #1A0B0A;
+    --danger-solid-hover: #FFA59E;
+    --focus-ring: #7CC0F0;
   }
 }
 
@@ -68,5 +88,15 @@
   --ok: #5CC28F;
   --warn: #E0A84A;
   --critical: #F0645A;
-  --focus-ring: #F0645A;
+  --control: #5F7686;
+  --primary: #3B7BA8;
+  --primary-hover: #4A8BB8;
+  --on-primary: #FFFFFF;
+  --link: #7CC0F0;
+  --selected: #7CC0F0;
+  --selected-bg: #16303F;
+  --danger-solid: #FF8F86;
+  --on-danger-solid: #1A0B0A;
+  --danger-solid-hover: #FFA59E;
+  --focus-ring: #7CC0F0;
 }
