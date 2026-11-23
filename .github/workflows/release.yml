@@ -3,11 +3,12 @@ name: release
 # depth, 5,000 seeds each (ADR 0088), the longest split by seed range over
 # parallel jobs (LOTSE_SIM_SHARD, ADR 0131); only when all of them pass, the release
 # is built twice, by packaging/release.sh on two runners in two directories,
-# and the two must match byte for byte: static `lotse` binaries for x86_64
-# and aarch64, tarballs, .deb, .rpm and .apk packages, BUILDINFO and
-# SHA256SUMS. The image for both architectures is built twice the same way.
-# Then the GitHub release and ghcr.io/<owner>/lotse publish exactly the bytes
-# that were compared. Run by hand on any branch, it runs the simulations and
+# and the two must match byte for byte: static `lotse` and `lotse-console`
+# binaries for x86_64 and aarch64, tarballs, .deb, .rpm and .apk packages,
+# BUILDINFO and SHA256SUMS (ADR 0137 adds the console). Both images, for
+# both architectures, are built twice the same way. Then the GitHub release,
+# ghcr.io/<owner>/lotse and ghcr.io/<owner>/lotse-console publish exactly the
+# bytes that were compared. Run by hand on any branch, it runs the simulations and
 # both reproducibility checks, and publishes nothing.
 # A failing simulation prints the seed; reproduce it with
 # LOTSE_SIM_SEED=<seed> cargo test -p <crate> --release --test <file>
@@ -199,6 +200,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: packaging/tools.sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: grep '^NODE_VERSION=' packaging/release.env >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Version
         # A branch run builds 0.0.0-check: the same for both builds.
         run: |
@@ -233,6 +238,10 @@ jobs:
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: some/other/place/packaging/tools.sh
+      - run: grep '^NODE_VERSION=' some/other/place/packaging/release.env >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Version
         run: |
           case $GITHUB_REF in
@@ -273,6 +282,7 @@ jobs:
     outputs:
       base: ${{ steps.base.outputs.base }}
       digest: ${{ steps.build.outputs.digest }}
+      console_digest: ${{ steps.build.outputs.console_digest }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -286,11 +296,15 @@ jobs:
           digest=$(docker buildx imagetools inspect gcr.io/distroless/static-debian12:nonroot --format '{{json .Manifest}}' | jq -r .digest)
           echo "base=gcr.io/distroless/static-debian12@$digest" >> "$GITHUB_OUTPUT"
       - id: build
-        run: packaging/image.sh dist "${{ steps.base.outputs.base }}" image.tar
+        run: |
+          packaging/image.sh dist "${{ steps.base.outputs.base }}" image.tar
+          packaging/image.sh dist "${{ steps.base.outputs.base }}" console-image.tar lotse-console
       - uses: actions/upload-artifact@v7
         with:
           name: image
-          path: image.tar
+          path: |
+            image.tar
+            console-image.tar
   image-again:
     needs: image
     runs-on: ubuntu-24.04
@@ -305,12 +319,17 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - id: build
         working-directory: some/other/place
-        run: packaging/image.sh dist "${{ needs.image.outputs.base }}" /tmp/image.tar
-      - name: The two images match
+        run: |
+          packaging/image.sh dist "${{ needs.image.outputs.base }}" /tmp/image.tar
+          packaging/image.sh dist "${{ needs.image.outputs.base }}" /tmp/console-image.tar lotse-console
+      - name: The two builds of each image match
         run: |
           echo "image:       ${{ needs.image.outputs.digest }}"
           echo "image-again: ${{ steps.build.outputs.digest }}"
           test "${{ needs.image.outputs.digest }}" = "${{ steps.build.outputs.digest }}"
+          echo "console image:       ${{ needs.image.outputs.console_digest }}"
+          echo "console image-again: ${{ steps.build.outputs.console_digest }}"
+          test "${{ needs.image.outputs.console_digest }}" = "${{ steps.build.outputs.console_digest }}"
 
   release:
     needs: [compare, image, image-again]
@@ -333,6 +352,8 @@ jobs:
             echo
             echo "Image: \`${IMAGE,,}:$GITHUB_REF_NAME\`, index digest \`${{ needs.image.outputs.digest }}\`, on \`${{ needs.image.outputs.base }}\`."
             echo
+            echo "Console image: \`${IMAGE,,}-console:$GITHUB_REF_NAME\`, index digest \`${{ needs.image.outputs.console_digest }}\`, on the same base."
+            echo
             echo '```'
             cat dist/BUILDINFO
             echo '```'
@@ -354,11 +375,14 @@ jobs:
         env:
           TOKEN: ${{ github.token }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lotse"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           echo "$TOKEN" | skopeo login ghcr.io --username "${{ github.actor }}" --password-stdin
-          for tag in "$GITHUB_REF_NAME" latest; do
-            skopeo copy --all --preserve-digests oci-archive:image.tar "docker://$image:$tag"
-          done
-          pushed=$(skopeo inspect --raw "docker://$image:$GITHUB_REF_NAME" | sha256sum | cut -d' ' -f1)
-          test "sha256:$pushed" = "${{ needs.image.outputs.digest }}"
+          push() { # archive, image, digest
+            for tag in "$GITHUB_REF_NAME" latest; do
+              skopeo copy --all --preserve-digests "oci-archive:$1" "docker://$2:$tag"
+            done
+            pushed=$(skopeo inspect --raw "docker://$2:$GITHUB_REF_NAME" | sha256sum | cut -d' ' -f1)
+            test "sha256:$pushed" = "$3"
+          }
+          push image.tar "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lotse" "${{ needs.image.outputs.digest }}"
+          push console-image.tar "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lotse-console" "${{ needs.image.outputs.console_digest }}"

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+# The config and the session key stay, even on purge: signed-in users keep
+# their sessions across a reinstall.
+if [ "$1" = "purge" ] && command -v update-rc.d >/dev/null; then
+    update-rc.d lotse-console remove >/dev/null || true
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi

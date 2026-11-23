@@ -139,5 +139,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0133 | [Access tokens with fixed lifetimes](0133-access-tokens-with-fixed-lifetimes.md) | Accepted |
 | 0134 | [`lotse mcp`, a separate command for AI agents](0134-lotse-mcp-a-separate-command-for-ai-agents.md) | Accepted |
 | 0135 | [`alter_configs` asks for `confirm` when a setting can delete data](0135-alter-configs-asks-for-confirm-when-a-setting-can-delete-data.md) | Accepted |
+| 0137 | [The console ships in the release, with HTTPS of its own](0137-the-console-ships-in-the-release-with-https-of-its-own.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

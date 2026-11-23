@@ -1,6 +1,6 @@
 # Install
 
-Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's certificates and checks the cluster file. There are four ways to get it: a package, the tarball, the container image, or a build from source.
+Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's certificates and checks the cluster file. There are four ways to get it: a package, the tarball, the container image, or a build from source. The management console is a second program, `lotse-console`, in packages of its own; its setup is in [The console](../admin/console.md).
 
 ## What you need
 
@@ -9,7 +9,7 @@ Lotse is one binary, `lotse`. It runs one node of a cluster, makes the cluster's
 - Two TCP ports per node. The examples use 7000 for the other nodes (`peer`) and 9000 for clients (`client`). Both are set per node in the cluster file.
 - A disk for the data directory. Retention keeps 7 days by default, so the size follows your traffic.
 
-Each release has, for x86_64 and aarch64, a static binary, a tarball, a `.deb`, an `.rpm`, an `.apk` and a container image ([ADR 0049](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0049-packaging.md), [ADR 0126](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0126-reproducible-releases-built-by-one-script-for-every-init-system.md)). Replace `<version>` below with the release you downloaded. The next chapter, [A first cluster](first-cluster.md), continues from here.
+Each release has, for x86_64 and aarch64, a static binary, a tarball, a `.deb`, an `.rpm`, an `.apk` and a container image of each program, `lotse` and `lotse-console` ([ADR 0049](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0049-packaging.md), [ADR 0126](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0126-reproducible-releases-built-by-one-script-for-every-init-system.md)). Replace `<version>` below with the release you downloaded. The next chapter, [A first cluster](first-cluster.md), continues from here.
 
 ## Packages
 
@@ -89,7 +89,7 @@ cd lotse
 cargo build --release -p lotse-node      # target/release/lotse
 ```
 
-`make release-tools && make release VERSION=<version>` builds the whole release into `dist/`: binaries, tarballs and packages for both architectures. `docker build -f packaging/Dockerfile -t lotse .` builds the image.
+`make release-tools && make release VERSION=<version>` builds the whole release into `dist/`: binaries, tarballs and packages of `lotse` and `lotse-console` for both architectures. It also needs the Node.js version `packaging/release.env` pins, for the console's web app. `docker build -f packaging/Dockerfile -t lotse .` builds the node's image, `docker build -f packaging/Dockerfile.console -t lotse-console .` the console's.
 
 ## Check the install
 

@@ -1,0 +1,43 @@
+# The Lotse management console (ADR 0019, ADR 0137). Copy to
+# /etc/lotse-console/lotse-console.toml and adjust; the packages run it as
+# the user lotse-console, which must be able to read this file, the
+# certificate and key below and the cluster's CA.
+
+# HTTPS on every address. Plain HTTP is served only on a loopback address
+# (listen = "127.0.0.1:8080", without [https]).
+listen = "0.0.0.0:8443"
+data_dir = "/var/lib/lotse-console"   # the session key; it outlives restarts
+
+[https]
+cert = "/etc/lotse-console/console.pem"   # the console's certificate chain, PEM
+key = "/etc/lotse-console/console.key"
+
+# Users sign in at your identity provider, the issuer the brokers trust.
+# Register the console there as a client with this redirect URL.
+[auth]
+mode = "oidc"
+issuer = "https://id.example.com/realms/ops"
+client_id = "lotse-console"
+# client_secret = "…"          # for a confidential client; PKCE is always used
+redirect_url = "https://console.example.com:8443/auth/callback"
+principal_claim = "sub"        # the same claim the brokers use
+# ca_file = "/etc/lotse-console/idp-ca.pem"   # a private issuer's CA
+session_hours = 12
+
+# The background sampler behind the charts. Bind this principal the
+# cluster-viewer role; each user's chart sums only what they may see.
+[metrics]
+principal = "console-metrics"
+client_id = "lotse-console-metrics"                       # OAuth client credentials, or:
+client_secret_file = "/etc/lotse-console/metrics-secret"  # password = "…" for SCRAM
+sample_secs = 10
+retention_hours = 24
+
+[live]
+interval_ms = 2000
+
+[[clusters]]
+id = "production"
+kind = "native"
+bootstrap = ["broker-1.example.com:9000", "broker-2.example.com:9000"]
+ca_file = "/etc/lotse-console/cluster-ca.pem"   # the cluster's CA

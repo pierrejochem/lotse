@@ -1,0 +1,7 @@
+# Settings of the Lotse console under OpenRC (ADR 0137).
+
+# The console's config file.
+#LOTSE_CONSOLE_CONFIG=/etc/lotse-console/lotse-console.toml
+
+# The log filter, for instance info or lotse_console=debug.
+#RUST_LOG=info
