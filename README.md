@@ -31,7 +31,7 @@ Lotse is a message broker in Rust: reliable queues and persistent streams on one
 - **Tested by simulation:** deterministic simulation with crashing disks and a faulty network, 5,000 seeds per simulation before every release.
 - **Clients and console:** clients for Rust, Java (with a Kotlin layer), C# and Node.js, a web console, and `lotse mcp` for AI agents.
 
-Status: preview, first release 0.1.0 ([notes](docs/releases/0.1.0.md)). What exists, what is not built yet and the limits that were decided are in [Status and known gaps](docs/status.md).
+Status: preview, first release 0.1.0 ([notes](docs/releases/0.1.0.md)), latest 0.1.1 ([notes](docs/releases/0.1.1.md)). What exists, what is not built yet and the limits that were decided are in [Status and known gaps](docs/status.md).
 
 ## Quick start
 
