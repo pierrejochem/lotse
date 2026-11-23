@@ -31,6 +31,22 @@ fn exactly_one_credential_signs_in() {
 }
 
 #[test]
+fn half_of_a_second_credential_still_counts_as_a_second_choice() {
+    for (token, user, password, cert, key) in [
+        (s("t"), None, s("pw"), None, None),
+        (s("t"), s("dave"), None, None, None),
+        (s("t"), None, None, p("c.pem"), None),
+        (s("t"), None, None, None, p("c.key")),
+        (None, s("dave"), None, p("c.pem"), None),
+        (None, None, s("pw"), None, p("c.key")),
+    ] {
+        let err = SignIn::choose(token.clone(), user.clone(), password.clone(), cert.clone(), key.clone())
+            .expect_err("two credentials are refused");
+        assert!(err.contains("not several"), "{token:?} {user:?} {password:?} {cert:?} {key:?}: {err}");
+    }
+}
+
+#[test]
 fn the_debug_form_hides_secrets() {
     let shown = format!(
         "{:?} {:?}",

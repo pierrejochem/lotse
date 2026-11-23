@@ -22,6 +22,12 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
     )]
 }
 
+/// A token's id as the token text and `list_tokens` write it: 16 lowercase
+/// hex digits. `list_sessions` uses the same, so the two tools' ids match.
+pub(crate) fn token_id(id: u64) -> Value {
+    json!(format!("{id:016x}"))
+}
+
 pub(crate) async fn list_tokens<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
     let owner = a.opt_str("owner")?;
     let tokens: Vec<Value> = c
@@ -30,7 +36,7 @@ pub(crate) async fn list_tokens<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: 
         .into_iter()
         .map(|t| {
             json!({
-                "id": format!("{:016x}", t.id),
+                "id": token_id(t.id),
                 "name": t.name,
                 "owner": t.owner,
                 "created_at_ms": t.created_at_ms,

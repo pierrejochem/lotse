@@ -649,6 +649,11 @@ fn principal(k: u8) -> &'static str {
     }
 }
 
+/// The token a session signed in with, null for any other credential.
+pub(crate) fn session_token_id(id: Option<u64>) -> Value {
+    id.map_or(Value::Null, crate::tokens::token_id)
+}
+
 pub(crate) async fn list_sessions<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {
     let mut sessions = Vec::new();
     let mut silent = Vec::new();
@@ -661,7 +666,7 @@ pub(crate) async fn list_sessions<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -
                     "name": e.name,
                     "groups": e.groups,
                     "mechanism": mechanism(e.mechanism),
-                    "token_id": e.token_id,
+                    "token_id": session_token_id(e.token_id),
                     "peer": e.peer,
                     "connected_ms": e.connected_ms,
                     "expires_ms": if e.expires_ms == 0 { Value::Null } else { json!(e.expires_ms) },

@@ -110,7 +110,7 @@ lotse upgrade finalize --config cluster.toml --cert admin.pem --key admin.key # 
 
 ### AI agents
 
-`lotse mcp` lets an AI agent work with a cluster as the user who signed in, over stdio on a developer's machine or over HTTP as one shared process ([ADR 0134](adr/0134-lotse-mcp-a-separate-command-for-ai-agents.md)); see the guide's [Using Lotse with AI agents](guide/src/use/ai-agents.md).
+`lotse mcp` lets an AI agent work with a cluster as the user who signed in, over stdio on a developer's machine or over HTTP as one shared process ([ADR 0134](adr/0134-lotse-mcp-a-separate-command-for-ai-agents.md)); see the guide's [Using Lotse with AI agents](guide/src/user/ai-agents.md).
 
 ### Building and checking a release
 

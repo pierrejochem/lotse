@@ -10,7 +10,7 @@ It speaks MCP 2026-07-28, and 2025-11-25 for clients that still open a session. 
 
 | Credential | For | How |
 | --- | --- | --- |
-| An access token | an agent on your machine, or an HTTP client | `LOTSE_TOKEN`, or `Authorization: Bearer` over HTTP. Make one in a client or ask a cluster admin; see [access tokens](../admin/access-tokens.md). It stops by itself, within 7 to 365 days |
+| An access token | an agent on your machine, or an HTTP client | `LOTSE_TOKEN`, or `Authorization: Bearer` over HTTP. Make one in the console under *Users and access*, *Tokens*, or with a client or `lotse`, or ask a cluster admin; see [access tokens](../admin/access-tokens.md). It stops by itself, within 7 to 365 days |
 | A user and password | the same, where no token exists | `LOTSE_USER` and `LOTSE_PASSWORD` (SCRAM-SHA-512), or `Authorization: Basic` over HTTP |
 | A client certificate | stdio only | `--cert` and `--key` |
 
@@ -34,7 +34,7 @@ A desktop agent that reads a list of MCP servers takes an entry like this one (t
     "lotse": {
       "command": "lotse",
       "args": ["mcp", "--config", "/etc/lotse/cluster.toml"],
-      "env": { "LOTSE_TOKEN": "lotse_tok_00000000000001f4_Qm9yZWQgb2YgcmVhZGluZz8gR29vZCBlbm91Z2g" }
+      "env": { "LOTSE_TOKEN": "lotse_tok_00000000000001f4_BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY" }
     }
   }
 }
@@ -55,10 +55,10 @@ lotse mcp --config cluster.toml --listen 0.0.0.0:8443 \
 
 - **Endpoint:** `POST /mcp`.
 - **TLS:** with `--tls-cert` and `--tls-key` (PEM) it serves HTTPS. Without them it starts only on a loopback address, over plain HTTP; on any other address it exits 2. The certificate is read at start and not reloaded: restart to change it.
-- **A credential on every request:** `Authorization: Bearer lotse_tok_...` or `Authorization: Basic` with the user and password. Without one, or with one the cluster refuses, the answer is 401 and no tool runs. The process holds no credential of its own, and refuses to start with `LOTSE_TOKEN`, `LOTSE_USER` or `--cert` given.
-- **Revocation:** before a request is served, the process asks the cluster that the credential still signs in (one round trip per request), so a revoked or expired token fails on its next request. A changed password is not noticed this way: a cached client keeps working until its session ends. After rotating a password, a cluster admin revokes the user's sessions (`RevokeSessions`, from the console or a client).
-- **Load:** a signed-in client is kept per credential, by its SHA-256 and never the credential itself, for 15 minutes idle, at most 1,000 at once. At most 256 credentials wait or sign in at once and 32 sign-ins reach the cluster at once. A request that waits longer than 5 s gets 503 with `Retry-After: 1`; so does a request while the cluster cannot be reached.
-- **Browsers:** a request with an `Origin` header is refused unless `--allow-origin` names it, as `scheme://host[:port]`, repeated for more. There is no CORS preflight support, so in practice a browser cannot use it. `null` is refused at start, and a value with a path or a trailing slash can never match and is warned about. Against DNS rebinding, a plaintext loopback listener checks the `Host` header; under TLS the certificate's name and the `Origin` check protect.
+- **A credential on every request:** `Authorization: Bearer lotse_tok_...` or `Authorization: Basic` with the user and password. Without one, or with one the cluster refuses, the answer is 401 and no tool runs. The process holds no credential of its own, and refuses to start with any of `LOTSE_TOKEN`, `LOTSE_USER`, `LOTSE_PASSWORD`, `--cert` or `--key` given.
+- **Revocation:** before a request is served, the process asks the cluster that the credential still signs in (one round trip per request), so a revoked or expired token fails on its next request. A changed password is not noticed this way: a cached client keeps working until its session ends. After rotating a password, a cluster admin revokes the user's sessions (`RevokeSessions`, from the console or a client). That also ends every token the user made before it, for good, so new ones must be made; `list_tokens` and the console still list those tokens until they expire.
+- **Load:** a signed-in client is kept per credential, by its SHA-256 and never the credential itself, for 15 minutes idle, at most 1,000 at once. At most 256 credentials wait or sign in at once and 32 sign-ins reach the cluster at once. A request that waits longer than 5 s gets 503 with `Retry-After: 1`; so does a request at once when 256 credentials are already waiting or signing in, and a request while the cluster cannot be reached.
+- **Browsers:** a request with an `Origin` header is refused with 403 unless `--allow-origin` names it, as `scheme://host[:port]`, repeated for more. There is no CORS preflight support, so in practice a browser cannot use it. `null` is refused at start, and a value with a path or a trailing slash can never match and is warned about. Against DNS rebinding, a plaintext loopback listener checks the `Host` header; under TLS the certificate's name and the `Origin` check protect.
 
 Two processes behind a load balancer need nothing shared, as no session is kept between requests.
 
@@ -76,7 +76,7 @@ Each tool takes and returns JSON. A result carries `structuredContent` and a sho
 | `describe_queue` | Messages ready, in flight and held by transactions; consumers and credit; settings; the dead-letter queue |
 | `describe_consumer_group` | Members and partitions; per partition the committed offset, last stable offset, high watermark and lag |
 | `node_metrics` | Each node's traffic, connections, CPU, memory, disk and commit latency; `node_id` narrows it |
-| `list_sessions` | Open sessions with principal, mechanism and peer: all for a cluster admin or viewer, your own for anyone else |
+| `list_sessions` | Open sessions with principal, mechanism, peer and the `token_id` of a token sign-in (16 hex digits, as `list_tokens` gives it): all for a cluster admin or viewer, your own for anyone else |
 | `describe_upgrade` | The cluster version, the restart turn and each node's release; needs cluster-admin or cluster-viewer |
 
 `lag` is to the last stable offset, which is what a `read_committed` group can read; `lag_against` says so, and `lag_to_high_watermark` sits beside it. Both count offsets.
@@ -94,7 +94,7 @@ No tool takes messages from a queue. A consumer that reads takes them out of fli
 
 **Change**
 
-`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs` and `create_partitions`. They work on resources created at runtime, as the same requests do over the native protocol.
+`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs` and `create_partitions`. They work on resources created at runtime, as the same requests do over the native protocol. `alter_configs` is marked `destructiveHint` too, without a `confirm` argument: a shorter retention, a cleanup policy or an overflow setting can delete data, so a client may ask you first.
 
 **Destroy**
 
@@ -102,7 +102,7 @@ No tool takes messages from a queue. A consumer that reads takes them out of fli
 
 **Tokens**
 
-`list_tokens` lists your own access tokens, or with `owner` another user's, which only a cluster admin or viewer may. There is no tool to make or revoke a token: that stays in the console and the clients.
+`list_tokens` lists your own access tokens, or with `owner` another user's, which only a cluster admin or viewer may. There is no tool to make or revoke a token: that stays in the console (*Users and access*, *Tokens*) and the clients.
 
 ## Limits
 

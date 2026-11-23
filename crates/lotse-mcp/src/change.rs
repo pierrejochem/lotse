@@ -87,7 +87,7 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             "alter_configs",
             "Changes settings of a stream or queue created at runtime: set gives settings new values, reset returns \
              them to their defaults. replication.factor is set on its own and moves every partition to that many \
-             nodes.",
+             nodes. Destructive: a shorter retention, a cleanup policy or an overflow setting can delete data.",
             json!({
                 "name": {"type": "string", "description": "The stream's or queue's name."},
                 "set": configs,
@@ -95,7 +95,7 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             }),
             &["name"],
             false,
-            false,
+            true,
         ),
         spec(
             "create_partitions",

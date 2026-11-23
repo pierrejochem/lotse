@@ -358,7 +358,7 @@ async fn stdio_calls_a_tool_as_the_token_owner() {
             .clone();
         assert!(!listed.is_empty(), "{sessions}");
         assert!(listed.iter().all(|s| s["name"] == "dave"), "Dave sees only his own: {sessions}");
-        assert!(listed.iter().any(|s| s["token_id"] == json!(token.id)), "{sessions}");
+        assert!(listed.iter().any(|s| s["token_id"] == json!(format!("{:016x}", token.id))), "{sessions}");
 
         // An unknown tool is a tool error too.
         let unknown = call(&mut m, 4, "no_such_tool", json!({}));
@@ -493,6 +493,19 @@ fn usage(args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[test]
+fn a_token_with_a_password_or_a_user_is_a_usage_error() {
+    for env in [
+        [("LOTSE_TOKEN", "lotse_tok_x"), ("LOTSE_PASSWORD", "pw")],
+        [("LOTSE_TOKEN", "lotse_tok_x"), ("LOTSE_USER", "dave")],
+    ] {
+        let (code, stdout, stderr) = usage(&["--plaintext-on-loopback", "--bootstrap", "127.0.0.1:1"], &env);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(stderr.contains("several"), "{stderr}");
+    }
 }
 
 #[test]
@@ -825,7 +838,10 @@ async fn http_bearer_token_and_basic_password_both_work() {
         let names = session_names(&mine);
         assert!(!names.is_empty() && names.iter().all(|n| n == "dave"), "{mine}");
         let listed = mine["structuredContent"]["sessions"].as_array().unwrap();
-        assert!(listed.iter().all(|s| s["token_id"] == json!(token.id)), "signed in with the token: {mine}");
+        assert!(
+            listed.iter().all(|s| s["token_id"] == json!(format!("{:016x}", token.id))),
+            "signed in with the token: {mine}"
+        );
         let hers = tool_result(&mcp, &erin, "list_sessions", json!({})).await;
         let names = session_names(&hers);
         assert!(!names.is_empty() && names.iter().all(|n| n == "erin"), "{hers}");

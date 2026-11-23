@@ -73,7 +73,7 @@ impl std::fmt::Debug for SignIn {
 impl SignIn {
     /// The one credential given: `LOTSE_TOKEN`, `LOTSE_USER` with
     /// `LOTSE_PASSWORD`, or `--cert` with `--key`. None, half of one, or
-    /// more than one is refused, so the process never acts as a principal
+    /// more than one choice is refused, so the process never acts as a principal
     /// other than the one meant.
     pub fn choose(
         token: Option<String>,
@@ -82,29 +82,30 @@ impl SignIn {
         cert: Option<PathBuf>,
         key: Option<PathBuf>,
     ) -> Result<SignIn, String> {
-        let mut found = Vec::new();
-        if let Some(t) = token.filter(|t| !t.is_empty()) {
-            found.push(SignIn::Token(t));
-        }
-        match (user.filter(|u| !u.is_empty()), password) {
-            (Some(user), Some(password)) => found.push(SignIn::Scram { user, password }),
-            (Some(_), None) => return Err("LOTSE_USER needs LOTSE_PASSWORD, the user's password".into()),
-            (None, Some(_)) if found.is_empty() && cert.is_none() => {
-                return Err("LOTSE_PASSWORD needs LOTSE_USER, the user it belongs to".into());
+        let token = token.filter(|t| !t.is_empty());
+        let user = user.filter(|u| !u.is_empty());
+        let password = password.filter(|p| !p.is_empty());
+        // Any part of a credential is a choice, so a stray variable next to
+        // another credential is refused instead of ignored.
+        let chosen = [token.is_some(), user.is_some() || password.is_some(), cert.is_some() || key.is_some()];
+        match chosen.iter().filter(|c| **c).count() {
+            0 => return Err(NO_CREDENTIAL.into()),
+            1 => {}
+            _ => {
+                return Err("give one credential, not several: LOTSE_TOKEN, or LOTSE_USER and LOTSE_PASSWORD, or \
+                            --cert and --key"
+                    .into());
             }
-            _ => {}
         }
-        match (cert, key) {
-            (Some(cert), Some(key)) => found.push(SignIn::Certificate { cert, key }),
-            (None, None) => {}
-            _ => return Err("--cert and --key go together".into()),
+        if let Some(token) = token {
+            return Ok(SignIn::Token(token));
         }
-        match found.len() {
-            0 => Err(NO_CREDENTIAL.into()),
-            1 => Ok(found.remove(0)),
-            _ => Err("give one credential, not several: LOTSE_TOKEN, or LOTSE_USER and LOTSE_PASSWORD, or \
-                      --cert and --key"
-                .into()),
+        match (user, password, cert, key) {
+            (Some(user), Some(password), None, None) => Ok(SignIn::Scram { user, password }),
+            (Some(_), None, ..) => Err("LOTSE_USER needs LOTSE_PASSWORD, the user's password".into()),
+            (None, Some(_), ..) => Err("LOTSE_PASSWORD needs LOTSE_USER, the user it belongs to".into()),
+            (_, _, Some(cert), Some(key)) => Ok(SignIn::Certificate { cert, key }),
+            _ => Err("--cert and --key go together".into()),
         }
     }
 }
