@@ -21,7 +21,7 @@ export function Overview() {
       <div>
         <h1 className="h1">Cluster overview</h1>
         <p className="sub">
-          {o.nodes.length} broker nodes · {count(o.raft_groups)} Raft groups · metadata leader{' '}
+          {counted(o.nodes.length, 'node')} · {count(o.raft_groups)} Raft groups · metadata leader{' '}
           <span className="mono">{o.metadata_leader}</span>, term {o.metadata_term}
         </p>
       </div>

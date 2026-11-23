@@ -12,7 +12,8 @@
 | Queue detail | ![Queue detail](queue-detail.png) |
 | Record browser | ![Record browser](messages.png) |
 | Tenants | ![Tenants](tenants.png) |
-| Access tokens (*People and credentials*, *Tokens*) | Screenshot to be taken |
+| People and credentials: users | ![Users](users.png) |
+| People and credentials: access tokens | ![Tokens](tokens.png) |
 
 ## Against a real cluster
 

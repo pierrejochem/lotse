@@ -76,6 +76,8 @@ The *People and credentials* pages manage who may sign in and what they may do, 
 
 **Tokens** lists the access tokens you may see, with name, owner, when each was made and when it ends, and the last four digits of its id. *Create token* asks for a name and one of five lifetimes: 1 week, 1 month (the default), 3 months, 6 months or 1 year. The text of the token appears once, with a copy button; it cannot be shown again, and the console keeps it only while that dialog is open ([ADR 0133](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0133-access-tokens-with-fixed-lifetimes.md)).
 
+![Tokens](../images/tokens.png)
+
 A token acts as its owner with the roles bound to the owner's own name. Your identity provider's groups do not count, so if all your roles come from groups, the token grants nothing until a cluster admin binds a role to your name. *Revoke* asks you to type the token's name first: connections signed in with the token end at once. You see and revoke your own tokens; cluster admins see every token, can filter by owner, and can make a token for another principal, such as a service account. On a cluster below version 0.1 the dialog shows the cluster's message instead of making a token. See [Access tokens](../admin/access-tokens.md).
 
 ### Client certificates

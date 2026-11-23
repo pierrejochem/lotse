@@ -167,7 +167,7 @@ export function Messages() {
         <p className="sub">Reads records without joining a consumer group or moving any offset. Every read is logged with your name.</p>
       </div>
 
-      <form className="card row" style={{ alignItems: 'flex-end', padding: '16px 20px' }} onSubmit={submit} aria-label="What to read">
+      <form className="card row" style={{ alignItems: 'flex-start', padding: '16px 20px' }} onSubmit={submit} aria-label="What to read">
         <div className="field">
           <span className="field-label">Stream</span>
           <Select
@@ -212,6 +212,8 @@ export function Messages() {
           </span>
         </div>
         <div className="field">
+          {/* An empty label keeps the button level with the other controls. */}
+          <span className="field-label" aria-hidden="true">&nbsp;</span>
           <button type="submit" className="btn primary" disabled={!stream || read.isPending}>
             {read.isPending ? 'Reading…' : `Read ${PAGE} records`}
           </button>

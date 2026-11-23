@@ -53,8 +53,10 @@ export const useStreams = (cluster: string) =>
   });
 
 export function useStream(cluster: string, name: string) {
-  useLive({ kind: 'stream', cluster, name }, keys.stream(cluster, name));
+  useLive(name ? { kind: 'stream', cluster, name } : null, keys.stream(cluster, name));
   return useQuery({
+    // The record browser asks before its stream list has arrived; an empty name is not a stream.
+    enabled: name !== '',
     queryKey: keys.stream(cluster, name),
     queryFn: () =>
       unwrap(api.GET('/api/v1/clusters/{cluster}/streams/{name}', { params: { path: { cluster, name } } })),

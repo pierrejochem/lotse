@@ -8,10 +8,10 @@ import { useToast } from '../components/toast';
 import { Chip, DiskBar, Failed, Loading, TableWrap } from '../components/ui';
 import { NONE_NOTE, bytes, clock, count, counted, duration, fraction, percent, rate } from '../format';
 
-/** "3 broker nodes in 3 zones · managed by the Lotse operator", from what is known. */
+/** "3 nodes in 3 zones · managed by the Lotse operator", from what is known. */
 function nodesLine(v: S['NodesView']) {
   const zones = new Set(v.nodes.map((n) => n.zone).filter(Boolean));
-  const parts = [counted(v.nodes.length, 'broker node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
+  const parts = [counted(v.nodes.length, 'node') + (zones.size > 0 ? ` in ${counted(zones.size, 'zone')}` : '')];
   if (v.events.length > 0) parts.push('managed by the Lotse operator');
   return parts.join(' · ');
 }
