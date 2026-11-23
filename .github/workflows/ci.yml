@@ -11,6 +11,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Nodes and tests log their groups' elections and the node loop's stalls, so a
+  # test that fails because a group had no leader shows when and why (ADR 0139).
+  LOTSE_LOG: info,lotse::raft=debug,lotse::stall=debug
 
 jobs:
   check:
@@ -126,9 +129,24 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/node/package-lock.json
       - run: cargo build -p lotse-node
+      - run: mkdir -p "$RUNNER_TEMP/lotse-tmp"
       - run: make sdk-test
         env:
           LOTSE_BIN: ${{ github.workspace }}/target/debug/lotse
+          TMPDIR: ${{ runner.temp }}/lotse-tmp
+          JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ runner.temp }}/lotse-tmp
+      # Nodes started by the SDK tests write their logs under TMPDIR; on a
+      # failure, show their elections and stalls (ADR 0139).
+      - name: Elections and stalls of the test nodes
+        if: failure()
+        run: |
+          find "$RUNNER_TEMP/lotse-tmp" -name '*.log' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            if grep -qE 'lotse::(raft|stall)' "$f"; then
+              echo "::group::$f"
+              grep -E 'lotse::(raft|stall)' "$f" | sed 's/\x1b\[[0-9;]*m//g' | tail -n 400
+              echo "::endgroup::"
+            fi
+          done
 
   # The Node.js SDK on the oldest Node.js it supports (20): zstd is not in
   # node:zlib there, lz4 and everything else must work. A job of its own so the
@@ -148,6 +166,21 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/node/package-lock.json
       - run: cargo build -p lotse-node
+      - run: mkdir -p "$RUNNER_TEMP/lotse-tmp"
       - run: make sdk-node-test
         env:
           LOTSE_BIN: ${{ github.workspace }}/target/debug/lotse
+          TMPDIR: ${{ runner.temp }}/lotse-tmp
+          JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ runner.temp }}/lotse-tmp
+      # Nodes started by the SDK tests write their logs under TMPDIR; on a
+      # failure, show their elections and stalls (ADR 0139).
+      - name: Elections and stalls of the test nodes
+        if: failure()
+        run: |
+          find "$RUNNER_TEMP/lotse-tmp" -name '*.log' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            if grep -qE 'lotse::(raft|stall)' "$f"; then
+              echo "::group::$f"
+              grep -E 'lotse::(raft|stall)' "$f" | sed 's/\x1b\[[0-9;]*m//g' | tail -n 400
+              echo "::endgroup::"
+            fi
+          done

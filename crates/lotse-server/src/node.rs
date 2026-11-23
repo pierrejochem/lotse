@@ -943,6 +943,12 @@ impl<R: Runtime> Node<R> {
 /// Makes a fresh state machine for a group.
 type Factory<S> = Arc<dyn Fn(GroupId) -> S + std::marker::Send + Sync>;
 
+/// A group's role, term and leader, for the log (ADR 0139).
+fn seen<R: Runtime, S: StateMachine>(replica: &Replica<R, S>) -> crate::elections::Seen {
+    let raft = replica.raft_ref();
+    crate::elections::Seen { role: raft.role(), term: raft.term(), leader: raft.leader() }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run<R: Runtime, S: StateMachine>(
     rt: R,
@@ -1184,6 +1190,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
 ) -> Result<(), Error> {
     let Around { links, shared, jobs, auth } = around;
     let mut next_tick = rt.now() + cfg.tick;
+    // What the groups do and when this loop falls behind, for the log
+    // (ADR 0139); the node runs every group with the default election timeout.
+    let mut elections = crate::elections::Elections::default();
+    let election = cfg.tick * Config::new(cfg.id, Vec::new()).election_ticks;
     let mut clients = Clients::default();
     clients.random = Some(Box::new({
         let rt = rt.clone();
@@ -1307,8 +1317,13 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             shared.work.take();
         }
         if rt.now() >= next_tick {
+            crate::elections::tick_late(cfg.id, rt.now() - next_tick, cfg.tick, election);
             next_tick = rt.now() + cfg.tick;
             groups.values_mut().for_each(|g| g.tick());
+            elections.retain(|g| groups.contains_key(&g));
+            for (&g, replica) in groups.iter() {
+                elections.observe(cfg.id, g, seen(replica), crate::elections::Cause::Tick);
+            }
         }
         if rt.now() >= next_host {
             host = rt.host_stats().await;
@@ -1453,6 +1468,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         let inbox: Vec<_> = shared.inbox.lock().expect("inbox lock").drain(..).collect();
         let core = core_groups(cfg);
+        let mut stepped = BTreeSet::new();
         for (from, messages) in inbox {
             for (g, msg) in messages {
                 // A runtime group's membership waits until this node's
@@ -1469,6 +1485,12 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 }
                 if let Some(group) = groups.get_mut(&g) {
                     group.step(from, msg);
+                    stepped.insert(g);
+                }
+            }
+            for g in std::mem::take(&mut stepped) {
+                if let Some(replica) = groups.get(&g) {
+                    elections.observe(cfg.id, g, seen(replica), crate::elections::Cause::Message(from));
                 }
             }
         }
@@ -1476,6 +1498,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         // persisted too: a queue leader checks out messages it has just
         // appended, and the append that carries them carries the checkout
         // as well, so both commit together (ADR 0111).
+        let persisting = rt.now();
         let mut sends: BTreeMap<GroupId, Vec<lotse_raft::Send>> = BTreeMap::new();
         for (&g, group) in groups.iter_mut() {
             let out = group.process_unfilled().await?;
@@ -1493,6 +1516,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 outbound.entry(s.to).or_default().push((g, s.msg));
             }
         }
+        crate::elections::slow(cfg.id, "persisting a round", rt.now() - persisting, cfg.tick, election);
         for job in marker_jobs {
             let task = write_markers(rt.clone(), marker_client.clone(), job, shared.clone(), cfg.tick * 5);
             jobs.spawn(rt, task);
