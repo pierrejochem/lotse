@@ -1,0 +1,120 @@
+# The console's .deb, .rpm and .apk packages (ADR 0137), made by nfpm like
+# the node's (packaging/nfpm.yaml) from the binary packaging/release.sh
+# built; it sets VERSION, ARCH (amd64 or arm64) and BINARY.
+#
+# - deb: systemd (lotse-console.service) and, without systemd, sysvinit
+#   (/etc/init.d/lotse-console).
+# - rpm: systemd.
+# - apk: OpenRC (/etc/init.d/lotse-console).
+#
+# Installing creates the user lotse-console, /var/lib/lotse-console and
+# /etc/lotse-console, and starts nothing: the console needs its config
+# first. An upgrade restarts a running console. Removing, even with purge,
+# leaves the config and the session key.
+name: lotse-console
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+release: 1
+section: net
+priority: optional
+maintainer: Pierre Jochem <pierrejochem@msn.com>
+vendor: Lotse
+homepage: https://github.com/pierrejochem/lotse
+license: Apache-2.0
+description: "Management console for Lotse clusters: web UI and HTTP API, acting as the signed-in user"
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/lotse-console
+    expand: true
+    file_info:
+      mode: 0755
+  - src: packaging/lotse-console.toml.example
+    dst: /usr/share/doc/lotse-console/lotse-console.toml.example
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/lotse-console/LICENSE
+    file_info:
+      mode: 0644
+
+  # systemd: deb and rpm.
+  - src: packaging/systemd/lotse-console.service
+    dst: /usr/lib/systemd/system/lotse-console.service
+    file_info:
+      mode: 0644
+    packager: deb
+  - src: packaging/systemd/lotse-console.service
+    dst: /usr/lib/systemd/system/lotse-console.service
+    file_info:
+      mode: 0644
+    packager: rpm
+  - src: packaging/systemd/lotse-console.sysusers
+    dst: /usr/lib/sysusers.d/lotse-console.conf
+    file_info:
+      mode: 0644
+    packager: deb
+  - src: packaging/systemd/lotse-console.sysusers
+    dst: /usr/lib/sysusers.d/lotse-console.conf
+    file_info:
+      mode: 0644
+    packager: rpm
+
+  # sysvinit: deb. Under systemd the unit has the same name, so systemd
+  # runs the unit, not the script.
+  - src: packaging/sysvinit/lotse-console.init
+    dst: /etc/init.d/lotse-console
+    type: config|noreplace
+    file_info:
+      mode: 0755
+    packager: deb
+  - src: packaging/sysvinit/lotse-console.default
+    dst: /etc/default/lotse-console
+    type: config|noreplace
+    file_info:
+      mode: 0644
+    packager: deb
+
+  # OpenRC: apk.
+  - src: packaging/openrc/lotse-console.initd
+    dst: /etc/init.d/lotse-console
+    type: config|noreplace
+    file_info:
+      mode: 0755
+    packager: apk
+  - src: packaging/openrc/lotse-console.confd
+    dst: /etc/conf.d/lotse-console
+    type: config|noreplace
+    file_info:
+      mode: 0644
+    packager: apk
+
+# The RPM header records the build machine's name; a fixed one keeps the
+# package reproducible.
+rpm:
+  buildhost: lotse
+
+apk:
+  scripts:
+    postupgrade: packaging/apk/console-post-upgrade
+
+overrides:
+  deb:
+    depends:
+      - adduser
+    scripts:
+      postinstall: packaging/deb/console-postinst
+      preremove: packaging/deb/console-prerm
+      postremove: packaging/deb/console-postrm
+  rpm:
+    scripts:
+      postinstall: packaging/rpm/console-post
+      preremove: packaging/rpm/console-preun
+      postremove: packaging/rpm/console-postun
+  apk:
+    depends:
+      - openrc
+    scripts:
+      postinstall: packaging/apk/console-post-install

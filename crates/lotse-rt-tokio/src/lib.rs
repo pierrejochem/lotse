@@ -38,11 +38,15 @@ mod certificate_files;
 #[cfg(feature = "dev-certs")]
 pub mod dev_certs;
 mod http;
+#[cfg(feature = "https")]
+mod https;
 mod net;
 mod serve;
 mod tls;
 
 pub use certificate_files::CertificateFiles;
+#[cfg(feature = "https")]
+pub use https::{HttpsListener, https_config};
 pub use net::{TokioConn, TokioListener};
 pub use serve::{HttpListener, HttpRequest, HttpResponse};
 pub use tls::{TlsConfig, TlsError};

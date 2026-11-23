@@ -2,7 +2,7 @@
 
 The console is a web app for looking at a cluster and, if your roles allow, changing it. It shows streams, queues, nodes and tenants, with live numbers and charts. It runs on a node of its own and talks to the cluster as you.
 
-Ask your administrator for its address. The setup of the console itself is in the administration guide.
+Ask your administrator for its address. The setup of the console itself is in [the administration guide](../admin/console.md).
 
 ## Sign in
 

@@ -1,0 +1,13 @@
+# The console on loopback with the built-in demo cluster: what CI starts
+# under each init system to see the console's packages run it (ADR 0137).
+# Not for real use.
+listen = "127.0.0.1:8080"
+data_dir = "/var/lib/lotse-console"
+
+[auth]
+mode = "dev"
+user = "ci"
+
+[[clusters]]
+id = "demo"
+kind = "demo"

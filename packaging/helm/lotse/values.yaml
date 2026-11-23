@@ -94,3 +94,41 @@ containerSecurityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: [ALL]
+
+# The management console (ADR 0137), off by default: one pod that serves the
+# web UI and API over HTTPS and acts as the user who signed in.
+console:
+  enabled: false
+  image:
+    repository: ghcr.io/pierrejochem/lotse-console
+    # Defaults to the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # The HTTPS port, in the pod and on the Service.
+  port: 8443
+  # A kubernetes.io/tls Secret (tls.crt, tls.key) with the console's own
+  # certificate, for the name users reach it by.
+  tlsSecretName: lotse-console-tls
+  # Optional: a Secret mounted at /etc/lotse-console/secrets, for files the
+  # config names, such as metrics.client_secret_file.
+  secretName: ""
+  # The cluster's id in the console; defaults to the release name.
+  clusterId: ""
+  # The rest of lotse-console.toml: [auth], [metrics], [live]. The chart sets
+  # listen, data_dir, [https] and a [[clusters]] entry for this cluster.
+  # Users sign in at the issuer the nodes trust; register the console there
+  # with the redirect URL https://<its name>/auth/callback.
+  config: |
+    [auth]
+    mode = "oidc"
+    issuer = "https://id.example.com/realms/ops"
+    client_id = "lotse-console"
+    redirect_url = "https://console.example.com/auth/callback"
+  service:
+    type: ClusterIP
+    annotations: {}
+  podAnnotations: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

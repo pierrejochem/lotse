@@ -1,0 +1,81 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          lotse-console
+# Required-Start:    $network $remote_fs $syslog
+# Required-Stop:     $network $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Lotse management console
+# Description:       Runs the Lotse console with the config file
+#                    /etc/default/lotse-console names.
+### END INIT INFO
+
+# The Lotse management console under sysvinit (ADR 0137), for systems
+# without systemd. Until its config file exists the script starts nothing.
+# The console writes its log to /var/log/lotse-console/lotse-console.log. On
+# systemd, use lotse-console.service instead.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+NAME=lotse-console
+DAEMON=/usr/bin/lotse-console
+PIDFILE=/run/lotse-console.pid
+LOG=/var/log/lotse-console/lotse-console.log
+LOTSE_CONSOLE_CONFIG=/etc/lotse-console/lotse-console.toml
+RUST_LOG=
+
+[ -x "$DAEMON" ] || exit 0
+[ -r /etc/default/lotse-console ] && . /etc/default/lotse-console
+
+running() {
+    [ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+do_start() {
+    if [ ! -r "$LOTSE_CONSOLE_CONFIG" ]; then
+        echo "$NAME: not started, there is no $LOTSE_CONSOLE_CONFIG"
+        return 0
+    fi
+    if running; then
+        echo "$NAME: already running"
+        return 0
+    fi
+    install -d -o lotse-console -g lotse-console -m 0750 /var/lib/lotse-console /var/log/lotse-console
+    echo "$NAME: starting"
+    # start-stop-daemon --background closes the output, so a shell under
+    # the lotse-console user keeps it in the log and replaces itself.
+    RUST_LOG=${RUST_LOG:-info} \
+        start-stop-daemon --start --quiet --background --make-pidfile --pidfile "$PIDFILE" \
+        --chuid lotse-console:lotse-console --chdir /var/lib/lotse-console --umask 027 \
+        --startas /bin/sh -- -c "exec $DAEMON --config $LOTSE_CONSOLE_CONFIG >>$LOG 2>&1"
+}
+
+do_stop() {
+    if ! running; then
+        echo "$NAME: not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    echo "$NAME: stopping"
+    start-stop-daemon --stop --quiet --pidfile "$PIDFILE" --retry "TERM/30/KILL/5"
+    status=$?
+    rm -f "$PIDFILE"
+    return $status
+}
+
+case "$1" in
+    start) do_start ;;
+    stop) do_stop ;;
+    restart | force-reload) do_stop && do_start ;;
+    status)
+        if running; then
+            echo "$NAME: running, pid $(cat "$PIDFILE")"
+        else
+            echo "$NAME: not running"
+            exit 3
+        fi
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|force-reload|status}" >&2
+        exit 2
+        ;;
+esac

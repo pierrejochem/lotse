@@ -68,8 +68,14 @@ jobs:
           workspaces: ". -> target/release-dist"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: packaging/tools.sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The Node.js release.env pins, for the console's web app (ADR 0137).
+      - run: grep '^NODE_VERSION=' packaging/release.env >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - run: packaging/release.sh --arch amd64 0.0.0-ci
       - run: tar -tzf dist/lotse-0.0.0-ci-linux-amd64.tar.gz
+      - run: tar -tzf dist/lotse-console-0.0.0-ci-linux-amd64.tar.gz
       - run: sudo apt-get install -y ./dist/lotse_*_amd64.deb
       - run: lotse --version && getent passwd lotse
       - run: systemd-analyze verify /usr/lib/systemd/system/lotse@.service
@@ -77,8 +83,17 @@ jobs:
       - run: docker run --rm -v "$PWD:/src" -w /src debian:12 sh packaging/ci/sysvinit.sh
       - run: docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh packaging/ci/openrc.sh
       - run: docker run --rm -v "$PWD:/src" -w /src fedora:42 sh packaging/ci/rpm.sh
+      # The console's packages (ADR 0137).
+      - run: sudo apt-get install -y ./dist/lotse-console_*_amd64.deb
+      - run: lotse-console --version && getent passwd lotse-console
+      - run: systemd-analyze verify /usr/lib/systemd/system/lotse-console.service
+      - run: docker run --rm -v "$PWD:/src" -w /src debian:12 sh packaging/ci/console-sysvinit.sh
+      - run: docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh packaging/ci/console-openrc.sh
+      - run: docker run --rm -v "$PWD:/src" -w /src fedora:42 sh packaging/ci/console-rpm.sh
       - run: docker build -f packaging/Dockerfile -t lotse:ci .
       - run: docker run --rm lotse:ci --version
+      - run: docker build -f packaging/Dockerfile.console -t lotse-console:ci .
+      - run: docker run --rm lotse-console:ci --version
       - run: packaging/ci/helm.sh
 
   # The client SDKs (ADR 0056, ADR 0083): the vectors drift check, the Java

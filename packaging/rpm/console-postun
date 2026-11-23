@@ -1,0 +1,6 @@
+#!/bin/sh
+# The config and the session key stay.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0

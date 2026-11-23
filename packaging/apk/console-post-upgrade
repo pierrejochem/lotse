@@ -1,0 +1,6 @@
+#!/bin/sh
+# After an upgrade: restart a running console.
+if rc-service lotse-console status >/dev/null 2>&1; then
+    rc-service lotse-console restart || true
+fi
+exit 0
