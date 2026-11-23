@@ -3,6 +3,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError } from '../api/client';
 import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens } from '../api/queries';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/toast';
 import { Failed, Icon, Loading, TableWrap } from '../components/ui';
 
@@ -177,41 +178,31 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
   );
 }
 
-function RevokeTokenButton({ cluster, id, name }: { cluster: string; id: number; name: string }) {
+function RevokeTokenButton({ cluster, id, name, owner }: { cluster: string; id: number; name: string; owner: string }) {
   const revoke = useRevokeToken(cluster);
   const toast = useToast();
   return (
-    <AlertDialog.Root>
-      <AlertDialog.Trigger className="btn small">Revoke</AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
-          <div className="dialog-head">
-            <div>
-              <AlertDialog.Title className="h2">Revoke the token {name}?</AlertDialog.Title>
-              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                Connections signed in with this token end at once. Nobody can use it again. This cannot be undone.
-              </AlertDialog.Description>
-            </div>
-          </div>
-          <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep the token</AlertDialog.Cancel>
-            <AlertDialog.Action
-              className="btn danger"
-              disabled={revoke.isPending}
-              onClick={() =>
-                revoke.mutate(id, {
-                  onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                  onError: (e) => toast({ title: message(e, 'Could not revoke the token.'), error: true }),
-                })
-              }
-            >
-              Revoke token
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <ConfirmDialog
+      trigger={
+        <AlertDialog.Trigger className="btn small">
+          Revoke{' '}
+          <span className="sr-only">token {name} of {owner}</span>
+        </AlertDialog.Trigger>
+      }
+      title={`Revoke the token ${name}?`}
+      body={`Connections signed in with this token of ${owner} end at once. Nobody can use it again; make a new token to restore access. This cannot be undone.`}
+      name={name}
+      prompt="Type the token's name to revoke it"
+      action="Revoke token"
+      keep="Keep the token"
+      pending={revoke.isPending}
+      onConfirm={() =>
+        revoke.mutate(id, {
+          onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+          onError: (e) => toast({ title: message(e, `Could not revoke the token ${name}.`), error: true }),
+        })
+      }
+    />
   );
 }
 
@@ -256,7 +247,7 @@ export function Tokens({ cluster }: { cluster: string }) {
       ) : q.isError ? (
         <Failed error={q.error} retry={() => q.refetch()} />
       ) : q.data.tokens.length === 0 ? (
-        <p className="empty">{owner ? `No tokens for ${owner}.` : 'No tokens.'}</p>
+        <p className="empty">{owner ? `No tokens for ${owner}.` : 'No tokens yet. A token lets a script or tool sign in as you. Create one to sign a script in.'}</p>
       ) : (
         <TableWrap>
           <table>
@@ -281,7 +272,7 @@ export function Tokens({ cluster }: { cluster: string }) {
                   <td>{day(t.created_ms)}</td>
                   <td>{day(t.expires_ms)}</td>
                   <td className="mono">{tail(t.id)}</td>
-                  <td><RevokeTokenButton cluster={cluster} id={t.id} name={t.name} /></td>
+                  <td><RevokeTokenButton cluster={cluster} id={t.id} name={t.name} owner={t.owner} /></td>
                 </tr>
               ))}
             </tbody>

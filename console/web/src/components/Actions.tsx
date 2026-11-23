@@ -2,6 +2,7 @@ import { useState } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../api/client';
 import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetReplication } from '../api/queries';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useToast } from './toast';
 
 const narrow = { width: 'min(480px, calc(100vw - 32px))' };
@@ -10,52 +11,23 @@ const narrow = { width: 'min(480px, calc(100vw - 32px))' };
 export function PurgeButton({ cluster, queue, ready }: { cluster: string; queue: string; ready: number }) {
   const purge = usePurgeQueue(cluster, queue);
   const toast = useToast();
-  const [typed, setTyped] = useState('');
   return (
-    <AlertDialog.Root onOpenChange={(open) => !open && setTyped('')}>
-      <AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="overlay" />
-        <AlertDialog.Content className="dialog" style={narrow}>
-          <div className="dialog-head">
-            <div>
-              <AlertDialog.Title className="h2">Purge {queue}?</AlertDialog.Title>
-              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
-                Settles the messages that are ready now, about {ready.toLocaleString('en-US')}. Messages consumers hold stay theirs, and
-                messages published meanwhile stay. This cannot be undone.
-              </AlertDialog.Description>
-            </div>
-          </div>
-          <div className="field" style={{ padding: '4px 24px 8px' }}>
-            <label htmlFor="purge-confirm">Type the queue's name to purge it</label>
-            <input
-              id="purge-confirm"
-              className="input mono"
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              placeholder={queue}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-          <div className="dialog-foot">
-            <AlertDialog.Cancel className="btn">Keep the messages</AlertDialog.Cancel>
-            <AlertDialog.Action
-              className="btn danger"
-              disabled={typed !== queue || purge.isPending}
-              onClick={() =>
-                purge.mutate(typed, {
-                  onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                  onError: (e) => toast({ title: e instanceof ApiError ? e.message : `Could not purge ${queue}.`, error: true }),
-                })
-              }
-            >
-              Purge {queue}
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <ConfirmDialog
+      trigger={<AlertDialog.Trigger className="btn">Purge</AlertDialog.Trigger>}
+      title={`Purge ${queue}?`}
+      body={`Deletes the ${ready.toLocaleString('en-US')} messages that are ready now. Messages that consumers hold are not deleted, and messages published meanwhile stay. This cannot be undone.`}
+      name={queue}
+      prompt={`Type ${queue} to confirm`}
+      action={`Purge ${queue}`}
+      keep="Keep the messages"
+      pending={purge.isPending}
+      onConfirm={(typed) =>
+        purge.mutate(typed, {
+          onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+          onError: (e) => toast({ title: e instanceof ApiError ? e.message : `Could not purge ${queue}.`, error: true }),
+        })
+      }
+    />
   );
 }
 

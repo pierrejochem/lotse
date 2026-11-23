@@ -140,17 +140,22 @@ describe('Tokens', () => {
     expect(dialog.textContent).toMatch(/grants nothing/);
   });
 
-  it('asks before revoking and says connections end at once', async () => {
+  it('asks before revoking: names the token and its owner, ends connections at once, needs the name typed', async () => {
     post.mockImplementation(() => ok({ message: 'Revoked.', cli: '' }));
     const user = userEvent.setup();
     view();
     const table = await screen.findByRole('table');
-    await user.click(within(table).getAllByRole('button', { name: 'Revoke' })[0]!);
+    // Each button says which token it is for, so a screen reader can tell them apart.
+    await user.click(within(table).getByRole('button', { name: 'Revoke token ci pipeline of ana' }));
     const confirm = await screen.findByRole('alertdialog');
     expect(confirm.textContent).toContain('ci pipeline');
-    expect(confirm.textContent).toContain('Connections signed in with this token end at once.');
+    expect(confirm.textContent).toContain('Connections signed in with this token of ana end at once.');
     expect(post).not.toHaveBeenCalled();
-    await user.click(within(confirm).getByRole('button', { name: 'Revoke token' }));
+    const go = within(confirm).getByRole('button', { name: 'Revoke token' }) as HTMLButtonElement;
+    expect(go.disabled).toBe(true);
+    await user.type(within(confirm).getByLabelText("Type the token's name to revoke it"), 'ci pipeline');
+    expect(go.disabled).toBe(false);
+    await user.click(go);
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith('/api/v1/clusters/{cluster}/tokens/{id}/revoke', {
         params: { path: { cluster: 'c1', id: 1234567 } },

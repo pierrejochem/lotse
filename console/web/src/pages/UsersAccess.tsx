@@ -17,16 +17,77 @@ import {
 } from '../api/queries';
 import { BindingDialog, download, PasswordDialog, RequestCertificateDialog, TypedConfirmButton } from '../components/AccessDialogs';
 import { useToast } from '../components/toast';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { RowMenu } from '../components/RowMenu';
 import { Tokens } from './Tokens';
 import { Chip, Failed, Loading, Select, TableWrap } from '../components/ui';
 
 const failure = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
-function Users({ cluster }: { cluster: string }) {
-  const q = useUsers(cluster);
+/** What can be done to a user made at runtime: set a password, end their sessions, delete them. Each asks first. */
+function UserActions({ cluster, name }: { cluster: string; name: string }) {
   const del = useDeleteUser(cluster);
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
+  const [asking, setAsking] = useState<'password' | 'sessions' | 'delete' | null>(null);
+  const close = (o: boolean) => !o && setAsking(null);
+  return (
+    <div className="row" style={{ justifyContent: 'flex-end' }}>
+      <RowMenu
+        label={`Actions for ${name}`}
+        actions={[
+          { label: 'Set password', onSelect: () => setAsking('password') },
+          { label: 'Revoke sessions', onSelect: () => setAsking('sessions') },
+          { label: 'Delete user', danger: true, onSelect: () => setAsking('delete') },
+        ]}
+      />
+      <PasswordDialog cluster={cluster} user={name} controlled={{ open: asking === 'password', onOpenChange: close }} />
+      <ConfirmDialog
+        open={asking === 'sessions'}
+        onOpenChange={close}
+        title={`Revoke the sessions of ${name}?`}
+        body="Sessions that began before now end. The user can sign in again with their password or certificate. Their access tokens stop working; revoke a token on the Tokens page to remove it."
+        name={name}
+        prompt="Type the user's name to revoke their sessions"
+        action="Revoke sessions"
+        keep="Keep the sessions"
+        pending={revoke.isPending}
+        onConfirm={(confirm) =>
+          revoke.mutate(
+            { subject: name, group: false, confirm },
+            {
+              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+              onError: (e) => toast({ title: failure(e, `Could not revoke the sessions of ${name}.`), error: true }),
+            },
+          )
+        }
+      />
+      <ConfirmDialog
+        open={asking === 'delete'}
+        onOpenChange={close}
+        title={`Delete ${name}?`}
+        body={`Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now. Scripts that sign in as ${name} fail with an authentication error. To restore access, create the user again with a new password.`}
+        name={name}
+        prompt="Type the user's name to delete them"
+        action={`Delete ${name}`}
+        keep="Keep the user"
+        pending={del.isPending}
+        onConfirm={(confirm) =>
+          del.mutate(
+            { name, confirm },
+            {
+              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+              onError: (e) => toast({ title: failure(e, `Could not delete ${name}.`), error: true }),
+            },
+          )
+        }
+      />
+    </div>
+  );
+}
+
+function Users({ cluster }: { cluster: string }) {
+  const q = useUsers(cluster);
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
@@ -60,49 +121,7 @@ function Users({ cluster }: { cluster: string }) {
                 <td>{u.roles.length ? u.roles.join(', ') : <span className="muted">none</span>}</td>
                 <td>
                   {u.source === 'runtime' ? (
-                    <div className="row" style={{ justifyContent: 'flex-end' }}>
-                      <PasswordDialog cluster={cluster} user={u.name} />
-                      <TypedConfirmButton
-                        small
-                        trigger="Delete"
-                        title={`Delete ${u.name}?`}
-                        body="Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now."
-                        name={u.name}
-                        prompt="Type the user's name to delete it"
-                        action={`Delete ${u.name}`}
-                        keep="Keep the user"
-                        pending={del.isPending}
-                        onConfirm={(confirm) =>
-                          del.mutate(
-                            { name: u.name, confirm },
-                            {
-                              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                              onError: (e) => toast({ title: failure(e, `Could not delete ${u.name}.`), error: true }),
-                            },
-                          )
-                        }
-                      />
-                      <TypedConfirmButton
-                        small
-                        trigger="Revoke sessions"
-                        title={`Revoke the sessions of ${u.name}?`}
-                        body="Sessions that began before now end. The user can sign in again with the password."
-                        name={u.name}
-                        prompt="Type the user's name to revoke its sessions"
-                        action="Revoke sessions"
-                        keep="Keep the sessions"
-                        pending={revoke.isPending}
-                        onConfirm={(confirm) =>
-                          revoke.mutate(
-                            { subject: u.name, group: false, confirm },
-                            {
-                              onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
-                              onError: (e) => toast({ title: failure(e, 'Could not revoke the sessions.'), error: true }),
-                            },
-                          )
-                        }
-                      />
-                    </div>
+                    <UserActions cluster={cluster} name={u.name} />
                   ) : (
                     <span className="muted small">Configured on the nodes</span>
                   )}
@@ -237,6 +256,8 @@ function OpenSessions({ cluster }: { cluster: string }) {
                 <tr key={`${x.node}-${x.peer}-${i}`}>
                   <th scope="row">
                     <span className="mono">{x.principal}</span>
+                    {' '}
+                    <span className="sr-only">from {x.peer}</span>
                     {x.groups.length > 0 && <span className="small muted"> · {x.groups.join(', ')}</span>}
                   </th>
                   <td>{x.mechanism}</td>
@@ -248,11 +269,11 @@ function OpenSessions({ cluster }: { cluster: string }) {
                     <td>
                       {x.kind === 'user' && (
                         <TypedConfirmButton
-                          trigger="Revoke"
-                          title={`Revoke the sessions of ${x.principal}?`}
+                          trigger={<>Revoke all{' '}<span className="sr-only">sessions of {x.principal}</span></>}
+                          title={`Revoke all sessions of ${x.principal}?`}
                           body="Every session of this user that began before now ends, on every node, and older tokens are refused. This cannot be undone."
                           name={x.principal}
-                          prompt="Type the user's name to revoke its sessions"
+                          prompt="Type the user's name to revoke their sessions"
                           action="Revoke sessions"
                           keep="Keep the sessions"
                           pending={revoke.isPending}
@@ -485,8 +506,8 @@ function CertificateRequests({ cluster }: { cluster: string }) {
           <thead>
             <tr>
               <th scope="col">Principal</th>
-              <th scope="col">Asked by</th>
-              <th scope="col">Asked</th>
+              <th scope="col">Requested by</th>
+              <th scope="col">Requested</th>
               <th scope="col">Key fingerprint</th>
               <th scope="col">State</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
@@ -610,6 +631,30 @@ function CertificatesTab({ cluster }: { cluster: string }) {
   );
 }
 
+/** Requests wait for someone with the CA key; Accepted lists what nodes have seen. Two views, one at a time. */
+function Certificates({ cluster }: { cluster: string }) {
+  const [view, setView] = useState<'requests' | 'accepted'>('requests');
+  return (
+    <div className="stack" style={{ gap: 24 }}>
+      <div className="seg" role="group" aria-label="Certificate view">
+        <button type="button" aria-pressed={view === 'requests'} onClick={() => setView('requests')}>Requests</button>
+        <button type="button" aria-pressed={view === 'accepted'} onClick={() => setView('accepted')}>Accepted</button>
+      </div>
+      {view === 'requests' ? (
+        <CertificateRequests cluster={cluster} />
+      ) : (
+        <>
+          <CertificateList cluster={cluster} />
+          <details>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>
+            <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
+          </details>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function UsersAccess() {
   const { cluster = '', tab } = useParams();
   const navigate = useNavigate();
@@ -641,14 +686,7 @@ export function UsersAccess() {
         <Tabs.Content value="bindings" className="tabs-content"><Bindings cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="tokens" className="tabs-content"><Tokens cluster={cluster} /></Tabs.Content>
         <Tabs.Content value="certificates" className="tabs-content">
-          <div className="stack" style={{ gap: 32 }}>
-            <CertificateRequests cluster={cluster} />
-            <CertificateList cluster={cluster} />
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>
-              <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
-            </details>
-          </div>
+          <Certificates cluster={cluster} />
         </Tabs.Content>
         <Tabs.Content value="sessions" className="tabs-content"><Sessions cluster={cluster} /></Tabs.Content>
       </Tabs.Root>

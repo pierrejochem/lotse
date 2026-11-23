@@ -121,6 +121,7 @@ const ICONS: Record<string, ReactNode> = {
   certificates: <><rect x="2" y="2.5" width="12" height="8" rx="1" /><path d="M5 5.5h6M5 8h3.5M5.5 13.5l1-2.5 1 2.5 1-2.5 1 2.5" /></>,
   sessions: <><rect x="2" y="3" width="12" height="8" rx="1" /><path d="M5.5 13.5h5M8 11v2.5" /></>,
   bindings: <path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />,
+  more: <path d="M3.5 8h.01M8 8h.01M12.5 8h.01" strokeWidth="2.5" />,
   chevron: <path d="m5 6 3 3 3-3" />,
   close: <path d="M4 4l8 8M12 4l-8 8" />,
   menu: <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />,
