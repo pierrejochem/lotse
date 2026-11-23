@@ -196,7 +196,7 @@ function Nav({ cluster }: { cluster: string }) {
             </ul>
           </div>
         )}
-        <div className="nav-foot t">lotse-console 0.0.1</div>
+        <div className="nav-foot t">lotse-console {typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''}</div>
       </div>
     </nav>
   );

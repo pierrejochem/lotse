@@ -222,8 +222,9 @@ export const useSessions = (cluster: string) =>
   });
 
 /** SCRAM users; only a cluster admin gets the list (403 for everyone else). */
-export const useUsers = (cluster: string) =>
+export const useUsers = (cluster: string, enabled = true) =>
   useQuery({
+    enabled,
     queryKey: keys.users(cluster),
     queryFn: () => unwrap(api.GET('/api/v1/clusters/{cluster}/users', path(cluster))),
   });

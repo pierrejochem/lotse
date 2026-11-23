@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import * as Switch from '@radix-ui/react-switch';
+import * as ToggleGroup from '@radix-ui/react-toggle-group';
 import { useMutation } from '@tanstack/react-query';
 import type { S } from '../api/client';
 import { ApiError } from '../api/client';
@@ -17,6 +18,17 @@ const TXN: Record<S['TxnState'], { text: string; tone: 'ok' | 'warn' | 'info' | 
   abort_marker: { text: 'ABORT marker', tone: 'info' },
 };
 
+/** The value's UTF-8 bytes, sixteen to a line with their offset, as a hex dump reads. */
+export function hexDump(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const lines: string[] = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const chunk = Array.from(bytes.slice(i, i + 16));
+    lines.push(`${i.toString(16).padStart(8, '0')}  ${chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+  }
+  return lines.join('\n');
+}
+
 function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream: string; partition: number; onClose: () => void }) {
   let pretty = r.value ?? '';
   try {
@@ -24,6 +36,7 @@ function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream:
   } catch {
     /* not JSON: show as is */
   }
+  const [view, setView] = useState<'text' | 'hex'>('text');
   const copy = (text: string) => navigator.clipboard?.writeText(text).catch(() => {});
   const title = useRef<HTMLHeadingElement>(null);
   // Choosing a record moves focus to its panel, which is also what tells a screen reader that something opened.
@@ -77,7 +90,13 @@ function Detail({ r, stream, partition, onClose }: { r: S['RecordView']; stream:
             <h3 className="label">Value · {count(r.size_bytes)} B</h3>
             <button className="btn small" onClick={() => copy(r.value ?? '')}>Copy value</button>
           </div>
-          <pre className="value">{pretty}</pre>
+          <ToggleGroup.Root type="single" className="toggle" aria-label="Show the value as" value={view} onValueChange={(v) => v && setView(v as 'text' | 'hex')} style={{ alignSelf: 'flex-start' }}>
+            <ToggleGroup.Item value="text">Text</ToggleGroup.Item>
+            <ToggleGroup.Item value="hex">Hex</ToggleGroup.Item>
+          </ToggleGroup.Root>
+          <pre className="value" role="group" aria-label={view === 'text' ? 'Value as text' : 'Value as hexadecimal bytes'} tabIndex={0}>
+            {view === 'text' ? pretty : hexDump(r.value ?? '')}
+          </pre>
         </div>
       )}
     </aside>

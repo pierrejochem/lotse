@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ApiError } from '../api/client';
-import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens } from '../api/queries';
+import { useCertificateRequests, useCreateToken, useRevokeToken, useTokens, useUsers } from '../api/queries';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/toast';
 import { Failed, Icon, Loading, TableWrap } from '../components/ui';
@@ -39,6 +39,8 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
   const [made, setMade] = useState<Made | null>(null);
   const create = useCreateToken(cluster);
   const toast = useToast();
+  // Only a cluster admin may name an owner, and only a cluster admin can list users, so the suggestions come with the field.
+  const users = useUsers(cluster, admin);
 
   const close = () => {
     setName('');
@@ -151,8 +153,9 @@ function CreateTokenDialog({ cluster, admin }: { cluster: string; admin: boolean
                   {admin && (
                     <div className="field">
                       <label htmlFor="tok-owner">Owner</label>
-                      <input id="tok-owner" className="input" value={owner} onChange={(e) => setOwner(e.target.value)} autoComplete="off" spellCheck={false} />
-                      <span className="muted small">The user it acts as, such as a service account. Empty: you.</span>
+                      <input id="tok-owner" className="input" list="tok-owners" placeholder="Me" value={owner} onChange={(e) => setOwner(e.target.value)} autoComplete="off" spellCheck={false} aria-describedby="tok-owner-help" />
+                      <datalist id="tok-owners">{(users.data?.users ?? []).map((u) => <option key={u.name} value={u.name} />)}</datalist>
+                      <span id="tok-owner-help" className="muted small">The user the token acts as, such as a service account. Leave empty to use yourself.</span>
                     </div>
                   )}
                   <p className="muted small" style={{ margin: 0 }}>

@@ -19,6 +19,7 @@ export function ConfirmDialog({
   action,
   keep,
   pending,
+  refuse,
   onConfirm,
 }: {
   open?: boolean;
@@ -33,12 +34,14 @@ export function ConfirmDialog({
   action: string;
   keep: string;
   pending?: boolean;
+  /** Why it cannot be done at all; the action stays off and this is said in place of asking. */
+  refuse?: string;
   onConfirm: (typed: string) => void;
 }) {
   const [typed, setTyped] = useState('');
   const id = `confirm-${title.replace(/\W+/g, '-')}`;
   const hint = `${id}-hint`;
-  const blocked = (name !== undefined && typed !== name) || pending;
+  const blocked = (name !== undefined && typed !== name) || pending || refuse !== undefined;
   return (
     <AlertDialog.Root
       open={open}
@@ -59,7 +62,12 @@ export function ConfirmDialog({
               </AlertDialog.Description>
             </div>
           </div>
-          {name !== undefined && (
+          {refuse && (
+            <p role="alert" className="error-text" style={{ margin: '0 24px 8px', padding: '10px 12px', borderRadius: 4, background: 'var(--crit-bg)' }}>
+              {refuse}
+            </p>
+          )}
+          {name !== undefined && !refuse && (
             <div className="field" style={{ padding: '4px 24px 8px' }}>
               <label htmlFor={id}>{prompt ?? `Type ${name} to confirm`}</label>
               <input

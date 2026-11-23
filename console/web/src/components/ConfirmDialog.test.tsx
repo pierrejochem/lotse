@@ -7,7 +7,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 
 afterEach(cleanup);
 
-const open = (onConfirm = vi.fn(), typed = true) => {
+const open = (onConfirm = vi.fn(), typed = true, refuse?: string) => {
   render(
     <ConfirmDialog
       trigger={<AlertDialog.Trigger>Open</AlertDialog.Trigger>}
@@ -17,6 +17,7 @@ const open = (onConfirm = vi.fn(), typed = true) => {
       prompt="Type the user's name to delete them"
       action="Delete ci-bot"
       keep="Keep the user"
+      refuse={refuse}
       onConfirm={onConfirm}
     />,
   );
@@ -50,5 +51,15 @@ describe('ConfirmDialog', () => {
     expect(go.disabled).toBe(false);
     await user.click(go);
     expect(onConfirm).toHaveBeenCalledOnce();
+  });
+
+  it('says why it cannot be done and keeps the button off even with the name typed', async () => {
+    const user = userEvent.setup();
+    open(vi.fn(), true, 'ci-bot is the only cluster admin. Make another user a cluster admin first.');
+    await user.click(screen.getByRole('button', { name: 'Open' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('only cluster admin');
+    expect((screen.getByRole('button', { name: 'Delete ci-bot' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByLabelText("Type the user's name to delete them")).toBeNull();
   });
 });

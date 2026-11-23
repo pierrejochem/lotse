@@ -10,6 +10,7 @@ import {
   useCertificateRequests,
   useCertificates,
   useDeleteUser,
+  useMe,
   useRevokeCertificate,
   useRevokeSessions,
   useSessions,
@@ -25,7 +26,7 @@ import { Chip, Failed, Loading, Select, TableWrap } from '../components/ui';
 const failure = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
 /** What can be done to a user made at runtime: set a password, end their sessions, delete them. Each asks first. */
-function UserActions({ cluster, name }: { cluster: string; name: string }) {
+function UserActions({ cluster, name, only, self }: { cluster: string; name: string; only: boolean; self: boolean }) {
   const del = useDeleteUser(cluster);
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
@@ -66,7 +67,8 @@ function UserActions({ cluster, name }: { cluster: string; name: string }) {
         open={asking === 'delete'}
         onOpenChange={close}
         title={`Delete ${name}?`}
-        body={`Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now. Scripts that sign in as ${name} fail with an authentication error. To restore access, create the user again with a new password.`}
+        body={`Removes the password. Sessions the user has open end at the latest when the node's session limit is up; revoke them to end them now. Scripts that sign in as ${name} fail with an authentication error. To restore access, create the user again with a new password.${self ? ' This is the user you are signed in as; you will be signed out when your session ends.' : ''}`}
+        refuse={only ? `${name} is the only cluster admin. Make another user a cluster admin first.` : undefined}
         name={name}
         prompt="Type the user's name to delete them"
         action={`Delete ${name}`}
@@ -88,6 +90,7 @@ function UserActions({ cluster, name }: { cluster: string; name: string }) {
 
 function Users({ cluster }: { cluster: string }) {
   const q = useUsers(cluster);
+  const me = useMe();
   if (q.isPending) return <Loading />;
   if (q.isError) {
     if (q.error instanceof ApiError && q.error.status === 403) {
@@ -95,6 +98,9 @@ function Users({ cluster }: { cluster: string }) {
     }
     return <Failed error={q.error} retry={() => q.refetch()} />;
   }
+  const isAdmin = (roles: string[]) => roles.some((r) => r.startsWith('cluster-admin'));
+  const admins = q.data.users.filter((u) => isAdmin(u.roles));
+  const onlyAdmin = (name: string) => admins.length === 1 && admins[0]?.name === name;
   return (
     <div className="stack">
       <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -121,7 +127,7 @@ function Users({ cluster }: { cluster: string }) {
                 <td>{u.roles.length ? u.roles.join(', ') : <span className="muted">none</span>}</td>
                 <td>
                   {u.source === 'runtime' ? (
-                    <UserActions cluster={cluster} name={u.name} />
+                    <UserActions cluster={cluster} name={u.name} only={onlyAdmin(u.name)} self={u.name === me.data?.principal} />
                   ) : (
                     <span className="muted small">Configured on the nodes</span>
                   )}
@@ -220,6 +226,7 @@ function ago(ms: number, now: number): string {
 /** The open client sessions on every node (ADR 0121): all for a cluster admin or viewer, one's own otherwise. */
 function OpenSessions({ cluster }: { cluster: string }) {
   const q = useSessions(cluster);
+  const me = useMe();
   const revoke = useRevokeSessions(cluster);
   const toast = useToast();
   if (q.isPending) return <Loading />;
@@ -256,6 +263,7 @@ function OpenSessions({ cluster }: { cluster: string }) {
                 <tr key={`${x.node}-${x.peer}-${i}`}>
                   <th scope="row">
                     <span className="mono">{x.principal}</span>
+                    {x.principal === me.data?.principal && <span className="small muted"> · you</span>}
                     {' '}
                     <span className="sr-only">from {x.peer}</span>
                     {x.groups.length > 0 && <span className="small muted"> · {x.groups.join(', ')}</span>}
