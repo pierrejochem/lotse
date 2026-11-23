@@ -59,14 +59,16 @@ export function Overview() {
           <h2 id="health-title" className="h3" style={{ marginBottom: 8 }}>Health</h2>
           <dl style={{ margin: 0 }}>
             {o.health.map((h) => (
-              <div key={h.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '12px 0', borderTop: '1px solid var(--line)' }}>
-                <div style={{ minWidth: 0 }}>
-                  <dt className="muted" style={{ fontSize: 14 }}>{h.label}</dt>
-                  <dd style={{ margin: '2px 0 0', fontWeight: 600 }}>
-                    {h.value} <span className="small muted" style={{ fontWeight: 400 }}>{h.detail}</span>
+              <div key={h.label} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: 12, padding: '12px 0', borderTop: '1px solid var(--line)' }}>
+                <dt className="muted" style={{ fontSize: 14, gridColumn: 1 }}>{h.label}</dt>
+                <dd style={{ margin: '2px 0 0', fontWeight: 600, gridColumn: 1 }}>
+                  {h.value} <span className="small muted" style={{ fontWeight: 400 }}>{h.detail}</span>
+                </dd>
+                {h.chip && (
+                  <dd style={{ margin: 0, gridColumn: 2, gridRow: '1 / span 2', alignSelf: 'center' }}>
+                    <Chip chip={h.chip} />
                   </dd>
-                </div>
-                {h.chip && <Chip chip={h.chip} />}
+                )}
               </div>
             ))}
           </dl>

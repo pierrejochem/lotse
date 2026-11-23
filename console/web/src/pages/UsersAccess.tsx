@@ -318,7 +318,7 @@ function Sessions({ cluster }: { cluster: string }) {
     <div className="stack" style={{ gap: 32 }}>
       <OpenSessions cluster={cluster} />
       <details>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke the sessions of a user or group by name</summary>
+        <summary className="disclosure">Revoke the sessions of a user or group by name</summary>
         <div style={{ paddingTop: 16 }}><RevokeByName cluster={cluster} /></div>
       </details>
     </div>
@@ -639,7 +639,7 @@ function CertificatesTab({ cluster }: { cluster: string }) {
           <span className="chip warn" style={{ marginLeft: 6 }} aria-hidden="true">
             {waiting}
           </span>
-          <span className="sr-only">, {waiting} waiting for the CA holder</span>
+          <span className="sr-only"> ({waiting} waiting for the CA holder)</span>
         </>
       )}
     </Tabs.Trigger>
@@ -661,7 +661,7 @@ function Certificates({ cluster }: { cluster: string }) {
         <>
           <CertificateList cluster={cluster} />
           <details>
-            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Revoke a certificate that is not listed</summary>
+            <summary className="disclosure">Revoke a certificate that is not listed</summary>
             <div style={{ paddingTop: 16 }}><RevokeBySerial cluster={cluster} /></div>
           </details>
         </>
