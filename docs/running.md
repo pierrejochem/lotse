@@ -108,6 +108,10 @@ lotse upgrade status --config cluster.toml --node 1                           # 
 lotse upgrade finalize --config cluster.toml --cert admin.pem --key admin.key # once every node runs it
 ```
 
+### AI agents
+
+`lotse mcp` lets an AI agent work with a cluster as the user who signed in, over stdio on a developer's machine or over HTTP as one shared process ([ADR 0134](adr/0134-lotse-mcp-a-separate-command-for-ai-agents.md)); see the guide's [Using Lotse with AI agents](guide/src/use/ai-agents.md).
+
 ### Building and checking a release
 
 `packaging/` holds the Dockerfile, the init scripts, the package definition (`nfpm.yaml`) and the release script. A release builds on any Linux with the tools `packaging/release.env` pins:

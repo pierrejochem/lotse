@@ -40,3 +40,4 @@
 - [Exchanges and routing](user/exchanges.md)
 - [Transactions and exactly-once](user/transactions.md)
 - [The management console](user/console.md)
+- [Using Lotse with AI agents](use/ai-agents.md)
