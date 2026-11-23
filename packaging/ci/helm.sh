@@ -74,6 +74,9 @@ done
 kill "$forward" || true
 cat "$work/clusters.json"
 grep -q '"lotse"' "$work/clusters.json"
+# It reached the nodes over TLS: what it says may be the nodes refusing the
+# dev user, who has no credential, but never a name or connection failure.
+! grep -qi 'invalid peer certificate\|cannot connect' "$work/clusters.json"
 
 status() { kubectl exec lotse-0 -- lotse upgrade status; }
 status

@@ -31,7 +31,7 @@ Needs Kubernetes 1.28 or later: the pod index label gives each pod its node id.
    helm install lotse packaging/helm/lotse --set 'auth.admins={admin}' --wait
    ```
 
-Clients reach the cluster through the Service `lotse:9000` and then each partition's leader by its pod name, so they run in the cluster.
+Clients bootstrap at the pods' names, such as `lotse-0.lotse-nodes.<namespace>.svc.cluster.local:9000`, and then reach each partition's leader by its pod name, so they run in the cluster. The node certificates name the pods, not the Service `lotse`, so a client that bootstraps through the Service fails the TLS name check.
 
 ## Upgrade
 
@@ -52,7 +52,7 @@ To hold a rollout, set `updateStrategy` partition with `kubectl patch statefulse
 
 ## Console
 
-With `console.enabled=true` the chart also runs the management console ([ADR 0137](../../../docs/adr/0137-the-console-ships-in-the-release-with-https-of-its-own.md)): one pod from `ghcr.io/pierrejochem/lotse-console` and a Service `lotse-console:8443`. It serves HTTPS with the certificate in the `kubernetes.io/tls` Secret `console.tlsSecretName` and reaches this cluster through `lotse:9000` with the cluster's CA, the only file it mounts from `tls.secretName`. `console.config` holds `[auth]` and `[metrics]`; files it names go in the Secret `console.secretName`, mounted at `/etc/lotse-console/secrets`.
+With `console.enabled=true` the chart also runs the management console ([ADR 0137](../../../docs/adr/0137-the-console-ships-in-the-release-with-https-of-its-own.md)): one pod from `ghcr.io/pierrejochem/lotse-console` and a Service `lotse-console:8443`. It serves HTTPS with the certificate in the `kubernetes.io/tls` Secret `console.tlsSecretName` and reaches this cluster at its pods' names with the cluster's CA, the only file it mounts from `tls.secretName`. `console.config` holds `[auth]` and `[metrics]`; files it names go in the Secret `console.secretName`, mounted at `/etc/lotse-console/secrets`.
 
 ```sh
 kubectl create secret tls lotse-console-tls --cert=console.pem --key=console.key

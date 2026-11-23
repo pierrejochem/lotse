@@ -4,8 +4,8 @@
 {{- fail "console.tlsSecretName must name a Secret with the console's HTTPS certificate (tls.crt, tls.key)" }}
 {{- end }}
 # The management console (ADR 0137): one pod that serves HTTPS with the
-# certificate in console.tlsSecretName and reaches this cluster through its
-# client Service, acting as the user who signed in (ADR 0019).
+# certificate in console.tlsSecretName and reaches this cluster at its pods'
+# names, acting as the user who signed in (ADR 0019).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,7 +30,9 @@ data:
     [[clusters]]
     id = {{ $c.clusterId | default .Release.Name | toJson }}
     kind = "native"
-    bootstrap = [{{ printf "%s.%s.svc.cluster.local:%d" (include "lotse.fullname" .) .Release.Namespace (int .Values.ports.client) | toJson }}]
+    # The pods' names, which the node certificates carry; the client Service's
+    # name is in none of them.
+    bootstrap = [{{ range $i, $_ := until (int .Values.replicas) }}{{ if $i }}, {{ end }}{{ printf "%s:%d" (include "lotse.podHost" (list $ $i)) (int $.Values.ports.client) | toJson }}{{ end }}]
     ca_file = "/etc/lotse-console/cluster/ca.pem"
 ---
 apiVersion: apps/v1
