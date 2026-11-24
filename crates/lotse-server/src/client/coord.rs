@@ -24,7 +24,7 @@ use lotse_proto::{
 };
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, ids, outcome};
+use super::{Clients, ClusterView, Outbox, hint, ids, outcome, write_applied};
 use crate::coordinator::{Phase, TxnMeta};
 use crate::replica::{ProposeError, Proposed, Replica, StateMachine};
 use crate::signal::Signal;
@@ -410,7 +410,10 @@ impl Clients {
     ) -> Vec<MarkerJob> {
         let writes = std::mem::take(&mut self.writes);
         for w in writes {
-            let Some(raft) = view.coordinator.and_then(|g| groups.get(&g)).map(|r| r.raft_ref()) else { continue };
+            let Some((group, replica)) = view.coordinator.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
+                continue;
+            };
+            let raft = replica.raft_ref();
             let code = match outcome(raft, w.last, w.term) {
                 Some(code) => code,
                 None if view.now >= w.deadline => ErrorCode::REQUEST_TIMED_OUT,
@@ -443,7 +446,12 @@ impl Clients {
                     None => continue,
                 }
             };
-            outbox.push(id, &resp);
+            // A heartbeat answered here is at or above every offset commit
+            // applied before it, so the member that takes a partition over
+            // asks for at least its previous owner's commit (zone reads
+            // design, section 2).
+            let written = (code == ErrorCode::NONE).then_some(w.last);
+            outbox.push_applied(id, &resp, &write_applied(group, replica, written));
         }
 
         let Ok((_, replica)) = Self::coordinator(view, groups) else {

@@ -45,10 +45,10 @@ use bytes::Bytes;
 use lotse_proto::{
     AbortedTxn, ApiKey, ApiVersionsResponse, BindingMetadata, Broker, ErrorCode, ExchangeMetadata,
     FetchPartitionResponse, FetchRequest, FetchResourceResponse, FetchResponse, FindCoordinatorRequest,
-    FindCoordinatorResponse, InitProducerResponse, LeaderHint, MarkerResult, MetadataRequest, MetadataResponse,
-    PartitionMetadata, ProducePartitionResponse, ProduceRequest, ProduceResourceResponse, ProduceResponse, Request,
-    RequestHeader, ResourceMetadata, Response, TxnPartitionResult, TxnResourceResult, VerifyTxnRequest,
-    WriteTxnMarkersRequest, WriteTxnMarkersResponse, coordinator, isolation, kind,
+    FindCoordinatorResponse, GroupIndex, InitProducerResponse, LeaderHint, MarkerResult, MetadataRequest,
+    MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceRequest, ProduceResourceResponse,
+    ProduceResponse, Request, RequestHeader, ResourceMetadata, Response, TxnPartitionResult, TxnResourceResult,
+    VerifyTxnRequest, WriteTxnMarkersRequest, WriteTxnMarkersResponse, coordinator, isolation, kind,
 };
 use lotse_raft::{NodeId, RaftGroup, Role};
 use lotse_record::Batch;
@@ -116,16 +116,56 @@ pub(crate) struct Outbox {
     /// The client certificate the connection authenticated with and the
     /// principal it names, for `RenewCertificate` (ADR 0123).
     presented: Option<(lotse_rt::CertInfo, String)>,
+    /// The request the main loop is handling on this connection, and the
+    /// indexes its answer carries: what the node's replicas of the
+    /// metadata and coordinator groups have applied ([`Answering`]).
+    answering: Mutex<Option<(u32, Vec<GroupIndex>)>>,
 }
 
 impl Outbox {
+    /// Answers `correlation_id`. While the main loop handles that request
+    /// ([`Outbox::answering`]), the answer carries the indexes it is
+    /// answered at; any later answer names them with
+    /// [`Outbox::push_applied`].
     fn push(&self, correlation_id: u32, response: &Response) {
-        self.push_frame(lotse_proto::encode_response(correlation_id, response));
+        let applied = match &*self.answering.lock().expect("outbox lock") {
+            Some((id, applied)) if *id == correlation_id => applied.clone(),
+            _ => Vec::new(),
+        };
+        self.push_applied(correlation_id, response, &applied);
+    }
+
+    /// Answers `correlation_id` with the header tag `applied`: for each
+    /// group, the index the node had applied when it answered (zone reads
+    /// design, section 2). Empty writes no tag.
+    pub(crate) fn push_applied(&self, correlation_id: u32, response: &Response, applied: &[GroupIndex]) {
+        let tags = lotse_proto::FrameTags { read_at_least: Vec::new(), applied: applied.to_vec() };
+        self.push_frame(lotse_proto::encode_response_tagged(correlation_id, &tags, response));
+    }
+
+    /// Marks `correlation_id` as handled now, answered from replicas that
+    /// have applied `applied`, until the guard drops. Nothing applies
+    /// while a request is handled, so every answer it gets then is
+    /// answered at these indexes, refusals included.
+    fn answering(&self, correlation_id: u32, applied: Vec<GroupIndex>) -> Answering<'_> {
+        *self.answering.lock().expect("outbox lock") = Some((correlation_id, applied));
+        Answering(self)
     }
 
     fn push_frame(&self, frame: Bytes) {
         self.queue.lock().expect("outbox lock").push_back(frame);
         self.ready.set();
+    }
+}
+
+/// While it lives, answers to the request [`Outbox::answering`] names
+/// carry its indexes. An answer that comes later, after more has applied,
+/// must not carry them: they could be below the write it answers.
+struct Answering<'a>(&'a Outbox);
+
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        *self.0.answering.lock().expect("outbox lock") = None;
     }
 }
 
@@ -453,6 +493,113 @@ fn zone_read_group(request: &Request, view: &ClusterView<'_>) -> Option<GroupId>
     }
 }
 
+/// The groups among the metadata and coordinator groups whose replicas
+/// answer `request` here: its answer carries what each has applied, so a
+/// client can ask a follower for no less (zone reads design, section 2).
+/// The access check every request has reads the metadata group too, but
+/// only answers given from these groups' state name them.
+fn answer_groups(request: &Request, view: &ClusterView<'_>) -> Vec<GroupId> {
+    let metadata = view.admin.metadata;
+    let coordinator = view.coordinator;
+    let groups: [Option<GroupId>; 2] = match request {
+        Request::Metadata(_)
+        | Request::CreateStream(_)
+        | Request::CreateQueue(_)
+        | Request::DeclareExchange(_)
+        | Request::Bind(_)
+        | Request::Unbind(_)
+        | Request::DeleteResource(_)
+        | Request::AlterConfigs(_)
+        | Request::DescribeConfigs(_)
+        | Request::AlterUser(_)
+        | Request::DescribeUsers(_)
+        | Request::CreateTenant(_)
+        | Request::DeleteTenant(_)
+        | Request::DescribeTenants(_)
+        | Request::AlterRoleBindings(_)
+        | Request::DescribeRoleBindings(_)
+        | Request::AddNode(_)
+        | Request::RemoveNode(_)
+        | Request::DescribeNodes(_)
+        | Request::MoveLeader(_)
+        | Request::ReassignPartition(_)
+        | Request::CreatePartitions(_)
+        | Request::SettleVoters(_)
+        | Request::RevokeSessions(_)
+        | Request::RevokeCertificate(_)
+        | Request::DescribeCertificates(_)
+        | Request::RecordCertificates(_)
+        | Request::RequestCertificate(_)
+        | Request::DescribeCertificateRequests(_)
+        | Request::RecordCertificate(_)
+        | Request::RenewCertificate(_)
+        | Request::ReportDisk(_)
+        | Request::Turn(_)
+        | Request::ReportVersion(_)
+        | Request::AlterUpgrade(_)
+        | Request::DescribeUpgrade(_)
+        | Request::CreateToken(_)
+        | Request::DescribeTokens(_)
+        | Request::RevokeToken(_) => [metadata, None],
+        Request::InitProducer(_)
+        | Request::AddPartitionsToTxn(_)
+        | Request::VerifyTxn(_)
+        | Request::EndTxn(_)
+        | Request::AddOffsetsToTxn(_)
+        | Request::GroupHeartbeat(_)
+        | Request::CommitOffsets(_) => [coordinator, None],
+        // Its access check reads the metadata group (`Clients::offset_read`).
+        Request::OffsetFetch(_) => [coordinator, metadata],
+        // Answered from partitions, queues, the node itself or the
+        // connection; `FindCoordinator` and `WhoAmI` from the node's view.
+        Request::ApiVersions
+        | Request::FindCoordinator(_)
+        | Request::Produce(_)
+        | Request::Fetch(_)
+        | Request::ListOffsets(_)
+        | Request::WriteTxnMarkers(_)
+        | Request::Subscribe(_)
+        | Request::Credit(_)
+        | Request::Ack(_)
+        | Request::Nack(_)
+        | Request::Unsubscribe(_)
+        | Request::DeadLetter(_)
+        | Request::Publish(_)
+        | Request::DescribeMetrics(_)
+        | Request::WhoAmI(_)
+        | Request::DescribeSessions(_)
+        | Request::SaslHandshake(_)
+        | Request::SaslAuthenticate(_)
+        | Request::CheckEmpty(_)
+        | Request::PurgeQueue(_)
+        | Request::Requeue(_) => [None, None],
+    };
+    let mut out: Vec<GroupId> = groups.into_iter().flatten().collect();
+    out.dedup();
+    out
+}
+
+/// What this node's replicas of `of` have applied; a group it has no
+/// replica of names nothing.
+fn applied_at<R: Runtime, S: StateMachine>(
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+    of: &[GroupId],
+) -> Vec<GroupIndex> {
+    of.iter().filter_map(|g| groups.get(g).map(|r| GroupIndex { group: *g, index: r.applied() })).collect()
+}
+
+/// What a write's answer names for its group: the replica's applied index,
+/// and for a write that succeeded never less than its entry `written`. A
+/// write is decided once committed, and a leader that is a quorum alone
+/// commits in the round it persists, a round before it applies.
+fn write_applied<R: Runtime, S: StateMachine>(
+    group: GroupId,
+    replica: &Replica<R, S>,
+    written: Option<u64>,
+) -> [GroupIndex; 1] {
+    [GroupIndex { group, index: replica.applied().max(written.unwrap_or(0)) }]
+}
+
 fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
     raft.leader().map(|l| LeaderHint { leader: l as u32, term: raft.term() })
 }
@@ -589,6 +736,10 @@ impl Clients {
             outbox.push(id, &Response::Refused { code: ErrorCode::INVALID_REQUEST, message: why });
             return Ok(());
         }
+        // Answers from here on are given from this node's replicas and
+        // name what they have applied.
+        let stamp = outbox.clone();
+        let _answering = stamp.answering(id, applied_at(groups, &answer_groups(&request, view)));
         match request {
             Request::ApiVersions => outbox.push(
                 id,
@@ -1120,7 +1271,9 @@ fn settle_init<R: Runtime, S: StateMachine>(
         return Some(p);
     };
     let resp = InitProducerResponse { error, producer_id, producer_epoch: 0, leader_hint };
-    p.outbox.push(p.correlation_id, &Response::InitProducer(resp));
+    let written = (error == ErrorCode::NONE).then_some(p.last);
+    let applied = write_applied(p.group, &groups[&p.group], written);
+    p.outbox.push_applied(p.correlation_id, &Response::InitProducer(resp), &applied);
     None
 }
 
@@ -1287,10 +1440,35 @@ fn find_coordinator<R: Runtime, S: StateMachine>(
             host: host.into(),
             port: port.parse().unwrap_or(0),
             error_msg: None,
-            voters: Vec::new(),
+            voters: coordinator_voters(g, view, groups),
         },
         None => unavailable("the coordinator group has no leader right now"),
     }
+}
+
+/// The coordinator group's voters as this node knows them, for a client
+/// that reads offsets from one in its zone (zone reads design, section 2):
+/// its replica's membership, both sides of a joint change, or else the
+/// voters the metadata group plans for it.
+fn coordinator_voters<R: Runtime, S: StateMachine>(
+    g: GroupId,
+    view: &ClusterView<'_>,
+    groups: &BTreeMap<GroupId, Replica<R, S>>,
+) -> Vec<u32> {
+    let voters: BTreeSet<NodeId> = match groups.get(&g) {
+        Some(r) => {
+            let m = r.raft_ref().membership();
+            m.voters.union(&m.outgoing).copied().collect()
+        }
+        None => {
+            let state = view.admin.metadata.and_then(|m| groups.get(&m)).map(|r| r.metadata());
+            match state.and_then(|s| s.targets.get(&g)) {
+                Some(v) => v.iter().copied().collect(),
+                None => view.admin.configured_voters.iter().copied().collect(),
+            }
+        }
+    };
+    voters.into_iter().map(|v| v as u32).collect()
 }
 
 /// The brokers and the resources asked for, as far as `who` may see them:

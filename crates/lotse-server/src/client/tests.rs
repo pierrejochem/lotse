@@ -3908,3 +3908,283 @@ fn offset_fetch_on_a_follower_waits_for_the_metadata_index_before_it_judges_acce
         assert_eq!(part(&ask(&mut five, 2).await), (ErrorCode::NONE, 9));
     });
 }
+
+/// Responses in `outbox` with their header tags, decoded as answers to
+/// `key`.
+fn drain_tagged(outbox: &Outbox, key: ApiKey) -> Vec<(lotse_proto::FrameTags, Response)> {
+    let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+    frames
+        .into_iter()
+        .filter(|f| !lotse_proto::is_push(f))
+        .map(|f| {
+            let (_, tags, r) = lotse_proto::decode_response_tagged(f, key).unwrap();
+            (tags, r)
+        })
+        .collect()
+}
+
+/// The index `tags` name for `group`, if any.
+fn applied_of(tags: &lotse_proto::FrameTags, group: GroupId) -> Option<u64> {
+    tags.applied.iter().find(|e| e.group == group).map(|e| e.index)
+}
+
+/// A single-voter replica of a group, led and with its first entries
+/// applied.
+async fn single_led(rt: &SimRuntime, dir: &str) -> Replica<SimRuntime, Nothing> {
+    let r = Replica::open(rt.clone(), dir, Config::new(1, vec![1]), Nothing, LogConfig::default()).await.unwrap();
+    let mut r = r;
+    for _ in 0..40 {
+        r.raft().tick();
+        r.process().await.unwrap();
+    }
+    assert_eq!(r.raft_ref().role(), Role::Leader);
+    r
+}
+
+/// Handles `request` on the node of `groups`, runs a few rounds, and
+/// returns its one answer with the header tags. Also returns the last
+/// index of `group`'s log right after the request was handled: the entry
+/// of a write it proposed.
+async fn ask_tagged(
+    clients: &mut Clients,
+    groups: &mut Groups,
+    view: &ClusterView<'_>,
+    request: Request,
+    group: GroupId,
+) -> (lotse_proto::FrameTags, Response, u64) {
+    let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+    let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest {
+        outbox: outbox.clone(),
+        header,
+        request,
+        principal: Principal::Anonymous,
+        mechanism: 0,
+        read_at_least: Vec::new(),
+    };
+    clients.handle(req, view, groups).await.unwrap();
+    let entry = groups[&group].raft_ref().last_index();
+    for _ in 0..5 {
+        for r in groups.values_mut() {
+            r.process().await.unwrap();
+        }
+        clients.after_round(view, groups).await.unwrap();
+    }
+    match drain_tagged(&outbox, key).as_slice() {
+        [(tags, r)] => (tags.clone(), r.clone(), entry),
+        other => panic!("expected one answer, got {other:?}"),
+    }
+}
+
+fn metadata_view<'a>(rt: &SimRuntime, voters: &'a BTreeMap<GroupId, Vec<NodeId>>) -> ClusterView<'a> {
+    static ADDRS: BTreeMap<NodeId, String> = BTreeMap::new();
+    ClusterView {
+        streams: &[],
+        queues: &[],
+        exchanges: &[],
+        deleted: &NOTHING_DELETED,
+        group_session: Duration::from_secs(1),
+        group_heartbeat: Duration::from_millis(100),
+        admin: AdminView { metadata: Some(G), nodes: &[1], configured_groups: 1, voters, ..AdminView::default() },
+        client_addrs: &ADDRS,
+        zones: &NO_ZONES,
+        coordinator: None,
+        node: NodeView::default(),
+        now: rt.now(),
+        unix_ms: 0,
+        access: &OPEN,
+        lagging: &NOT_LAGGING,
+        current_voters: &NO_CURRENT,
+    }
+}
+
+#[test]
+fn a_metadata_write_answer_carries_the_index_it_applied_at() {
+    // A client that reads its write from a follower names this index, so
+    // the follower answers only once it holds the write (zone reads design,
+    // section 2).
+    Sim::new(11).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(G, single_led(&rt, "m").await)]);
+        let voters = BTreeMap::new();
+        let view = metadata_view(&rt, &voters);
+        let mut clients = Clients::default();
+        let request = Request::CreateStream(lotse_proto::CreateStreamRequest {
+            name: "orders".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            partitions: 1,
+            replication: 1,
+            configs: Vec::new(),
+        });
+        let (tags, r, entry) = ask_tagged(&mut clients, &mut groups, &view, request, G).await;
+        let Response::Create(c) = r else { panic!("{r:?}") };
+        assert_eq!(c.error, ErrorCode::NONE);
+        assert!(groups[&G].metadata().id_of("orders").is_some());
+        let applied = applied_of(&tags, G).expect("the metadata group's index");
+        assert!(applied >= entry, "answered at {applied}, the create is at {entry}");
+        assert_eq!(tags.applied.len(), 1, "only the metadata group: {tags:?}");
+    });
+}
+
+#[test]
+fn metadata_carries_applied() {
+    Sim::new(12).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(G, single_led(&rt, "m").await)]);
+        let voters = BTreeMap::new();
+        let view = metadata_view(&rt, &voters);
+        let mut clients = Clients::default();
+        let request = Request::Metadata(lotse_proto::MetadataRequest { names: Vec::new() });
+        let applied = groups[&G].applied();
+        let (tags, r, _) = ask_tagged(&mut clients, &mut groups, &view, request, G).await;
+        assert!(matches!(r, Response::Metadata(_)), "{r:?}");
+        assert_eq!(applied_of(&tags, G), Some(applied));
+    });
+}
+
+#[test]
+fn a_heartbeat_answer_carries_the_coordinator_index() {
+    // A member that takes over a partition reads its committed offset next:
+    // the heartbeat that hands it over must name at least the index of the
+    // previous owner's last commit, so a follower in its zone answers only
+    // with that commit applied (zone reads design, section 2).
+    const C: GroupId = 2;
+    Sim::new(13).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(C, single_led(&rt, "c").await)]);
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![20, 21] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: Some(C),
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
+        };
+        let mut clients = Clients::default();
+        let heartbeat_owning = |member: &str, epoch: i32, owned: Option<Vec<u32>>| {
+            Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
+                group_id: "g".into(),
+                member_id: member.into(),
+                member_epoch: epoch,
+                rebalance_timeout_ms: 100,
+                subscribed: (epoch == 0).then(|| vec![7]),
+                owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                instance_id: None,
+                subscribed_pattern: None,
+            })
+        };
+        let heartbeat = |member: &str, epoch: i32| heartbeat_owning(member, epoch, None);
+        let (_, r, _) = ask_tagged(&mut clients, &mut groups, &view, heartbeat("", 0), C).await;
+        let Response::GroupHeartbeat(a) = r else { panic!("{r:?}") };
+        assert_eq!(a.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2));
+        let commit = Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
+            tenant: lotse_proto::DEFAULT_TENANT.into(),
+            group_id: "g".into(),
+            member_id: a.member_id.clone(),
+            member_epoch: a.member_epoch,
+            resources: vec![lotse_proto::OffsetCommitResource {
+                resource_id: 7,
+                partitions: vec![lotse_proto::OffsetCommitPartition {
+                    partition: 0,
+                    offset: 9,
+                    leader_term: 0,
+                    metadata: None,
+                }],
+            }],
+        });
+        let (tags, r, entry) = ask_tagged(&mut clients, &mut groups, &view, commit, C).await;
+        let Response::CommitOffsets(c) = r else { panic!("{r:?}") };
+        assert_eq!(c.resources[0].partitions[0].error, ErrorCode::NONE);
+        assert!(applied_of(&tags, C).is_some_and(|i| i >= entry), "the commit's own answer: {tags:?} vs {entry}");
+        // A heartbeat that changes nothing is answered at once, without a
+        // write of its own.
+        let (outbox, key) = (Arc::new(Outbox::default()), ApiKey::GROUP_HEARTBEAT);
+        let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+        let request = heartbeat_owning(&a.member_id, a.member_epoch, Some(vec![0, 1]));
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header,
+            request,
+            principal: Principal::Anonymous,
+            mechanism: 0,
+            read_at_least: Vec::new(),
+        };
+        clients.handle(req, &view, &mut groups).await.unwrap();
+        match drain_tagged(&outbox, key).as_slice() {
+            [(tags, Response::GroupHeartbeat(h))] => {
+                assert_eq!(h.error, ErrorCode::NONE);
+                let applied = applied_of(tags, C).expect("the coordinator group's index");
+                assert!(applied >= entry, "answered at once at {applied}, the commit is at {entry}");
+            }
+            other => panic!("expected an answer at once, got {other:?}"),
+        }
+        // Any member's next heartbeat, a new one's included.
+        for (member, epoch) in [(String::new(), 0), (a.member_id.clone(), a.member_epoch)] {
+            let (tags, r, _) = ask_tagged(&mut clients, &mut groups, &view, heartbeat(&member, epoch), C).await;
+            assert!(matches!(r, Response::GroupHeartbeat(_)), "{r:?}");
+            let applied = applied_of(&tags, C).expect("the coordinator group's index");
+            assert!(applied >= entry, "{member:?} answered at {applied}, the commit is at {entry}");
+        }
+    });
+}
+
+#[test]
+fn find_coordinator_names_the_voters() {
+    Sim::new(14).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+        let addrs: BTreeMap<NodeId, String> = all.iter().map(|n| (*n, format!("n{n}:9092"))).collect();
+        let mut view = zone_view(&rt, None, Some(G), &NOT_LAGGING, &OPEN);
+        view.client_addrs = &addrs;
+        for n in [1, 3] {
+            let request = Request::FindCoordinator(lotse_proto::FindCoordinatorRequest {
+                key_type: lotse_proto::coordinator::GROUP,
+                key: "g".into(),
+            });
+            let r = zone_ask(&mut five, n, &view, request, Vec::new(), Principal::Anonymous).await;
+            let Response::FindCoordinator(f) = r else { panic!("{r:?}") };
+            assert_eq!((f.error, f.node_id), (ErrorCode::NONE, 1), "node {n}");
+            assert_eq!(f.voters, vec![1, 2, 3, 4, 5], "node {n}");
+        }
+    });
+}
+
+#[test]
+fn a_follower_zone_read_carries_its_applied_index() {
+    Sim::new(15).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let view = zone_view(&rt, Some(G), None, &NOT_LAGGING, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let (outbox, key) = (Arc::new(Outbox::default()), ApiKey::DESCRIBE_CONFIGS);
+        let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header,
+            request: describe_configs(id),
+            principal: Principal::Anonymous,
+            mechanism: 0,
+            read_at_least: at(G, applied),
+        };
+        Clients::default().handle(req, &view, five.nodes.get_mut(&2).unwrap()).await.unwrap();
+        match drain_tagged(&outbox, key).as_slice() {
+            [(tags, Response::DescribeConfigs(d))] => {
+                assert_eq!(d.error, ErrorCode::NONE);
+                assert_eq!(applied_of(tags, G), Some(applied));
+            }
+            other => panic!("expected one answer, got {other:?}"),
+        }
+    });
+}

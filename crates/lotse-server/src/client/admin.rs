@@ -42,7 +42,7 @@ use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, outcome};
+use super::{Clients, ClusterView, Outbox, hint, outcome, write_applied};
 use crate::auth::Principal;
 use crate::metadata::{
     self, CertKey, Change, Cleanup, DEFAULT_DELETE_RETENTION_MS, MAX_PARTITIONS, MetadataState, QueueChange,
@@ -1335,7 +1335,9 @@ impl Clients {
 
     /// Answers admin records that are decided and applied.
     pub(super) fn settle_admin<R: Runtime, S: StateMachine>(&mut self, view: &ClusterView<'_>, groups: &Groups<R, S>) {
-        let Some(replica) = view.admin.metadata.and_then(|g| groups.get(&g)) else { return };
+        let Some((group, replica)) = view.admin.metadata.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
+            return;
+        };
         let writes = std::mem::take(&mut self.admin_writes);
         for w in writes {
             let raft = replica.raft_ref();
@@ -1392,14 +1394,15 @@ impl Clients {
                         }
                         then => then.answer(ErrorCode::NONE, 0, None),
                     };
-                    outbox.push(*id, &resp);
+                    outbox.push_applied(*id, &resp, &write_applied(group, replica, Some(w.last)));
                 }
                 Some(code) => {
                     let h = if code == ErrorCode::NOT_LEADER { hint(raft) } else { None };
-                    outbox.push(*id, &w.then.answer(code, 0, h));
+                    outbox.push_applied(*id, &w.then.answer(code, 0, h), &write_applied(group, replica, None));
                 }
                 None if view.now >= w.deadline => {
-                    outbox.push(*id, &w.then.answer(ErrorCode::REQUEST_TIMED_OUT, 0, None));
+                    let resp = w.then.answer(ErrorCode::REQUEST_TIMED_OUT, 0, None);
+                    outbox.push_applied(*id, &resp, &write_applied(group, replica, None));
                 }
                 None => self.admin_writes.push(w),
             }
