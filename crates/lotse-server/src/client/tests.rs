@@ -3336,41 +3336,54 @@ fn a_leader_names_no_lagging_voter() {
     let lag = Duration::from_secs(10);
     let t0 = lotse_rt::Instant::from_nanos(1_000_000_000);
     let progress = |matched: u64, heard_recently: bool| lotse_raft::VoterProgress { matched, heard_recently };
-    let mut caught_up = BTreeMap::new();
+    let mut samples = crate::node::CommitSamples::default();
+    let mut judge = |commit: u64, two: u64, three: (u64, bool), now| {
+        let progress = [(2, progress(two, true)), (3, progress(three.0, three.1))];
+        crate::node::current_voters(&mut samples, commit, progress, now, lag)
+    };
     // Both hold everything at first; node 3 is not heard.
-    let current =
-        crate::node::current_voters(5, [(2, progress(5, true)), (3, progress(5, false))], &mut caught_up, t0, lag);
+    let current = judge(5, 5, (5, false), t0);
     assert_eq!(current, BTreeSet::from([2]));
     assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(2));
     // The commit index moves on and node 2 does not follow: behind for
     // exactly the limit it is still current, longer it is not.
     let at = |ms| t0 + Duration::from_millis(ms);
-    let current = crate::node::current_voters(
-        9,
-        [(2, progress(5, true)), (3, progress(9, false))],
-        &mut caught_up,
-        at(10_000),
-        lag,
-    );
-    assert_eq!(current, BTreeSet::from([2]));
-    let current = crate::node::current_voters(
-        9,
-        [(2, progress(5, true)), (3, progress(9, false))],
-        &mut caught_up,
-        at(10_001),
-        lag,
-    );
+    assert_eq!(judge(9, 5, (9, false), at(10_000)), BTreeSet::from([2]));
+    let current = judge(9, 5, (9, false), at(10_001));
     assert!(current.is_empty(), "{current:?}");
     assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), None);
     // Node 3 heard again, holding everything: current at once.
-    let current = crate::node::current_voters(
-        9,
-        [(2, progress(5, true)), (3, progress(9, true))],
-        &mut caught_up,
-        at(10_002),
-        lag,
-    );
+    let current = judge(9, 5, (9, true), at(10_002));
     assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(3));
+}
+
+/// Under a steady stream of writes the commit index moves at every sample
+/// and a slower voter trails it by a moment: it stays current, judged by
+/// time, not by whether it holds the commit index of the moment. One whose
+/// match index stops is current until it is `follower_max_lag` behind.
+#[test]
+fn a_voter_a_moment_behind_the_commit_index_stays_current() {
+    let lag = Duration::from_secs(10);
+    let step = Duration::from_millis(100);
+    let t0 = lotse_rt::Instant::from_nanos(1_000_000_000);
+    let progress = |matched: u64| lotse_raft::VoterProgress { matched, heard_recently: true };
+    let mut samples = crate::node::CommitSamples::default();
+    let stopped_at = t0 + Duration::from_secs(5);
+    let mut stopped = 0;
+    for i in 0..300u32 {
+        let now = t0 + step * i;
+        let commit = 10 * u64::from(i) + 10;
+        if now <= stopped_at {
+            stopped = commit;
+        }
+        // Node 2 holds what was committed one sample ago (everything at the
+        // first, when the leader knows no earlier commit index).
+        let two = if i == 0 { commit } else { commit - 10 };
+        let current =
+            crate::node::current_voters(&mut samples, commit, [(2, progress(two)), (3, progress(stopped))], now, lag);
+        assert!(current.contains(&2), "a moment behind at {i}: {current:?}");
+        assert_eq!(current.contains(&3), now - stopped_at <= lag, "stopped, at {i}: {current:?}");
+    }
 }
 
 /// Only a voter in the reader's zone is named; a node in another zone or in
@@ -3380,7 +3393,7 @@ fn a_leader_names_no_voter_outside_the_zone() {
     let zones = five_zones();
     assert_eq!(preferred_replica("d", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "no node in the zone");
     assert_eq!(preferred_replica("c", 1, &[1, 2, 3, 5], &zones, |_| true), None, "node 4 is no voter");
-    assert_eq!(preferred_replica("", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "node 5 has no zone");
+    assert_eq!(preferred_replica("", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "an empty zone names nothing");
 }
 
 /// A leader in the reader's zone is where the reader should be: it names
