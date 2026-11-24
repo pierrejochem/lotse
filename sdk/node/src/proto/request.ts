@@ -38,6 +38,8 @@ export interface ListOffsetsRequest {
 }
 /** Fetch's tag: a follower may answer (ADR 0104). */
 const TAG_ALLOW_FOLLOWER = 0;
+/** Fetch's tag: the client's zone. */
+const TAG_ZONE = 1;
 
 export interface FetchRequest {
   readonly type: "Fetch";
@@ -48,6 +50,8 @@ export interface FetchRequest {
   readonly resources: readonly m.FetchResource[];
   /** A follower may answer with the committed data it has instead of NOT_LEADER (ADR 0104). Tag 0. */
   readonly allowFollower?: boolean;
+  /** The zone the client reads from, for a leader that points it at a replica there. Tag 1, written only when set. */
+  readonly zone?: string;
 }
 export interface InitProducerRequest {
   readonly type: "InitProducer";
@@ -640,10 +644,16 @@ export function writeRequest(w: Writer, req: Request): void {
         });
         w1.noTags();
       });
-      if (req.allowFollower) {
-        w.tags([{ tag: TAG_ALLOW_FOLLOWER, value: Uint8Array.of(1) }]);
-      } else {
-        w.noTags();
+      {
+        // Ascending tag order, only what is set.
+        const tags: Tag[] = [];
+        if (req.allowFollower) {
+          tags.push({ tag: TAG_ALLOW_FOLLOWER, value: Uint8Array.of(1) });
+        }
+        if (req.zone !== undefined) {
+          tags.push(m.stringTag(TAG_ZONE, req.zone));
+        }
+        w.tags(tags);
       }
       return;
     case "InitProducer":
@@ -951,15 +961,29 @@ export function readRequest(apiKey: number, r: Reader): Request {
         return { resourceId, partitions };
       });
       let allowFollower = false;
+      let zone: string | undefined;
       for (const t of r.tags()) {
         if (t.tag === TAG_ALLOW_FOLLOWER) {
           const vr = new Reader(t.value);
           allowFollower = vr.u8() !== 0;
           vr.finish();
+        } else if (t.tag === TAG_ZONE) {
+          const vr = new Reader(t.value);
+          zone = vr.string();
+          vr.finish();
         }
       }
-      // Left out when not set, as a request made without it has it.
-      return { type: "Fetch", maxWaitMs, minBytes, maxBytes, isolation, resources, ...(allowFollower ? { allowFollower } : {}) };
+      // Left out when not set, as a request made without them has them.
+      return {
+        type: "Fetch",
+        maxWaitMs,
+        minBytes,
+        maxBytes,
+        isolation,
+        resources,
+        ...(allowFollower ? { allowFollower } : {}),
+        ...(zone !== undefined ? { zone } : {}),
+      };
     }
     case ApiKey.INIT_PRODUCER:
       return { type: "InitProducer", txnId: r.optString(), txnTimeoutMs: r.u32(), tenant: m.getTenant(r) };

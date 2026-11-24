@@ -6,22 +6,28 @@ import {
   BatchBuilder,
   BatchKind,
   BrokerResponseError,
+  ClientError,
   Compression,
   concat,
   ControlType,
   ErrorCode,
+  type ErrorCodeValue,
   Fetched,
   GaveUpError,
+  type GroupIndex,
   Isolation,
+  type LeaderHint,
   LotseClient,
   marker,
   OffsetAt,
   OffsetOutOfRangeError,
   type Request,
+  type Response,
 } from "../src/index.js";
+import { Indexes, refused, zoneNode } from "../src/client/zone.js";
 import { fromHex } from "../src/record/bytes.js";
 import * as fx from "./support/fx.js";
-import { closeAll, type FakeNode, startNodes } from "./support/fake-node.js";
+import { closeAll, type FakeNode, type Heard, startNodes } from "./support/fake-node.js";
 import { field, lines } from "./vectors.js";
 
 /** Fetch requests, retries, ListOffsets, and what a read_committed reader sees. */
@@ -475,5 +481,458 @@ describe("fetch and list offsets against scripted brokers", () => {
     assert.equal(String(OffsetAt.EARLIEST), "EARLIEST");
     assert.equal(String(OffsetAt.LATEST), "LATEST");
     assert.equal(String(OffsetAt.time(5)), "time(5)");
+  });
+});
+
+// ---- zone reads: offsets and admin state in the client's zone, and back to the zone ----
+//
+// Node 1 (a) is in zone x and leads everything; nodes 2 (b) and 3 (c) are in zone y. Stream s (id 7) lives on node 1
+// alone, stream t (id 8) on nodes 1 and 2. Node 1 coordinates, with all three voting.
+
+describe("zone reads against scripted nodes", () => {
+  let a: FakeNode;
+  let b: FakeNode;
+  let c: FakeNode;
+  let client: LotseClient | undefined;
+  /** What every node heard, in order across the nodes. */
+  let heard: Heard[];
+
+  beforeEach(async () => {
+    [a, b, c] = (await startNodes(3)) as [FakeNode, FakeNode, FakeNode];
+    heard = [];
+  });
+
+  afterEach(async () => {
+    client?.close();
+    client = undefined;
+    await closeAll([a, b, c]);
+  });
+
+  const HINT: LeaderHint = { leader: 1, term: 1n };
+  const ZONES: Record<number, string> = { 1: "x", 2: "y", 3: "y" };
+
+  /** Indexes from pairs of group and index. */
+  const at = (...pairs: (number | bigint)[]): GroupIndex[] => {
+    const out: GroupIndex[] = [];
+    for (let i = 0; i < pairs.length; i += 2) {
+      out.push({ group: BigInt(pairs[i] as number | bigint), index: BigInt(pairs[i + 1] as number | bigint) });
+    }
+    return out;
+  };
+
+  /** Indexes as text, "1:5 2:3", so what was heard compares as plain strings. */
+  const text = (indexes: readonly GroupIndex[]): string => indexes.map((e) => `${e.group}:${e.index}`).join(" ");
+
+  /** The metadata of the zone tests, listing the nodes `listed`. */
+  const zoneMetadata = (...listed: FakeNode[]): Extract<Response, { type: "Metadata" }> => ({
+    type: "Metadata",
+    brokers: listed.map((n) => ({ nodeId: n.id, host: "127.0.0.1", port: n.address.port, rack: ZONES[n.id] ?? "" })),
+    resources: [
+      fx.stream("s", 7, fx.partition(0, 1, 1, 1)),
+      fx.stream("t", 8, fx.partition(0, 1, 1, 1, 2)),
+    ],
+  });
+
+  const zoneFetched = (error: ErrorCodeValue, preferredReplica?: number): Extract<Response, { type: "Fetch" }> => ({
+    type: "Fetch",
+    throttleMs: 0,
+    resources: [
+      {
+        resourceId: 0n,
+        partitions: [
+          {
+            partition: 0,
+            error,
+            highWatermark: 0n,
+            lastStableOffset: 0n,
+            logStartOffset: 0n,
+            abortedTxns: [],
+            records: new Uint8Array(0),
+            leaderHint: null,
+            ...(preferredReplica === undefined ? {} : { preferredReplica }),
+          },
+        ],
+      },
+    ],
+  });
+
+  /** The answer to a zone read, with `error` (and then the leader's hint) or without. */
+  const read = (req: Request, error: ErrorCodeValue): Response => {
+    const leaderHint = error === ErrorCode.NONE ? null : HINT;
+    switch (req.type) {
+      case "DescribeConfigs":
+        return {
+          type: "DescribeConfigs",
+          error,
+          leaderHint,
+          resources: req.resourceIds.map((resourceId) => ({ resourceId, error: ErrorCode.NONE, configs: [] })),
+        };
+      case "DescribeNodes":
+        return { type: "DescribeNodes", error, leaderHint, nodes: [] };
+      case "DescribeUsers":
+        return { type: "DescribeUsers", error, leaderHint, users: [] };
+      case "DescribeTokens":
+        return { type: "DescribeTokens", error, leaderHint, tokens: [] };
+      case "DescribeCertificates":
+        return { type: "DescribeCertificates", error, leaderHint, nowMs: 0n, certificates: [] };
+      case "DescribeCertificateRequests":
+        return { type: "DescribeCertificateRequests", error, leaderHint, nowMs: 0n, requests: [] };
+      case "DescribeUpgrade":
+        return { type: "DescribeUpgrade", error, leaderHint, clusterVersion: null, held: false, turn: null, nodes: [] };
+      case "DescribeTenants":
+        return { type: "DescribeTenants", error, leaderHint, tenants: [] };
+      case "DescribeRoleBindings":
+        return { type: "DescribeRoleBindings", error, leaderHint, bindings: [] };
+      case "OffsetFetch":
+        return {
+          type: "OffsetFetch",
+          resources: req.resources.map((r) => ({
+            resourceId: r.resourceId,
+            partitions: r.partitions.map((partition) => ({ partition, error, offset: 0n, leaderTerm: 1n, metadata: null })),
+          })),
+        };
+      default:
+        throw new Error(`not a zone read: ${req.type}`);
+    }
+  };
+
+  /** What every node answers, unless a test says otherwise. */
+  const common = (req: Request): Response => {
+    switch (req.type) {
+      case "Metadata":
+        return zoneMetadata(a, b, c);
+      case "FindCoordinator":
+        return { ...fx.coordinator(a), voters: [1, 2, 3] };
+      case "GroupHeartbeat":
+        return {
+          type: "GroupHeartbeat",
+          throttleMs: 0,
+          error: ErrorCode.NONE,
+          memberId: "m",
+          memberEpoch: 1,
+          heartbeatIntervalMs: 1_000,
+          assignment: [{ resourceId: 7n, partitions: [0] }],
+        };
+      case "Fetch":
+        return zoneFetched(ErrorCode.NONE);
+      case "ListOffsets":
+        return fx.listed(0, 0, 0);
+      case "CommitOffsets":
+        return {
+          type: "CommitOffsets",
+          resources: req.resources.map((r) => ({
+            resourceId: r.resourceId,
+            partitions: r.partitions.map((p) => ({ partition: p.partition, error: ErrorCode.NONE })),
+          })),
+        };
+      default:
+        return read(req, ErrorCode.NONE);
+    }
+  };
+
+  /** Every node answers `common` and records what it hears in `heard`. */
+  const zoneNodes = (): void => {
+    for (const n of [a, b, c]) {
+      n.heardIn(heard).on((_node, req) => common(req));
+    }
+  };
+
+  const zoneClient = (zone: string | null): LotseClient => {
+    client = new LotseClient(fx.config([a], zone === null ? {} : { zone }));
+    return client;
+  };
+
+  /** The requests of `type` that were heard, as "node [readAtLeast]". */
+  const heardOf = (type: Request["type"]): string[] =>
+    heard.filter((h) => h.request.type === type).map((h) => `${h.node} [${text(h.readAtLeast)}]`);
+
+  /** The nodes that heard the requests of `type`, in order. */
+  const nodesOf = (type: Request["type"]): number[] => heard.filter((h) => h.request.type === type).map((h) => h.node);
+
+  /** The reads of the streams, as "node kind allowFollower". */
+  const streamReads = (): string[] => {
+    const out: string[] = [];
+    for (const h of heard) {
+      if (h.request.type === "Fetch") {
+        out.push(`${h.node} fetch ${h.request.allowFollower === true}`);
+      } else if (h.request.type === "ListOffsets") {
+        out.push(`${h.node} list ${h.request.allowFollower === true}`);
+      }
+    }
+    return out;
+  };
+
+  /** Indexes only rise, and every connection's answers raise the one set. */
+  test("anIndexOnlyRises", () => {
+    const i = new Indexes();
+    assert.deepEqual(i.snapshot(), at(1, 0, 2, 0));
+    i.raise(at(1, 5, 2, 3));
+    i.raise(at(1, 2));
+    assert.deepEqual(i.snapshot(), at(1, 5, 2, 3));
+    i.raise(at(2, -1n));
+    assert.deepEqual(i.snapshot(), at(1, 5, 2, -1n), "indexes are u64");
+    i.raise(at(2, 4));
+    assert.deepEqual(i.snapshot(), at(1, 5, 2, -1n), "u64::MAX is the highest");
+  });
+
+  test("theZoneNodeIsTheLowestIdInTheZone", () => {
+    const zones = new Map([
+      [1, "x"],
+      [2, "y"],
+      [3, "y"],
+    ]);
+    assert.equal(zoneNode("y", [3, 2, 1], zones), 2);
+    assert.equal(zoneNode("x", [2, 3], zones), null);
+    assert.equal(zoneNode("z", zones.keys(), zones), null);
+  });
+
+  /**
+   * Every `applied` the client hears raises its index of that group; a lower one (from a follower further behind) leaves
+   * it as it is.
+   */
+  test("appliedRaisesTheIndexAndNeverLowersIt", async () => {
+    zoneNodes();
+    a.applied((r) => (r.type === "Metadata" ? at(1, 5, 2, 3) : []));
+    const answers = [at(1, 2), at(1, 9)];
+    b.applied(() => answers.shift() ?? []);
+    await zoneClient("y").metadata();
+    for (let i = 0; i < 3; i++) {
+      await client!.describeUsers();
+    }
+    assert.deepEqual(
+      heardOf("DescribeUsers"),
+      ["2 [1:5 2:3]", "2 [1:5 2:3]", "2 [1:9 2:3]"],
+      "2 is below 5 and leaves it; 9 raises it",
+    );
+  });
+
+  /** Each of the nine admin reads goes to the lowest-id node in the client's zone with both groups' indexes. */
+  test("anAdminReadGoesToTheZoneWithReadAtLeast", async () => {
+    zoneNodes();
+    a.applied((r) => (r.type === "Metadata" ? at(1, 4) : []));
+    const cl = zoneClient("y");
+    await cl.metadata();
+    await cl.describeConfigs("s");
+    await cl.describeNodes();
+    await cl.describeUsers();
+    await cl.describeTokens(null);
+    await cl.describeCertificates();
+    await cl.describeCertificateRequests();
+    await cl.describeUpgrade();
+    await cl.describeTenants();
+    await cl.describeRoleBindings();
+    const reads = heard.filter((h) => h.request.type !== "Metadata");
+    assert.equal(reads.length, 9, reads.map((h) => h.request.type).join(" "));
+    for (const h of reads) {
+      assert.equal(`${h.node} [${text(h.readAtLeast)}]`, "2 [1:4 2:0]", h.request.type);
+    }
+  });
+
+  /**
+   * A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader, without
+   * the tag, and the next read tries the zone again.
+   */
+  test("aRefusedZoneReadGoesToTheLeaderAndTheNextTriesTheZoneAgain", async () => {
+    zoneNodes();
+    a.applied(() => at(1, 6));
+    let refusedOnce = false;
+    b.on((_node, r) => {
+      if (r.type === "DescribeTenants" && !refusedOnce) {
+        refusedOnce = true;
+        return read(r, ErrorCode.NOT_LEADER);
+      }
+      return common(r);
+    });
+    const cl = zoneClient("y");
+    await cl.metadata();
+    await cl.describeTenants();
+    await cl.describeTenants();
+    assert.deepEqual(heardOf("DescribeTenants"), ["2 [1:6 2:0]", "1 []", "2 [1:6 2:0]"]);
+  });
+
+  /**
+   * A node of an older release ignores the tag and refuses the leader-only reads with NOT_LEADER: every such read ends
+   * at the leader.
+   */
+  test("anOlderZoneNodeSendsTheReadToTheLeader", async () => {
+    zoneNodes();
+    b.on((_node, r) => (r.type === "DescribeUpgrade" ? read(r, ErrorCode.NOT_LEADER) : common(r)));
+    const cl = zoneClient("y");
+    await cl.metadata();
+    await cl.describeUpgrade();
+    await cl.describeUpgrade();
+    assert.deepEqual(nodesOf("DescribeUpgrade"), [2, 1, 2, 1]);
+  });
+
+  /** A group member reads its committed offsets from the lowest-id coordinator voter in its zone. */
+  test("offsetFetchGoesToACoordinatorVoterInTheZone", async () => {
+    zoneNodes();
+    a.applied((r) =>
+      r.type === "Metadata" ? at(1, 4) : r.type === "FindCoordinator" || r.type === "GroupHeartbeat" ? at(2, 6) : [],
+    );
+    const group = await zoneClient("y").joinGroup("g", ["s"]);
+    await group.poll(10);
+    assert.deepEqual(group.positions(), new Map([["s", new Map([[0, 0n]])]]), "the committed offset");
+    assert.deepEqual(heardOf("OffsetFetch"), ["2 [1:4 2:6]"]);
+  });
+
+  /** A fetch that goes to the leader names the client's zone, so the leader can point back to it; one to the zone does not. */
+  test("aFetchToTheLeaderNamesTheZone", async () => {
+    zoneNodes();
+    const cl = zoneClient("y");
+    await cl.fetch("s", 0, 0n, 0);
+    await cl.fetch("t", 0, 0n, 0);
+    const fetches = heard.flatMap((h) =>
+      h.request.type === "Fetch" ? [`${h.node} ${h.request.zone ?? "none"} ${h.request.allowFollower === true}`] : [],
+    );
+    assert.deepEqual(fetches, ["1 y false", "2 none true"]);
+  });
+
+  /**
+   * After a replica in the zone failed, the leader serves; once it names that replica as current again, the next fetch
+   * and offset lookup go back there, without asking for metadata.
+   */
+  test("preferredReplicaSendsTheNextFetchBackToTheZone", async () => {
+    zoneNodes();
+    a.on((_node, r) => (r.type === "Fetch" ? zoneFetched(ErrorCode.NONE, 2) : common(r)));
+    let refusedOnce = false;
+    b.on((_node, r) => {
+      if (r.type === "Fetch" && !refusedOnce) {
+        refusedOnce = true;
+        return zoneFetched(ErrorCode.NOT_LEADER);
+      }
+      return common(r);
+    });
+    const cl = zoneClient("y");
+    await cl.fetch("t", 0, 0n, 0);
+    await cl.fetch("t", 0, 0n, 0);
+    await cl.listOffset("t", 0, OffsetAt.LATEST);
+    assert.deepEqual(streamReads(), ["2 fetch true", "1 fetch false", "2 fetch true", "2 list true"]);
+    assert.equal(nodesOf("Metadata").length, 1, "metadata only for the first route");
+  });
+
+  /** A client without a zone sends neither tag, and its reads go to the leaders. */
+  test("noZoneNoTags", async () => {
+    zoneNodes();
+    a.applied(() => at(1, 4, 2, 6));
+    for (const n of [b, c]) {
+      n.on((_node, r) => {
+        if (r.type === "Metadata" || r.type === "FindCoordinator") {
+          return common(r);
+        }
+        throw new Error(`only the leader is asked, not for ${r.type}`);
+      });
+    }
+    const cl = zoneClient(null);
+    await cl.describeUpgrade();
+    await cl.describeUsers();
+    await cl.fetch("t", 0, 0n, 0);
+    await cl.listOffset("t", 0, OffsetAt.LATEST);
+    await (await cl.joinGroup("g", ["s"])).poll(10);
+    assert.ok(heard.some((h) => h.request.type === "OffsetFetch"));
+    for (const h of heard) {
+      assert.deepEqual(h.readAtLeast, [], h.request.type);
+      if (h.request.type === "Fetch") {
+        assert.equal(h.request.zone, undefined);
+        assert.notEqual(h.request.allowFollower, true);
+      }
+      if (h.request.type !== "Metadata" && h.request.type !== "FindCoordinator") {
+        assert.equal(h.node, 1, h.request.type);
+      }
+    }
+  });
+
+  /**
+   * A node the latest metadata no longer lists is no zone node, for admin reads and offset reads alike: here node 2
+   * left, and the reads go to node 3 without trying node 2 first. Node 2 still serves, so a read sent there would show.
+   */
+  test("zoneReadsSkipANodeTheLatestMetadataLeftOut", async () => {
+    zoneNodes();
+    let answers = 0;
+    a.on((_node, r) => (r.type === "Metadata" ? (++answers === 1 ? zoneMetadata(a, b, c) : zoneMetadata(a, c)) : common(r)));
+    const cl = zoneClient("y");
+    await cl.metadata();
+    await cl.metadata();
+    await cl.describeUsers();
+    await (await cl.joinGroup("g", ["s"])).poll(10);
+    assert.deepEqual(nodesOf("DescribeUsers"), [3]);
+    assert.deepEqual(nodesOf("OffsetFetch"), [3]);
+  });
+
+  /** Node 2 refuses the first fetch of t, then serves; node 1 answers its n-th fetch with what `leader` gives. */
+  const afterAFallback = async (leader: (n: number) => Response): Promise<string[]> => {
+    zoneNodes();
+    let count = 0;
+    a.on((_node, r) => (r.type === "Fetch" ? leader(++count) : common(r)));
+    let refusedOnce = false;
+    b.on((_node, r) => {
+      if (r.type === "Fetch" && !refusedOnce) {
+        refusedOnce = true;
+        return zoneFetched(ErrorCode.NOT_LEADER);
+      }
+      return common(r);
+    });
+    const cl = zoneClient("y");
+    try {
+      await cl.fetch("t", 0, 0n, 0);
+    } catch (e) {
+      // the leader's answer to it is the test's to choose
+      assert.ok(e instanceof ClientError, String(e));
+    }
+    await cl.fetch("t", 0, 0n, 0);
+    return streamReads();
+  };
+
+  /** A leader answer with an error says nothing about the replicas: its preferred replica leaves the next fetch with the leader. */
+  test("preferredReplicaOnAnErrorIsIgnored", async () => {
+    const seen = await afterAFallback((n) =>
+      n === 1 ? zoneFetched(ErrorCode.OFFSET_OUT_OF_RANGE, 2) : zoneFetched(ErrorCode.NONE),
+    );
+    assert.deepEqual(seen, ["2 fetch true", "1 fetch false", "1 fetch false"]);
+  });
+
+  /**
+   * A replica the client has no address for cannot be asked: the fallback stays, rather than sending the next fetch to
+   * the replica that failed.
+   */
+  test("preferredReplicaWithoutAnAddressLeavesTheFetchOnTheLeader", async () => {
+    const seen = await afterAFallback((n) => zoneFetched(ErrorCode.NONE, n === 1 ? 4 : undefined));
+    assert.deepEqual(seen, ["2 fetch true", "1 fetch false", "1 fetch false"]);
+  });
+
+  /**
+   * The zone voter refuses an `OffsetFetch`, or the call to it fails: that read goes to the coordinator, and the next
+   * tries the zone again.
+   */
+  test("aRefusedOffsetFetchGoesToTheCoordinatorAndTheNextTriesTheZoneAgain", async () => {
+    for (const failedCall of [false, true]) {
+      heard.length = 0;
+      zoneNodes();
+      let refusedOnce = false;
+      b.on((_node, r) => {
+        if (r.type === "OffsetFetch" && !refusedOnce) {
+          refusedOnce = true;
+          return failedCall ? { type: "Error", code: ErrorCode.INVALID_REQUEST } : read(r, ErrorCode.NOT_LEADER);
+        }
+        return common(r);
+      });
+      const cl = zoneClient("y");
+      await cl.metadata();
+      const req: Request = {
+        type: "OffsetFetch",
+        groupId: "g",
+        requireStable: true,
+        resources: [{ resourceId: 7n, partitions: [0] }],
+        tenant: "default",
+      };
+      const internal = cl as unknown as { callCoordinatorRead(key: string, req: Request): Promise<Response> };
+      for (let i = 0; i < 2; i++) {
+        const r = await internal.callCoordinatorRead("g", req);
+        assert.ok(r.type === "OffsetFetch" && !refused(r), JSON.stringify(r, (_k, v: unknown) => (typeof v === "bigint" ? String(v) : v)));
+      }
+      assert.deepEqual(nodesOf("OffsetFetch"), [2, 1, 2], `failed call: ${failedCall}`);
+      cl.close();
+    }
+    client = undefined;
   });
 });

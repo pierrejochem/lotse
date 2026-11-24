@@ -7,9 +7,11 @@ import {
   type ApiVersionsResponse,
   DecodeError,
   decodePush,
+  type DecodedResponse,
   decodeResponse,
   type DeliverPush,
   encodeRequest,
+  type GroupIndex,
   isPush,
   readLength,
   type Request,
@@ -361,8 +363,11 @@ export class Connection {
    * Sends a request and returns the promise of its response. It rejects with `BrokerError` if the node refuses the
    * request as a whole, with `RequestTimeoutError` if no response comes within the request timeout, and with
    * `ConnectionError` if the connection fails first. `Credit` is never answered: use `sendOnly`.
+   *
+   * With `readAtLeast` (header tag 0), the node may answer only from state that has applied at least these indexes of
+   * those groups. An empty list sends the request as without it.
    */
-  send(request: Request): Promise<Response> {
+  send(request: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     if (request.type === "Credit") {
       return Promise.reject(new TypeError("Credit is never answered; use sendOnly"));
     }
@@ -373,7 +378,7 @@ export class Connection {
     const id = this.nextId();
     let wire: Uint8Array;
     try {
-      wire = withLengthPrefix(encodeRequest(id, request));
+      wire = withLengthPrefix(encodeRequest(id, request, readAtLeast));
     } catch (e) {
       return Promise.reject(new ConnectionError(`cannot encode the request: ${describe(e)}`, false, e));
     }
@@ -537,15 +542,25 @@ export class Connection {
     }
     this.slots.delete(id);
     clearTimeout(slot.timer);
-    let response: Response;
+    let decoded: DecodedResponse;
     try {
-      response = decodeResponse(frame, slot.key).response;
+      decoded = decodeResponse(frame, slot.key);
     } catch (e) {
       if (e instanceof DecodeError) {
         slot.reject(new ConnectionError(`undecodable response: ${e.message}`, true, e));
       }
       throw e;
     }
+    // Before the promise settles, so a read that follows this answer asks for what it reflected.
+    const onApplied = this.options.onApplied;
+    if (onApplied !== undefined && decoded.applied.length > 0) {
+      try {
+        onApplied(decoded.applied);
+      } catch {
+        // A listener's failure is its own; the answer still reaches its caller.
+      }
+    }
+    const response = decoded.response;
     if (response.type === "Error") {
       slot.reject(new BrokerError(response.code, null));
     } else if (response.type === "Refused") {

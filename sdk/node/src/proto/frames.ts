@@ -2,7 +2,7 @@ import { ApiKey, Flags, isImplemented, type RequestHeader } from "./api-key.js";
 import { DecodeError } from "./error.js";
 import type { ErrorCodeValue } from "./error-code.js";
 import * as m from "./messages.js";
-import { Reader } from "./reader.js";
+import { Reader, type Tag } from "./reader.js";
 import { type Request, readRequest, requestApiKey, writeRequest } from "./request.js";
 import { isErrorResponse, readResponse, type Response, writeResponse } from "./response.js";
 import { Writer } from "./writer.js";
@@ -37,21 +37,81 @@ export function readLength(prefix: Uint8Array): number {
   return len;
 }
 
+// ---- header tags ----
+
+/**
+ * A position in one Raft group's log: the group and the index applied or wanted there. Frame headers carry lists of
+ * them as tag 0: `read_at_least` in a request, `applied` in a response. Both are `u64` bit patterns, as everywhere in
+ * this library: compare indexes with `compareU64`.
+ */
+export interface GroupIndex {
+  readonly group: bigint;
+  readonly index: bigint;
+}
+
+/** The metadata group's id. */
+export const METADATA_GROUP = 1n;
+/** The coordinator group's id. */
+export const COORDINATOR_GROUP = 2n;
+
+/** Header tag 0: `read_at_least` in a request, `applied` in a response. */
+const TAG_HEADER_INDEXES = 0;
+
+/** Writes a header's tags: none for an empty list, else tag 0 with a `u32` count and the entries. */
+function putHeaderTags(w: Writer, indexes: readonly GroupIndex[]): void {
+  if (indexes.length === 0) {
+    w.noTags();
+    return;
+  }
+  const v = new Writer();
+  v.u32(indexes.length);
+  for (const e of indexes) {
+    v.u64(e.group).u64(e.index);
+  }
+  w.tags([{ tag: TAG_HEADER_INDEXES, value: v.toBytes() }]);
+}
+
+/** The indexes of header tag 0; other tags come from newer versions and are skipped. */
+function getHeaderTags(raw: readonly Tag[]): GroupIndex[] {
+  const out: GroupIndex[] = [];
+  for (const t of raw) {
+    if (t.tag !== TAG_HEADER_INDEXES) {
+      continue;
+    }
+    const v = new Reader(t.value);
+    const n = v.u32();
+    // Each entry takes sixteen bytes, so a count beyond what is left is a lie.
+    if (n > Math.floor(v.remaining / 16)) {
+      throw DecodeError.malformed("index count exceeds the field");
+    }
+    for (let i = 0; i < n; i++) {
+      out.push({ group: v.u64(), index: v.u64() });
+    }
+    v.finish();
+  }
+  return out;
+}
+
 // ---- requests ----
 
 export interface DecodedRequest {
   readonly header: RequestHeader;
   readonly request: Request;
+  /** Header tag 0: the indexes the answer must reflect, empty without the tag. */
+  readonly readAtLeast: readonly GroupIndex[];
 }
 
-/** A request frame without its length prefix. */
-export function encodeRequest(correlationId: number, request: Request): Uint8Array {
+/**
+ * A request frame without its length prefix. With `readAtLeast` (header tag 0), the node may serve the read only once
+ * it has applied at least these indexes; an empty list writes no tag, so the frame is the same as without it.
+ */
+export function encodeRequest(correlationId: number, request: Request, readAtLeast: readonly GroupIndex[] = []): Uint8Array {
   const w = new Writer();
   w.u16(requestApiKey(request));
   w.u16(0);
   w.u32(correlationId);
   w.u16(0);
-  w.noTags();
+  putHeaderTags(w, readAtLeast);
   writeRequest(w, request);
   return w.toBytes();
 }
@@ -59,7 +119,9 @@ export function encodeRequest(correlationId: number, request: Request): Uint8Arr
 export function decodeRequest(frame: Uint8Array): DecodedRequest {
   const r = new Reader(frame);
   const header: RequestHeader = { apiKey: r.u16(), apiVersion: r.u16(), correlationId: r.u32(), flags: r.u16() };
-  r.tags();
+  // The tags' content is read after the support check, so a header this library does not speak still gives
+  // UNSUPPORTED and the caller can answer.
+  const rawTags = r.tags();
   if (!isImplemented(header.apiKey, header.apiVersion)) {
     throw new DecodeError(
       "UNSUPPORTED",
@@ -67,9 +129,10 @@ export function decodeRequest(frame: Uint8Array): DecodedRequest {
       header,
     );
   }
+  const readAtLeast = getHeaderTags(rawTags);
   const request = readRequest(header.apiKey, r);
   r.finish();
-  return { header, request };
+  return { header, request, readAtLeast };
 }
 
 // ---- responses ----
@@ -77,14 +140,19 @@ export function decodeRequest(frame: Uint8Array): DecodedRequest {
 export interface DecodedResponse {
   readonly correlationId: number;
   readonly response: Response;
+  /** Header tag 0: the indexes the node had applied when it answered, empty without the tag. */
+  readonly applied: readonly GroupIndex[];
 }
 
-/** A response frame without its length prefix. The ERROR flag is set for `Error` and `Refused`. */
-export function encodeResponse(correlationId: number, response: Response): Uint8Array {
+/**
+ * A response frame without its length prefix. The ERROR flag is set for `Error` and `Refused`. With `applied` (header
+ * tag 0), the indexes the node had applied when it answered; an empty list writes no tag.
+ */
+export function encodeResponse(correlationId: number, response: Response, applied: readonly GroupIndex[] = []): Uint8Array {
   const w = new Writer();
   w.u32(correlationId);
   w.u16(isErrorResponse(response) ? Flags.ERROR : 0);
-  w.noTags();
+  putHeaderTags(w, applied);
   writeResponse(w, response);
   return w.toBytes();
 }
@@ -105,7 +173,7 @@ export function decodeResponse(frame: Uint8Array, apiKey: number): DecodedRespon
   const r = new Reader(frame);
   const correlationId = r.u32();
   const flags = r.u16();
-  r.tags();
+  const applied = getHeaderTags(r.tags());
   if ((flags & Flags.ERROR) !== 0) {
     const code: ErrorCodeValue = r.u16();
     let reason: Uint8Array | null = null;
@@ -117,7 +185,7 @@ export function decodeResponse(frame: Uint8Array, apiKey: number): DecodedRespon
     }
     r.finish();
     if (reason === null) {
-      return { correlationId, response: { type: "Error", code } };
+      return { correlationId, response: { type: "Error", code }, applied };
     }
     let message: string;
     try {
@@ -125,11 +193,11 @@ export function decodeResponse(frame: Uint8Array, apiKey: number): DecodedRespon
     } catch {
       throw DecodeError.malformed("reason is not UTF-8");
     }
-    return { correlationId, response: { type: "Refused", code, message } };
+    return { correlationId, response: { type: "Refused", code, message }, applied };
   }
   const response = readResponse(apiKey, r);
   r.finish();
-  return { correlationId, response };
+  return { correlationId, response, applied };
 }
 
 // ---- pushes ----

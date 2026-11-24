@@ -19,6 +19,8 @@ export interface GroupHost {
   readonly backoffMs: number;
   retrying<T>(attempt: () => Promise<T>, signal?: AbortSignal, mayHaveChanged?: boolean): Promise<T>;
   callCoordinator(key: string, request: Request): Promise<Response>;
+  /** A read of the coordinator group's state: from a voter in the client's zone, else the coordinator. */
+  callCoordinatorRead(key: string, request: Request): Promise<Response>;
   forgetCoordinator(): void;
   streamId(name: string): bigint | undefined;
   streamName(id: bigint): string | undefined;
@@ -459,7 +461,7 @@ export class GroupConsumer implements AsyncIterable<GroupRecord> {
     const req: Request = { type: "OffsetFetch", groupId: this.group, requireStable: true, resources, tenant: this.host.tenant };
     let resp: Extract<Response, { type: "OffsetFetch" }>;
     try {
-      const r = await this.host.callCoordinator(this.group, req);
+      const r = await this.host.callCoordinatorRead(this.group, req);
       if (r.type !== "OffsetFetch") {
         this.host.forgetCoordinator();
         return;
