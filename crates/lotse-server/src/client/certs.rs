@@ -111,10 +111,11 @@ impl Clients {
         &mut self,
         outbox: Arc<Outbox>,
         id: u32,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeCertificatesResponse { error, leader_hint, now_ms: 0, certificates: Vec::new() };
@@ -383,10 +384,11 @@ impl Clients {
         outbox: Arc<Outbox>,
         id: u32,
         principal: &Principal,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeCertificateRequestsResponse { error, leader_hint, now_ms: 0, requests: Vec::new() };

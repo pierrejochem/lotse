@@ -183,6 +183,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             request: produce_request("kept"),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(2, &all, None, |from, to| from == 1 && to == 2).await;
@@ -265,6 +266,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
                 request: idempotent_request("x", 0),
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         }
@@ -382,6 +384,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
                     request: fetch,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 },
                 &view,
                 &mut groups,
@@ -502,6 +505,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
                 request: fetch,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(request, &view, &mut groups).await.unwrap();
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -573,6 +577,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     groups,
@@ -728,6 +733,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     groups,
@@ -824,8 +830,14 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
         let send = async |clients: &mut Clients, groups: &mut Groups, on: &Arc<Outbox>, request: Request| {
             let key = request.api_key();
             let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
-            let req =
-                ClientRequest { outbox: on.clone(), header, request, principal: Principal::Anonymous, mechanism: 0 };
+            let req = ClientRequest {
+                outbox: on.clone(),
+                header,
+                request,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+                read_at_least: Vec::new(),
+            };
             clients.handle(req, &view, groups).await.unwrap();
             // A delivery takes one more commit: its checkout (ADR 0109).
             for _ in 0..5 {
@@ -947,6 +959,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: produce_request("a"),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(6, &all, Some(1), |_, _| true).await;
@@ -961,6 +974,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: ack,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         let near = |f: NodeId, t: NodeId| (f == 1 && (t == 2 || t == 3)) || ((f == 2 || f == 3) && t == 1);
@@ -990,6 +1004,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: sub,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let groups = five.nodes.get_mut(&2).unwrap();
         c2.handle(req, &view, groups).await.unwrap();
@@ -1069,6 +1084,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
                             request,
                             principal: Principal::Anonymous,
                             mechanism: 0,
+                            read_at_least: Vec::new(),
                         },
                         &view,
                         groups,
@@ -1173,6 +1189,7 @@ fn offsets_for_a_released_partition_are_refused() {
                             request,
                             principal: Principal::Anonymous,
                             mechanism: 0,
+                            read_at_least: Vec::new(),
                         },
                         &view,
                         groups,
@@ -1234,6 +1251,7 @@ fn offsets_for_a_released_partition_are_refused() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     &mut groups,
@@ -1310,6 +1328,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             match &drain(&outbox, key).0[..] {
@@ -1373,6 +1392,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 outboxes.push((outbox, key));
@@ -1554,6 +1574,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 outboxes.push((outbox, key));
@@ -1798,6 +1819,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             }),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let last = groups[&G].raft_ref().last_index();
 
@@ -1995,6 +2017,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
                 request: req,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -2068,6 +2091,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
             for _ in 0..3 {
@@ -2206,6 +2230,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 for _ in 0..3 {
@@ -2320,6 +2345,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 for _ in 0..3 {
@@ -2389,6 +2415,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2553,6 +2580,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2660,6 +2688,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2776,6 +2805,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             let answer = outbox.queue.lock().unwrap().drain(..).last().unwrap();
@@ -2830,6 +2860,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2970,6 +3001,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -3123,6 +3155,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
                 request: produce_request(v),
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
         }
@@ -3149,6 +3182,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
             request: Request::Ack(lotse_proto::AckRequest::plain(7, vec![(1, 2)])),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         clients.handle(ack, &view, &mut groups).await.unwrap();
         for _ in 0..3 {
@@ -3179,8 +3213,14 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
         let letters = Arc::new(Outbox::default());
         for (key, request) in requests {
             let outbox = if key == ApiKey::DEAD_LETTER { letters.clone() } else { outbox.clone() };
-            let req =
-                ClientRequest { outbox, header: header(key), request, principal: Principal::Anonymous, mechanism: 0 };
+            let req = ClientRequest {
+                outbox,
+                header: header(key),
+                request,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+                read_at_least: Vec::new(),
+            };
             clients.handle(req, &view, &mut groups).await.unwrap();
         }
         for _ in 0..3 {
@@ -3243,6 +3283,7 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             request,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let produced = |outbox: &Outbox| -> Vec<ErrorCode> {
             drain(outbox, ApiKey::PRODUCE)
@@ -3465,6 +3506,7 @@ fn a_fetch_without_zone_gets_no_preferred_replica() {
                 request: fetch,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(request, &view, &mut groups).await.unwrap();
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -3477,5 +3519,286 @@ fn a_fetch_without_zone_gets_no_preferred_replica() {
         assert_eq!((p.error, p.preferred_replica), (ErrorCode::NONE, Some(3)), "node 2 is not current");
         assert_eq!(ask(Some("c")).await.preferred_replica, Some(4));
         assert_eq!(ask(Some("a")).await.preferred_replica, None, "the leader is in the zone");
+    });
+}
+
+/// Zone reads (the zone reads design, section 2): five voters of the
+/// metadata group `G`, node 1 leading, a queue created through it and
+/// applied everywhere.
+async fn five_with_a_queue(rt: &SimRuntime) -> (Five, u64) {
+    let mut five = Five::new(rt).await;
+    let all = [1, 2, 3, 4, 5];
+    five.campaign(1);
+    five.run(6, &all, Some(1), |_, _| true).await;
+    assert_eq!(five.get(1).role(), Role::Leader);
+    let lagging = BTreeSet::new();
+    let view = zone_view(rt, Some(G), None, &lagging, &OPEN);
+    let mut clients = Clients::default();
+    let request = Request::CreateQueue(lotse_proto::CreateQueueRequest {
+        tenant: crate::DEFAULT_TENANT.into(),
+        name: "work".into(),
+        priority_levels: 1,
+        single_active: false,
+        dlq: None,
+        replication: 1,
+        configs: vec![("max.deliveries".into(), "3".into())],
+    });
+    let outbox = Arc::new(Outbox::default());
+    let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest {
+        outbox: outbox.clone(),
+        header,
+        request,
+        principal: Principal::Anonymous,
+        mechanism: 0,
+        read_at_least: Vec::new(),
+    };
+    clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+    five.run(8, &all, Some(1), |_, _| true).await;
+    let id = five.nodes[&1][&G].metadata().id_of("work").expect("created");
+    for n in all {
+        assert_eq!(five.nodes[&n][&G].applied(), five.nodes[&1][&G].applied(), "node {n} applied it all");
+    }
+    (five, id)
+}
+
+/// A view of a node in the zone reads tests: `metadata` and `coordinator`
+/// the groups it hosts, `lagging` its lagging groups.
+fn zone_view<'a>(
+    rt: &SimRuntime,
+    metadata: Option<GroupId>,
+    coordinator: Option<GroupId>,
+    lagging: &'a BTreeSet<GroupId>,
+    access: &'a crate::access::Access,
+) -> ClusterView<'a> {
+    static ADDRS: BTreeMap<NodeId, String> = BTreeMap::new();
+    static VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
+    ClusterView {
+        streams: &[],
+        queues: &[],
+        exchanges: &[],
+        deleted: &NOTHING_DELETED,
+        group_session: Duration::from_secs(45),
+        group_heartbeat: Duration::from_secs(5),
+        admin: AdminView { metadata, nodes: &[1], configured_groups: 1, voters: &VOTERS, ..AdminView::default() },
+        client_addrs: &ADDRS,
+        zones: &NO_ZONES,
+        coordinator,
+        node: NodeView::default(),
+        now: rt.now(),
+        unix_ms: 0,
+        access,
+        lagging,
+        current_voters: &NO_CURRENT,
+    }
+}
+
+/// Asks node `n` of `five` once, with `read_at_least`, as `principal`.
+async fn zone_ask(
+    five: &mut Five,
+    n: NodeId,
+    view: &ClusterView<'_>,
+    request: Request,
+    read_at_least: Vec<lotse_proto::GroupIndex>,
+    principal: Principal,
+) -> Response {
+    let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+    let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest { outbox: outbox.clone(), header, request, principal, mechanism: 0, read_at_least };
+    let mut clients = Clients::default();
+    clients.handle(req, view, five.nodes.get_mut(&n).unwrap()).await.unwrap();
+    match &drain(&outbox, key).0[..] {
+        [r] => r.clone(),
+        other => panic!("expected one answer, got {other:?}"),
+    }
+}
+
+fn describe_configs(id: u64) -> Request {
+    Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: vec![id] })
+}
+
+fn at(group: GroupId, index: u64) -> Vec<lotse_proto::GroupIndex> {
+    vec![lotse_proto::GroupIndex { group, index }]
+}
+
+#[test]
+fn a_follower_serves_a_read_at_or_below_its_applied_index() {
+    Sim::new(21).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let leader = zone_ask(&mut five, 1, &view, describe_configs(id), Vec::new(), Principal::Anonymous).await;
+        for index in [applied, applied - 1] {
+            let follower =
+                zone_ask(&mut five, 2, &view, describe_configs(id), at(G, index), Principal::Anonymous).await;
+            let Response::DescribeConfigs(d) = &follower else { panic!("{follower:?}") };
+            assert_eq!(d.error, ErrorCode::NONE);
+            assert!(d.resources[0].configs.iter().any(|c| c.key == "max.deliveries" && c.value == "3"), "{d:?}");
+            assert_eq!(follower, leader, "the follower answers what the leader does from the same state");
+        }
+    });
+}
+
+#[test]
+fn a_follower_refuses_a_read_above_its_applied_index() {
+    Sim::new(22).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G, applied + 1), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NOT_LEADER);
+        assert_eq!(d.leader_hint.map(|h| h.leader), Some(1), "it names the leader");
+        assert!(d.resources.is_empty());
+    });
+}
+
+#[test]
+fn a_lagging_follower_refuses_a_read() {
+    Sim::new(23).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::from([G]);
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!((d.error, d.leader_hint.map(|h| h.leader)), (ErrorCode::NOT_LEADER, Some(1)));
+        // The leader is never lagging: it serves what it has.
+        let r = zone_ask(&mut five, 1, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NONE);
+    });
+}
+
+#[test]
+fn a_read_at_zero_is_served_by_a_current_follower() {
+    Sim::new(24).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 3, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NONE);
+        // Every zone read of the metadata group is served the same way.
+        let reads = [
+            Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least: None }),
+            Request::DescribeUsers(lotse_proto::DescribeUsersRequest),
+            Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: None }),
+            Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest),
+            Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest),
+            Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest),
+            Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+            Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+        ];
+        let applied = five.nodes[&3][&G].applied();
+        for read in reads {
+            let served = zone_ask(&mut five, 3, &view, read.clone(), at(G, 0), Principal::Anonymous).await;
+            assert_eq!(error_of(&served), (ErrorCode::NONE, None), "{read:?}");
+            let refused = zone_ask(&mut five, 3, &view, read.clone(), at(G, applied + 1), Principal::Anonymous).await;
+            assert_eq!(error_of(&refused), (ErrorCode::NOT_LEADER, Some(1)), "{read:?}");
+        }
+    });
+}
+
+/// The error and leader hint of an admin read's answer.
+fn error_of(r: &Response) -> (ErrorCode, Option<u32>) {
+    let (error, hint) = match r {
+        Response::DescribeNodes(d) => (d.error, d.leader_hint),
+        Response::DescribeUsers(d) => (d.error, d.leader_hint),
+        Response::DescribeTokens(d) => (d.error, d.leader_hint),
+        Response::DescribeCertificates(d) => (d.error, d.leader_hint),
+        Response::DescribeCertificateRequests(d) => (d.error, d.leader_hint),
+        Response::DescribeUpgrade(d) => (d.error, d.leader_hint),
+        Response::DescribeTenants(d) => (d.error, d.leader_hint),
+        Response::DescribeRoleBindings(d) => (d.error, d.leader_hint),
+        Response::DescribeConfigs(d) => (d.error, d.leader_hint),
+        other => panic!("{other:?}"),
+    };
+    (error, hint.map(|h| h.leader))
+}
+
+#[test]
+fn a_read_without_the_tag_still_needs_the_leader() {
+    Sim::new(25).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
+        // A tag for another group does not count for this one.
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G + 1, 0), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
+        // Tenants and role bindings answer from any node without the tag, as before.
+        for read in [
+            Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+            Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+        ] {
+            let r = zone_ask(&mut five, 2, &view, read, Vec::new(), Principal::Anonymous).await;
+            assert_eq!(error_of(&r), (ErrorCode::NONE, None));
+        }
+    });
+}
+
+/// A follower behind the client's index says NOT_LEADER, not UNAUTHORIZED:
+/// the role bindings it would judge by may be older than what the client
+/// saw, and the client then asks the leader.
+#[test]
+fn a_follower_behind_refuses_before_it_judges_access() {
+    Sim::new(26).run(|rt| async move {
+        let (mut five, _) = five_with_a_queue(&rt).await;
+        let auth = crate::AuthConfig { required: true, ..crate::AuthConfig::none() };
+        let access = crate::access::Access::build(&auth, &[], &crate::metadata::MetadataState::default());
+        let user = Principal::User { name: "u".into(), groups: Vec::new() };
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &access);
+        let read = Request::DescribeUsers(lotse_proto::DescribeUsersRequest);
+        let applied = five.nodes[&2][&G].applied();
+        let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied + 1), user.clone()).await;
+        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
+        // Caught up, it judges: this user may not list users.
+        let r = zone_ask(&mut five, 2, &view, read, at(G, applied), user).await;
+        assert!(matches!(r, Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }), "{r:?}");
+    });
+}
+
+#[test]
+fn offset_fetch_on_a_coordinator_voter_serves_its_applied_offsets() {
+    Sim::new(27).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let applied = five.nodes[&3][&G].applied();
+        assert_eq!(applied, five.nodes[&1][&G].applied());
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let leader = zone_ask(&mut five, 1, &view, fetch.clone(), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(part(&leader), (ErrorCode::NONE, 9));
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), at(G, applied), Principal::Anonymous).await;
+        assert_eq!(r, leader, "the voter answers what the leader does");
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), at(G, applied + 1), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER);
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "without the tag only the leader serves");
+        let lagging = BTreeSet::from([G]);
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let r = zone_ask(&mut five, 3, &view, fetch, at(G, 0), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "a lagging voter does not serve");
     });
 }

@@ -394,10 +394,14 @@ impl Clients {
         outbox: Arc<Outbox>,
         id: u32,
         req: OffsetFetchRequest,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let coordinator = Self::coordinator(view, groups);
+        let coordinator = match (view.coordinator, at_least) {
+            (Some(g), Some(_)) => Self::read_replica(view, groups, g, at_least),
+            _ => Self::coordinator(view, groups).map(|(_, replica)| replica),
+        };
         let resources = req
             .resources
             .iter()
@@ -415,7 +419,7 @@ impl Clients {
                             metadata: None,
                         };
                         let state = match &coordinator {
-                            Ok((_, replica)) => replica.coordinator(),
+                            Ok(replica) => replica.coordinator(),
                             Err((code, _)) => {
                                 out.error = *code;
                                 return out;

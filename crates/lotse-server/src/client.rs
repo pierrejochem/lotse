@@ -138,6 +138,9 @@ pub(crate) struct ClientRequest {
     principal: Principal,
     /// How its session signed in, [`lotse_proto::session_mechanism`].
     mechanism: u8,
+    /// The request header's `read_at_least`: for each group, the highest
+    /// index the client saw applied. Only zone reads look at it.
+    read_at_least: Vec<lotse_proto::GroupIndex>,
 }
 
 /// Reads requests from one connection and writes its responses. Requests
@@ -205,24 +208,25 @@ pub(crate) async fn serve<R: Runtime>(
             noted = rt.now();
             session.note_cert(u64::try_from(rt.unix_time().as_millis()).unwrap_or(u64::MAX));
         }
-        match lotse_proto::decode_request(frame) {
-            Ok((header, Request::SaslHandshake(req))) => {
+        match lotse_proto::decode_request_tagged(frame) {
+            Ok((header, _, Request::SaslHandshake(req))) => {
                 outbox.push(header.correlation_id, &Response::SaslHandshake(session.handshake(&req)));
             }
-            Ok((header, Request::SaslAuthenticate(req))) => {
+            Ok((header, _, Request::SaslAuthenticate(req))) => {
                 let Some(step) = race(session.authenticate(&rt, &req), &[&stop]).await else { break };
                 outbox.push(header.correlation_id, &Response::SaslAuthenticate(step.response));
                 if step.close {
                     break;
                 }
             }
-            Ok((header, request)) => match session.principal(rt.now()) {
+            Ok((header, tags, request)) => match session.principal(rt.now()) {
                 Some(p) => commands(ClientRequest {
                     outbox: outbox.clone(),
                     header,
                     request,
                     principal: p.clone(),
                     mechanism: session.mechanism(),
+                    read_at_least: tags.read_at_least,
                 }),
                 // Which versions a node speaks is no secret: a client asks
                 // before it knows how to authenticate.
@@ -232,6 +236,7 @@ pub(crate) async fn serve<R: Runtime>(
                     request,
                     principal: Principal::Anonymous,
                     mechanism: lotse_proto::session_mechanism::NONE,
+                    read_at_least: Vec::new(),
                 }),
                 None => outbox.push(header.correlation_id, &Response::Error(ErrorCode::UNAUTHORIZED)),
             },
@@ -424,6 +429,26 @@ const GONE: &str = "the resource was deleted";
 /// What it hears when the group moved off this node (ADR 0048).
 const MOVED: &str = "outcome unknown: the partition moved to other nodes";
 
+/// The group a zone read is answered from (the zone reads design, section
+/// 2): the coordinator group for `OffsetFetch`, the metadata group for the
+/// admin reads; `None` for any other request, which ignores
+/// `read_at_least`.
+fn zone_read_group(request: &Request, view: &ClusterView<'_>) -> Option<GroupId> {
+    match request {
+        Request::OffsetFetch(_) => view.coordinator,
+        Request::DescribeConfigs(_)
+        | Request::DescribeNodes(_)
+        | Request::DescribeUsers(_)
+        | Request::DescribeTokens(_)
+        | Request::DescribeCertificates(_)
+        | Request::DescribeCertificateRequests(_)
+        | Request::DescribeUpgrade(_)
+        | Request::DescribeTenants(_)
+        | Request::DescribeRoleBindings(_) => view.admin.metadata,
+        _ => None,
+    }
+}
+
 fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
     raft.leader().map(|l| LeaderHint { leader: l as u32, term: raft.term() })
 }
@@ -527,9 +552,25 @@ impl Clients {
         view: &ClusterView<'_>,
         groups: &mut BTreeMap<GroupId, Replica<R, S>>,
     ) -> Result<(), Error> {
-        let ClientRequest { outbox, header, mut request, principal, mechanism } = req;
+        let ClientRequest { outbox, header, mut request, principal, mechanism, read_at_least } = req;
         let id = header.correlation_id;
-        if let Err(why) = view.access.check(&principal, &request) {
+        // A zone read names the index of its group the client saw; any
+        // other request ignores the tag.
+        let read_group = zone_read_group(&request, view);
+        let at_least = read_group.and_then(|g| read_at_least.iter().filter(|e| e.group == g).map(|e| e.index).max());
+        // A node that may not serve a metadata read refuses it with
+        // NOT_LEADER, so the client asks the leader. Its role bindings may
+        // be older than what the client saw, so judging access by them
+        // first could refuse with UNAUTHORIZED what the leader allows. The
+        // handler judges the same state the same way and refuses, so
+        // nothing is answered without the check.
+        let behind = match (read_group, at_least) {
+            (Some(g), Some(n)) if view.admin.metadata == Some(g) => {
+                Self::read_replica(view, groups, g, Some(n)).is_err()
+            }
+            _ => false,
+        };
+        if !behind && let Err(why) = view.access.check(&principal, &request) {
             outbox.push(id, &Response::Refused { code: ErrorCode::UNAUTHORIZED, message: why });
             return Ok(());
         }
@@ -568,7 +609,7 @@ impl Clients {
             Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, &principal, view, groups),
             Request::Publish(req) => self.publish(outbox, id, req, &principal, view),
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
-            Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, view, groups),
+            Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, at_least, view, groups),
             Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),
             Request::CreateStream(req) => self.create_stream(outbox, id, req, view, groups),
             Request::CreateQueue(req) => self.create_queue(outbox, id, req, view, groups),
@@ -577,41 +618,41 @@ impl Clients {
             Request::Unbind(req) => self.bind(outbox, id, req, true, view, groups),
             Request::DeleteResource(req) => self.delete_resource(outbox, id, req, view, groups),
             Request::AlterConfigs(req) => self.alter_configs(outbox, id, req, view, groups),
-            Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, view, groups),
+            Request::DescribeConfigs(req) => self.describe_configs(outbox, id, req, at_least, view, groups),
             Request::DescribeMetrics(_) => self.describe_metrics(&outbox, id, view, groups, &principal),
             Request::AlterUser(req) => self.alter_user(outbox, id, req, view, groups),
-            Request::DescribeUsers(_) => self.describe_users(outbox, id, view, groups),
+            Request::DescribeUsers(_) => self.describe_users(outbox, id, at_least, view, groups),
             Request::CreateTenant(req) => self.create_tenant(outbox, id, req, view, groups),
             Request::DeleteTenant(req) => self.delete_tenant(outbox, id, req, view, groups),
-            Request::DescribeTenants(_) => self.describe_tenants(&outbox, id, view, &principal),
+            Request::DescribeTenants(_) => self.describe_tenants(&outbox, id, at_least, view, groups, &principal),
             Request::AlterRoleBindings(req) => self.alter_role_bindings(outbox, id, req, view, groups),
-            Request::DescribeRoleBindings(_) => self.describe_role_bindings(&outbox, id, view),
+            Request::DescribeRoleBindings(_) => self.describe_role_bindings(&outbox, id, at_least, view, groups),
             Request::WhoAmI(_) => self.who_am_i(&outbox, id, view, &principal),
             Request::AddNode(req) => self.add_node(outbox, id, req, view, groups),
             Request::MoveLeader(req) => self.move_leader(outbox, id, req, view, groups),
             Request::ReassignPartition(req) => self.reassign_partition(outbox, id, req, view, groups),
             Request::RevokeSessions(req) => self.revoke_sessions(outbox, id, req, view, groups),
             Request::RevokeCertificate(req) => self.revoke_certificate(outbox, id, req, view, groups),
-            Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, view, groups),
+            Request::DescribeCertificates(_) => self.describe_certificates(outbox, id, at_least, view, groups),
             Request::DescribeSessions(_) => self.describe_sessions(&outbox, id, view, &principal),
             Request::RecordCertificates(req) => self.record_certificates(outbox, id, req, view, groups),
             Request::RequestCertificate(req) => self.request_certificate(outbox, id, req, &principal, view, groups),
             Request::DescribeCertificateRequests(_) => {
-                self.describe_certificate_requests(outbox, id, &principal, view, groups)
+                self.describe_certificate_requests(outbox, id, &principal, at_least, view, groups)
             }
             Request::RecordCertificate(req) => self.record_certificate(outbox, id, req, view, groups),
             Request::RenewCertificate(req) => self.renew_certificate(outbox, id, req, &principal, view, groups),
             Request::CreatePartitions(req) => self.create_partitions(outbox, id, req, view, groups),
             Request::RemoveNode(req) => self.remove_node(outbox, id, req, view, groups),
-            Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, view, groups),
+            Request::DescribeNodes(req) => self.describe_nodes(&outbox, id, req, at_least, view, groups),
             Request::SettleVoters(req) => self.settle_voters(outbox, id, req, view, groups),
             Request::ReportDisk(req) => self.report_disk(outbox, id, req, &principal, view, groups),
             Request::Turn(req) => self.turn(outbox, id, req, &principal, view, groups),
             Request::ReportVersion(req) => self.report_version(outbox, id, req, &principal, view, groups),
             Request::AlterUpgrade(req) => self.alter_upgrade(outbox, id, req, view, groups),
-            Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, view, groups),
+            Request::DescribeUpgrade(_) => self.describe_upgrade(&outbox, id, at_least, view, groups),
             Request::CreateToken(req) => self.create_token(outbox, id, req, (&principal, mechanism), view, groups),
-            Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, view, groups),
+            Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, at_least, view, groups),
             Request::RevokeToken(req) => self.revoke_token(outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
