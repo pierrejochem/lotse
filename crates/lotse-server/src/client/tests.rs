@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 /// No follower lags in these tests (ADR 0116).
 static NOT_LAGGING: BTreeSet<GroupId> = BTreeSet::new();
+/// Nor is any voter current, so no leader names one.
+static NO_CURRENT: BTreeMap<GroupId, BTreeSet<NodeId>> = BTreeMap::new();
 
 use bytes::Bytes;
 use lotse_log::LogConfig;
@@ -170,6 +172,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
@@ -249,6 +252,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
@@ -348,6 +352,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
@@ -468,6 +473,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         let mut ask = async |offset: u64, isolation: u8, allow_follower: bool| {
@@ -555,6 +561,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -635,6 +642,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
@@ -706,6 +714,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -807,6 +816,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         // One connection for the consumers, another for the watcher.
         let (outbox, watcher) = (Arc::new(Outbox::default()), Arc::new(Outbox::default()));
@@ -924,6 +934,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
@@ -1030,6 +1041,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1133,6 +1145,7 @@ fn offsets_for_a_released_partition_are_refused() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1282,6 +1295,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         for (applied_at_least, expected) in
@@ -1347,6 +1361,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1527,6 +1542,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1764,6 +1780,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1958,6 +1975,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         let outbox = Arc::new(Outbox::default());
@@ -2040,6 +2058,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 unix_ms: 0,
                 access,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -2108,6 +2127,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
             unix_ms: 0,
             access: &after,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         for _ in 0..3 {
             clients.after_round(&view, &mut groups).await.unwrap();
@@ -2160,6 +2180,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2278,6 +2299,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     unix_ms: 0,
                     access: &OPEN,
                     lagging: &NOT_LAGGING,
+                    current_voters: &NO_CURRENT,
                 };
                 let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
                     tenant: lotse_proto::DEFAULT_TENANT.into(),
@@ -2355,6 +2377,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2498,6 +2521,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2624,6 +2648,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2728,6 +2753,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2792,6 +2818,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2931,6 +2958,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3082,6 +3110,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3203,6 +3232,7 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3276,5 +3306,163 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             clients.after_round(&view(&none), &mut groups).await.unwrap();
         }
         assert_eq!(produced(&outbox), [ErrorCode::NONE]);
+    });
+}
+
+/// Zones of five nodes: the leader (1) in `a`, nodes 2 and 3 in `b`, node 4
+/// in `c`, node 5 in none.
+fn five_zones() -> BTreeMap<NodeId, String> {
+    BTreeMap::from([(1, "a".into()), (2, "b".into()), (3, "b".into()), (4, "c".into())])
+}
+
+/// A leader points a reader in another zone to the lowest current voter
+/// there (the design's section 1).
+#[test]
+fn a_leader_names_a_current_voter_in_the_zone() {
+    let zones = five_zones();
+    let voters = [1, 2, 3, 4, 5];
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |_| true), Some(2));
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| n == 3), Some(3), "only node 3 is current");
+    assert_eq!(preferred_replica("c", 1, &voters, &zones, |_| true), Some(4));
+}
+
+/// A voter the leader has not heard lately, or that has not reached the
+/// commit index within `follower_max_lag`, is not named (ADR 0116, from the
+/// leader's side).
+#[test]
+fn a_leader_names_no_lagging_voter() {
+    let zones = five_zones();
+    let voters = [1, 2, 3, 4, 5];
+    let lag = Duration::from_secs(10);
+    let t0 = lotse_rt::Instant::from_nanos(1_000_000_000);
+    let progress = |matched: u64, heard_recently: bool| lotse_raft::VoterProgress { matched, heard_recently };
+    let mut caught_up = BTreeMap::new();
+    // Both hold everything at first; node 3 is not heard.
+    let current =
+        crate::node::current_voters(5, [(2, progress(5, true)), (3, progress(5, false))], &mut caught_up, t0, lag);
+    assert_eq!(current, BTreeSet::from([2]));
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(2));
+    // The commit index moves on and node 2 does not follow: behind for
+    // exactly the limit it is still current, longer it is not.
+    let at = |ms| t0 + Duration::from_millis(ms);
+    let current = crate::node::current_voters(
+        9,
+        [(2, progress(5, true)), (3, progress(9, false))],
+        &mut caught_up,
+        at(10_000),
+        lag,
+    );
+    assert_eq!(current, BTreeSet::from([2]));
+    let current = crate::node::current_voters(
+        9,
+        [(2, progress(5, true)), (3, progress(9, false))],
+        &mut caught_up,
+        at(10_001),
+        lag,
+    );
+    assert!(current.is_empty(), "{current:?}");
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), None);
+    // Node 3 heard again, holding everything: current at once.
+    let current = crate::node::current_voters(
+        9,
+        [(2, progress(5, true)), (3, progress(9, true))],
+        &mut caught_up,
+        at(10_002),
+        lag,
+    );
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(3));
+}
+
+/// Only a voter in the reader's zone is named; a node in another zone or in
+/// none is not, and neither is a learner.
+#[test]
+fn a_leader_names_no_voter_outside_the_zone() {
+    let zones = five_zones();
+    assert_eq!(preferred_replica("d", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "no node in the zone");
+    assert_eq!(preferred_replica("c", 1, &[1, 2, 3, 5], &zones, |_| true), None, "node 4 is no voter");
+    assert_eq!(preferred_replica("", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "node 5 has no zone");
+}
+
+/// A leader in the reader's zone is where the reader should be: it names
+/// no other replica, not even a current one in the same zone.
+#[test]
+fn a_leader_in_the_zone_names_no_other_replica() {
+    let zones = five_zones();
+    assert_eq!(preferred_replica("b", 2, &[1, 2, 3, 4, 5], &zones, |_| true), None);
+    assert_eq!(preferred_replica("a", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None);
+}
+
+/// Through the node's fetch path: a leader names a preferred replica only
+/// to a fetch that names a zone, and only one the node judged current.
+#[test]
+fn a_fetch_without_zone_gets_no_preferred_replica() {
+    Sim::new(4).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+        let mut groups = five.nodes.remove(&1).unwrap();
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let zones = five_zones();
+        let current = BTreeMap::from([(G, BTreeSet::from([3, 4]))]);
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &zones,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+            current_voters: &current,
+        };
+        let mut clients = Clients::default();
+        let mut ask = async |zone: Option<&str>| {
+            let outbox = Arc::new(Outbox::default());
+            let fetch = Request::Fetch(lotse_proto::FetchRequest {
+                max_wait_ms: 0,
+                min_bytes: 1,
+                max_bytes: 1 << 20,
+                isolation: lotse_proto::isolation::COMMITTED,
+                resources: vec![lotse_proto::FetchResource {
+                    resource_id: 7,
+                    partitions: vec![lotse_proto::FetchPartition {
+                        partition: 0,
+                        fetch_offset: 0,
+                        leader_term: 0,
+                        max_bytes: 1 << 20,
+                    }],
+                }],
+                allow_follower: false,
+                zone: zone.map(String::from),
+            });
+            let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
+            let request = ClientRequest {
+                outbox: outbox.clone(),
+                header,
+                request: fetch,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+            };
+            clients.handle(request, &view, &mut groups).await.unwrap();
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
+            let Response::Fetch(f) = lotse_proto::decode_response(frame, ApiKey::FETCH).unwrap().1 else { panic!() };
+            f.resources[0].partitions[0].clone()
+        };
+        let p = ask(None).await;
+        assert_eq!((p.error, p.preferred_replica), (ErrorCode::NONE, None));
+        let p = ask(Some("b")).await;
+        assert_eq!((p.error, p.preferred_replica), (ErrorCode::NONE, Some(3)), "node 2 is not current");
+        assert_eq!(ask(Some("c")).await.preferred_replica, Some(4));
+        assert_eq!(ask(Some("a")).await.preferred_replica, None, "the leader is in the zone");
     });
 }

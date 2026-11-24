@@ -351,6 +351,10 @@ pub(crate) struct ClusterView<'a> {
     /// has not heard its leader lately, or not caught up with what the
     /// leader said was committed within `follower_max_lag` (ADR 0116).
     pub(crate) lagging: &'a BTreeSet<GroupId>,
+    /// For groups this node leads: the voters it heard lately that caught
+    /// up within `follower_max_lag`, which it may name to a reader in their
+    /// zone. A group with none is absent.
+    pub(crate) current_voters: &'a BTreeMap<GroupId, BTreeSet<NodeId>>,
 }
 
 impl ClusterView<'_> {
@@ -422,6 +426,24 @@ const MOVED: &str = "outcome unknown: the partition moved to other nodes";
 
 fn hint(raft: &RaftGroup) -> Option<LeaderHint> {
     raft.leader().map(|l| LeaderHint { leader: l as u32, term: raft.term() })
+}
+
+/// The replica a leader names to a reader in `zone` (the zone reads
+/// design, section 1): the lowest-id voter in that zone that is not the
+/// leader and is `current`. None when the leader is in the zone itself,
+/// since the reader is where it should be.
+pub(crate) fn preferred_replica(
+    zone: &str,
+    leader: NodeId,
+    voters: &[NodeId],
+    zones: &BTreeMap<NodeId, String>,
+    current: impl Fn(NodeId) -> bool,
+) -> Option<NodeId> {
+    let in_zone = |n: &NodeId| zones.get(n).is_some_and(|z| z == zone);
+    if zone.is_empty() || in_zone(&leader) {
+        return None;
+    }
+    voters.iter().copied().filter(|v| *v != leader && in_zone(v) && current(*v)).min()
 }
 
 /// Requests in flight.
@@ -1129,6 +1151,14 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                                 .collect();
                         }
                         out.last_stable_offset = lso;
+                    }
+                    if leads && let Some(zone) = &req.zone {
+                        let voters: Vec<NodeId> = raft.membership().voters.iter().copied().collect();
+                        let current = group.and_then(|g| view.current_voters.get(&g));
+                        out.preferred_replica = preferred_replica(zone, raft.id(), &voters, view.zones, |n| {
+                            current.is_some_and(|c| c.contains(&n))
+                        })
+                        .map(|n| n as u32);
                     }
                     (out.high_watermark, out.log_start_offset) = (hw, start);
                 }

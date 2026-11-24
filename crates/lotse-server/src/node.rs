@@ -240,6 +240,35 @@ fn follower_current(
     hears_leader && caught_up_at.is_some_and(|t| now - t <= max_lag)
 }
 
+/// The same rule seen from a leader (the zone reads design, section 1):
+/// records in `caught_up` when each voter's match index last reached the
+/// leader's `commit`, forgets the members `progress` no longer names, and
+/// returns the voters it heard within an election timeout that caught up
+/// within `max_lag`. A leader names only those to a reader in their zone.
+pub(crate) fn current_voters(
+    commit: u64,
+    progress: impl IntoIterator<Item = (NodeId, lotse_raft::VoterProgress)>,
+    caught_up: &mut BTreeMap<NodeId, lotse_rt::Instant>,
+    now: lotse_rt::Instant,
+    max_lag: Duration,
+) -> BTreeSet<NodeId> {
+    let mut named = BTreeSet::new();
+    let mut current = BTreeSet::new();
+    for (id, p) in progress {
+        named.insert(id);
+        // The match index only rises with the voter's answers, so reaching
+        // the commit index is evidence it held everything committed then.
+        if p.matched >= commit {
+            caught_up.insert(id, now);
+        }
+        if follower_current(p.heard_recently, caught_up.get(&id).copied(), now, max_lag) {
+            current.insert(id);
+        }
+    }
+    caught_up.retain(|id, _| named.contains(id));
+    current
+}
+
 /// How often a leaving node asks a group's next voter to take over: a
 /// transfer whose target did not campaign is given up after an election
 /// timeout.
@@ -1261,6 +1290,11 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // (ADR 0116).
     let mut caught_up: BTreeMap<GroupId, lotse_rt::Instant> = BTreeMap::new();
     let mut lagging: BTreeSet<GroupId> = BTreeSet::new();
+    // For the groups this node leads: in which term, when each voter last
+    // reached the commit index, and the voters current now, which a leader
+    // names to a reader in their zone.
+    let mut voters_caught_up: BTreeMap<GroupId, (u64, BTreeMap<NodeId, lotse_rt::Instant>)> = BTreeMap::new();
+    let mut current: BTreeMap<GroupId, BTreeSet<NodeId>> = BTreeMap::new();
     let mut leave_asked: BTreeMap<GroupId, (lotse_rt::Instant, usize)> = BTreeMap::new();
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth, &configured_voters).await? {
@@ -1338,9 +1372,27 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         let now = rt.now();
         caught_up.retain(|g, _| groups.contains_key(g));
         lagging.clear();
+        // A group this node no longer leads, or leads in another term (lost
+        // and won again between two rounds), starts afresh: its voters are
+        // current only once they catch up with this leadership.
+        voters_caught_up.retain(|g, (term, _)| {
+            groups.get(g).is_some_and(|r| r.raft_ref().role() == Role::Leader && r.raft_ref().term() == *term)
+        });
+        current.clear();
         for (&g, replica) in groups.iter() {
             let raft = replica.raft_ref();
             if raft.role() == Role::Leader {
+                let progress = raft
+                    .membership()
+                    .voters
+                    .iter()
+                    .filter(|&&v| v != cfg.id)
+                    .filter_map(|&v| raft.voter_progress(v).map(|p| (v, p)));
+                let (_, at) = voters_caught_up.entry(g).or_insert_with(|| (raft.term(), BTreeMap::new()));
+                let now_current = current_voters(raft.commit(), progress, at, now, cfg.follower_max_lag);
+                if !now_current.is_empty() {
+                    current.insert(g, now_current);
+                }
                 continue;
             }
             if raft.hears_leader() && replica.applied() >= raft.leader_commit() {
@@ -1415,6 +1467,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             unix_ms: rt.unix_time().as_millis() as u64,
             access: &known.access,
             lagging: &lagging,
+            current_voters: &current,
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {
