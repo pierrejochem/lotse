@@ -86,7 +86,8 @@ mcp    speaks the Model Context Protocol on stdin and stdout, for an AI
        It reaches the nodes the cluster file names, or those --bootstrap
        names, over TLS with the CA of [tls] ca or --ca; plain TCP only with
        --plaintext-on-loopback, to a loopback address. Logs go to stderr
-       (LOTSE_LOG, default info). With --listen it speaks MCP over
+       (LOTSE_LOG, default info). --zone <zone> (or LOTSE_ZONE) reads
+       offsets and admin state from replicas in that zone. With --listen it speaks MCP over
        Streamable HTTP instead, at POST /mcp, for many agents: it holds no
        credential of its own (giving it one is refused) and every request
        signs in with its own Authorization header, Bearer <access token>
@@ -807,6 +808,11 @@ enum McpMode {
     Http(lotse_node::mcp::http::Listen),
 }
 
+/// The zone `lotse mcp` reads in: `--zone`, else `LOTSE_ZONE`.
+fn mcp_zone(flag: Option<String>, env: Option<String>) -> Option<String> {
+    flag.or(env)
+}
+
 /// Reads the flags and the environment of `lotse mcp`; an error here is a
 /// usage error, exit code 2.
 fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
@@ -850,6 +856,7 @@ fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
                 bootstrap: bootstrap.clone(),
                 ca: a.ca.clone(),
                 plaintext_on_loopback: a.plaintext_on_loopback,
+                zone: mcp_zone(a.zone.clone(), env("LOTSE_ZONE")),
             }
         }
         None => {
@@ -858,6 +865,7 @@ fn mcp_setup(a: &Args) -> Result<McpSetup, String> {
                 bootstrap: file.nodes.iter().map(|n| n.client.clone()).collect(),
                 ca: a.ca.clone().or_else(|| file.tls.ca.as_ref().map(PathBuf::from)),
                 plaintext_on_loopback: a.plaintext_on_loopback,
+                zone: mcp_zone(a.zone.clone(), env("LOTSE_ZONE")),
             }
         }
     };
@@ -900,7 +908,14 @@ fn mcp(setup: McpSetup) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::node_id;
+    use super::{mcp_zone, node_id};
+
+    #[test]
+    fn the_zone_of_mcp_is_the_flag_then_lotse_zone() {
+        assert_eq!(mcp_zone(Some("a".into()), Some("b".into())).as_deref(), Some("a"));
+        assert_eq!(mcp_zone(None, Some("b".into())).as_deref(), Some("b"));
+        assert_eq!(mcp_zone(None, None), None);
+    }
 
     #[test]
     fn the_flag_then_lotse_node_then_the_pod_index_name_the_node() {

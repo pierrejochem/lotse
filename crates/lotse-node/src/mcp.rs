@@ -120,6 +120,9 @@ pub struct Reach {
     pub ca: Option<PathBuf>,
     /// Plain TCP, which the runtime allows only to loopback addresses.
     pub plaintext_on_loopback: bool,
+    /// The zone the agent runs in: with one, offsets and admin state are
+    /// read from replicas in it (`ClientConfig::zone`).
+    pub zone: Option<String>,
 }
 
 impl Reach {
@@ -158,13 +161,18 @@ pub fn client(reach: &Reach, sign_in: SignIn) -> Result<Client<TokioRuntime>, St
         Some(ca) => rt.with_tls(TlsConfig::from_files(ca, identity).map_err(|e| format!("{}: {e}", ca.display()))?),
         None => rt.plaintext_on_loopback(),
     };
-    let cfg = ClientConfig {
+    Ok(Client::new(rt, client_config(reach, credentials)))
+}
+
+/// The settings of the tools' client, apart from its runtime.
+pub fn client_config(reach: &Reach, credentials: Option<Credentials>) -> ClientConfig {
+    ClientConfig {
         retry_for: std::time::Duration::from_secs(15),
         credentials,
+        zone: reach.zone.clone(),
         // `idempotent` stays on: the produce tool promises it.
         ..ClientConfig::new(reach.bootstrap.clone())
-    };
-    Ok(Client::new(rt, cfg))
+    }
 }
 
 /// The MCP server: the tools on a signed-in client.

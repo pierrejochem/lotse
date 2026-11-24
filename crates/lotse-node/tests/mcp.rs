@@ -252,6 +252,29 @@ fn tool<'a>(listed: &'a Value, name: &str) -> &'a Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_takes_a_zone() {
+    let cluster = Cluster::start("mcp-zone").await;
+    let (cert, key) = (cluster.client("alice.pem"), cluster.client("alice.key"));
+    let (cert, key) = (cert.to_str().unwrap().to_string(), key.to_str().unwrap().to_string());
+    let config = cluster.config.clone();
+    tokio::task::spawn_blocking(move || {
+        // The flag, and LOTSE_ZONE given to the child alone, not the test
+        // process, so no other test sees it.
+        let flag = ["--zone", "eu-1", "--cert", cert.as_str(), "--key", key.as_str()];
+        let env = ["--cert", cert.as_str(), "--key", key.as_str()];
+        for (args, vars) in [(&flag[..], &[][..]), (&env[..], &[("LOTSE_ZONE", "eu-1")][..])] {
+            let mut m = Mcp::spawn(&config, args, vars);
+            let r = m.request(1, "tools/call", json!({"_meta": meta(), "name": "cluster_overview", "arguments": {}}));
+            assert_eq!(r["result"]["isError"], false, "{r}");
+            m.finish();
+        }
+    })
+    .await
+    .unwrap();
+    cluster.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stdio_answers_discover_and_lists_the_tools() {
     let cluster = Cluster::start("mcp-list").await;
     let (cert, key) = (cluster.client("alice.pem"), cluster.client("alice.key"));

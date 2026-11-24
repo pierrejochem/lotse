@@ -26,6 +26,8 @@ LOTSE_TOKEN=lotse_tok_... lotse mcp --config cluster.toml
 
 `--config` names the cluster file, from which `lotse mcp` takes the node addresses and the CA. Without it, name the nodes and the CA: `--bootstrap node1:9092,node2:9092 --ca ca.pem`.
 
+`--zone <zone>` (or `LOTSE_ZONE`) makes the agent read offsets and admin state from replicas in that zone, which keeps those reads off links between zones.
+
 A desktop agent that reads a list of MCP servers takes an entry like this one (the file and its keys differ by agent; the shape is the usual one):
 
 ```json
