@@ -41,7 +41,7 @@ ClientConfig config = ClientConfig.CreateBuilder("127.0.0.1:9092", "127.0.0.1:90
 using var client = new LotseClient(config);
 ```
 
-Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithZone`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)).
+Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithZone`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)). With `WithZone`, fetches, offset lookups, committed offsets and the `Describe*Async` admin reads go to a node in that zone, which answers only once it has applied what the client has seen ([ADR 0141](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0141-reads-in-the-client-s-zone-with-read-your-writes.md)).
 
 ## Streams
 

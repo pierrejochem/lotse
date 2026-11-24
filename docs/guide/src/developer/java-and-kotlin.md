@@ -27,7 +27,7 @@ try (var client = new LotseClient(config)) {
 }
 ```
 
-Other builder methods: `requestTimeout`, `retryFor`, `backoff`, `produceTimeout`, `idempotent`, `txnTimeout`, `producerName`, `transactionalId`, `metadataMaxAge`, `tenant`, `zone`, `credentials`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
+Other builder methods: `requestTimeout`, `retryFor`, `backoff`, `produceTimeout`, `idempotent`, `txnTimeout`, `producerName`, `transactionalId`, `metadataMaxAge`, `tenant`, `zone`, `credentials`. They mean what the Rust fields mean (see [Rust client](rust-client.md)). With `zone`, fetches, offset lookups, committed offsets and the `describe*` admin reads go to a node in that zone, which answers only once it has applied what the client has seen ([ADR 0141](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0141-reads-in-the-client-s-zone-with-read-your-writes.md)).
 
 ## Streams
 

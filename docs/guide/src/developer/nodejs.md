@@ -38,7 +38,7 @@ const client = new LotseClient({
 // ... client.close() when done
 ```
 
-Durations are milliseconds: `requestTimeoutMs` 10 000, `retryForMs` 30 000, `backoffMs` 50, `produceTimeoutMs` 5 000, `txnTimeoutMs` 60 000, `metadataMaxAgeMs` 30 000. Other options: `idempotent`, `producerName`, `transactionalId`, `tenant`, `zone`. They mean what the Rust fields mean (see [Rust client](rust-client.md)).
+Durations are milliseconds: `requestTimeoutMs` 10 000, `retryForMs` 30 000, `backoffMs` 50, `produceTimeoutMs` 5 000, `txnTimeoutMs` 60 000, `metadataMaxAgeMs` 30 000. Other options: `idempotent`, `producerName`, `transactionalId`, `tenant`, `zone`. They mean what the Rust fields mean (see [Rust client](rust-client.md)). With `zone`, fetches, offset lookups, committed offsets and the `describe*` admin reads go to a node in that zone, which answers only once it has applied what the client has seen ([ADR 0141](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0141-reads-in-the-client-s-zone-with-read-your-writes.md)).
 
 ## Streams
 
