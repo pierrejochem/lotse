@@ -558,6 +558,15 @@ pub enum ChangeError {
     Invalid,
 }
 
+/// A leader's view of one member: see [`Raft::voter_progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoterProgress {
+    /// The highest index the leader knows the member holds.
+    pub matched: u64,
+    /// Whether its latest answer came within an election timeout, in ticks.
+    pub heard_recently: bool,
+}
+
 #[derive(Debug, Clone)]
 struct Progress {
     matched: u64,
@@ -802,6 +811,17 @@ impl RaftGroup {
             .collect();
         heard.insert(self.cfg.id);
         Some(heard)
+    }
+    /// On a leader: how far `id`, a member other than this node, has come
+    /// and whether it answered within an election timeout (the window
+    /// [`Raft::responsive`] uses); `None` elsewhere, for itself and for a
+    /// non-member. A leader judges a voter's currency from this (ADR 0116),
+    /// never a safety decision.
+    pub fn voter_progress(&self, id: NodeId) -> Option<VoterProgress> {
+        let State::Leader { progress } = &self.state else { return None };
+        let p = progress.get(&id)?;
+        let window = u64::from(self.cfg.election_ticks);
+        Some(VoterProgress { matched: p.matched, heard_recently: p.heard_at.is_some_and(|t| self.ticks < t + window) })
     }
     /// Last index in the log, persisted or not.
     pub fn last_index(&self) -> u64 {

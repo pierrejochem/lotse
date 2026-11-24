@@ -1162,3 +1162,34 @@ fn a_leader_knows_which_members_answer_it() {
     c.ticks(3);
     assert_eq!(c.nodes[&c.leader().unwrap()].raft.responsive(), Some(all));
 }
+
+#[test]
+fn leader_sees_a_voter_s_match_and_whether_it_hears_it() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&id| id != l).unwrap();
+    c.nodes.get_mut(&l).unwrap().propose(1, "a").unwrap();
+    c.ticks(3);
+    let leader = &c.nodes[&l].raft;
+    let seen = leader.voter_progress(f).expect("the leader knows a member");
+    assert_eq!(seen.matched, leader.commit());
+    assert!(seen.heard_recently);
+    assert!(leader.voter_progress(l).is_none(), "not itself");
+    assert!(leader.voter_progress(99).is_none(), "not a member");
+    assert!(c.nodes[&f].raft.voter_progress(l).is_none(), "only a leader knows");
+    // Cut off for longer than an election timeout: it is no longer heard, and
+    // its match stays where it was while the others commit on.
+    c.cut.insert(f);
+    let before = seen.matched;
+    c.nodes.get_mut(&l).unwrap().propose(1, "b").unwrap();
+    c.ticks(30);
+    let leader = &c.nodes[&l].raft;
+    assert!(leader.commit() > before);
+    let cut = leader.voter_progress(f).unwrap();
+    assert!(!cut.heard_recently);
+    assert_eq!(cut.matched, before);
+    c.cut.clear();
+    c.ticks(30);
+    let back = c.nodes[&c.leader().unwrap()].raft.voter_progress(f).unwrap();
+    assert!(back.heard_recently);
+}
