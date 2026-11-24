@@ -358,7 +358,7 @@ public final class GroupConsumer implements AutoCloseable {
         Request req = new Request.OffsetFetch(group, true, resources, client.config().tenant());
         Response.OffsetFetch resp;
         try {
-            if (!(client.callCoordinator(group, req) instanceof Response.OffsetFetch r)) {
+            if (!(client.callCoordinatorRead(group, req) instanceof Response.OffsetFetch r)) {
                 client.forgetCoordinator();
                 return;
             }

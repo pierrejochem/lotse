@@ -11,6 +11,7 @@ import dev.lotse.net.ConnectionException;
 import dev.lotse.net.ConnectionPool;
 import dev.lotse.net.InsecureTransportException;
 import dev.lotse.proto.ErrorCode;
+import dev.lotse.proto.GroupIndex;
 import dev.lotse.proto.LeaderHint;
 import dev.lotse.proto.Messages;
 import dev.lotse.proto.Messages.Config;
@@ -123,6 +124,15 @@ public final class LotseClient implements AutoCloseable {
     private final Map<PartitionKey, List<Long>> voters = new HashMap<>();
     /** Partitions whose replica in the zone failed: read from the leader until metadata is asked for again. */
     private final java.util.Set<PartitionKey> notInZone = new java.util.HashSet<>();
+    /**
+     * The nodes the latest {@code Metadata} answer listed: the only candidates for a zone read. The maps above only
+     * grow, and a node that left would otherwise cost every zone read a failed call first.
+     */
+    private final java.util.Set<Long> listed = new TreeSet<>();
+    /** The replica in this client's zone a partition's leader named as current, until metadata is asked for again. */
+    private final Map<PartitionKey, Long> zoneReplica = new HashMap<>();
+    /** The metadata and coordinator groups' indexes the answers named, which a zone read asks a node to have applied. */
+    private final Zone.Indexes indexes = new Zone.Indexes();
     private final Map<Long, String> names = new HashMap<>();
     /** Exchanges by name, and when metadata said so ({@link System#nanoTime}). Guarded by {@link #state}. */
     private final Map<String, Exchange> exchanges = new HashMap<>();
@@ -135,6 +145,8 @@ public final class LotseClient implements AutoCloseable {
     private final Object sessionLock = new Object();
     private Session session;
     private volatile Address coordinatorAddress;
+    /** The coordinator group's voters, as the last {@code FindCoordinator} named them: where a zone offset read may go. */
+    private volatile List<Long> coordinatorVoters = List.of();
     private final Map<PartitionKey, ReentrantLock> partitionLocks = new ConcurrentHashMap<>();
 
     private volatile Long metadataLeader;
@@ -145,7 +157,7 @@ public final class LotseClient implements AutoCloseable {
     /** Creates a client. It connects on first use. */
     public LotseClient(ClientConfig config) {
         this.cfg = config;
-        this.pool = new ConnectionPool(config.connectionOptions());
+        this.pool = new ConnectionPool(config.connectionOptions(indexes::raise));
         this.executor = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "lotse-client");
             t.setDaemon(true);
@@ -272,9 +284,11 @@ public final class LotseClient implements AutoCloseable {
 
     private void learn(Response.Metadata m) {
         synchronized (state) {
+            listed.clear();
             for (Messages.Broker b : m.brokers()) {
                 brokers.put(b.nodeId(), new Address(b.host(), b.port()));
                 zones.put(b.nodeId(), b.rack());
+                listed.add(b.nodeId());
             }
             for (ResourceMetadata r : m.resources()) {
                 if (!r.error().isOk()) {
@@ -290,6 +304,7 @@ public final class LotseClient implements AutoCloseable {
                     routes.put(key, new Route(r.resourceId(), p.leader(), p.leaderTerm()));
                     voters.put(key, List.copyOf(p.voters()));
                     notInZone.remove(key);
+                    zoneReplica.remove(key);
                 }
             }
         }
@@ -744,6 +759,7 @@ public final class LotseClient implements AutoCloseable {
                 if (r instanceof Response.FindCoordinator f) {
                     if (f.error().isOk()) {
                         Address a = new Address(f.host(), f.port());
+                        coordinatorVoters = f.voters();
                         coordinatorAddress = a;
                         return a;
                     }
@@ -774,6 +790,37 @@ public final class LotseClient implements AutoCloseable {
             forgetCoordinator();
             throw e.toAttempt();
         }
+    }
+
+    /**
+     * A read of the coordinator group's state ({@code OffsetFetch}): from the lowest-id voter in this client's zone,
+     * which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
+     * call sends that one read to the coordinator; the next read tries the zone again.
+     */
+    Response callCoordinatorRead(String key, Request req) {
+        String zone = cfg.zone();
+        if (zone != null) {
+            // Learns the voters, if no FindCoordinator did yet.
+            coordinator(key);
+            Address addr;
+            synchronized (state) {
+                List<Long> candidates = new ArrayList<>(coordinatorVoters);
+                candidates.retainAll(listed);
+                Long node = Zone.zoneNode(zone, candidates, zones);
+                addr = node == null ? null : brokers.get(node);
+            }
+            if (addr != null) {
+                try {
+                    Response resp = call(addr, req, indexes.snapshot());
+                    if (!Zone.refused(resp)) {
+                        return resp;
+                    }
+                } catch (CallFailure e) {
+                    // the coordinator answers instead
+                }
+            }
+        }
+        return callCoordinator(key, req);
     }
 
     ProducerIds initProducerOnce(String txn) {
@@ -1022,8 +1069,9 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
-     * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104).
-     * {@code null} without a zone, when the leader is in it, or when there is none.
+     * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). The one the
+     * leader last named, if any, else a voter in the zone as metadata has them. {@code null} without a zone, when the
+     * leader is in it, or when there is none.
      */
     private Address replicaInZone(String stream, int partition, long leader) {
         String zone = cfg.zone();
@@ -1034,6 +1082,10 @@ public final class LotseClient implements AutoCloseable {
         synchronized (state) {
             if (notInZone.contains(key) || zone.equals(zones.get(leader))) {
                 return null;
+            }
+            Long named = zoneReplica.get(key);
+            if (named != null && named != leader && brokers.containsKey(named)) {
+                return brokers.get(named);
             }
             for (long v : voters.getOrDefault(key, List.of())) {
                 if (zone.equals(zones.get(v))) {
@@ -1068,7 +1120,9 @@ public final class LotseClient implements AutoCloseable {
                 List.of(new FetchResource(
                         routed.route().resourceId(),
                         List.of(new FetchPartition(partition, offset, routed.route().term(), 1L << 20)))),
-                allowFollower);
+                allowFollower,
+                // Only the leader names a replica to come back to.
+                allowFollower ? null : cfg.zone());
         Response resp;
         try {
             resp = call(addr, req);
@@ -1089,6 +1143,20 @@ public final class LotseClient implements AutoCloseable {
         ErrorCode code = p.error();
         if (allowFollower && !code.isOk()) {
             throw leaveReplica(stream, partition, addr + ": " + code);
+        }
+        // The leader names a replica in this client's zone that is current again: the next fetch goes there, without
+        // asking for metadata. An answer with an error says nothing about the partition's replicas, and a node without
+        // a known address cannot be asked: clearing the fallback for it would send the next fetch to the replica that
+        // failed.
+        Long preferred = p.preferredReplica();
+        if (!allowFollower && code.isOk() && preferred != null && preferred != routed.route().leader()) {
+            synchronized (state) {
+                if (brokers.containsKey(preferred)) {
+                    PartitionKey key = new PartitionKey(stream, partition);
+                    notInZone.remove(key);
+                    zoneReplica.put(key, preferred);
+                }
+            }
         }
         if (code.isOk()) {
             return new Fetched(p.records(), p.highWatermark(), p.lastStableOffset(), p.logStartOffset(), p.abortedTxns());
@@ -1498,14 +1566,15 @@ public final class LotseClient implements AutoCloseable {
 
     /**
      * A resource's settings, each with where its value comes from ({@link Messages.ConfigSource}). Read from the
-     * metadata leader, so changes this client made are in it.
+     * metadata leader or, with a zone, from a node in it that has applied every metadata index this client saw, so
+     * changes this client made are in it.
      */
     public List<Messages.ConfigEntry> describeConfigs(String name) {
         checkOpen();
         long id = resourceId(name);
         Request req = new Request.DescribeConfigs(List.of(id));
         return retrying(() -> {
-            Response r = callAdmin(req);
+            Response r = callAdminRead(req);
             if (!(r instanceof Response.DescribeConfigs d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1543,7 +1612,7 @@ public final class LotseClient implements AutoCloseable {
     public List<Messages.UserEntry> describeUsers() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeUsers());
+            Response r = callAdminRead(new Request.DescribeUsers());
             if (!(r instanceof Response.DescribeUsers d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1570,7 +1639,7 @@ public final class LotseClient implements AutoCloseable {
     public CertificateInventory describeCertificates() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeCertificates());
+            Response r = callAdminRead(new Request.DescribeCertificates());
             if (!(r instanceof Response.DescribeCertificates d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1609,7 +1678,7 @@ public final class LotseClient implements AutoCloseable {
     public CertificateRequests describeCertificateRequests() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeCertificateRequests());
+            Response r = callAdminRead(new Request.DescribeCertificateRequests());
             if (!(r instanceof Response.DescribeCertificateRequests d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1656,7 +1725,7 @@ public final class LotseClient implements AutoCloseable {
     public List<Messages.TenantEntry> describeTenants() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeTenants());
+            Response r = callAdminRead(new Request.DescribeTenants());
             if (!(r instanceof Response.DescribeTenants d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1675,7 +1744,7 @@ public final class LotseClient implements AutoCloseable {
     public List<Messages.SourcedBinding> describeRoleBindings() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeRoleBindings());
+            Response r = callAdminRead(new Request.DescribeRoleBindings());
             if (!(r instanceof Response.DescribeRoleBindings d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1749,7 +1818,7 @@ public final class LotseClient implements AutoCloseable {
         checkOpen();
         Request req = new Request.DescribeTokens(owner);
         return retrying(() -> {
-            Response r = callAdmin(req);
+            Response r = callAdminRead(req);
             if (!(r instanceof Response.DescribeTokens d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1808,7 +1877,7 @@ public final class LotseClient implements AutoCloseable {
     public Response.DescribeUpgrade describeUpgrade() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeUpgrade());
+            Response r = callAdminRead(new Request.DescribeUpgrade());
             if (!(r instanceof Response.DescribeUpgrade d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -1937,7 +2006,7 @@ public final class LotseClient implements AutoCloseable {
     public List<Messages.NodeEntry> describeNodes() {
         checkOpen();
         return retrying(() -> {
-            Response r = callAdmin(new Request.DescribeNodes());
+            Response r = callAdminRead(new Request.DescribeNodes());
             if (!(r instanceof Response.DescribeNodes d)) {
                 throw Attempt.retry("unexpected response " + r);
             }
@@ -2097,6 +2166,38 @@ public final class LotseClient implements AutoCloseable {
         }
     }
 
+    /**
+     * An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata
+     * listed, which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a
+     * failed call sends that one read to the metadata leader, whom a refusal may name; the next read tries the zone
+     * again.
+     */
+    private Response callAdminRead(Request req) {
+        String zone = cfg.zone();
+        if (zone != null) {
+            Address addr;
+            synchronized (state) {
+                Long node = Zone.zoneNode(zone, listed, zones);
+                addr = node == null ? null : brokers.get(node);
+            }
+            if (addr != null) {
+                try {
+                    Response resp = call(addr, req, indexes.snapshot());
+                    if (!Zone.refused(resp)) {
+                        return resp;
+                    }
+                    LeaderHint hint = Zone.leaderHint(resp);
+                    if (hint != null) {
+                        metadataLeader = hint.leader();
+                    }
+                } catch (CallFailure e) {
+                    // the leader answers instead
+                }
+            }
+        }
+        return callAdmin(req);
+    }
+
     /** Sends an admin request to the metadata leader, or any broker if it is not known. */
     private Response callAdmin(Request req) {
         Long leader = metadataLeader;
@@ -2158,6 +2259,14 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
+     * {@link #call} with the request header's {@code read_at_least}: a zone read the node may answer only once it has
+     * applied these indexes.
+     */
+    Response call(Address addr, Request req, List<GroupIndex> readAtLeast) {
+        return callOn(connect(addr), req, readAtLeast);
+    }
+
+    /**
      * The pooled connection to {@code addr}, logged in.
      *
      * @throws CallFailure when there is none
@@ -2190,8 +2299,12 @@ public final class LotseClient implements AutoCloseable {
      * @throws CallFailure when there is no response
      */
     Response callOn(Connection c, Request req) {
+        return callOn(c, req, List.of());
+    }
+
+    private Response callOn(Connection c, Request req, List<GroupIndex> readAtLeast) {
         try {
-            return c.call(req);
+            return c.call(req, readAtLeast);
         } catch (BrokerException e) {
             pool.discard(c);
             // Not authenticated, or the session ended: sending again with the same credentials gets the same

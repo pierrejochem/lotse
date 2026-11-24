@@ -221,20 +221,31 @@ public sealed interface Request {
      * @param resources what to read
      * @param allowFollower a follower may answer with the committed data it has instead of {@code NOT_LEADER}
      *     (ADR 0104); tag 0
+     * @param zone the zone the client reads from, for a leader that points it at a replica there, or {@code null};
+     *     tag 1, written only when set
      */
     record Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources,
-            boolean allowFollower) implements Request {
+            boolean allowFollower, String zone) implements Request {
         /** Fetch's tag: a follower may answer. */
         static final long TAG_ALLOW_FOLLOWER = 0;
+
+        /** Fetch's tag: the client's zone. */
+        static final long TAG_ZONE = 1;
 
         /** Creates the request. */
         public Fetch {
             resources = List.copyOf(resources);
         }
 
+        /** The request without a zone. */
+        public Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources,
+                boolean allowFollower) {
+            this(maxWaitMs, minBytes, maxBytes, isolation, resources, allowFollower, null);
+        }
+
         /** The request for the leader only. */
         public Fetch(long maxWaitMs, long minBytes, long maxBytes, int isolation, List<FetchResource> resources) {
-            this(maxWaitMs, minBytes, maxBytes, isolation, resources, false);
+            this(maxWaitMs, minBytes, maxBytes, isolation, resources, false, null);
         }
 
         @Override
@@ -256,11 +267,15 @@ public sealed interface Request {
                 });
                 w1.noTags();
             });
+            // Ascending tag order, only what is set.
+            List<Tag> tags = new java.util.ArrayList<>();
             if (allowFollower) {
-                w.tags(List.of(new Tag(Fetch.TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1}))));
-            } else {
-                w.noTags();
+                tags.add(new Tag(Fetch.TAG_ALLOW_FOLLOWER, ByteString.copyOf(new byte[] {1})));
             }
+            if (zone != null) {
+                tags.add(Messages.stringTag(Fetch.TAG_ZONE, zone));
+            }
+            w.tags(tags);
         }
 
         static Fetch read(Reader r) {
@@ -279,14 +294,19 @@ public sealed interface Request {
                 return new FetchResource(id, partitions);
             });
             boolean allowFollower = false;
+            String zone = null;
             for (Tag t : r.tags()) {
+                Reader vr = new Reader(t.value().toByteArray());
                 if (t.tag() == Fetch.TAG_ALLOW_FOLLOWER) {
-                    Reader vr = new Reader(t.value().toByteArray());
                     allowFollower = vr.u8() != 0;
-                    vr.finish();
+                } else if (t.tag() == Fetch.TAG_ZONE) {
+                    zone = vr.string();
+                } else {
+                    continue; // from a newer version: skipped
                 }
+                vr.finish();
             }
-            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower);
+            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower, zone);
         }
     }
 

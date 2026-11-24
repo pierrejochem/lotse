@@ -679,6 +679,8 @@ public final class Messages {
      * @param abortedTxns aborted transactions in {@code records}, for read-committed
      * @param records whole record batches as stored, control batches included
      * @param leaderHint the leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param preferredReplica a node in the client's zone that may serve this partition, a {@code u32}, or
+     *     {@code null}; tag 1
      */
     public record FetchPartitionResponse(
             long partition,
@@ -688,10 +690,24 @@ public final class Messages {
             long logStartOffset,
             List<AbortedTxn> abortedTxns,
             ByteString records,
-            LeaderHint leaderHint) {
+            LeaderHint leaderHint,
+            Long preferredReplica) {
         /** Creates the structure. */
         public FetchPartitionResponse {
             abortedTxns = List.copyOf(abortedTxns);
+        }
+
+        /** The structure without a preferred replica. */
+        public FetchPartitionResponse(
+                long partition,
+                ErrorCode error,
+                long highWatermark,
+                long lastStableOffset,
+                long logStartOffset,
+                List<AbortedTxn> abortedTxns,
+                ByteString records,
+                LeaderHint leaderHint) {
+            this(partition, error, highWatermark, lastStableOffset, logStartOffset, abortedTxns, records, leaderHint, null);
         }
     }
 

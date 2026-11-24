@@ -2,6 +2,7 @@ package dev.lotse.client;
 
 import dev.lotse.net.Address;
 import dev.lotse.proto.Frames;
+import dev.lotse.proto.GroupIndex;
 import dev.lotse.proto.Request;
 import dev.lotse.proto.Response;
 import java.io.DataInputStream;
@@ -74,6 +75,15 @@ final class FakeNode implements AutoCloseable {
         }
     }
 
+    /**
+     * One request as a node heard it: which node, the request and its header's {@code read_at_least}.
+     *
+     * @param node the node's id
+     * @param request the request
+     * @param readAtLeast header tag 0, empty without it
+     */
+    record Heard(long node, Request request, List<GroupIndex> readAtLeast) {}
+
     /** Close the connection without answering. */
     static final class Drop extends RuntimeException {
         private static final long serialVersionUID = 1L;
@@ -93,6 +103,8 @@ final class FakeNode implements AutoCloseable {
     private final List<Socket> sockets = new CopyOnWriteArrayList<>();
     private final List<Request> received = new CopyOnWriteArrayList<>();
     private final List<Conn> conns = new CopyOnWriteArrayList<>();
+    private volatile java.util.function.Function<Request, List<GroupIndex>> applied = r -> List.of();
+    private volatile List<Heard> heard = new CopyOnWriteArrayList<>();
     private volatile ConnHandler handler = (node, conn, request) -> {
         throw new AssertionError("node " + node.id + " was not expected to get " + request);
     };
@@ -113,6 +125,29 @@ final class FakeNode implements AutoCloseable {
     FakeNode onConn(ConnHandler handler) {
         this.handler = handler;
         return this;
+    }
+
+    /** What header tag 0, {@code applied}, of the answer to each request says; none by default. */
+    FakeNode applied(java.util.function.Function<Request, List<GroupIndex>> applied) {
+        this.applied = applied;
+        return this;
+    }
+
+    /** Records what this node hears in {@code log}, which other nodes may share, so the order across them shows. */
+    FakeNode heardIn(List<Heard> log) {
+        this.heard = log;
+        return this;
+    }
+
+    /** Every request this node heard, with its {@code read_at_least}, in arrival order. */
+    List<Heard> heard() {
+        List<Heard> out = new ArrayList<>();
+        for (Heard h : heard) {
+            if (h.node() == id) {
+                out.add(h);
+            }
+        }
+        return out;
     }
 
     /** Every connection accepted so far, in order. */
@@ -177,6 +212,7 @@ final class FakeNode implements AutoCloseable {
                 in.readFully(frame);
                 Frames.DecodedRequest decoded = Frames.decodeRequest(frame);
                 received.add(decoded.request());
+                heard.add(new Heard(id, decoded.request(), decoded.readAtLeast()));
                 conn.requests.add(decoded.request());
                 workers.execute(() -> answer(socket, conn, decoded));
             }
@@ -191,7 +227,8 @@ final class FakeNode implements AutoCloseable {
             if (response == null) {
                 return;
             }
-            byte[] wire = Frames.withLengthPrefix(Frames.encodeResponse(decoded.header().correlationId(), response));
+            byte[] wire = Frames.withLengthPrefix(Frames.encodeResponse(
+                    decoded.header().correlationId(), applied.apply(decoded.request()), response));
             synchronized (socket) {
                 OutputStream out = socket.getOutputStream();
                 out.write(wire);

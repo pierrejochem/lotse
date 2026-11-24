@@ -4,10 +4,12 @@ import dev.lotse.auth.Credentials;
 import dev.lotse.net.Address;
 import dev.lotse.net.ConnectionOptions;
 import dev.lotse.net.TlsConfig;
+import dev.lotse.proto.GroupIndex;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * How a {@link LotseClient} behaves. Immutable; make one with {@link #builder}.
@@ -135,7 +137,9 @@ public final class ClientConfig {
 
     /**
      * The zone this client runs in, or {@code null}. With one, it fetches from a replica of the partition in that
-     * zone, which serves the committed data it has, and from the leader if there is none (ADR 0104).
+     * zone, which serves the committed data it has, and from the leader if there is none (ADR 0104); a leader it
+     * fetched from may send it back there. Committed group offsets and the admin {@code describe} calls are read from
+     * a node in that zone that has applied what this client saw, else from the leader.
      */
     public String zone() {
         return zone;
@@ -159,8 +163,11 @@ public final class ClientConfig {
         return renewCheck;
     }
 
-    ConnectionOptions connectionOptions() {
-        ConnectionOptions.Builder b = ConnectionOptions.builder().requestTimeout(requestTimeout).credentials(credentials);
+    ConnectionOptions connectionOptions(Consumer<List<GroupIndex>> onApplied) {
+        ConnectionOptions.Builder b = ConnectionOptions.builder()
+                .requestTimeout(requestTimeout)
+                .credentials(credentials)
+                .onApplied(onApplied);
         if (tls != null) {
             b.tls(tls);
         } else if (plaintextOnLoopback) {
@@ -280,8 +287,9 @@ public final class ClientConfig {
         }
 
         /**
-         * The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104).
-         * Default none: fetches go to the leader.
+         * The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104), and
+         * offset and admin reads to a node there that has applied what this client saw. Default none: reads go to the
+         * leader.
          */
         public Builder zone(String zone) {
             this.zone = zone;

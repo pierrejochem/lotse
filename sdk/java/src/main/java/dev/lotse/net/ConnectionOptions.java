@@ -1,9 +1,12 @@
 package dev.lotse.net;
 
 import dev.lotse.auth.Credentials;
+import dev.lotse.proto.GroupIndex;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * How connections are made: transport security, credentials, timeouts. Immutable; make one with {@link #builder()}.
@@ -19,6 +22,7 @@ public final class ConnectionOptions {
     private final Duration connectTimeout;
     private final Ticker ticker;
     private final SecureRandom random;
+    private final Consumer<List<GroupIndex>> onApplied;
 
     private ConnectionOptions(Builder b) {
         this.tls = b.tls;
@@ -28,6 +32,7 @@ public final class ConnectionOptions {
         this.connectTimeout = b.connectTimeout;
         this.ticker = b.ticker;
         this.random = b.random;
+        this.onApplied = b.onApplied;
     }
 
     /** A builder with the defaults: 10 s request timeout, 10 s connect timeout, the system clock. */
@@ -66,6 +71,11 @@ public final class ConnectionOptions {
         return random;
     }
 
+    /** What hears every answer's {@code applied} indexes, or {@code null}. */
+    Consumer<List<GroupIndex>> onApplied() {
+        return onApplied;
+    }
+
     /** Builds {@link ConnectionOptions}. */
     public static final class Builder {
         private TlsConfig tls;
@@ -75,6 +85,7 @@ public final class ConnectionOptions {
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Ticker ticker = Ticker.SYSTEM;
         private SecureRandom random = new SecureRandom();
+        private Consumer<List<GroupIndex>> onApplied;
 
         private Builder() {}
 
@@ -122,6 +133,16 @@ public final class ConnectionOptions {
         /** The source of SCRAM nonces; for tests. */
         public Builder random(SecureRandom random) {
             this.random = Objects.requireNonNull(random);
+            return this;
+        }
+
+        /**
+         * Hears the indexes every answer says its node had applied (header tag 0, {@code applied}), before the
+         * answer's future completes, on the connection's reader thread; answers without them are not passed on. A
+         * client keeps the highest index of each group, which a read in its zone then asks a node to have applied.
+         */
+        public Builder onApplied(Consumer<List<GroupIndex>> listener) {
+            this.onApplied = listener;
             return this;
         }
 
