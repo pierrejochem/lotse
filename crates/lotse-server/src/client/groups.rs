@@ -33,6 +33,7 @@ use lotse_proto::{
     GroupHeartbeatResponse, NO_OFFSET, OffsetCommitResource, OffsetFetchPartition, OffsetFetchRequest,
     OffsetFetchResource, OffsetFetchResponse, Response, TxnPartitionResult, TxnResource, TxnResourceResult,
 };
+use lotse_raft::Role;
 use lotse_rt::{Instant, Runtime};
 
 use super::coord::{Busy, Then};
@@ -394,14 +395,11 @@ impl Clients {
         outbox: Arc<Outbox>,
         id: u32,
         req: OffsetFetchRequest,
-        at_least: Option<u64>,
+        at_least: (Option<u64>, Option<u64>),
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let coordinator = match (view.coordinator, at_least) {
-            (Some(g), Some(_)) => Self::read_replica(view, groups, g, at_least),
-            _ => Self::coordinator(view, groups).map(|(_, replica)| replica),
-        };
+        let coordinator = Self::offset_read(view, groups, at_least);
         let resources = req
             .resources
             .iter()
@@ -437,6 +435,33 @@ impl Clients {
             })
             .collect();
         outbox.push(id, &Response::OffsetFetch(OffsetFetchResponse { resources }));
+    }
+
+    /// The coordinator replica an `OffsetFetch` is answered from, with
+    /// `at_least` the indexes the client saw of the coordinator group and
+    /// of the metadata group. Without the first, today's coordinator check.
+    /// With it, [`Clients::read_replica`]; a follower of the coordinator
+    /// group also needs the metadata index applied and the metadata group
+    /// current, since the access check reads the metadata group's role
+    /// bindings. The coordinator leader serves as without the tag.
+    pub(super) fn offset_read<'a, R: Runtime, S: StateMachine>(
+        view: &ClusterView<'_>,
+        groups: &'a mut Groups<R, S>,
+        (at_least, metadata_at_least): (Option<u64>, Option<u64>),
+    ) -> Result<&'a mut Replica<R, S>, (ErrorCode, Option<lotse_proto::LeaderHint>)> {
+        let Some(g) = view.coordinator.filter(|_| at_least.is_some()) else {
+            return Self::coordinator(view, groups).map(|(_, replica)| replica);
+        };
+        if let Some(replica) = groups.get(&g)
+            && replica.raft_ref().role() != Role::Leader
+            && let (Some(m), Some(meta)) = (metadata_at_least, view.admin.metadata)
+        {
+            let hint = super::hint(replica.raft_ref());
+            if Self::read_replica(view, groups, meta, Some(m)).is_err() {
+                return Err((ErrorCode::NOT_LEADER, hint));
+            }
+        }
+        Self::read_replica(view, groups, g, at_least)
     }
 
     pub(super) fn add_offsets_to_txn<R: Runtime, S: StateMachine>(

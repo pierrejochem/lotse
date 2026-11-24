@@ -46,6 +46,8 @@ type Groups = BTreeMap<GroupId, Replica<SimRuntime, Nothing>>;
 struct Five {
     nodes: BTreeMap<NodeId, Groups>,
     queue: Vec<(NodeId, NodeId, Message)>,
+    /// The group the methods below drive: `G` unless a test hosts more.
+    group: GroupId,
 }
 
 impl Five {
@@ -61,19 +63,20 @@ impl Five {
             let r = Replica::open_with(disk, "g", cfg, Nothing, LogConfig::default(), options).await.unwrap();
             nodes.insert(id, BTreeMap::from([(G, r)]));
         }
-        Five { nodes, queue: Vec::new() }
+        Five { nodes, queue: Vec::new(), group: G }
     }
 
     fn raft(&mut self, id: NodeId) -> &mut RaftGroup {
-        self.nodes.get_mut(&id).unwrap().get_mut(&G).unwrap().raft()
+        self.nodes.get_mut(&id).unwrap().get_mut(&self.group).unwrap().raft()
     }
 
     fn get(&self, id: NodeId) -> &RaftGroup {
-        self.nodes[&id][&G].raft_ref()
+        self.nodes[&id][&self.group].raft_ref()
     }
 
     async fn process(&mut self, id: NodeId) {
-        let out = self.nodes.get_mut(&id).unwrap().get_mut(&G).unwrap().process().await.unwrap();
+        let group = self.group;
+        let out = self.nodes.get_mut(&id).unwrap().get_mut(&group).unwrap().process().await.unwrap();
         self.queue.extend(out.messages.into_iter().map(|s| (id, s.to, s.msg)));
     }
 
@@ -3713,6 +3716,7 @@ fn error_of(r: &Response) -> (ErrorCode, Option<u32>) {
         Response::DescribeTenants(d) => (d.error, d.leader_hint),
         Response::DescribeRoleBindings(d) => (d.error, d.leader_hint),
         Response::DescribeConfigs(d) => (d.error, d.leader_hint),
+        Response::Refused { code, .. } => (*code, None),
         other => panic!("{other:?}"),
     };
     (error, hint.map(|h| h.leader))
@@ -3746,20 +3750,40 @@ fn a_read_without_the_tag_still_needs_the_leader() {
 #[test]
 fn a_follower_behind_refuses_before_it_judges_access() {
     Sim::new(26).run(|rt| async move {
-        let (mut five, _) = five_with_a_queue(&rt).await;
+        let (mut five, id) = five_with_a_queue(&rt).await;
         let auth = crate::AuthConfig { required: true, ..crate::AuthConfig::none() };
         let access = crate::access::Access::build(&auth, &[], &crate::metadata::MetadataState::default());
         let user = Principal::User { name: "u".into(), groups: Vec::new() };
         let lagging = BTreeSet::new();
         let view = zone_view(&rt, Some(G), None, &lagging, &access);
-        let read = Request::DescribeUsers(lotse_proto::DescribeUsersRequest);
         let applied = five.nodes[&2][&G].applied();
-        let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied + 1), user.clone()).await;
-        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
-        // Caught up, it judges: this user may not list users.
+        for read in metadata_zone_reads(id) {
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied + 1), user.clone()).await;
+            assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)), "{read:?}");
+            // Caught up, it judges access, and answers what that allows.
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied), user.clone()).await;
+            assert_ne!(error_of(&r).0, ErrorCode::NOT_LEADER, "{read:?}");
+        }
+        // This user may not list users.
+        let read = Request::DescribeUsers(lotse_proto::DescribeUsersRequest);
         let r = zone_ask(&mut five, 2, &view, read, at(G, applied), user).await;
         assert!(matches!(r, Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }), "{r:?}");
     });
+}
+
+/// The nine zone reads of the metadata group, `DescribeConfigs` of `id`.
+fn metadata_zone_reads(id: u64) -> [Request; 9] {
+    [
+        describe_configs(id),
+        Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least: None }),
+        Request::DescribeUsers(lotse_proto::DescribeUsersRequest),
+        Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: None }),
+        Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest),
+        Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest),
+        Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest),
+        Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+        Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+    ]
 }
 
 #[test]
@@ -3800,5 +3824,87 @@ fn offset_fetch_on_a_coordinator_voter_serves_its_applied_offsets() {
         let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
         let r = zone_ask(&mut five, 3, &view, fetch, at(G, 0), Principal::Anonymous).await;
         assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "a lagging voter does not serve");
+    });
+}
+
+/// A follower of the coordinator group judges an `OffsetFetch`'s access by
+/// its metadata group's role bindings: one that has not applied the grant
+/// the client saw refuses as a follower behind, not with UNAUTHORIZED, and
+/// serves once it has.
+#[test]
+fn offset_fetch_on_a_follower_waits_for_the_metadata_index_before_it_judges_access() {
+    const C: GroupId = 2;
+    Sim::new(28).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        for id in all {
+            let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2, 3, 4, 5]) };
+            let disk = rt.node(&format!("n{id}"));
+            let options = crate::ReplicaOptions::default();
+            let r = Replica::open_with(disk, "c", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+            five.nodes.get_mut(&id).unwrap().insert(C, r);
+        }
+        // Node 1 leads both groups; the coordinator group holds an offset.
+        for g in [G, C] {
+            five.group = g;
+            five.campaign(1);
+            five.run(6, &all, Some(1), |_, _| true).await;
+            assert_eq!(five.get(1).role(), Role::Leader);
+        }
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&C).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let c = five.nodes[&2][&C].applied();
+        // User u becomes a cluster admin at metadata index m, which node 2
+        // does not hear of.
+        five.group = G;
+        let grant = crate::metadata::Change::SetBindings {
+            add: vec![lotse_auth::roles::RoleBinding {
+                subject: lotse_auth::roles::Subject::User("u".into()),
+                role: lotse_auth::roles::Role::ClusterAdmin,
+                tenant: String::new(),
+                prefix: String::new(),
+            }],
+            remove: Vec::new(),
+        };
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(crate::metadata::record(&grant)).unwrap();
+        five.run(8, &all, Some(1), |from, to| from != 2 && to != 2).await;
+        let m = five.nodes[&1][&G].applied();
+        assert!(five.nodes[&2][&G].applied() < m, "node 2 has not applied the grant");
+        let auth = crate::AuthConfig { required: true, ..crate::AuthConfig::none() };
+        let user = Principal::User { name: "u".into(), groups: Vec::new() };
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let tags = vec![lotse_proto::GroupIndex { group: C, index: c }, lotse_proto::GroupIndex { group: G, index: m }];
+        let lagging = BTreeSet::new();
+        let ask = async |five: &mut Five, n: NodeId| {
+            let access = crate::access::Access::build(&auth, &[], five.nodes[&n][&G].metadata());
+            let view = zone_view(&rt, Some(G), Some(C), &lagging, &access);
+            zone_ask(five, n, &view, fetch.clone(), tags.clone(), user.clone()).await
+        };
+        let r = ask(&mut five, 2).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "behind on the metadata group: {r:?}");
+        // Without the grant node 2 would refuse access, as it does with
+        // only the coordinator index named.
+        let access = crate::access::Access::build(&auth, &[], five.nodes[&2][&G].metadata());
+        let view = zone_view(&rt, Some(G), Some(C), &lagging, &access);
+        let r = zone_ask(&mut five, 2, &view, fetch.clone(), at(C, c), user.clone()).await;
+        assert!(matches!(r, Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }), "{r:?}");
+        // The coordinator leader serves as without the tag.
+        assert_eq!(part(&ask(&mut five, 1).await), (ErrorCode::NONE, 9));
+        // Once node 2 applied the grant, it serves.
+        five.run(8, &all, Some(1), |_, _| true).await;
+        assert!(five.nodes[&2][&G].applied() >= m);
+        assert_eq!(part(&ask(&mut five, 2).await), (ErrorCode::NONE, 9));
     });
 }

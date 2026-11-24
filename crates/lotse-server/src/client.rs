@@ -432,7 +432,11 @@ const MOVED: &str = "outcome unknown: the partition moved to other nodes";
 /// The group a zone read is answered from (the zone reads design, section
 /// 2): the coordinator group for `OffsetFetch`, the metadata group for the
 /// admin reads; `None` for any other request, which ignores
-/// `read_at_least`.
+/// `read_at_least`. Every handler of a request listed here calls
+/// `Clients::metadata_read`, `Clients::read_replica` or
+/// `Clients::offset_read` before it answers anything: `Clients::handle`
+/// skips the access check for a read that check refuses, trusting the
+/// handler to refuse it too.
 fn zone_read_group(request: &Request, view: &ClusterView<'_>) -> Option<GroupId> {
     match request {
         Request::OffsetFetch(_) => view.coordinator,
@@ -557,15 +561,21 @@ impl Clients {
         // A zone read names the index of its group the client saw; any
         // other request ignores the tag.
         let read_group = zone_read_group(&request, view);
-        let at_least = read_group.and_then(|g| read_at_least.iter().filter(|e| e.group == g).map(|e| e.index).max());
-        // A node that may not serve a metadata read refuses it with
+        let index_of =
+            |g: Option<GroupId>| g.and_then(|g| read_at_least.iter().filter(|e| e.group == g).map(|e| e.index).max());
+        let at_least = index_of(read_group);
+        // An `OffsetFetch` also names the metadata index: its access check
+        // reads the metadata group (`Clients::offset_read`).
+        let offsets_at_least = (at_least, index_of(view.admin.metadata));
+        // A node that may not serve a zone read refuses it with
         // NOT_LEADER, so the client asks the leader. Its role bindings may
         // be older than what the client saw, so judging access by them
         // first could refuse with UNAUTHORIZED what the leader allows. The
         // handler judges the same state the same way and refuses, so
         // nothing is answered without the check.
-        let behind = match (read_group, at_least) {
-            (Some(g), Some(n)) if view.admin.metadata == Some(g) => {
+        let behind = match (&request, read_group, at_least) {
+            (Request::OffsetFetch(_), _, Some(_)) => Self::offset_read(view, groups, offsets_at_least).is_err(),
+            (_, Some(g), Some(n)) if view.admin.metadata == Some(g) => {
                 Self::read_replica(view, groups, g, Some(n)).is_err()
             }
             _ => false,
@@ -609,7 +619,7 @@ impl Clients {
             Request::GroupHeartbeat(req) => self.group_heartbeat(outbox, id, req, &principal, view, groups),
             Request::Publish(req) => self.publish(outbox, id, req, &principal, view),
             Request::CommitOffsets(req) => self.commit_offsets(outbox, id, req, view, groups),
-            Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, at_least, view, groups),
+            Request::OffsetFetch(req) => self.offset_fetch(outbox, id, req, offsets_at_least, view, groups),
             Request::AddOffsetsToTxn(req) => self.add_offsets_to_txn(outbox, id, req, view, groups),
             Request::CreateStream(req) => self.create_stream(outbox, id, req, view, groups),
             Request::CreateQueue(req) => self.create_queue(outbox, id, req, view, groups),
