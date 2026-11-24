@@ -275,8 +275,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     }
 
     /// A resource's settings, with where each value comes from
-    /// ([`lotse_proto::config_source`]). Read from the metadata leader, so
-    /// changes this client made are in it.
+    /// ([`lotse_proto::config_source`]). Read from the metadata leader or,
+    /// with a zone, from a node in it that has applied every metadata index
+    /// this client saw, so changes this client made are in it.
     pub async fn describe_configs(&self, name: &str) -> Result<Vec<ConfigEntry>, ClientError> {
         let resource_id = self.resource_id(name).await?;
         let req = Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![resource_id] });
@@ -534,9 +535,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.nodes_answer(DescribeNodesRequest::default()).await
     }
 
-    /// Internal, for nodes (ADR 0105): the cluster's nodes from a metadata
-    /// leader that has applied at least `index`, so the answer is at least
-    /// as new as the asking node's own metadata state.
+    /// Internal, for nodes (ADR 0105): the cluster's nodes from a replica
+    /// of the metadata group that has applied at least `index`, so the
+    /// answer is at least as new as the asking node's own metadata state:
+    /// the leader or, with a zone, a node in it that has also applied every
+    /// metadata index this client saw.
     pub async fn describe_nodes_since(&self, index: u64) -> Result<Vec<NodeEntry>, ClientError> {
         self.nodes_answer(DescribeNodesRequest { applied_at_least: Some(index) }).await
     }
@@ -970,10 +973,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// the next read tries the zone again.
     async fn call_admin_read(&self, req: &Request) -> Result<Response, Attempt> {
         if let Some(zone) = self.cfg.zone.as_deref() {
-            let node = {
-                let zones = self.zones.lock().expect("zones lock");
-                zone::zone_node(zone, zones.keys().copied(), &zones)
-            };
+            let listed = self.listed.lock().expect("listed lock").clone();
+            let node = zone::zone_node(zone, listed, &self.zones.lock().expect("zones lock"));
             let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
             if let Some(addr) = addr {
                 match self.call_with(&addr, req, &self.indexes.snapshot()).await {

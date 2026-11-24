@@ -323,6 +323,11 @@ mod zone_reads {
     /// Stream `s` (id 7) lives on node 1 alone, stream `t` (id 8) on nodes
     /// 1 and 2; node 1 leads both.
     fn metadata() -> Response {
+        metadata_of(&[1, 2, 3])
+    }
+
+    /// [`metadata`] listing only the nodes `ids`.
+    fn metadata_of(ids: &[u32]) -> Response {
         let stream = |name: &str, resource_id, voters: Vec<u32>| ResourceMetadata {
             error: ErrorCode::NONE,
             name: name.into(),
@@ -343,6 +348,7 @@ mod zone_reads {
         Response::Metadata(MetadataResponse {
             brokers: racks
                 .iter()
+                .filter(|(id, _, _)| ids.contains(id))
                 .map(|(id, host, rack)| lotse_proto::Broker {
                     node_id: *id,
                     host: (*host).into(),
@@ -766,5 +772,143 @@ mod zone_reads {
                 }
             }
         });
+    }
+
+    /// A node the latest metadata no longer lists is no zone node, for
+    /// admin reads and offset reads alike: here node 2 left and is gone,
+    /// and the reads go to node 3 without a failed call first.
+    #[test]
+    fn zone_reads_skip_a_node_the_latest_metadata_left_out() {
+        lotse_sim::Sim::new(1).run(|rt| async move {
+            let heard = Heard::default();
+            let answers = Arc::new(Mutex::new(0));
+            serve(&rt, "a", &heard, move |r| match r {
+                Request::Metadata(_) => {
+                    let mut n = answers.lock().unwrap();
+                    *n += 1;
+                    (vec![], if *n == 1 { metadata() } else { metadata_of(&[1, 3]) })
+                }
+                r => (vec![], common(r)),
+            });
+            serve(&rt, "c", &heard, |r| (vec![], common(r)));
+            let client = client(&rt, Some("y"));
+            client.metadata(&[]).await.expect("all three");
+            client.metadata(&[]).await.expect("node 2 left");
+            client.describe_users().await.expect("users");
+            let mut group = client.join_group("g", &["s"], crate::GroupConfig::default()).await.expect("joined");
+            group.poll(Duration::from_millis(10)).await.expect("polled");
+            let hosts = |key| heard_of(&heard, key).into_iter().map(|(h, _)| h).collect::<Vec<_>>();
+            assert_eq!(hosts(lotse_proto::ApiKey::DESCRIBE_USERS), ["c"]);
+            assert_eq!(hosts(lotse_proto::ApiKey::OFFSET_FETCH), ["c"]);
+        });
+    }
+
+    /// The fetches of `t`, as (host, allow_follower).
+    fn fetches(heard: &Heard) -> Vec<(String, bool)> {
+        let heard = heard.lock().unwrap();
+        heard
+            .iter()
+            .filter_map(|(h, _, r)| match r {
+                Request::Fetch(f) => Some((h.clone(), f.allow_follower)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Node 2 refuses the first fetch, then serves; node 1 answers fetches
+    /// with what `leader` gives for the n-th one.
+    fn after_a_fallback(leader: impl Fn(usize) -> Response + Send + Sync + 'static) -> Vec<(String, bool)> {
+        let heard = Heard::default();
+        let out = heard.clone();
+        lotse_sim::Sim::new(1).run(move |rt| async move {
+            let count = Arc::new(Mutex::new(0));
+            serve(&rt, "a", &heard, move |r| match r {
+                Request::Fetch(_) => {
+                    let mut n = count.lock().unwrap();
+                    *n += 1;
+                    (vec![], leader(*n))
+                }
+                r => (vec![], common(r)),
+            });
+            let refused = Arc::new(Mutex::new(false));
+            serve(&rt, "b", &heard, move |r| match r {
+                Request::Fetch(_) if !std::mem::replace(&mut *refused.lock().unwrap(), true) => {
+                    (vec![], fetched(ErrorCode::NOT_LEADER, None))
+                }
+                r => (vec![], common(r)),
+            });
+            serve(&rt, "c", &heard, |r| (vec![], common(r)));
+            let client = client(&rt, Some("y"));
+            let _ = client.fetch("t", 0, 0, Duration::ZERO).await;
+            client.fetch("t", 0, 0, Duration::ZERO).await.expect("fetched");
+        });
+        fetches(&out)
+    }
+
+    fn hosts(fetches: &[(&str, bool)]) -> Vec<(String, bool)> {
+        fetches.iter().map(|(h, f)| (h.to_string(), *f)).collect()
+    }
+
+    /// A leader answer with an error says nothing about the replicas: its
+    /// `preferred_replica` leaves the next fetch with the leader.
+    #[test]
+    fn preferred_replica_on_an_error_is_ignored() {
+        let seen = after_a_fallback(|n| {
+            if n == 1 { fetched(ErrorCode::OFFSET_OUT_OF_RANGE, Some(2)) } else { fetched(ErrorCode::NONE, None) }
+        });
+        assert_eq!(seen, hosts(&[("b", true), ("a", false), ("a", false)]));
+    }
+
+    /// A replica the client has no address for cannot be asked: the
+    /// fallback stays, rather than sending the next fetch to the replica
+    /// that failed.
+    #[test]
+    fn preferred_replica_without_an_address_leaves_the_fetch_on_the_leader() {
+        let seen = after_a_fallback(|n| fetched(ErrorCode::NONE, if n == 1 { Some(4) } else { None }));
+        assert_eq!(seen, hosts(&[("b", true), ("a", false), ("a", false)]));
+    }
+
+    /// The zone voter refuses an `OffsetFetch`, or the call to it fails:
+    /// that read goes to the coordinator, and the next tries the zone
+    /// again.
+    #[test]
+    fn a_refused_offset_fetch_goes_to_the_coordinator_and_the_next_tries_the_zone_again() {
+        for failed_call in [false, true] {
+            lotse_sim::Sim::new(1).run(move |rt| async move {
+                let heard = Heard::default();
+                serve(&rt, "a", &heard, |r| (vec![], common(r)));
+                let refused = Arc::new(Mutex::new(false));
+                serve(&rt, "b", &heard, move |r| match r {
+                    Request::OffsetFetch(_) if !std::mem::replace(&mut *refused.lock().unwrap(), true) => {
+                        let answer = if failed_call {
+                            Response::Error(ErrorCode::INVALID_REQUEST)
+                        } else {
+                            read(r, ErrorCode::NOT_LEADER)
+                        };
+                        (vec![], answer)
+                    }
+                    r => (vec![], common(r)),
+                });
+                serve(&rt, "c", &heard, |r| (vec![], common(r)));
+                let client = client(&rt, Some("y"));
+                client.metadata(&[]).await.expect("metadata");
+                let req = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+                    group_id: "g".into(),
+                    tenant: "default".into(),
+                    require_stable: true,
+                    resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+                });
+                for _ in 0..2 {
+                    match client.call_coordinator_read("g", &req).await {
+                        Ok(Response::OffsetFetch(o)) => assert!(!crate::zone::refused(&Response::OffsetFetch(o))),
+                        Ok(other) => panic!("unexpected {other:?}"),
+                        Err(_) => panic!("the read failed"),
+                    }
+                }
+                let hosts: Vec<String> =
+                    heard_of(&heard, lotse_proto::ApiKey::OFFSET_FETCH).into_iter().map(|(h, _)| h).collect();
+                assert_eq!(hosts, ["b", "a", "b"], "failed call: {failed_call}");
+            });
+        }
     }
 }

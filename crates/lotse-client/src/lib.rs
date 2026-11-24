@@ -332,6 +332,10 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     /// client's zone; and partitions whose replica in it failed, which are
     /// read from the leader until metadata is asked for again.
     zones: Mutex<BTreeMap<u32, String>>,
+    /// The nodes the latest `Metadata` answer listed: the only candidates
+    /// for a zone read. The maps above only grow, and a node that left
+    /// would otherwise cost every zone read a failed call first.
+    listed: Mutex<BTreeSet<u32>>,
     voters: Mutex<BTreeMap<(String, u32), Vec<u32>>>,
     not_in_zone: Mutex<BTreeSet<(String, u32)>>,
     /// The replica in this client's zone a partition's leader named as
@@ -422,6 +426,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
             zones: Mutex::new(BTreeMap::new()),
+            listed: Mutex::new(BTreeSet::new()),
             voters: Mutex::new(BTreeMap::new()),
             not_in_zone: Mutex::new(BTreeSet::new()),
             zone_replica: Mutex::new(BTreeMap::new()),
@@ -504,6 +509,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             zones.insert(b.node_id, b.rack.clone());
         }
         drop((brokers, zones));
+        *self.listed.lock().expect("listed lock") = m.brokers.iter().map(|b| b.node_id).collect();
         let mut names = self.names.lock().expect("names lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             names.insert(r.resource_id, r.name.clone());
@@ -827,7 +833,9 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         if let Some(zone) = self.cfg.zone.as_deref() {
             // Learns the voters, if no `FindCoordinator` did yet.
             self.coordinator(key).await?;
-            let voters = self.coordinator_voters.lock().expect("coordinator lock").clone();
+            let mut voters = self.coordinator_voters.lock().expect("coordinator lock").clone();
+            let listed = self.listed.lock().expect("listed lock").clone();
+            voters.retain(|v| listed.contains(v));
             let node = zone::zone_node(zone, voters, &self.zones.lock().expect("zones lock"));
             let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
             if let Some(addr) = addr
@@ -1213,10 +1221,14 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
         // The leader names a replica in this client's zone that is current
         // again: the next fetch goes there, without asking for metadata. An
-        // answer with an error says nothing about the partition's replicas.
+        // answer with an error says nothing about the partition's replicas,
+        // and a node without a known address cannot be asked: clearing the
+        // fallback for it would send the next fetch to the replica that
+        // failed.
         if !allow_follower
             && p.error == ErrorCode::NONE
             && let Some(node) = p.preferred_replica.filter(|&n| n != route.leader)
+            && self.brokers.lock().expect("brokers lock").contains_key(&node)
         {
             let key = (stream.to_string(), partition);
             self.not_in_zone.lock().expect("zone lock").remove(&key);
