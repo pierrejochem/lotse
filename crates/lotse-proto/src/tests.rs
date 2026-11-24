@@ -87,6 +87,7 @@ fn records_are_not_copied_on_decode() {
                 aborted_txns: vec![],
                 records,
                 leader_hint: None,
+                preferred_replica: None,
             }],
         }],
     });
@@ -589,4 +590,135 @@ fn a_session_names_its_token() {
     {
         assert_eq!(decode_response(frame, ApiKey::DESCRIBE_SESSIONS).unwrap().1, answer(e));
     }
+}
+
+#[test]
+fn frame_tags_round_trip() {
+    let indexes = vec![GroupIndex { group: 1, index: 7 }, GroupIndex { group: 2, index: u64::MAX }];
+    let request = Request::DescribeNodes(DescribeNodesRequest::default());
+    let tags = FrameTags { read_at_least: indexes, applied: vec![] };
+    let (header, back, decoded) = decode_request_tagged(encode_request_tagged(9, &tags, &request)).unwrap();
+    assert_eq!((header.correlation_id, back, decoded), (9, tags, request.clone()));
+
+    let response = Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None });
+    let tags = FrameTags { read_at_least: vec![], applied: vec![GroupIndex { group: 1, index: 9 }] };
+    let frame = encode_response_tagged(4, &tags, &response);
+    assert_eq!(decode_response_tagged(frame, ApiKey::BIND).unwrap(), (4, tags, response.clone()));
+
+    // A frame without the tags decodes to the default, and the plain functions write exactly that.
+    let plain = encode_request(3, &request);
+    assert_eq!(plain, encode_request_tagged(3, &FrameTags::default(), &request));
+    assert_eq!(decode_request_tagged(plain).unwrap().1, FrameTags::default());
+    let plain = encode_response(3, &response);
+    assert_eq!(decode_response_tagged(plain, ApiKey::BIND).unwrap().1, FrameTags::default());
+}
+
+#[test]
+fn a_request_carries_only_read_at_least_and_a_response_only_applied() {
+    let request = Request::ApiVersions;
+    let tags = FrameTags {
+        read_at_least: vec![GroupIndex { group: 1, index: 1 }],
+        applied: vec![GroupIndex { group: 2, index: 2 }],
+    };
+    let back = decode_request_tagged(encode_request_tagged(1, &tags, &request)).unwrap().1;
+    assert_eq!(back, FrameTags { read_at_least: tags.read_at_least.clone(), applied: vec![] });
+    let response = Response::Error(ErrorCode::UNAUTHORIZED);
+    let back = decode_response_tagged(encode_response_tagged(1, &tags, &response), ApiKey::BIND).unwrap().1;
+    assert_eq!(back, FrameTags { read_at_least: vec![], applied: tags.applied });
+}
+
+#[test]
+fn an_unknown_header_tag_is_skipped_and_a_lying_count_refused() {
+    // Frame: api key, version, correlation id, flags, then two tags: 5 (unknown) and 0 (indexes).
+    let build = |count: u32| {
+        let mut w = Writer::new();
+        w.u16(ApiKey::API_VERSIONS.0);
+        w.u16(0);
+        w.u32(1);
+        w.u16(0);
+        let mut v = Writer::new();
+        v.u32(count);
+        v.u64(1);
+        v.u64(2);
+        w.tags(&[(0, v.finish()), (5, Bytes::from_static(b"later"))]);
+        w.no_tags();
+        w.finish()
+    };
+    let (_, tags, _) = decode_request_tagged(build(1)).unwrap();
+    assert_eq!(tags.read_at_least, vec![GroupIndex { group: 1, index: 2 }]);
+    assert!(decode_request_tagged(build(u32::MAX)).is_err());
+}
+
+#[test]
+fn fetch_zone_and_preferred_replica_round_trip() {
+    let fetch = |zone: Option<&str>| {
+        Request::Fetch(FetchRequest {
+            max_wait_ms: 1,
+            min_bytes: 1,
+            max_bytes: 1024,
+            isolation: isolation::COMMITTED,
+            resources: vec![],
+            allow_follower: true,
+            zone: zone.map(str::to_string),
+        })
+    };
+    let with = fetch(Some("eu-1"));
+    assert_eq!(decode_request(encode_request(1, &with)).unwrap().1, with);
+    // Without a zone the bytes are what they were before the tag existed: one tag, allow_follower.
+    let without = encode_request(1, &fetch(None));
+    let mut tail = Writer::new();
+    tail.tags(&[(0, Bytes::from_static(&[1]))]);
+    let tail = tail.finish();
+    assert_eq!(&without[without.len() - tail.len()..], &tail[..], "only the allow_follower tag");
+    assert_eq!(decode_request(without).unwrap().1, fetch(None));
+
+    let partition = |hint: Option<LeaderHint>, preferred: Option<u32>| FetchPartitionResponse {
+        partition: 0,
+        error: ErrorCode::NONE,
+        high_watermark: 0,
+        last_stable_offset: 0,
+        log_start_offset: 0,
+        aborted_txns: vec![],
+        records: Bytes::new(),
+        leader_hint: hint,
+        preferred_replica: preferred,
+    };
+    let answer = |p| {
+        Response::Fetch(FetchResponse {
+            throttle_ms: 0,
+            resources: vec![FetchResourceResponse { resource_id: 1, partitions: vec![p] }],
+        })
+    };
+    for p in [
+        partition(None, Some(3)),
+        partition(Some(LeaderHint { leader: 2, term: 4 }), Some(3)),
+        partition(Some(LeaderHint { leader: 2, term: 4 }), None),
+        partition(None, None),
+    ] {
+        let resp = answer(p);
+        assert_eq!(decode_response(encode_response(1, &resp), ApiKey::FETCH).unwrap().1, resp);
+    }
+    let plain = encode_response(1, &answer(partition(None, None)));
+    let placed = encode_response(1, &answer(partition(None, Some(3))));
+    // One tag: its number (a varint), its value's length (4 bytes) and the u32 node id.
+    assert_eq!(placed.len(), plain.len() + 1 + 4 + 4);
+}
+
+#[test]
+fn find_coordinator_voters_round_trip() {
+    let answer = |voters: Vec<u32>| {
+        Response::FindCoordinator(FindCoordinatorResponse {
+            error: ErrorCode::NONE,
+            node_id: 2,
+            host: "n2".into(),
+            port: 9000,
+            error_msg: None,
+            voters,
+        })
+    };
+    let with = answer(vec![1, 3, 5]);
+    assert_eq!(decode_response(encode_response(1, &with), ApiKey::FIND_COORDINATOR).unwrap().1, with);
+    let empty = encode_response(1, &answer(vec![]));
+    assert_eq!(empty.last(), Some(&0), "empty is an empty tag block, as before");
+    assert_eq!(decode_response(empty, ApiKey::FIND_COORDINATOR).unwrap().1, answer(vec![]));
 }

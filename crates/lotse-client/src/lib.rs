@@ -1147,6 +1147,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 }],
             }],
             allow_follower,
+            zone: None,
         });
         let resp = match self.call(&addr, &req).await {
             Ok(Response::Fetch(r)) => r,

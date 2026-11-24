@@ -37,7 +37,11 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use lotse_auth::scram::{ScramClient, ScramCredential, ScramServer};
 use lotse_proto::samples;
-use lotse_proto::{ApiKey, ErrorCode, Response, decode_request, encode_push, encode_request, encode_response};
+use lotse_proto::{
+    ApiKey, ErrorCode, FrameTags, GroupIndex, OutcomeResponse, Request, Response, decode_request,
+    decode_request_tagged, decode_response_tagged, encode_push, encode_request, encode_request_tagged, encode_response,
+    encode_response_tagged,
+};
 use lotse_record::{
     Attributes, Batch, BatchBuilder, BatchKind, BatchOptions, Compression, ControlType, Record, dead_letter, varint,
 };
@@ -369,7 +373,28 @@ fn main() {
         &routing(),
     );
 
-    let requests: Vec<String> = samples::requests()
+    // Header tags (tag 0 of the frame header) have no sample of their own: they ride on a frame.
+    let tagged_request = {
+        let request = Request::DescribeNodes(lotse_proto::DescribeNodesRequest::default());
+        let tags = FrameTags {
+            read_at_least: vec![GroupIndex { group: 1, index: 7 }, GroupIndex { group: 2, index: u64::MAX }],
+            applied: vec![],
+        };
+        let frame = encode_request_tagged(900, &tags, &request);
+        let (_, back, decoded) = decode_request_tagged(frame.clone()).expect("decodes");
+        assert_eq!((back, decoded), (tags, request));
+        format!("req-tagged-read-at-least {}", hex(&frame))
+    };
+    let tagged_response = {
+        let response = Response::Outcome(OutcomeResponse { error: ErrorCode::NONE, leader_hint: None });
+        let tags = FrameTags { read_at_least: vec![], applied: vec![GroupIndex { group: 1, index: 9 }] };
+        let frame = encode_response_tagged(900, &tags, &response);
+        let (_, back, decoded) = decode_response_tagged(frame.clone(), ApiKey::BIND).expect("decodes");
+        assert_eq!((back, decoded), (tags, response));
+        format!("res-tagged-applied {} {}", ApiKey::BIND.0, hex(&frame))
+    };
+
+    let mut requests: Vec<String> = samples::requests()
         .iter()
         .enumerate()
         .map(|(i, req)| {
@@ -394,13 +419,14 @@ fn main() {
         })
         .map(|(line, _)| line)
         .collect();
+    requests.push(tagged_request);
     out.write(
         "requests.hex",
-        "Request frames (version 0), without the length prefix. Correlation id = index + 1.\nlabel hex",
+        "Request frames (version 0), without the length prefix. Correlation id = index + 1.\nreq-tagged-read-at-least carries header tag 0 (read_at_least), correlation id 900.\nlabel hex",
         &requests,
     );
 
-    let responses: Vec<String> = samples::responses()
+    let mut responses: Vec<String> = samples::responses()
         .iter()
         .enumerate()
         .filter(|(_, (key, _))| {
@@ -426,9 +452,10 @@ fn main() {
             format!("res-{i:03}-{name} {} {}", key.0, hex(&frame))
         })
         .collect();
+    responses.push(tagged_response);
     out.write(
         "responses.hex",
-        "Response frames, without the length prefix, with the API key of the request they answer.\nCorrelation id = index in the sample list.\nlabel api_key hex",
+        "Response frames, without the length prefix, with the API key of the request they answer.\nCorrelation id = index in the sample list.\nres-tagged-applied carries header tag 0 (applied), correlation id 900.\nlabel api_key hex",
         &responses,
     );
 

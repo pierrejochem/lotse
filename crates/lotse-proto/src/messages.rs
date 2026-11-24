@@ -568,10 +568,15 @@ pub struct FetchRequest {
     /// A follower may answer with the committed data it has instead of
     /// `NOT_LEADER` (ADR 0104). Tag 0.
     pub allow_follower: bool,
+    /// The zone the client reads from, for a leader that points it at a
+    /// replica there. Tag 1; absent encodes as no tag.
+    pub zone: Option<String>,
 }
 
 /// Fetch: a follower may answer (ADR 0104).
 const TAG_ALLOW_FOLLOWER: u64 = 0;
+/// Fetch: the client's zone.
+const TAG_FETCH_ZONE: u64 = 1;
 
 impl FetchRequest {
     pub(crate) fn put(&self, w: &mut Writer) {
@@ -590,11 +595,15 @@ impl FetchRequest {
             });
             w.no_tags();
         });
+        // Ascending tag order, only what is set.
+        let mut tags = Vec::new();
         if self.allow_follower {
-            w.tags(&[(TAG_ALLOW_FOLLOWER, Bytes::from_static(&[1]))]);
-        } else {
-            w.no_tags();
+            tags.push((TAG_ALLOW_FOLLOWER, Bytes::from_static(&[1])));
         }
+        if let Some(zone) = &self.zone {
+            tags.push((TAG_FETCH_ZONE, Bytes::copy_from_slice(zone.as_bytes())));
+        }
+        w.tags(&tags);
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
         let (max_wait_ms, min_bytes, max_bytes, isolation) = (r.u32()?, r.u32()?, r.u32()?, r.u8()?);
@@ -614,16 +623,24 @@ impl FetchRequest {
             Ok(FetchResource { resource_id, partitions })
         })?;
         let mut allow_follower = false;
+        let mut zone = None;
         for (tag, value) in r.tags()? {
-            let mut v = Reader::new(value);
             match tag {
-                TAG_ALLOW_FOLLOWER => allow_follower = v.u8()? != 0,
+                TAG_ALLOW_FOLLOWER => {
+                    let mut v = Reader::new(value);
+                    allow_follower = v.u8()? != 0;
+                    v.finish()?;
+                }
+                TAG_FETCH_ZONE => {
+                    zone = Some(
+                        String::from_utf8(value.to_vec()).map_err(|_| DecodeError::Malformed("zone is not UTF-8"))?,
+                    );
+                }
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,
             }
-            v.finish()?;
         }
-        Ok(FetchRequest { max_wait_ms, min_bytes, max_bytes, isolation, resources, allow_follower })
+        Ok(FetchRequest { max_wait_ms, min_bytes, max_bytes, isolation, resources, allow_follower, zone })
     }
 }
 
@@ -655,7 +672,12 @@ pub struct FetchPartitionResponse {
     pub records: Bytes,
     /// The leader, with [`ErrorCode::NOT_LEADER`].
     pub leader_hint: Option<LeaderHint>,
+    /// A node in the client's zone that may serve this partition (tag 1).
+    pub preferred_replica: Option<u32>,
 }
+
+/// Fetch partition response: the preferred replica.
+const TAG_PREFERRED_REPLICA: u64 = 1;
 
 /// What was read from one resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,7 +713,20 @@ impl FetchResponse {
                     w.u64(a.first_offset);
                 });
                 w.bytes(&p.records);
-                put_hint(w, p.leader_hint);
+                // Tags 0 (leader hint) and 1, ascending, only what is set.
+                let mut tags = Vec::new();
+                if let Some(h) = p.leader_hint {
+                    let mut v = Writer::new();
+                    v.u32(h.leader);
+                    v.u64(h.term);
+                    tags.push((TAG_LEADER_HINT, v.finish()));
+                }
+                if let Some(node) = p.preferred_replica {
+                    let mut v = Writer::new();
+                    v.u32(node);
+                    tags.push((TAG_PREFERRED_REPLICA, v.finish()));
+                }
+                w.tags(&tags);
             });
             w.no_tags();
         });
@@ -702,7 +737,7 @@ impl FetchResponse {
         let resources = r.array(10, |r| {
             let resource_id = r.u64()?;
             let partitions = r.array(36, |r| {
-                Ok(FetchPartitionResponse {
+                let mut p = FetchPartitionResponse {
                     partition: r.u32()?,
                     error: ErrorCode(r.u16()?),
                     high_watermark: r.u64()?,
@@ -710,8 +745,20 @@ impl FetchResponse {
                     log_start_offset: r.u64()?,
                     aborted_txns: r.array(16, |r| Ok(AbortedTxn { producer_id: r.u64()?, first_offset: r.u64()? }))?,
                     records: r.bytes()?,
-                    leader_hint: get_hint(r)?,
-                })
+                    leader_hint: None,
+                    preferred_replica: None,
+                };
+                for (tag, value) in r.tags()? {
+                    let mut v = Reader::new(value);
+                    match tag {
+                        TAG_LEADER_HINT => p.leader_hint = Some(LeaderHint { leader: v.u32()?, term: v.u64()? }),
+                        TAG_PREFERRED_REPLICA => p.preferred_replica = Some(v.u32()?),
+                        // Unknown tags come from newer versions: skipped.
+                        _ => continue,
+                    }
+                    v.finish()?;
+                }
+                Ok(p)
             })?;
             r.tags()?;
             Ok(FetchResourceResponse { resource_id, partitions })
@@ -765,7 +812,13 @@ pub struct FindCoordinatorResponse {
     pub port: u16,
     /// Details for humans.
     pub error_msg: Option<String>,
+    /// The nodes that vote in the coordinator group, so a client can read
+    /// from one in its zone (tag 0). Empty encodes as no tag.
+    pub voters: Vec<u32>,
 }
+
+/// FindCoordinator response: the coordinator group's voters.
+const TAG_COORDINATOR_VOTERS: u64 = 0;
 
 impl FindCoordinatorResponse {
     pub(crate) fn put(&self, w: &mut Writer) {
@@ -774,17 +827,41 @@ impl FindCoordinatorResponse {
         w.string(&self.host);
         w.u16(self.port);
         w.opt_string(self.error_msg.as_deref());
-        w.no_tags();
+        if self.voters.is_empty() {
+            w.no_tags();
+        } else {
+            let mut v = Writer::new();
+            v.u32(self.voters.len() as u32);
+            for node in &self.voters {
+                v.u32(*node);
+            }
+            w.tags(&[(TAG_COORDINATOR_VOTERS, v.finish())]);
+        }
     }
     pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        let resp = FindCoordinatorResponse {
+        let mut resp = FindCoordinatorResponse {
             error: ErrorCode(r.u16()?),
             node_id: r.u32()?,
             host: r.string()?,
             port: r.u16()?,
             error_msg: r.opt_string()?,
+            voters: Vec::new(),
         };
-        r.tags()?;
+        for (tag, value) in r.tags()? {
+            if tag == TAG_COORDINATOR_VOTERS {
+                let mut v = Reader::new(value);
+                let n = v.u32()? as usize;
+                // Each id takes four bytes, so a count beyond what is left is a lie.
+                if n > v.remaining() / 4 {
+                    return Err(DecodeError::Malformed("voter count exceeds the field"));
+                }
+                for _ in 0..n {
+                    resp.voters.push(v.u32()?);
+                }
+                v.finish()?;
+            }
+            // Unknown tags come from newer versions: skipped.
+        }
         Ok(resp)
     }
 }

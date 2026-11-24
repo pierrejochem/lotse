@@ -463,6 +463,7 @@ async fn fetch_error(rt: &SimRuntime, addr: &str, resource_id: u64) -> Option<Er
             }],
         }],
         allow_follower: false,
+        zone: None,
     });
     conn.send(lotse_proto::encode_request(1, &req)).await.ok()?;
     let frame = conn.recv().await.ok()??;

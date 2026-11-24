@@ -365,6 +365,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
                 }],
             }],
             allow_follower: false,
+            zone: None,
         });
         let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
         let mut clients = Clients::default();
@@ -486,6 +487,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
                     }],
                 }],
                 allow_follower,
+                zone: None,
             });
             let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
             let request = ClientRequest {

@@ -242,6 +242,7 @@ pub fn requests() -> Vec<Request> {
                 partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
             }],
             allow_follower: false,
+            zone: None,
         }),
         Request::Fetch(FetchRequest {
             max_wait_ms: 500,
@@ -253,6 +254,7 @@ pub fn requests() -> Vec<Request> {
                 partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
             }],
             allow_follower: true,
+            zone: None,
         }),
         Request::SaslHandshake(SaslHandshakeRequest { mechanism: "SCRAM-SHA-512".into() }),
         Request::SaslAuthenticate(SaslAuthenticateRequest { auth_bytes: Bytes::from_static(b"n,,n=alice,r=x") }),
@@ -517,6 +519,18 @@ pub fn requests() -> Vec<Request> {
             oldest: cluster_version::of(0, 4),
             newest: cluster_version::of(0, 5),
         }),
+        Request::Fetch(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            isolation: isolation::COMMITTED,
+            resources: vec![FetchResource {
+                resource_id: 7,
+                partitions: vec![FetchPartition { partition: 1, fetch_offset: 42, leader_term: 3, max_bytes: 4096 }],
+            }],
+            allow_follower: true,
+            zone: Some("eu-1".into()),
+        }),
     ]
 }
 
@@ -647,6 +661,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         aborted_txns: vec![AbortedTxn { producer_id: 5, first_offset: 44 }],
                         records: Bytes::from_static(b"raw segment bytes"),
                         leader_hint: None,
+                        preferred_replica: None,
                     }],
                 }],
             }),
@@ -659,6 +674,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 host: "n2".into(),
                 port: 9000,
                 error_msg: None,
+                voters: Vec::new(),
             }),
         ),
         (
@@ -669,6 +685,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                 host: String::new(),
                 port: 0,
                 error_msg: Some("no leader".into()),
+                voters: Vec::new(),
             }),
         ),
         (
@@ -1160,6 +1177,7 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
                         aborted_txns: vec![],
                         records: Bytes::new(),
                         leader_hint: Some(LeaderHint { leader: 3, term: 5 }),
+                        preferred_replica: None,
                     }],
                 }],
             }),
@@ -1324,6 +1342,37 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         (
             ApiKey::REPORT_VERSION,
             Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::FETCH,
+            Response::Fetch(FetchResponse {
+                throttle_ms: 0,
+                resources: vec![FetchResourceResponse {
+                    resource_id: 7,
+                    partitions: vec![FetchPartitionResponse {
+                        partition: 1,
+                        error: ErrorCode::NOT_LEADER,
+                        high_watermark: 0,
+                        last_stable_offset: 0,
+                        log_start_offset: 0,
+                        aborted_txns: vec![],
+                        records: Bytes::new(),
+                        leader_hint: Some(LeaderHint { leader: 3, term: 5 }),
+                        preferred_replica: Some(2),
+                    }],
+                }],
+            }),
+        ),
+        (
+            ApiKey::FIND_COORDINATOR,
+            Response::FindCoordinator(FindCoordinatorResponse {
+                error: ErrorCode::NONE,
+                node_id: 2,
+                host: "n2".into(),
+                port: 9000,
+                error_msg: None,
+                voters: vec![1, 2, 3],
+            }),
         ),
     ]
 }

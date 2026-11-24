@@ -1079,6 +1079,7 @@ async fn try_fetch<R: Runtime, S: StateMachine>(
                 aborted_txns: Vec::new(),
                 records: Bytes::new(),
                 leader_hint: None,
+                preferred_replica: None,
             };
             let group = view.stream_group_of(res.resource_id, fp.partition);
             match group.and_then(|g| groups.get(&g)) {
@@ -1190,6 +1191,7 @@ fn find_coordinator<R: Runtime, S: StateMachine>(
         host: String::new(),
         port: 0,
         error_msg: Some(why.into()),
+        voters: Vec::new(),
     };
     if req.key_type != coordinator::PRODUCER && req.key_type != coordinator::GROUP {
         return unavailable("unknown coordinator type");
@@ -1204,6 +1206,7 @@ fn find_coordinator<R: Runtime, S: StateMachine>(
             host: host.into(),
             port: port.parse().unwrap_or(0),
             error_msg: None,
+            voters: Vec::new(),
         },
         None => unavailable("the coordinator group has no leader right now"),
     }
