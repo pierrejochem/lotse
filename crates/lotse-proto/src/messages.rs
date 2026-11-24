@@ -601,7 +601,9 @@ impl FetchRequest {
             tags.push((TAG_ALLOW_FOLLOWER, Bytes::from_static(&[1])));
         }
         if let Some(zone) = &self.zone {
-            tags.push((TAG_FETCH_ZONE, Bytes::copy_from_slice(zone.as_bytes())));
+            let mut v = Writer::new();
+            v.string(zone);
+            tags.push((TAG_FETCH_ZONE, v.finish()));
         }
         w.tags(&tags);
     }
@@ -632,9 +634,9 @@ impl FetchRequest {
                     v.finish()?;
                 }
                 TAG_FETCH_ZONE => {
-                    zone = Some(
-                        String::from_utf8(value.to_vec()).map_err(|_| DecodeError::Malformed("zone is not UTF-8"))?,
-                    );
+                    let mut v = Reader::new(value);
+                    zone = Some(v.string()?);
+                    v.finish()?;
                 }
                 // Unknown tags come from newer versions: skipped.
                 _ => continue,

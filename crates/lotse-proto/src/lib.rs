@@ -835,9 +835,9 @@ fn put_header_tags(w: &mut Writer, indexes: &[GroupIndex]) {
 }
 
 /// The indexes of header tag 0; other tags come from newer versions and are skipped.
-fn get_header_tags(r: &mut Reader) -> Result<Vec<GroupIndex>, DecodeError> {
+fn get_header_tags(raw: Vec<(u64, Bytes)>) -> Result<Vec<GroupIndex>, DecodeError> {
     let mut out = Vec::new();
-    for (tag, value) in r.tags()? {
+    for (tag, value) in raw {
         if tag != TAG_HEADER_INDEXES {
             continue;
         }
@@ -950,12 +950,15 @@ pub fn decode_request_tagged(frame: Bytes) -> Result<(RequestHeader, FrameTags, 
     let mut r = Reader::new(frame);
     let header =
         RequestHeader { api_key: ApiKey(r.u16()?), api_version: r.u16()?, correlation_id: r.u32()?, flags: r.u16()? };
-    let tags = FrameTags { read_at_least: get_header_tags(&mut r)?, applied: Vec::new() };
+    // The tags' content is read after the support check, so a header this node does not speak
+    // still gives `Unsupported` and it can answer.
+    let raw_tags = r.tags()?;
     let supported =
         ApiKey::SUPPORTED.iter().any(|v| v.api_key == header.api_key && (v.min..=v.max).contains(&header.api_version));
     if !supported {
         return Err(DecodeError::Unsupported(header));
     }
+    let tags = FrameTags { read_at_least: get_header_tags(raw_tags)?, applied: Vec::new() };
     let request = match header.api_key {
         ApiKey::API_VERSIONS => {
             r.tags()?;
@@ -1145,7 +1148,7 @@ pub fn decode_response_tagged(frame: Bytes, api_key: ApiKey) -> Result<(u32, Fra
     let mut r = Reader::new(frame);
     let correlation_id = r.u32()?;
     let flags = r.u16()?;
-    let tags = FrameTags { read_at_least: Vec::new(), applied: get_header_tags(&mut r)? };
+    let tags = FrameTags { read_at_least: Vec::new(), applied: get_header_tags(r.tags()?)? };
     if flags & flags::ERROR != 0 {
         let code = ErrorCode(r.u16()?);
         let reason = r.tags()?.into_iter().find(|(t, _)| *t == TAG_REASON).map(|(_, v)| v);

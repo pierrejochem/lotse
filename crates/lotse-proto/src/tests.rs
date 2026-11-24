@@ -722,3 +722,15 @@ fn find_coordinator_voters_round_trip() {
     assert_eq!(empty.last(), Some(&0), "empty is an empty tag block, as before");
     assert_eq!(decode_response(empty, ApiKey::FIND_COORDINATOR).unwrap().1, answer(vec![]));
 }
+
+#[test]
+fn a_malformed_header_tag_on_an_unsupported_version_is_still_unsupported() {
+    let mut w = Writer::new();
+    w.u16(ApiKey::API_VERSIONS.0);
+    w.u16(9);
+    w.u32(5);
+    w.u16(0);
+    w.tags(&[(0, Bytes::from_static(&[1]))]); // a count that is not even whole
+    w.no_tags();
+    assert!(matches!(decode_request_tagged(w.finish()), Err(DecodeError::Unsupported(h)) if h.correlation_id == 5));
+}
