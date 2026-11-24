@@ -180,7 +180,8 @@ public sealed partial class LotseClient
 
     /// <summary>
     /// A resource's settings, each with where its value comes from (<see cref="Messages.ConfigSource"/>). Read from the
-    /// metadata leader, so changes this client made are in it.
+    /// metadata leader or, with a zone, from a node in it that has applied every metadata index this client saw, so
+    /// changes this client made are in it.
     /// </summary>
     /// <param name="name">The resource.</param>
     /// <param name="cancellationToken">Stops the call.</param>
@@ -193,7 +194,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.ConfigEntry>>(
             async () =>
             {
-                Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(req, cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeConfigs d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -251,7 +252,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.UserEntry>>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeUsers(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeUsers(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeUsers d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -366,7 +367,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<Messages.CertificateInventory>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeCertificates(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeCertificates(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeCertificates d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -407,7 +408,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.TenantEntry>>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeTenants(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeTenants(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeTenants d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -442,7 +443,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.SourcedBinding>>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeRoleBindings(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeRoleBindings(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeRoleBindings d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -554,7 +555,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.TokenEntry>>(
             async () =>
             {
-                Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(req, cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeTokens d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -627,7 +628,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<Response.DescribeUpgrade>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeUpgrade(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeUpgrade(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeUpgrade d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -686,7 +687,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<Messages.CertificateRequests>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeCertificateRequests(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeCertificateRequests(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeCertificateRequests d)
                 {
                     throw Attempt.Retry("unexpected response " + r);
@@ -766,7 +767,7 @@ public sealed partial class LotseClient
         return await RetryingAsync<IReadOnlyList<Messages.NodeEntry>>(
             async () =>
             {
-                Response r = await CallAdminAsync(new Request.DescribeNodes(), cancellationToken).ConfigureAwait(false);
+                Response r = await CallAdminReadAsync(new Request.DescribeNodes(), cancellationToken).ConfigureAwait(false);
                 if (r is not Response.DescribeNodes d)
                 {
                     throw Attempt.Retry("unexpected response " + r);

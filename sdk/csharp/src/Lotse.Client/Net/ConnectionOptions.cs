@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using Lotse.Auth;
+using Lotse.Proto;
 
 namespace Lotse.Net;
 
@@ -24,6 +26,7 @@ public sealed class ConnectionOptions
         Ticker = b.TickerValue;
         Random = b.RandomValue;
         Time = b.TimeValue;
+        OnApplied = b.OnAppliedValue;
     }
 
     internal TlsConfig? Tls { get; }
@@ -45,6 +48,9 @@ public sealed class ConnectionOptions
 
     internal TimeProvider Time { get; }
 
+    /// <summary>What hears every answer's <c>applied</c> indexes, or <c>null</c>.</summary>
+    internal Action<IReadOnlyList<GroupIndex>>? OnApplied { get; }
+
     /// <summary>A builder with the defaults: 10 s request timeout, 10 s connect timeout, the system clock.</summary>
     public static Builder CreateBuilder() => new();
 
@@ -59,6 +65,7 @@ public sealed class ConnectionOptions
         internal Ticker TickerValue = Tickers.System;
         internal Action<byte[]> RandomValue = b => RandomNumberGenerator.Fill(b);
         internal TimeProvider TimeValue = TimeProvider.System;
+        internal Action<IReadOnlyList<GroupIndex>>? OnAppliedValue;
 
         internal Builder()
         {
@@ -122,6 +129,17 @@ public sealed class ConnectionOptions
         public Builder WithTimeProvider(TimeProvider time)
         {
             TimeValue = time ?? throw new ArgumentNullException(nameof(time));
+            return this;
+        }
+
+        /// <summary>
+        /// Hears the indexes every answer says its node had applied (header tag 0, <c>applied</c>), before the answer's
+        /// task completes, on the connection's read loop; answers without them are not passed on. A client keeps the
+        /// highest index of each group, which a read in its zone then asks a node to have applied.
+        /// </summary>
+        public Builder WithAppliedListener(Action<IReadOnlyList<GroupIndex>>? listener)
+        {
+            OnAppliedValue = listener;
             return this;
         }
 

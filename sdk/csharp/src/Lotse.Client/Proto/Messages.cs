@@ -539,6 +539,7 @@ public static class Messages
     /// <param name="AbortedTxns">Aborted transactions in <paramref name="Records"/>, for read-committed.</param>
     /// <param name="Records">Whole record batches as stored, control batches included.</param>
     /// <param name="LeaderHint">The leader, with <see cref="ErrorCode.NotLeader"/>, or <c>null</c>.</param>
+    /// <param name="PreferredReplica">A node in the client's zone that may serve this partition, or <c>null</c>; tag 1.</param>
     public sealed record FetchPartitionResponse(
         uint Partition,
         ErrorCode Error,
@@ -547,7 +548,8 @@ public static class Messages
         ulong LogStartOffset,
         IReadOnlyList<AbortedTxn> AbortedTxns,
         ByteString Records,
-        LeaderHint? LeaderHint);
+        LeaderHint? LeaderHint,
+        uint? PreferredReplica = null);
 
     /// <summary>What was read from one resource.</summary>
     /// <param name="ResourceId">The resource.</param>

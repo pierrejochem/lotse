@@ -456,7 +456,7 @@ public sealed class GroupConsumer : IAsyncDisposable
         Response.OffsetFetch resp;
         try
         {
-            if (await _client.CallCoordinatorAsync(Group, req, ct).ConfigureAwait(false) is not Response.OffsetFetch r)
+            if (await _client.CallCoordinatorReadAsync(Group, req, ct).ConfigureAwait(false) is not Response.OffsetFetch r)
             {
                 _client.ForgetCoordinator();
                 return;

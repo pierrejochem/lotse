@@ -54,7 +54,15 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     private readonly SortedDictionary<uint, string> _zones = new();
     private readonly Dictionary<PartitionKey, IReadOnlyList<uint>> _voters = new();
     private readonly HashSet<PartitionKey> _notInZone = new();
+    // The nodes the latest Metadata answer listed: the only candidates for a zone read. The maps above only grow, and a
+    // node that left would otherwise cost every zone read a failed call first.
+    private readonly SortedSet<uint> _listed = new();
+    // The replica in this client's zone a partition's leader named as current, until metadata is asked for again.
+    private readonly Dictionary<PartitionKey, uint> _zoneReplica = new();
     private readonly Dictionary<ulong, string> _names = new();
+
+    // The metadata and coordinator groups' indexes the answers named, which a zone read asks a node to have applied.
+    private readonly Zone.Indexes _indexes = new();
 
     // Exchanges by name, and when metadata said so (Stopwatch ticks). Guarded by _state.
     private readonly Dictionary<string, (Exchange Exchange, long At)> _exchanges = new();
@@ -62,6 +70,8 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     private readonly object _sessionLock = new();
     private Session? _session;
     private volatile Address? _coordinatorAddress;
+    // The coordinator group's voters, as the last FindCoordinator named them: where a zone offset read may go.
+    private volatile IReadOnlyList<uint> _coordinatorVoters = Array.Empty<uint>();
     private readonly ConcurrentDictionary<PartitionKey, SemaphoreSlim> _partitionLocks = new();
 
     private long _metadataLeader = -1;
@@ -104,7 +114,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     public LotseClient(ClientConfig config)
     {
         _cfg = config ?? throw new ArgumentNullException(nameof(config));
-        _pool = new ConnectionPool(config.ConnectionOptions());
+        _pool = new ConnectionPool(config.ConnectionOptions(_indexes.Raise));
         if (config.RenewCertificateFiles is { } files)
         {
             CancellationToken stop = _stopRenewing.Token;
@@ -263,6 +273,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     {
         lock (_state)
         {
+            _listed.Clear();
             foreach (Messages.Broker b in m.Brokers)
             {
                 if (b.Port != 0)
@@ -270,6 +281,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                     _brokers[b.NodeId] = new Address(b.Host, b.Port);
                 }
                 _zones[b.NodeId] = b.Rack;
+                _listed.Add(b.NodeId);
             }
             foreach (Messages.ResourceMetadata r in m.Resources)
             {
@@ -288,6 +300,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                     _routes[key] = new Route(r.ResourceId, p.Leader, p.LeaderTerm);
                     _voters[key] = p.Voters;
                     _notInZone.Remove(key);
+                    _zoneReplica.Remove(key);
                 }
             }
         }
@@ -810,6 +823,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                             why = $"the coordinator's address {f.Host}:{f.Port} is not valid";
                             continue;
                         }
+                        _coordinatorVoters = f.Voters;
                         _coordinatorAddress = a;
                         return a;
                     }
@@ -847,6 +861,46 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             ForgetCoordinator();
             throw e.ToAttempt();
         }
+    }
+
+    /// <summary>
+    /// A read of the coordinator group's state (<c>OffsetFetch</c>): from the lowest-id voter in this client's zone,
+    /// which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
+    /// call sends that one read to the coordinator; the next read tries the zone again.
+    /// </summary>
+    internal async Task<Response> CallCoordinatorReadAsync(string key, Request req, CancellationToken ct)
+    {
+        string? zone = _cfg.Zone;
+        if (zone is not null)
+        {
+            // Learns the voters, if no FindCoordinator did yet.
+            await CoordinatorAsync(key, ct).ConfigureAwait(false);
+            Address? addr = null;
+            lock (_state)
+            {
+                IEnumerable<uint> candidates = _coordinatorVoters.Where(_listed.Contains);
+                if (Zone.ZoneNode(zone, candidates, _zones) is uint node)
+                {
+                    addr = _brokers.GetValueOrDefault(node);
+                }
+            }
+            if (addr is not null)
+            {
+                try
+                {
+                    Response resp = await CallAsync(addr, req, _indexes.Snapshot(), ct).ConfigureAwait(false);
+                    if (!Zone.Refused(resp))
+                    {
+                        return resp;
+                    }
+                }
+                catch (CallFailure)
+                {
+                    // the coordinator answers instead
+                }
+            }
+        }
+        return await CallCoordinatorAsync(key, req, ct).ConfigureAwait(false);
     }
 
     internal async Task<(ulong ProducerId, ushort Epoch)> InitProducerOnceAsync(string? txn, CancellationToken ct)
@@ -981,8 +1035,9 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). <c>null</c>
-    /// without a zone, when the leader is in it, or when there is none.
+    /// A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). The one the
+    /// leader last named, if any, else a voter in the zone as metadata has them. <c>null</c> without a zone, when the
+    /// leader is in it, or when there is none.
     /// </summary>
     private Address? ReplicaInZone(string stream, int partition, uint leader)
     {
@@ -997,6 +1052,11 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             if (_notInZone.Contains(key) || (_zones.TryGetValue(leader, out string? z) && z == zone))
             {
                 return null;
+            }
+            if (_zoneReplica.TryGetValue(key, out uint named) && named != leader
+                && _brokers.TryGetValue(named, out Address? namedAddr))
+            {
+                return namedAddr;
             }
             if (!_voters.TryGetValue(key, out IReadOnlyList<uint>? voters))
             {
@@ -1044,7 +1104,9 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                     routed.Route.ResourceId,
                     new[] { new Messages.FetchPartition((uint)partition, offset, routed.Route.Term, 1u << 20) }),
             },
-            allowFollower);
+            allowFollower,
+            // Only the leader names a replica to come back to.
+            allowFollower ? null : _cfg.Zone);
         Response resp;
         try
         {
@@ -1072,6 +1134,22 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         if (allowFollower && !code.IsOk)
         {
             throw LeaveReplica(stream, partition, addr + ": " + code);
+        }
+        // The leader names a replica in this client's zone that is current again: the next fetch goes there, without
+        // asking for metadata. An answer with an error says nothing about the partition's replicas, and a node without a
+        // known address cannot be asked: clearing the fallback for it would send the next fetch to the replica that
+        // failed.
+        if (!allowFollower && code.IsOk && p.PreferredReplica is uint preferred && preferred != routed.Route.Leader)
+        {
+            lock (_state)
+            {
+                if (_brokers.ContainsKey(preferred))
+                {
+                    var key = new PartitionKey(stream, partition);
+                    _notInZone.Remove(key);
+                    _zoneReplica[key] = preferred;
+                }
+            }
         }
         if (code.IsOk)
         {
@@ -1245,6 +1323,48 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata
+    /// listed, which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a
+    /// failed call sends that one read to the metadata leader, whom a refusal may name; the next read tries the zone
+    /// again.
+    /// </summary>
+    private async Task<Response> CallAdminReadAsync(Request req, CancellationToken ct)
+    {
+        string? zone = _cfg.Zone;
+        if (zone is not null)
+        {
+            Address? addr = null;
+            lock (_state)
+            {
+                if (Zone.ZoneNode(zone, _listed, _zones) is uint node)
+                {
+                    addr = _brokers.GetValueOrDefault(node);
+                }
+            }
+            if (addr is not null)
+            {
+                try
+                {
+                    Response resp = await CallAsync(addr, req, _indexes.Snapshot(), ct).ConfigureAwait(false);
+                    if (!Zone.Refused(resp))
+                    {
+                        return resp;
+                    }
+                    if (Zone.LeaderHint(resp) is { } hint)
+                    {
+                        Interlocked.Exchange(ref _metadataLeader, hint.Leader);
+                    }
+                }
+                catch (CallFailure)
+                {
+                    // the leader answers instead
+                }
+            }
+        }
+        return await CallAdminAsync(req, ct).ConfigureAwait(false);
+    }
+
     /// <summary>Sends an admin request to the metadata leader, or any broker if it is not known.</summary>
     private async Task<Response> CallAdminAsync(Request req, CancellationToken ct)
     {
@@ -1323,6 +1443,17 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         return await CallOnAsync(c, req, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// <see cref="CallAsync(Address, Request, CancellationToken)"/> with the request header's <c>read_at_least</c>: a
+    /// zone read the node may answer only once it has applied these indexes.
+    /// </summary>
+    internal async Task<Response> CallAsync(
+        Address addr, Request req, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken ct)
+    {
+        Connection c = await ConnectAsync(addr, ct).ConfigureAwait(false);
+        return await CallOnAsync(c, req, readAtLeast, ct).ConfigureAwait(false);
+    }
+
     /// <summary>The pooled connection to <paramref name="addr"/>, logged in.</summary>
     /// <exception cref="CallFailure">There is none.</exception>
     internal async Task<Connection> ConnectAsync(Address addr, CancellationToken ct)
@@ -1355,12 +1486,19 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         return c;
     }
 
-    /// <summary>Sends one request on a given connection and waits for its response; failures are handled as in <see cref="CallAsync"/>.</summary>
-    internal async Task<Response> CallOnAsync(Connection c, Request req, CancellationToken ct)
+    /// <summary>
+    /// Sends one request on a given connection and waits for its response; failures are handled as in
+    /// <see cref="CallAsync(Address, Request, CancellationToken)"/>.
+    /// </summary>
+    internal Task<Response> CallOnAsync(Connection c, Request req, CancellationToken ct) =>
+        CallOnAsync(c, req, Array.Empty<GroupIndex>(), ct);
+
+    private async Task<Response> CallOnAsync(
+        Connection c, Request req, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken ct)
     {
         try
         {
-            return await c.CallAsync(req, ct).ConfigureAwait(false);
+            return await c.CallAsync(req, readAtLeast, ct).ConfigureAwait(false);
         }
         catch (BrokerException e)
         {
