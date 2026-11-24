@@ -24,7 +24,7 @@ use lotse_proto::{
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
 
-use crate::{Attempt, CallError, Client, ClientError};
+use crate::{Attempt, CallError, Client, ClientError, zone};
 
 /// PBKDF2 iterations for passwords this client sets (RFC 7677's minimum,
 /// Kafka's default).
@@ -281,7 +281,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let resource_id = self.resource_id(name).await?;
         let req = Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![resource_id] });
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeConfigs(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     match d.resources.into_iter().next() {
@@ -356,7 +356,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_tenants(&self) -> Result<Vec<TenantEntry>, ClientError> {
         let req = Request::DescribeTenants(DescribeTenantsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeTenants(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.tenants)
@@ -489,7 +489,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_tokens(&self, owner: Option<&str>) -> Result<Vec<lotse_proto::TokenEntry>, ClientError> {
         let req = Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: owner.map(str::to_string) });
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeTokens(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.tokens.clone())
@@ -544,7 +544,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     async fn nodes_answer(&self, req: DescribeNodesRequest) -> Result<Vec<NodeEntry>, ClientError> {
         let req = Request::DescribeNodes(req);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeNodes(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.nodes)
@@ -631,7 +631,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_upgrade(&self) -> Result<lotse_proto::DescribeUpgradeResponse, ClientError> {
         let req = Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeUpgrade(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -656,7 +656,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_certificates(&self) -> Result<lotse_proto::DescribeCertificatesResponse, ClientError> {
         let req = Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeCertificates(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -742,7 +742,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     ) -> Result<lotse_proto::DescribeCertificateRequestsResponse, ClientError> {
         let req = Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeCertificateRequests(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -773,7 +773,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_role_bindings(&self) -> Result<Vec<(RoleBindingData, u8)>, ClientError> {
         let req = Request::DescribeRoleBindings(DescribeRoleBindingsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeRoleBindings(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.bindings)
@@ -816,7 +816,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_users(&self) -> Result<Vec<UserEntry>, ClientError> {
         let req = Request::DescribeUsers(DescribeUsersRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeUsers(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.users)
@@ -961,6 +961,33 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 return;
             }
         }
+    }
+
+    /// An admin read (one of the zone reads): to the lowest-id node in this
+    /// client's zone, which answers once it has applied what this client
+    /// saw (the zone reads design). A refusal, an error or a failed call
+    /// sends that one read to the metadata leader, whom a refusal may name;
+    /// the next read tries the zone again.
+    async fn call_admin_read(&self, req: &Request) -> Result<Response, Attempt> {
+        if let Some(zone) = self.cfg.zone.as_deref() {
+            let node = {
+                let zones = self.zones.lock().expect("zones lock");
+                zone::zone_node(zone, zones.keys().copied(), &zones)
+            };
+            let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
+            if let Some(addr) = addr {
+                match self.call_with(&addr, req, &self.indexes.snapshot()).await {
+                    Ok(resp) if !zone::refused(&resp) => return Ok(resp),
+                    Ok(resp) => {
+                        if let Some(hint) = zone::leader_hint(&resp) {
+                            *self.metadata_leader.lock().expect("leader lock") = Some(hint.leader);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        self.call_admin(req).await
     }
 
     /// Sends an admin request to the metadata leader, or any broker if it
