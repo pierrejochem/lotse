@@ -1,6 +1,6 @@
 # C#
 
-The C# client is in `sdk/csharp` (.NET 10). It follows `lotse-client` and the Java client rule for rule. The design is in [ADR 0083](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0083-client-sdks-for-csharp-and-nodejs.md); the optional codecs are in [ADR 0084](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0084-codecs-in-the-csharp-sdk.md). Nothing is published to NuGet yet, so build it from the source tree. `sdk/csharp/README.md` lists every rule in full.
+The C# client is in `sdk/csharp` (.NET 10). It follows `lotse-client` and the Java client rule for rule. The design is in [ADR 0083](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0083-client-sdks-for-csharp-and-nodejs.md); the optional codecs are in [ADR 0084](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0084-codecs-in-the-csharp-sdk.md). The packages `Lotse.Client` and `Lotse.Client.Codecs` are released with the broker, at its version, on GitHub; see [Installing the SDKs](installing-sdks.md). `sdk/csharp/README.md` lists every rule in full.
 
 ## Build and test
 

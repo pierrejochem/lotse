@@ -1,6 +1,6 @@
 # 83. Client SDKs for C# and Node.js
 
-- Status: Accepted
+- Status: Accepted; publishing and the package names superseded by [ADR 0142](0142-the-sdks-are-released-with-the-broker-on-github-first.md)
 - Date: 2026-11-08
 
 ## Context
