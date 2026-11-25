@@ -27,7 +27,9 @@ gradle_package() {
     dir=$1
     artifact=$2
     repo=$(mktemp -d)
-    (cd "$root/sdk/$dir" && ./gradlew --quiet --no-daemon publishToMavenLocal -Dmaven.repo.local="$repo")
+    # --rerun-tasks: a second build must really build again, or comparing the
+    # two would compare one build with itself.
+    (cd "$root/sdk/$dir" && ./gradlew --quiet --no-daemon --rerun-tasks publishToMavenLocal -Dmaven.repo.local="$repo")
     version=$("$root/packaging/sdk-versions.sh" | sed -n "s/^$dir //p")
     cp "$repo/dev/lotse/$artifact/$version/$artifact-$version"* "$out/"
     rm -rf "$repo"
@@ -39,6 +41,8 @@ export SOURCE_DATE_EPOCH
 
 csharp_package() {
     version=$("$root/packaging/sdk-versions.sh" | sed -n 's/^csharp //p')
+    # Start clean, so a second build really builds again.
+    rm -rf "$root"/sdk/csharp/src/*/bin "$root"/sdk/csharp/src/*/obj
     for project in Lotse.Client Lotse.Client.Codecs; do
         dotnet pack "$root/sdk/csharp/src/$project/$project.csproj" -c Release -o "$out" --nologo -v quiet \
             -p:ContinuousIntegrationBuild=true -p:DeterministicTimestamp="$SOURCE_DATE_EPOCH"

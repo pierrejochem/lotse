@@ -1,0 +1,197 @@
+# Releases the Java, Kotlin, C# and Node.js SDKs at the broker's version
+# (ADR 0142).
+#
+# It runs after the release workflow, not inside it. That workflow creates the
+# GitHub release with the workflow token, and GitHub starts no workflow on an
+# event that token caused, so `release: published` would never fire here;
+# `workflow_run` of `release` does. It goes on only when that run succeeded
+# for a pushed `v*` tag, so the broker release and its binaries exist.
+#
+# Each SDK is tested against that tag's `lotse`, built twice and compared byte
+# for byte. Only once all four passed does one job publish: the packages and
+# SHA256SUMS-sdk to the GitHub release, then GitHub Packages (Java before
+# Kotlin), then the public registries that a repository variable and a secret
+# switch on.
+#
+# On a pull request that touches the SDKs or these scripts it tests, builds
+# and compares, and publishes nothing; so does a run started by hand without a
+# `v*` tag. Started by hand with a tag, it re-runs that release's SDKs.
+name: sdk-release
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  pull_request:
+    paths:
+      - "sdk/**"
+      - "packaging/sdk-*.sh"
+      - "packaging/test-sdk-publish.sh"
+      - "packaging/nupkg-normalise.py"
+      - ".github/workflows/sdk-release.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "A v* tag to release the SDKs of (empty: build and compare only)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-release-${{ github.event.workflow_run.head_branch || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Decides what to build and whether to publish.
+  plan:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          case "$EVENT" in
+          workflow_run) tag=$RUN_TAG ;;
+          workflow_dispatch) tag=$INPUT_TAG ;;
+          *) tag= ;;
+          esac
+          case "$tag" in
+          v*) echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"; echo "tag=$tag" >> "$GITHUB_OUTPUT" ;;
+          "") echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; echo "tag=" >> "$GITHUB_OUTPUT" ;;
+          *) echo "not a v* tag: $tag" >&2; exit 1 ;;
+          esac
+
+  build:
+    needs: plan
+    name: build (${{ matrix.sdk }})
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [java, kotlin, csharp, node]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/setup-java@v6
+        if: matrix.sdk == 'java' || matrix.sdk == 'kotlin'
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        if: matrix.sdk == 'java' || matrix.sdk == 'kotlin'
+      - uses: actions/setup-dotnet@v6
+        if: matrix.sdk == 'csharp'
+        with:
+          global-json-file: sdk/csharp/global.json
+      - uses: actions/setup-node@v7
+        if: matrix.sdk == 'node'
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      # The tests run against the broker the packages claim to match: the
+      # tag's released binary, or this commit's on a pull request.
+      - name: The lotse of the release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "lotse-${TAG#v}-linux-amd64" --dir "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP/bin/lotse-${TAG#v}-linux-amd64"
+          echo "LOTSE_BIN=$RUNNER_TEMP/bin/lotse-${TAG#v}-linux-amd64" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.TAG == ''
+      - uses: Swatinem/rust-cache@v2
+        if: env.TAG == ''
+        with:
+          shared-key: debug
+          save-if: false
+      - name: The lotse of this commit
+        if: env.TAG == ''
+        run: |
+          cargo build -p lotse-node
+          echo "LOTSE_BIN=$GITHUB_WORKSPACE/target/debug/lotse" >> "$GITHUB_ENV"
+
+      - run: mkdir -p "$RUNNER_TEMP/lotse-tmp"
+      - name: Test
+        env:
+          TMPDIR: ${{ runner.temp }}/lotse-tmp
+          JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ runner.temp }}/lotse-tmp
+        run: |
+          case "${{ matrix.sdk }}" in
+          java) cd sdk/java && ./gradlew check ;;
+          kotlin) cd sdk/kotlin && ./gradlew check ;;
+          csharp) make sdk-csharp-test ;;
+          node) make sdk-node-test && packaging/test-sdk-publish.sh ;;
+          esac
+
+      - name: Build twice and compare
+        env:
+          CI: "true"
+        run: |
+          packaging/sdk-package.sh "${{ matrix.sdk }}" "$RUNNER_TEMP/a"
+          packaging/sdk-package.sh "${{ matrix.sdk }}" "$RUNNER_TEMP/b"
+          packaging/sdk-compare.sh "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"
+          (cd "$RUNNER_TEMP/a" && sha256sum -- *)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdk-${{ matrix.sdk }}
+          path: ${{ runner.temp }}/a/*
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: sdk/csharp/global.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sdk-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/packages
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CI: "true"
+          PUBLISH_MAVEN_CENTRAL: ${{ vars.PUBLISH_MAVEN_CENTRAL }}
+          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
+          MAVEN_GPG_KEY: ${{ secrets.MAVEN_GPG_KEY }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          PUBLISH_NUGET: ${{ vars.PUBLISH_NUGET }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PUBLISH_NPM: ${{ vars.PUBLISH_NPM }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: packaging/sdk-publish.sh "${{ needs.plan.outputs.tag }}" "$RUNNER_TEMP/packages"
