@@ -446,9 +446,14 @@ impl Clients {
     /// follower serves too, once it has applied `at_least`, the highest
     /// index the client saw, and is not lagging (ADR 0116): its applied
     /// state then holds everything the client saw, the role bindings that
-    /// filter the answer included. The leader serves as without it, since
-    /// it has applied everything committed once it applied an entry of its
-    /// own term.
+    /// filter the answer included. The leader passes the leader check and,
+    /// with `at_least`, must have applied it too: a leader applies what is
+    /// committed before it tells anyone, and a newer leader's entries sit
+    /// above everything committed before, so a leader that has applied less
+    /// than the client saw has been deposed without knowing it yet. It says
+    /// NOT_LEADER with no hint, since a hint would name itself (as
+    /// `DescribeNodes` with `applied_at_least` does, ADR 0105), and the
+    /// client looks for the leader.
     pub(super) fn read_replica<'a, R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
@@ -464,11 +469,15 @@ impl Clients {
             }
             return Ok(groups.get_mut(&group).expect("found above"));
         }
-        if view.admin.metadata == Some(group) {
-            Self::metadata_leader(view, groups)
+        let replica = if view.admin.metadata == Some(group) {
+            Self::metadata_leader(view, groups)?
         } else {
-            Self::coordinator(view, groups).map(|(_, replica)| replica)
+            Self::coordinator(view, groups).map(|(_, replica)| replica)?
+        };
+        if at_least.is_some_and(|n| replica.applied() < n) {
+            return Err((ErrorCode::NOT_LEADER, None));
         }
+        Ok(replica)
     }
 
     /// [`Clients::read_replica`] for the metadata group; without one,

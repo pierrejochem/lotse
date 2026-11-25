@@ -3909,6 +3909,87 @@ fn offset_fetch_on_a_follower_waits_for_the_metadata_index_before_it_judges_acce
     });
 }
 
+/// Cuts node 1, the leader of `G`, off and elects node 2 among the other
+/// four, which commits an entry of its new term. Node 1 hears nothing and
+/// still thinks it leads, as a leader does for up to about two election
+/// timeouts, or longer when its process pauses. Returns node 2's applied
+/// index, which node 1 has not reached.
+async fn depose_node_1(five: &mut Five) -> u64 {
+    let rest = [2, 3, 4, 5];
+    five.campaign(2);
+    five.run(8, &rest, Some(2), |_, _| true).await;
+    assert_eq!(five.get(2).role(), Role::Leader);
+    assert_eq!(five.get(1).role(), Role::Leader, "node 1 has not noticed");
+    let newer = five.nodes[&2][&G].applied();
+    assert!(five.nodes[&1][&G].applied() < newer, "node 1 has not applied the new term's entry");
+    newer
+}
+
+/// A leader deposed without knowing it that has applied less than the
+/// client saw refuses a zone read with NOT_LEADER and no hint, which would
+/// name itself; the new leader serves it (ADR 0141, section 2).
+#[test]
+fn a_deposed_leader_behind_the_client_refuses_a_read() {
+    Sim::new(29).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let old = five.nodes[&1][&G].applied();
+        let newer = depose_node_1(&mut five).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        for read in metadata_zone_reads(id) {
+            let r = zone_ask(&mut five, 1, &view, read.clone(), at(G, newer), Principal::Anonymous).await;
+            assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, None), "{read:?}");
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, newer), Principal::Anonymous).await;
+            assert_eq!(error_of(&r).0, ErrorCode::NONE, "the new leader serves: {read:?}");
+        }
+        // What the client saw node 1 has applied: it still serves that,
+        // as an untagged read is served (docs/status.md).
+        let r = zone_ask(&mut five, 1, &view, describe_configs(id), at(G, old), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NONE, None));
+    });
+}
+
+/// The same for an `OffsetFetch` at a deposed coordinator leader: a member
+/// that took a partition over at the new leader never reads the older
+/// offset there.
+#[test]
+fn a_deposed_coordinator_behind_the_client_refuses_an_offset_fetch() {
+    Sim::new(30).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let newer = depose_node_1(&mut five).await;
+        // The new leader commits the offset the next owner went on from.
+        let committed = crate::groups::Committed { offset: 12, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&2).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &[2, 3, 4, 5], Some(2), |_, _| true).await;
+        let newer = five.nodes[&2][&G].applied().max(newer);
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let r = zone_ask(&mut five, 1, &view, fetch.clone(), at(G, newer), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "never the older offset 9: {r:?}");
+        let r = zone_ask(&mut five, 2, &view, fetch, at(G, newer), Principal::Anonymous).await;
+        assert_eq!(part(&r), (ErrorCode::NONE, 12));
+    });
+}
+
 /// Responses in `outbox` with their header tags, decoded as answers to
 /// `key`.
 fn drain_tagged(outbox: &Outbox, key: ApiKey) -> Vec<(lotse_proto::FrameTags, Response)> {

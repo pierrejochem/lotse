@@ -443,7 +443,9 @@ impl Clients {
     /// With it, [`Clients::read_replica`]; a follower of the coordinator
     /// group also needs the metadata index applied and the metadata group
     /// current, since the access check reads the metadata group's role
-    /// bindings. The coordinator leader serves as without the tag.
+    /// bindings. The coordinator leader serves as without the tag once it
+    /// has applied the coordinator index, and a deposed one that has not
+    /// says NOT_LEADER with no hint.
     pub(super) fn offset_read<'a, R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
         groups: &'a mut Groups<R, S>,
