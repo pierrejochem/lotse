@@ -53,9 +53,18 @@ csharp_package() {
     fi
 }
 
+# npm pack writes fixed times and a sorted file list by itself; the build must
+# start clean so no stale output from another commit lands in the tarball.
+node_package() {
+    rm -rf "$root/sdk/node/dist"
+    (cd "$root/sdk/node" && npm ci --no-audit --no-fund --loglevel=error && npm run --silent build &&
+        npm pack --silent --pack-destination "$out" > /dev/null)
+}
+
 case "$sdk" in
 java) gradle_package java lotse-client ;;
 kotlin) gradle_package kotlin lotse-client-kotlin ;;
 csharp) csharp_package ;;
+node) node_package ;;
 *) usage ;;
 esac

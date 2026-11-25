@@ -65,7 +65,7 @@ function unsupported(codec: Compression): RecordFormatError {
   const name = compressionName(codec);
   return new RecordFormatError(
     "UNSUPPORTED_COMPRESSION",
-    `compression codec ${name}: this Node.js (${process.version}) has no zstd in node:zlib, so @lotse/client cannot read or write ` +
+    `compression codec ${name}: this Node.js (${process.version}) has no zstd in node:zlib, so @pierrejochem/lotse-client cannot read or write ` +
       "a zstd frame; use Node.js 22.15, 23.8 or later (24 is tested), or give the SDK a zstd of your own with registerCodec(Compression.ZSTD, ...)",
   );
 }
