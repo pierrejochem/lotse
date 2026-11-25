@@ -52,19 +52,25 @@ That event is allowed to start a workflow. It can also be started by hand (`work
 
 GitHub Packages requires an npm package's scope to be the repository owner, so the Node.js name differs on GitHub. The names stop being placeholders: ADR 0142 supersedes those lines of ADR 0056 and ADR 0083.
 
+**Package metadata (my call).** Every package names the license Apache-2.0, as the repository's `LICENSE` and `Cargo.toml` do, and names the repository, its URL and the maintainer. The Java and Kotlin builds gain `maven-publish` with sources and javadoc jars and a full POM now, because Maven Central asks for all of it later and goal 3 rules out a build change then. The Java codecs stay the Gradle feature `compression` (a capability) that ADR 0061 describes, and the POM lists the zstd and LZ4 libraries as optional dependencies. `sdk/node/package.json` loses `private: true` and takes the GitHub name. If npm later uses `@lotse/client`, that is a rename in the change that turns npm on. The workflow never rewrites a name at publish time, so a release's npm tarball is the same everywhere it goes.
+
 ### 2. Versions
 
 - Each SDK's version in the repository equals `Cargo.toml`'s:
   - `sdk/java/build.gradle.kts`;
-  - `sdk/kotlin/build.gradle.kts`, including its dependency on the Java core;
-  - a `<Version>` for both C# packages;
+  - `sdk/kotlin/build.gradle.kts`, including its dependency on the Java core. The Kotlin POM names `dev.lotse:lotse-client` at exactly the same version. The composite build (`includeBuild`) stays for development and tests, but it must not leak into the published POM or the compared jars (my call);
+  - a `<Version>` for both C# packages. `Lotse.Client.Codecs` depends on `Lotse.Client` at exactly that version (`[x.y.z]`), not NuGet's default "at least" (my call);
   - `sdk/node/package.json`.
 - The release workflow's existing version check compares them with the tag too. A tag whose SDK versions differ fails before any simulation runs, so the anti-goal cannot happen through a forgotten bump.
 - `docs/releases/<version>.md` names the SDK packages once they ship. The workflow requires those notes already (ADR 0138), so this is a convention, not a check.
 
 ### 3. The SDK workflow (`.github/workflows/sdk-release.yml`)
 
-One job per SDK. Each job:
+**Two stages (my call).** First one build job per SDK. Then, only once all four have passed, one publish job. That job publishes Java before Kotlin, because the Kotlin POM points at the Java package. This way a tag never gets some SDKs published and others not because one failed to build. A failure while publishing can still leave a partial set, which a re-run completes.
+
+**Which tag.** On `workflow_run`, `GITHUB_SHA` is not the tag, so every job checks out `github.event.workflow_run.head_branch` explicitly (or the `tag` input when started by hand). The release run only succeeds after its `release` job has created the final GitHub release (not a draft) with the binaries attached, so the release and its x86_64 tarball exist when this workflow starts. The real-node tests use that tarball's `lotse` (my call: the runners are x86_64).
+
+Each build job:
 
 1. Checks out the tag.
 2. Runs the SDK's tests. The real-node tests run against the `lotse` from the release for that tag (downloaded from the GitHub release), so the packages are tested against the broker they claim to match.
@@ -74,10 +80,13 @@ One job per SDK. Each job:
    - `npm pack` with fixed times.
 
    This is the same promise ADR 0126 makes for the binaries. A package that does not reproduce fails the job.
-4. On a tag:
-   - publishes to GitHub Packages with the workflow token (`packages: write`);
-   - uploads the packages to the tag's GitHub release with `gh release upload`, together with a `SHA256SUMS-sdk` file.
-5. Started by hand on a branch: steps 1 to 3 only, so nothing is published.
+4. Hands its packages to the publish job as workflow artifacts.
+
+The publish job, on a tag:
+- uploads all packages to the tag's GitHub release with `gh release upload`, together with a `SHA256SUMS-sdk` file;
+- then publishes them to GitHub Packages with the workflow token (`packages: write`).
+
+Started by hand on a branch, only the build jobs run, so nothing is published.
 
 The public registries are steps present in each job, skipped unless a repository variable switches them on and the secret exists:
 - `PUBLISH_MAVEN_CENTRAL` with the Sonatype token and the PGP key;
@@ -86,7 +95,11 @@ The public registries are steps present in each job, skipped unless a repository
 
 Turning one on later is a settings change and a docs line.
 
-Re-running for a tag whose packages GitHub Packages already holds: the registry refuses the same version again. The job treats an identical existing package as done and a different one as a failure.
+Re-running for a tag that was partly published (my call):
+- The release assets are the record. If the tag's release already holds `SHA256SUMS-sdk`, the job compares the new build's checksums with it. Since the builds are reproducible they must match, and a mismatch fails the job.
+- A registry that already holds the version answers "already exists". Once the checksums matched, the job counts that as done.
+
+This avoids comparing against what GitHub Packages stores, which may not return the same bytes.
 
 ### 4. Docs
 
