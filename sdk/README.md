@@ -13,7 +13,7 @@ Client libraries for the Lotse native protocol. The Rust code is the authority: 
 
 ## Status
 
-The C# and Node.js clients cover the same scope as the Java client (streams, queues, publishing, transactions, consumer groups, admin, TLS, SCRAM-SHA-512 and OAUTHBEARER) and follow it rule for rule; each has its own README with the API and the rules, and a chapter in the developer guide. Both are tested against the golden vectors and, with `LOTSE_BIN`, against real nodes. Nothing is published to NuGet or npm yet.
+The C# and Node.js clients cover the same scope as the Java client (streams, queues, publishing, transactions, consumer groups, admin, TLS, SCRAM-SHA-512 and OAUTHBEARER) and follow it rule for rule; each has its own README with the API and the rules, and a chapter in the developer guide. Both are tested against the golden vectors and, with `LOTSE_BIN`, against real nodes. All four are released with the broker, at its version, to GitHub Packages and as files on the GitHub release ([ADR 0142](../docs/adr/0142-the-sdks-are-released-with-the-broker-on-github-first.md)); the guide page [Installing the SDKs](../docs/guide/src/developer/installing-sdks.md) says how to depend on them.
 
 The rest of this page describes the Java client and the Kotlin layer.
 
@@ -199,7 +199,7 @@ Producers may compress a batch with zstd or lz4, and the broker serves it as sen
 
 ```kotlin
 // Gradle
-implementation("dev.lotse:lotse-client:0.0.1") {
+implementation("dev.lotse:lotse-client:0.1.1") {
     capabilities { requireCapability("dev.lotse:lotse-client-compression") }
 }
 // or name them yourself, also in Maven

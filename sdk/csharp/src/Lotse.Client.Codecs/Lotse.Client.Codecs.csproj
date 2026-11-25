@@ -10,6 +10,7 @@
     <RootNamespace>Lotse.Codecs</RootNamespace>
     <AssemblyName>Lotse.Client.Codecs</AssemblyName>
     <PackageId>Lotse.Client.Codecs</PackageId>
+    <Version>0.1.1</Version>
     <Description>The zstd and LZ4 codecs for Lotse.Client (optional; ADR 0084).</Description>
   </PropertyGroup>
 
@@ -22,5 +23,13 @@
   <ItemGroup>
     <ProjectReference Include="..\Lotse.Client\Lotse.Client.csproj" />
   </ItemGroup>
+
+  <!-- The codecs are built against one release of Lotse.Client, so the package names that release exactly
+       ([x.y.z]) instead of NuGet's default "at least" (ADR 0142). -->
+  <Target Name="PinProjectReferenceVersions" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_ProjectReferencesWithVersions Update="@(_ProjectReferencesWithVersions)" ProjectVersion="[%(_ProjectReferencesWithVersions.ProjectVersion)]" />
+    </ItemGroup>
+  </Target>
 
 </Project>

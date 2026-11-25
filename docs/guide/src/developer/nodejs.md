@@ -1,6 +1,6 @@
 # Node.js
 
-The Node.js client is in `sdk/node` (TypeScript, Node.js 20 and later). It follows `lotse-client` and the Java client rule for rule. The design is in [ADR 0083](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0083-client-sdks-for-csharp-and-nodejs.md); the codecs are in [ADR 0085](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0085-codecs-in-the-nodejs-sdk.md). The package is named `@lotse/client` and is private: nothing is published to npm yet, so build it from the source tree. It has no runtime dependencies. `sdk/node/README.md` lists every rule in full.
+The Node.js client is in `sdk/node` (TypeScript, Node.js 20 and later). It follows `lotse-client` and the Java client rule for rule. The design is in [ADR 0083](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0083-client-sdks-for-csharp-and-nodejs.md); the codecs are in [ADR 0085](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0085-codecs-in-the-nodejs-sdk.md). The package `@pierrejochem/lotse-client` is released with the broker, at its version, on GitHub; see [Installing the SDKs](installing-sdks.md). It has no runtime dependencies. `sdk/node/README.md` lists every rule in full.
 
 ## Build and test
 
@@ -28,7 +28,7 @@ Values of 64 bits are `bigint`. A `u64` is held as its signed 64-bit bit pattern
 `new LotseClient(options)` takes `bootstrap` and a transport. There is no transport default: give `tls` or `plaintextOnLoopback: true`, or the client refuses with `InsecureTransportError`, which is never retried.
 
 ```ts
-import { LotseClient, TlsConfig, scramCredentials } from "@lotse/client";
+import { LotseClient, TlsConfig, scramCredentials } from "@pierrejochem/lotse-client";
 
 const client = new LotseClient({
   bootstrap: ["10.0.0.1:9092", "10.0.0.2:9092"],

@@ -1,0 +1,19 @@
+<Project>
+  <!-- Package metadata shared by Lotse.Client and Lotse.Client.Codecs (ADR 0142). Only the projects under src
+       are packed; the tests and examples are not. -->
+  <PropertyGroup>
+    <Authors>Pierre Jochem</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/pierrejochem/lotse</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/pierrejochem/lotse</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+</Project>

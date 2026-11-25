@@ -1,6 +1,6 @@
 # Lotse client for Node.js
 
-A client for the Lotse native protocol in TypeScript, for Node.js 20 and later. It follows [ADR 0083](../../docs/adr/0083-client-sdks-for-csharp-and-nodejs.md) and [ADR 0056](../../docs/adr/0056-client-sdks-for-the-jvm.md): the Rust code is the authority, the golden vectors in [`../conformance`](../conformance) enforce it, and the [Java client](../java) is the reference for structure. The package name `@lotse/client` is a placeholder; nothing is published.
+A client for the Lotse native protocol in TypeScript, for Node.js 20 and later. It follows [ADR 0083](../../docs/adr/0083-client-sdks-for-csharp-and-nodejs.md) and [ADR 0056](../../docs/adr/0056-client-sdks-for-the-jvm.md): the Rust code is the authority, the golden vectors in [`../conformance`](../conformance) enforce it, and the [Java client](../java) is the reference for structure. The package is `@pierrejochem/lotse-client` on GitHub Packages, released with the broker at its version (ADR 0142).
 
 ## Status
 
@@ -17,7 +17,7 @@ Phase 7 of 8 is done: the examples, on top of the admin calls, transactions, pub
 ## Connections
 
 ```ts
-import { Connection, ConnectionPool, TlsConfig, scramCredentials, parseAddress } from "@lotse/client";
+import { Connection, ConnectionPool, TlsConfig, scramCredentials, parseAddress } from "@pierrejochem/lotse-client";
 
 const tls = await TlsConfig.fromFiles("ca.pem", "alice.pem", "alice.key"); // client certificate optional
 const node = parseAddress("10.0.0.1:9092");
@@ -42,7 +42,7 @@ pool.close();
 ## Streams
 
 ```ts
-import { LotseClient, OffsetAt, TlsConfig } from "@lotse/client";
+import { LotseClient, OffsetAt, TlsConfig } from "@pierrejochem/lotse-client";
 
 const client = new LotseClient({
   bootstrap: ["10.0.0.1:9092", "10.0.0.2:9092"],

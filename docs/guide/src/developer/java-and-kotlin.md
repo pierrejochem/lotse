@@ -1,6 +1,6 @@
 # Java and Kotlin
 
-The Java client is in `sdk/java` (Java 17, Gradle). It follows `lotse-client` rule for rule; the Kotlin layer in `sdk/kotlin` wraps it for coroutines. The design is in [ADR 0056](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0056-client-sdks-for-the-jvm.md) and [ADR 0080](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0080-kotlin-layer-on-dispatchers-io.md). The artifact group is `dev.lotse`, version 0.0.1; nothing is published to a repository yet, so build it from the source tree.
+The Java client is in `sdk/java` (Java 17, Gradle). It follows `lotse-client` rule for rule; the Kotlin layer in `sdk/kotlin` wraps it for coroutines. The design is in [ADR 0056](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0056-client-sdks-for-the-jvm.md) and [ADR 0080](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0080-kotlin-layer-on-dispatchers-io.md). The packages `dev.lotse:lotse-client` and `dev.lotse:lotse-client-kotlin` are released with the broker, at its version, on GitHub; see [Installing the SDKs](installing-sdks.md).
 
 ## Packages
 

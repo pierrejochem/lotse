@@ -1,12 +1,25 @@
 {
-  "name": "@lotse/client",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Node.js client for the Lotse message broker (placeholder name; not published).",
+  "name": "@pierrejochem/lotse-client",
+  "version": "0.1.1",
+  "description": "Node.js client for Lotse, a message broker with reliable queues and persistent streams.",
   "license": "Apache-2.0",
+  "author": "Pierre Jochem",
+  "homepage": "https://github.com/pierrejochem/lotse",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pierrejochem/lotse.git",
+    "directory": "sdk/node"
+  },
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "engines": {
     "node": ">=20"
   },
