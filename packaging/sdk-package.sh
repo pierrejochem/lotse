@@ -33,8 +33,29 @@ gradle_package() {
     rm -rf "$repo"
 }
 
+# Zip entry times and the like come from the commit, not the clock.
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
+export SOURCE_DATE_EPOCH
+
+csharp_package() {
+    version=$("$root/packaging/sdk-versions.sh" | sed -n 's/^csharp //p')
+    for project in Lotse.Client Lotse.Client.Codecs; do
+        dotnet pack "$root/sdk/csharp/src/$project/$project.csproj" -c Release -o "$out" --nologo -v quiet \
+            -p:ContinuousIntegrationBuild=true -p:DeterministicTimestamp="$SOURCE_DATE_EPOCH"
+    done
+    python3 "$root/packaging/nupkg-normalise.py" "$out"/*.nupkg "$out"/*.snupkg
+    # The codecs are built against one release of the client and must say so exactly.
+    dependency=$(unzip -p "$out/Lotse.Client.Codecs.$version.nupkg" Lotse.Client.Codecs.nuspec |
+        sed -n 's/.*<dependency id="Lotse.Client" version="\([^"]*\)".*/\1/p')
+    if [ "$dependency" != "[$version]" ]; then
+        echo "Lotse.Client.Codecs depends on Lotse.Client '$dependency', not [$version]" >&2
+        exit 1
+    fi
+}
+
 case "$sdk" in
 java) gradle_package java lotse-client ;;
 kotlin) gradle_package kotlin lotse-client-kotlin ;;
+csharp) csharp_package ;;
 *) usage ;;
 esac

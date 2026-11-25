@@ -24,4 +24,12 @@
     <ProjectReference Include="..\Lotse.Client\Lotse.Client.csproj" />
   </ItemGroup>
 
+  <!-- The codecs are built against one release of Lotse.Client, so the package names that release exactly
+       ([x.y.z]) instead of NuGet's default "at least" (ADR 0142). -->
+  <Target Name="PinProjectReferenceVersions" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_ProjectReferencesWithVersions Update="@(_ProjectReferencesWithVersions)" ProjectVersion="[%(_ProjectReferencesWithVersions.ProjectVersion)]" />
+    </ItemGroup>
+  </Target>
+
 </Project>
