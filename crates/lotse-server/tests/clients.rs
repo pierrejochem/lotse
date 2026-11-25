@@ -766,8 +766,16 @@ async fn run(rt: SimRuntime) {
         }
     }
     assert!(out.txns.iter().any(|(_, e)| *e == TxnEnd::Committed), "no transaction committed: checked nothing");
-    if zoned && std::env::var_os("LOTSE_SIM_STATS").is_some() {
-        eprintln!("zone checks: {:?}", checks.lock().unwrap());
+    if zoned {
+        let checks = checks.lock().unwrap();
+        if std::env::var_os("LOTSE_SIM_STATS").is_some() {
+            eprintln!("zone checks: {checks:?}");
+        }
+        // In 241 zone runs of 500 seeds the fewest were 32 judged reads
+        // and 4 takeovers: none of either means the zone oracles judged
+        // nothing, not a lucky run.
+        assert!(checks.configs + checks.nodes > 0, "no admin read was answered: the zone oracles checked nothing");
+        assert!(checks.takeovers > 0, "no member took a partition over: the zone oracles checked nothing");
     }
     drop(out);
     drop(reader);
