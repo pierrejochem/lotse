@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Lotse.Auth;
 using Lotse.Net;
+using Lotse.Proto;
 
 namespace Lotse.Client;
 
@@ -89,7 +90,9 @@ public sealed class ClientConfig
 
     /// <summary>
     /// The zone this client runs in, or <c>null</c>. With one, it fetches from a replica of the partition in that zone,
-    /// which serves the committed data it has, and from the leader if there is none (ADR 0104).
+    /// which serves the committed data it has, and from the leader if there is none (ADR 0104); a leader it fetched from
+    /// may send it back there. Committed group offsets and the admin <c>Describe</c> calls are read from a node in that
+    /// zone that has applied what this client saw, else from the leader.
     /// </summary>
     public string? Zone { get; }
 
@@ -108,9 +111,12 @@ public sealed class ClientConfig
     /// <summary>How often the client looks whether its certificate may be renewed, when it renews by itself.</summary>
     public TimeSpan RenewCheck { get; }
 
-    internal ConnectionOptions ConnectionOptions()
+    internal ConnectionOptions ConnectionOptions(Action<IReadOnlyList<GroupIndex>>? onApplied = null)
     {
-        ConnectionOptions.Builder b = Net.ConnectionOptions.CreateBuilder().WithRequestTimeout(RequestTimeout).WithCredentials(Credentials);
+        ConnectionOptions.Builder b = Net.ConnectionOptions.CreateBuilder()
+            .WithRequestTimeout(RequestTimeout)
+            .WithCredentials(Credentials)
+            .WithAppliedListener(onApplied);
         if (_tls is not null)
         {
             b.Tls(_tls);
@@ -252,7 +258,10 @@ public sealed class ClientConfig
             return this;
         }
 
-        /// <summary>The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104). Default none.</summary>
+        /// <summary>
+        /// The zone this client runs in: fetches go to a replica there, the leader if there is none (ADR 0104), and offset
+        /// and admin reads to a node there that has applied what this client saw. Default none: reads go to the leader.
+        /// </summary>
         public Builder WithZone(string? zone)
         {
             ZoneValue = zone;

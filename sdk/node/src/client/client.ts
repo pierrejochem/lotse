@@ -30,6 +30,7 @@ import {
   type ResourceMetadata,
   ResourceKind,
 } from "../proto/messages.js";
+import type { GroupIndex } from "../proto/frames.js";
 import type { Request } from "../proto/request.js";
 import type {
   DescribeMetricsResponse,
@@ -44,6 +45,7 @@ import type { BatchRecord, Header } from "../record/types.js";
 import { compareU64, U32_MAX, u64ToString } from "../record/unsigned.js";
 import { Attempt, CallFailure } from "./attempt.js";
 import { CreatedToken } from "./created-token.js";
+import { Indexes, leaderHintOf, refused, zoneNode } from "./zone.js";
 import { type ClientConfig, type ClientOptions, resolveClientOptions } from "./config.js";
 import {
   BrokerResponseError,
@@ -199,6 +201,15 @@ export class LotseClient {
   private readonly voters = new Map<string, readonly number[]>();
   /** Partitions whose replica in the zone failed: read from the leader until metadata is asked for again. */
   private readonly notInZone = new Set<string>();
+  /**
+   * The nodes the latest Metadata answer listed: the only candidates for a zone read. The maps above only grow, and a
+   * node that left would otherwise cost every zone read a failed call first.
+   */
+  private listed = new Set<number>();
+  /** The replica in this client's zone a partition's leader named as current, until metadata is asked for again. */
+  private readonly zoneReplica = new Map<string, number>();
+  /** The metadata and coordinator groups' indexes the answers named, which a zone read asks a node to have applied. */
+  private readonly indexes = new Indexes();
   /** The names of the resources this client has looked up, by id, and their newest ids by name. */
   private readonly names = new Map<bigint, string>();
   private readonly idsByName = new Map<string, bigint>();
@@ -212,6 +223,8 @@ export class LotseClient {
 
   private session: Session | null = null;
   private coordinatorAddress: Address | null = null;
+  /** The coordinator group's voters, as the last FindCoordinator named them: where a zone offset read may go. */
+  private coordinatorVoters: readonly number[] = [];
   private readonly partitionLocks = new Map<string, Mutex>();
 
   private metadataLeader: number | null = null;
@@ -222,7 +235,8 @@ export class LotseClient {
   /** Creates a client. It connects on first use. */
   constructor(options: ClientOptions) {
     this.cfg = resolveClientOptions(options);
-    this.pool = new ConnectionPool(this.cfg.connection);
+    // Every answer's applied indexes raise this client's, before the answer reaches its caller.
+    this.pool = new ConnectionPool({ ...this.cfg.connection, onApplied: (applied) => this.indexes.raise(applied) });
     if (this.cfg.renewCertificate !== null) {
       void this.keepRenewed(this.cfg.renewCertificate.certPemFile, this.cfg.renewCertificate.keyPemFile);
     }
@@ -407,10 +421,13 @@ export class LotseClient {
   }
 
   private learn(m: Extract<Response, { type: "Metadata" }>): void {
+    const listed = new Set<number>();
     for (const b of m.brokers) {
       this.brokers.set(b.nodeId, { host: b.host, port: b.port });
       this.zones.set(b.nodeId, b.rack);
+      listed.add(b.nodeId);
     }
+    this.listed = listed;
     for (const r of m.resources) {
       if (r.error !== ErrorCode.NONE) {
         continue;
@@ -429,6 +446,7 @@ export class LotseClient {
         this.routes.set(key, { resourceId: r.resourceId, leader: p.leader, term: p.leaderTerm });
         this.voters.set(key, p.voters);
         this.notInZone.delete(key);
+        this.zoneReplica.delete(key);
       }
     }
   }
@@ -860,6 +878,7 @@ export class LotseClient {
         const r = await this.call(addr, find);
         if (r.type === "FindCoordinator") {
           if (r.error === ErrorCode.NONE) {
+            this.coordinatorVoters = r.voters ?? [];
             this.coordinatorAddress = { host: r.host, port: r.port };
             return this.coordinatorAddress;
           }
@@ -880,11 +899,14 @@ export class LotseClient {
     throw Attempt.retry(why);
   }
 
-  /** One request to the coordinator; failures become `Attempt`s (every coordinator request may be repeated). */
-  private async callCoordinator(key: string, req: Request): Promise<Response> {
+  /**
+   * One request to the coordinator; failures become `Attempt`s (every coordinator request may be repeated). With
+   * `readAtLeast`, the request header's `read_at_least`; empty, no tag.
+   */
+  private async callCoordinator(key: string, req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     const addr = await this.coordinator(key);
     try {
-      return await this.call(addr, req);
+      return await this.call(addr, req, readAtLeast);
     } catch (e) {
       if (e instanceof CallFailure) {
         this.coordinatorAddress = null;
@@ -892,6 +914,42 @@ export class LotseClient {
       }
       throw e;
     }
+  }
+
+  /**
+   * A read of the coordinator group's state (`OffsetFetch`): from the lowest-id voter in this client's zone, which
+   * answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed call
+   * sends that one read to the coordinator with the same indexes, which a coordinator deposed without knowing it
+   * refuses (ADR 0141); the next read tries the zone again.
+   */
+  private async callCoordinatorRead(key: string, req: Request): Promise<Response> {
+    const zone = this.cfg.zone;
+    let atLeast: readonly GroupIndex[] = [];
+    if (zone !== null) {
+      // Learns the voters, if no FindCoordinator did yet.
+      await this.coordinator(key);
+      atLeast = this.indexes.snapshot();
+      const node = zoneNode(
+        zone,
+        this.coordinatorVoters.filter((v) => this.listed.has(v)),
+        this.zones,
+      );
+      const addr = node === null ? undefined : this.brokers.get(node);
+      if (addr !== undefined) {
+        try {
+          const resp = await this.call(addr, req, atLeast);
+          if (!refused(resp)) {
+            return resp;
+          }
+        } catch (e) {
+          if (!(e instanceof CallFailure)) {
+            throw e;
+          }
+          // the coordinator answers instead
+        }
+      }
+    }
+    return this.callCoordinator(key, req, atLeast);
   }
 
   private async initProducerOnce(txn: string | null): Promise<ProducerIds> {
@@ -1021,14 +1079,22 @@ export class LotseClient {
   }
 
   /**
-   * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). `null` without
-   * a zone, when the leader is in it, or when there is none.
+   * A replica of the partition in this client's zone other than the leader: where fetches go (ADR 0104). The one the
+   * leader last named, if any, else a voter in the zone as metadata has them. `null` without a zone, when the leader is
+   * in it, or when there is none.
    */
   private replicaInZone(stream: string, partition: number, leader: number): Address | null {
     const zone = this.cfg.zone;
     const key = routeKey(stream, partition);
     if (zone === null || this.notInZone.has(key) || this.zones.get(leader) === zone) {
       return null;
+    }
+    const named = this.zoneReplica.get(key);
+    if (named !== undefined && named !== leader) {
+      const addr = this.brokers.get(named);
+      if (addr !== undefined) {
+        return addr;
+      }
     }
     for (const v of this.voters.get(key) ?? []) {
       if (this.zones.get(v) === zone) {
@@ -1072,6 +1138,8 @@ export class LotseClient {
         },
       ],
       ...(allowFollower ? { allowFollower } : {}),
+      // Only the leader names a replica to come back to.
+      ...(!allowFollower && this.cfg.zone !== null ? { zone: this.cfg.zone } : {}),
     };
     let resp: Response;
     try {
@@ -1095,6 +1163,21 @@ export class LotseClient {
     }
     if (allowFollower && p.error !== ErrorCode.NONE) {
       throw this.leaveReplica(stream, partition, `${formatAddress(addr)}: ${describeError(p.error)}`);
+    }
+    // The leader names a replica in this client's zone that is current again: the next fetch goes there, without
+    // asking for metadata. An answer with an error says nothing about the partition's replicas, and a node without a
+    // known address cannot be asked: clearing the fallback for it would send the next fetch to the replica that failed.
+    const preferred = p.preferredReplica;
+    if (
+      !allowFollower &&
+      p.error === ErrorCode.NONE &&
+      preferred !== undefined &&
+      preferred !== routed.route.leader &&
+      this.brokers.has(preferred)
+    ) {
+      const key = routeKey(stream, partition);
+      this.notInZone.delete(key);
+      this.zoneReplica.set(key, preferred);
     }
     if (p.error === ErrorCode.NONE) {
       return new Fetched(p.records, p.highWatermark, p.lastStableOffset, p.logStartOffset, p.abortedTxns);
@@ -1234,8 +1317,46 @@ export class LotseClient {
     }
   }
 
-  /** Sends an admin request to the metadata leader, or any broker if it is not known. */
-  private async callAdmin(req: Request): Promise<Response> {
+  /**
+   * An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata listed,
+   * which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
+   * call sends that one read to the metadata leader, whom a refusal may name, with the same indexes: a leader deposed
+   * without knowing it refuses a read it has not applied (ADR 0141), so the retry finds the new one. The next read
+   * tries the zone again.
+   */
+  private async callAdminRead(req: Request): Promise<Response> {
+    const zone = this.cfg.zone;
+    let atLeast: readonly GroupIndex[] = [];
+    if (zone !== null) {
+      atLeast = this.indexes.snapshot();
+      const node = zoneNode(zone, this.listed, this.zones);
+      const addr = node === null ? undefined : this.brokers.get(node);
+      if (addr !== undefined) {
+        try {
+          const resp = await this.call(addr, req, atLeast);
+          if (!refused(resp)) {
+            return resp;
+          }
+          const hint = leaderHintOf(resp);
+          if (hint !== null) {
+            this.metadataLeader = hint.leader;
+          }
+        } catch (e) {
+          if (!(e instanceof CallFailure)) {
+            throw e;
+          }
+          // the leader answers instead
+        }
+      }
+    }
+    return this.callAdmin(req, atLeast);
+  }
+
+  /**
+   * Sends an admin request to the metadata leader, or any broker if it is not known. With `readAtLeast`, the request
+   * header's `read_at_least`; empty, no tag.
+   */
+  private async callAdmin(req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     const leader = this.metadataLeader;
     // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's nodes
     // first, or it keeps asking the others. If the broker that answers does not know it either (one that lags), ask the
@@ -1262,7 +1383,7 @@ export class LotseClient {
       addr = targets[this.adminTurn++ % targets.length] as Address;
     }
     try {
-      return await this.call(addr, req);
+      return await this.call(addr, req, readAtLeast);
     } catch (e) {
       if (!(e instanceof CallFailure)) {
         throw e;
@@ -1486,6 +1607,7 @@ export class LotseClient {
       backoffMs: this.cfg.backoffMs,
       retrying: (attempt, signal, mayHaveChanged) => this.retrying(attempt, signal, mayHaveChanged),
       callCoordinator: (key, request) => this.callCoordinator(key, request),
+      callCoordinatorRead: (key, request) => this.callCoordinatorRead(key, request),
       forgetCoordinator: () => {
         this.coordinatorAddress = null;
       },
@@ -1889,8 +2011,9 @@ export class LotseClient {
   }
 
   /**
-   * A resource's settings, each with where its value comes from (`ConfigSource`). Read from the metadata leader, so
-   * changes this client made are in it.
+   * A resource's settings, each with where its value comes from (`ConfigSource`). Read from the metadata leader or,
+   * with a zone, from a node in it that has applied every metadata index this client saw, so changes this client made
+   * are in it.
    *
    * @throws UnknownStreamError if no broker knows the name
    */
@@ -1899,7 +2022,7 @@ export class LotseClient {
     const id = await this.resourceId(name);
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeConfigs", resourceIds: [id] });
+        const r = await this.callAdminRead({ type: "DescribeConfigs", resourceIds: [id] });
         if (r.type !== "DescribeConfigs") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -1940,7 +2063,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeUsers" });
+        const r = await this.callAdminRead({ type: "DescribeUsers" });
         if (r.type !== "DescribeUsers") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -1961,7 +2084,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeCertificates" });
+        const r = await this.callAdminRead({ type: "DescribeCertificates" });
         if (r.type !== "DescribeCertificates") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -1989,7 +2112,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeTenants" });
+        const r = await this.callAdminRead({ type: "DescribeTenants" });
         if (r.type !== "DescribeTenants") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2015,7 +2138,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeRoleBindings" });
+        const r = await this.callAdminRead({ type: "DescribeRoleBindings" });
         if (r.type !== "DescribeRoleBindings") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2095,7 +2218,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeTokens", owner });
+        const r = await this.callAdminRead({ type: "DescribeTokens", owner });
         if (r.type !== "DescribeTokens") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2159,7 +2282,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeUpgrade" });
+        const r = await this.callAdminRead({ type: "DescribeUpgrade" });
         if (r.type !== "DescribeUpgrade") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2213,7 +2336,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeCertificateRequests" });
+        const r = await this.callAdminRead({ type: "DescribeCertificateRequests" });
         if (r.type !== "DescribeCertificateRequests") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2276,7 +2399,7 @@ export class LotseClient {
     this.checkOpen();
     return this.retrying(
       async () => {
-        const r = await this.callAdmin({ type: "DescribeNodes" });
+        const r = await this.callAdminRead({ type: "DescribeNodes" });
         if (r.type !== "DescribeNodes") {
           throw Attempt.retry(`unexpected response ${r.type}`);
         }
@@ -2455,8 +2578,8 @@ export class LotseClient {
    *
    * @throws CallFailure when there is no response
    */
-  private async call(addr: Address, req: Request): Promise<Response> {
-    return this.callOn(await this.connect(addr), req);
+  private async call(addr: Address, req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
+    return this.callOn(await this.connect(addr), req, readAtLeast);
   }
 
   /** The pooled connection to `addr`, logged in. */
@@ -2487,10 +2610,13 @@ export class LotseClient {
     return c;
   }
 
-  /** Sends one request on a given connection and waits for its response; failures are handled as in `call`. */
-  private async callOn(c: Connection, req: Request): Promise<Response> {
+  /**
+   * Sends one request on a given connection and waits for its response; failures are handled as in `call`. With
+   * `readAtLeast`, a zone read the node may answer only once it has applied these indexes.
+   */
+  private async callOn(c: Connection, req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     try {
-      return await c.send(req);
+      return await c.send(req, readAtLeast);
     } catch (e) {
       if (e instanceof BrokerError) {
         this.pool.discard(c);

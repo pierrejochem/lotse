@@ -55,7 +55,9 @@ export interface ClientOptions {
   readonly tenant?: string;
   /**
    * The zone this client runs in. With one, it fetches from a replica of the partition in that zone, which serves the
-   * committed data it has, and from the leader if there is none (ADR 0104). Default none: fetches go to the leader.
+   * committed data it has, and from the leader if there is none (ADR 0104); a leader it fetched from may send it back
+   * there. Committed group offsets and the admin `describe` calls are read from a node in that zone that has applied
+   * what this client saw, else from the leader. Default none: reads go to the leader.
    */
   readonly zone?: string;
   /** For the TCP connect and the TLS handshake together. Default 10 000. */

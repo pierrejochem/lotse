@@ -1,4 +1,4 @@
-import type { Request, Response } from "../../src/index.js";
+import type { GroupIndex, Request, Response } from "../../src/index.js";
 import { type Address, formatAddress } from "../../src/net/address.js";
 import { type FakeBroker, type Peer } from "./fake-broker.js";
 import { FakeBroker as Broker } from "./fake-broker.js";
@@ -13,12 +13,21 @@ export type NodeHandler = (
   peer: Peer,
 ) => Response | null | typeof DROP | Promise<Response | null | typeof DROP>;
 
+/** One request as a node heard it: which node, the request and its header's `readAtLeast`. */
+export interface Heard {
+  readonly node: number;
+  readonly request: Request;
+  readonly readAtLeast: readonly GroupIndex[];
+}
+
 /** A broker with an id, in this process, that answers as a test tells it to. Plain TCP on loopback. */
 export class FakeNode {
   private handler: NodeHandler = (node, request) => {
     throw new Error(`node ${node.id} was not expected to get ${request.type}`);
   };
   private readonly received: Request[] = [];
+  private appliedOf: (request: Request) => readonly GroupIndex[] = () => [];
+  private heardLog: Heard[] = [];
   private broker!: FakeBroker;
 
   private constructor(readonly id: number) {}
@@ -27,6 +36,7 @@ export class FakeNode {
     const node = new FakeNode(id);
     node.broker = await Broker.start(async (peer, req) => {
       node.received.push(req.request);
+      node.heardLog.push({ node: node.id, request: req.request, readAtLeast: req.readAtLeast });
       const answer = await node.handler(node, req.request, peer);
       if (answer === null) {
         return;
@@ -35,7 +45,7 @@ export class FakeNode {
         peer.closeSocket();
         return;
       }
-      peer.reply(req.header.correlationId, answer);
+      peer.reply(req.header.correlationId, answer, node.appliedOf(req.request));
     });
     return node;
   }
@@ -43,6 +53,23 @@ export class FakeNode {
   on(handler: NodeHandler): this {
     this.handler = handler;
     return this;
+  }
+
+  /** What header tag 0, `applied`, of the answer to each request says; none by default. */
+  applied(f: (request: Request) => readonly GroupIndex[]): this {
+    this.appliedOf = f;
+    return this;
+  }
+
+  /** Records what this node hears in `log`, which other nodes may share, so the order across them shows. */
+  heardIn(log: Heard[]): this {
+    this.heardLog = log;
+    return this;
+  }
+
+  /** Every request this node heard, with its `readAtLeast`, in arrival order. */
+  heard(): Heard[] {
+    return this.heardLog.filter((h) => h.node === this.id);
   }
 
   get address(): Address {

@@ -5,6 +5,7 @@ import dev.lotse.auth.Credentials;
 import dev.lotse.proto.ApiKey;
 import dev.lotse.proto.DecodeException;
 import dev.lotse.proto.Frames;
+import dev.lotse.proto.GroupIndex;
 import dev.lotse.proto.Request;
 import dev.lotse.proto.Response;
 import java.io.BufferedOutputStream;
@@ -264,6 +265,16 @@ public final class Connection implements AutoCloseable {
      * @throws IllegalArgumentException for {@code Credit}, which is never answered: use {@link #sendOnly}
      */
     public CompletableFuture<Response> send(Request request) {
+        return send(request, List.of());
+    }
+
+    /**
+     * {@link #send} with the request header's {@code read_at_least}: the node may answer only from state that has
+     * applied at least these indexes of those groups. An empty list sends the request as {@link #send} does.
+     *
+     * @throws IllegalArgumentException for {@code Credit}, which is never answered: use {@link #sendOnly}
+     */
+    public CompletableFuture<Response> send(Request request, List<GroupIndex> readAtLeast) {
         if (request.apiKey().equals(ApiKey.CREDIT)) {
             throw new IllegalArgumentException("Credit is never answered; use sendOnly");
         }
@@ -278,7 +289,7 @@ public final class Connection implements AutoCloseable {
         }
         byte[] wire;
         try {
-            wire = Frames.withLengthPrefix(Frames.encodeRequest(id, request));
+            wire = Frames.withLengthPrefix(Frames.encodeRequest(id, readAtLeast, request));
         } catch (RuntimeException e) {
             future.completeExceptionally(new ConnectionException("cannot encode the request: " + e.getMessage(), false, e));
             return future;
@@ -342,6 +353,14 @@ public final class Connection implements AutoCloseable {
     /** Sends a request and waits for the response; the blocking form of {@link #send}. */
     public Response call(Request request) {
         return await(send(request));
+    }
+
+    /**
+     * Sends a request with {@code read_at_least} and waits for the response; the blocking form of
+     * {@link #send(Request, List)}.
+     */
+    public Response call(Request request, List<GroupIndex> readAtLeast) {
+        return await(send(request, readAtLeast));
     }
 
     /**
@@ -495,13 +514,23 @@ public final class Connection implements AutoCloseable {
             // Late: the request timed out, or it was sent with sendOnly.
             return;
         }
-        Response response;
+        Frames.DecodedResponse decoded;
         try {
-            response = Frames.decodeResponse(frame, slot.key()).response();
+            decoded = Frames.decodeResponse(frame, slot.key());
         } catch (DecodeException e) {
             slot.future().completeExceptionally(new ConnectionException("undecodable response: " + e.getMessage(), true, e));
             throw e;
         }
+        // Before the future completes, so a read that follows this answer asks for what it reflected.
+        java.util.function.Consumer<List<GroupIndex>> onApplied = options.onApplied();
+        if (onApplied != null && !decoded.applied().isEmpty()) {
+            try {
+                onApplied.accept(decoded.applied());
+            } catch (RuntimeException e) {
+                LOG.log(System.Logger.Level.WARNING, "the applied listener threw", e);
+            }
+        }
+        Response response = decoded.response();
         if (response instanceof Response.Error error) {
             slot.future().completeExceptionally(new BrokerException(error.code(), null));
         } else if (response instanceof Response.Refused refused) {

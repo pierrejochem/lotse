@@ -15,7 +15,9 @@ import {
   IMPLEMENTED_KEYS,
   isPush,
   isRetriable,
+  type Request,
   responseCorrelationId,
+  Writer,
 } from "../src/proto/index.js";
 import { field, hex, lines, toHex } from "./vectors.js";
 
@@ -35,15 +37,94 @@ test("every request decodes and is written again to the same bytes", () => {
   const vectors = lines("requests.hex");
   assert.ok(vectors.length >= 40, "the vectors cover every client request");
   for (const v of vectors) {
+    if (tagged(v)) {
+      continue; // aHeaderTagRidesOnItsFrame
+    }
     const label = field(v, 0);
     const frame = hex(field(v, 1));
     const decoded = decodeRequest(frame);
+    assert.deepEqual(decoded.readAtLeast, [], label);
     const correlationId = Number(label.split("-")[1]) + 1;
     assert.equal(decoded.header.correlationId, correlationId, label);
     assert.equal(decoded.header.apiVersion, 0, label);
     assert.equal(decoded.header.flags, 0, label);
     assert.equal(toHex(encodeRequest(correlationId, decoded.request)), field(v, 1), label);
   }
+});
+
+/** The samples of header tag 0 ride on a frame of their own, labelled `-tagged-` with correlation id 900. */
+function tagged(v: string[]): boolean {
+  return field(v, 0).includes("-tagged-");
+}
+
+/**
+ * Header tag 0: `read_at_least` on a request, `applied` on a response, read as the broker wrote them and written
+ * again byte for byte; an empty list writes no tag.
+ */
+test("aHeaderTagRidesOnItsFrame", () => {
+  const req = lines("requests.hex").find(tagged);
+  assert.ok(req !== undefined);
+  const r = decodeRequest(hex(field(req, 1)));
+  assert.equal(r.header.correlationId, 900);
+  assert.deepEqual(r.request, { type: "DescribeNodes" });
+  const wanted = [
+    { group: 1n, index: 7n },
+    { group: 2n, index: -1n },
+  ];
+  assert.deepEqual(r.readAtLeast, wanted, "u64::MAX is -1n, as every u64 here");
+  assert.equal(toHex(encodeRequest(900, r.request, wanted)), field(req, 1));
+  assert.deepEqual(encodeRequest(900, r.request, []), encodeRequest(900, r.request));
+
+  const res = lines("responses.hex").find(tagged);
+  assert.ok(res !== undefined);
+  const d = decodeResponse(hex(field(res, 2)), Number(field(res, 1)));
+  assert.equal(d.correlationId, 900);
+  assert.deepEqual(d.response, { type: "Outcome", error: ErrorCode.NONE, leaderHint: null });
+  assert.deepEqual(d.applied, [{ group: 1n, index: 9n }]);
+  assert.equal(toHex(encodeResponse(900, d.response, d.applied)), field(res, 2));
+});
+
+/** A header index count larger than the field holds is refused, not trusted. */
+test("aHeaderIndexCountBeyondTheFieldIsRefused", () => {
+  const w = new Writer();
+  w.u16(ApiKey.DESCRIBE_NODES).u16(0).u32(1).u16(0);
+  w.tags([{ tag: 0, value: new Writer().u32(2).u64(1n).u64(7n).toBytes() }]);
+  w.noTags();
+  const e = decodeFails(() => decodeRequest(w.toBytes()));
+  assert.equal(e.kind, "MALFORMED");
+});
+
+/** The zone reads' message tags: `Fetch` tag 1 `zone`, a fetched partition's tag 1 `preferredReplica` and `FindCoordinator`'s tag 0 `voters`. */
+test("zoneTagsAreReadAsTheBrokerWroteThem", () => {
+  let zone = false;
+  for (const v of lines("requests.hex")) {
+    const r: Request = decodeRequest(hex(field(v, 1))).request;
+    if (r.type === "Fetch" && r.zone !== undefined) {
+      zone = true;
+      assert.equal(r.zone, "eu-1");
+      assert.equal(r.allowFollower, true);
+    }
+  }
+  let preferred = false;
+  let voters = false;
+  for (const v of lines("responses.hex")) {
+    const r = decodeResponse(hex(field(v, 2)), Number(field(v, 1))).response;
+    if (r.type === "Fetch") {
+      for (const res of r.resources) {
+        for (const p of res.partitions) {
+          if (p.preferredReplica !== undefined) {
+            preferred = true;
+            assert.equal(p.preferredReplica, 2);
+          }
+        }
+      }
+    }
+    if (r.type === "FindCoordinator" && r.voters !== undefined) {
+      voters = true;
+      assert.deepEqual(r.voters, [1, 2, 3]);
+    }
+  }
+  assert.ok(zone && preferred && voters);
 });
 
 test("every client API key has a request vector", () => {
@@ -60,10 +141,14 @@ test("every response decodes and is written again to the same bytes", () => {
   const vectors = lines("responses.hex");
   assert.ok(vectors.length >= 40);
   for (const v of vectors) {
+    if (tagged(v)) {
+      continue; // aHeaderTagRidesOnItsFrame
+    }
     const label = field(v, 0);
     const frame = hex(field(v, 2));
     const key = Number(field(v, 1));
     const decoded = decodeResponse(frame, key);
+    assert.deepEqual(decoded.applied, [], label);
     const correlationId = Number(label.split("-")[1]);
     assert.equal(decoded.correlationId, correlationId, label);
     assert.equal(responseCorrelationId(frame), correlationId, label);

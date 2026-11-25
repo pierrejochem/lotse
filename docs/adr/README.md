@@ -144,5 +144,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0138 | [Every release has its notes, and images are tagged by version](0138-every-release-has-its-notes-and-version-tagged-images.md) | Accepted |
 | 0139 | [Nodes log their groups' elections and stalls](0139-nodes-log-their-groups-elections-and-stalls.md) | Accepted |
 | 0140 | [The console has a navy primary action and red only for danger](0140-the-console-has-a-navy-primary-action-and-red-only-for-danger.md) | Accepted |
+| 0141 | [Reads in the client's zone, with read-your-writes](0141-reads-in-the-client-s-zone-with-read-your-writes.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

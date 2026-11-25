@@ -64,6 +64,7 @@ async fn broker(rt: SimRuntime, id: u32, seen: Seen, follower_error: Option<Erro
                                     aborted_txns: vec![],
                                     records,
                                     leader_hint: None,
+                                    preferred_replica: None,
                                 }],
                             }],
                         })

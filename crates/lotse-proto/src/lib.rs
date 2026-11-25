@@ -793,14 +793,81 @@ pub enum Response {
     },
 }
 
+/// A position in one Raft group's log: the group and the index applied or
+/// wanted there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GroupIndex {
+    /// The group, such as 1 for metadata and 2 for the coordinator.
+    pub group: u64,
+    /// A log index in it.
+    pub index: u64,
+}
+
+/// What a frame header carries besides the body (header tag 0).
+///
+/// A request holds `read_at_least`: a read the node may serve only once it
+/// has applied at least these indexes. A response holds `applied`: what the
+/// node had applied when it answered. Each side ignores the other's field,
+/// and a frame without the tag decodes to the default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrameTags {
+    /// In a request: the indexes the answer must reflect.
+    pub read_at_least: Vec<GroupIndex>,
+    /// In a response: the indexes the node had applied.
+    pub applied: Vec<GroupIndex>,
+}
+
+/// Header tag 0: `read_at_least` in a request, `applied` in a response.
+const TAG_HEADER_INDEXES: u64 = 0;
+
+fn put_header_tags(w: &mut Writer, indexes: &[GroupIndex]) {
+    if indexes.is_empty() {
+        w.no_tags();
+        return;
+    }
+    let mut v = Writer::new();
+    v.u32(indexes.len() as u32);
+    for e in indexes {
+        v.u64(e.group);
+        v.u64(e.index);
+    }
+    w.tags(&[(TAG_HEADER_INDEXES, v.finish())]);
+}
+
+/// The indexes of header tag 0; other tags come from newer versions and are skipped.
+fn get_header_tags(raw: Vec<(u64, Bytes)>) -> Result<Vec<GroupIndex>, DecodeError> {
+    let mut out = Vec::new();
+    for (tag, value) in raw {
+        if tag != TAG_HEADER_INDEXES {
+            continue;
+        }
+        let mut v = Reader::new(value);
+        let n = v.u32()? as usize;
+        // Each entry takes sixteen bytes, so a count beyond what is left is a lie.
+        if n > v.remaining() / 16 {
+            return Err(DecodeError::Malformed("index count exceeds the field"));
+        }
+        for _ in 0..n {
+            out.push(GroupIndex { group: v.u64()?, index: v.u64()? });
+        }
+        v.finish()?;
+    }
+    Ok(out)
+}
+
 /// Encodes a version-0 request.
 pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
+    encode_request_tagged(correlation_id, &FrameTags::default(), request)
+}
+
+/// Encodes a version-0 request with header tags (`read_at_least`).
+pub fn encode_request_tagged(correlation_id: u32, tags: &FrameTags, request: &Request) -> Bytes {
     let mut w = Writer::new();
     w.u16(request.api_key().0);
     w.u16(0);
     w.u32(correlation_id);
     w.u16(0);
-    w.no_tags();
+    put_header_tags(&mut w, &tags.read_at_least);
     match request {
         Request::ApiVersions => w.no_tags(),
         Request::Metadata(r) => r.put(&mut w),
@@ -875,15 +942,23 @@ pub fn encode_request(correlation_id: u32, request: &Request) -> Bytes {
 /// Decodes a request. A header this node does not speak gives
 /// [`DecodeError::Unsupported`], so it can still answer.
 pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeError> {
+    decode_request_tagged(frame).map(|(header, _, request)| (header, request))
+}
+
+/// Decodes a request with its header tags.
+pub fn decode_request_tagged(frame: Bytes) -> Result<(RequestHeader, FrameTags, Request), DecodeError> {
     let mut r = Reader::new(frame);
     let header =
         RequestHeader { api_key: ApiKey(r.u16()?), api_version: r.u16()?, correlation_id: r.u32()?, flags: r.u16()? };
-    r.tags()?;
+    // The tags' content is read after the support check, so a header this node does not speak
+    // still gives `Unsupported` and it can answer.
+    let raw_tags = r.tags()?;
     let supported =
         ApiKey::SUPPORTED.iter().any(|v| v.api_key == header.api_key && (v.min..=v.max).contains(&header.api_version));
     if !supported {
         return Err(DecodeError::Unsupported(header));
     }
+    let tags = FrameTags { read_at_least: get_header_tags(raw_tags)?, applied: Vec::new() };
     let request = match header.api_key {
         ApiKey::API_VERSIONS => {
             r.tags()?;
@@ -961,15 +1036,20 @@ pub fn decode_request(frame: Bytes) -> Result<(RequestHeader, Request), DecodeEr
         _ => unreachable!("checked against SUPPORTED"),
     };
     r.finish()?;
-    Ok((header, request))
+    Ok((header, tags, request))
 }
 
 /// Encodes a response to the request with `correlation_id`.
 pub fn encode_response(correlation_id: u32, response: &Response) -> Bytes {
+    encode_response_tagged(correlation_id, &FrameTags::default(), response)
+}
+
+/// Encodes a response with header tags (`applied`).
+pub fn encode_response_tagged(correlation_id: u32, tags: &FrameTags, response: &Response) -> Bytes {
     let mut w = Writer::new();
     w.u32(correlation_id);
     w.u16(if matches!(response, Response::Error(_) | Response::Refused { .. }) { flags::ERROR } else { 0 });
-    w.no_tags();
+    put_header_tags(&mut w, &tags.applied);
     match response {
         Response::ApiVersions(r) => r.put(&mut w),
         Response::Metadata(r) => r.put(&mut w),
@@ -1060,10 +1140,15 @@ pub fn response_correlation_id(frame: &[u8]) -> Result<u32, DecodeError> {
 
 /// Decodes a response to a request of type `api_key`.
 pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response), DecodeError> {
+    decode_response_tagged(frame, api_key).map(|(id, _, response)| (id, response))
+}
+
+/// Decodes a response to a request of type `api_key`, with its header tags.
+pub fn decode_response_tagged(frame: Bytes, api_key: ApiKey) -> Result<(u32, FrameTags, Response), DecodeError> {
     let mut r = Reader::new(frame);
     let correlation_id = r.u32()?;
     let flags = r.u16()?;
-    r.tags()?;
+    let tags = FrameTags { read_at_least: Vec::new(), applied: get_header_tags(r.tags()?)? };
     if flags & flags::ERROR != 0 {
         let code = ErrorCode(r.u16()?);
         let reason = r.tags()?.into_iter().find(|(t, _)| *t == TAG_REASON).map(|(_, v)| v);
@@ -1075,7 +1160,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
             },
             None => Response::Error(code),
         };
-        return Ok((correlation_id, response));
+        return Ok((correlation_id, tags, response));
     }
     let response = match api_key {
         ApiKey::API_VERSIONS => Response::ApiVersions(ApiVersionsResponse::get(&mut r)?),
@@ -1150,7 +1235,7 @@ pub fn decode_response(frame: Bytes, api_key: ApiKey) -> Result<(u32, Response),
         _ => return Err(DecodeError::Malformed("unknown API key")),
     };
     r.finish()?;
-    Ok((correlation_id, response))
+    Ok((correlation_id, tags, response))
 }
 
 #[cfg(test)]

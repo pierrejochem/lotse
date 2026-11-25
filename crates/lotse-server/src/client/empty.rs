@@ -84,6 +84,10 @@ impl Clients {
         match answer {
             Ok(None) => {
                 let req = DeleteResourceRequest { resource_id: w.resource_id, if_empty: false };
+                // Answered from the metadata group, as when it came in.
+                let applied = super::applied_at(groups, &view.admin.metadata.into_iter().collect::<Vec<_>>());
+                let stamp = w.outbox.clone();
+                let _answering = stamp.answering(w.id, applied);
                 self.delete_resource(w.outbox, w.id, req, view, groups);
             }
             Ok(Some(partition)) => {

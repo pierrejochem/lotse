@@ -160,16 +160,18 @@ impl Clients {
     }
 
     /// `DescribeTokens`: the live tokens `who` may see, never a hash.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn describe_tokens<R: Runtime, S: StateMachine>(
         &mut self,
         outbox: &Outbox,
         id: u32,
         req: DescribeTokensRequest,
         who: &Principal,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeTokensResponse { error, leader_hint, tokens: Vec::new() };

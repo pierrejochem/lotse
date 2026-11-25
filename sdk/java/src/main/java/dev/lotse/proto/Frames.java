@@ -16,6 +16,9 @@ import java.util.List;
  * Push:     correlation_id u32 (0) | flags u16 (PUSH) | tagged_fields | api_key u16 | api_version u16 | body
  * </pre>
  *
+ * <p>The header's tagged fields have one tag, 0: {@code read_at_least} in a request and {@code applied} in a
+ * response, each a list of {@link GroupIndex}. A frame without it reads as an empty list.
+ *
  * <p>Check the {@link Flags#ERROR} flag of a response <em>before</em> decoding a typed body: such a response
  * carries only an error code (and optionally a reason), whatever the request was. {@link #decodeResponse} does.
  * Responses on a connection may come back in another order than the requests; match them by correlation id.
@@ -26,11 +29,83 @@ public final class Frames {
 
     private Frames() {}
 
-    /** A decoded request frame. */
-    public record DecodedRequest(RequestHeader header, Request request) {}
+    /**
+     * A decoded request frame.
+     *
+     * @param header the header
+     * @param request the request
+     * @param readAtLeast header tag 0: the indexes the answer must reflect, empty without the tag
+     */
+    public record DecodedRequest(RequestHeader header, Request request, List<GroupIndex> readAtLeast) {
+        /** Creates the frame. */
+        public DecodedRequest {
+            readAtLeast = List.copyOf(readAtLeast);
+        }
 
-    /** A decoded response frame. */
-    public record DecodedResponse(long correlationId, Response response) {}
+        /** A frame without header tags. */
+        public DecodedRequest(RequestHeader header, Request request) {
+            this(header, request, List.of());
+        }
+    }
+
+    /**
+     * A decoded response frame.
+     *
+     * @param correlationId the request it answers
+     * @param response the response
+     * @param applied header tag 0: the indexes the node had applied when it answered, empty without the tag
+     */
+    public record DecodedResponse(long correlationId, Response response, List<GroupIndex> applied) {
+        /** Creates the frame. */
+        public DecodedResponse {
+            applied = List.copyOf(applied);
+        }
+
+        /** A frame without header tags. */
+        public DecodedResponse(long correlationId, Response response) {
+            this(correlationId, response, List.of());
+        }
+    }
+
+    // ---- header tags ----
+
+    /** Header tag 0: {@code read_at_least} in a request, {@code applied} in a response. */
+    static final long TAG_HEADER_INDEXES = 0;
+
+    /** Writes a header's tags: none for an empty list, else tag 0 with a {@code u32} count and the entries. */
+    private static void putHeaderTags(Writer w, List<GroupIndex> indexes) {
+        if (indexes.isEmpty()) {
+            w.noTags();
+            return;
+        }
+        Writer v = new Writer();
+        v.u32(indexes.size());
+        for (GroupIndex e : indexes) {
+            v.u64(e.group()).u64(e.index());
+        }
+        w.tags(List.of(new Tag(TAG_HEADER_INDEXES, ByteString.copyOf(v.toByteArray()))));
+    }
+
+    /** The indexes of header tag 0; other tags come from newer versions and are skipped. */
+    private static List<GroupIndex> getHeaderTags(List<Tag> raw) {
+        List<GroupIndex> out = new java.util.ArrayList<>();
+        for (Tag t : raw) {
+            if (t.tag() != TAG_HEADER_INDEXES) {
+                continue;
+            }
+            Reader v = new Reader(t.value().toByteArray());
+            long n = v.u32();
+            // Each entry takes sixteen bytes, so a count beyond what is left is a lie.
+            if (n > v.remaining() / 16) {
+                throw DecodeException.malformed("index count exceeds the field");
+            }
+            for (long i = 0; i < n; i++) {
+                out.add(new GroupIndex(v.u64(), v.u64()));
+            }
+            v.finish();
+        }
+        return out;
+    }
 
     // ---- length prefix ----
 
@@ -66,12 +141,20 @@ public final class Frames {
 
     /** Encodes a version-0 request. {@code correlationId} is a {@code u32} and must not be 0, which is reserved for pushes. */
     public static byte[] encodeRequest(long correlationId, Request request) {
+        return encodeRequest(correlationId, List.of(), request);
+    }
+
+    /**
+     * Encodes a version-0 request with header tag 0, {@code read_at_least}: a read the node may serve only once it has
+     * applied at least these indexes. An empty list writes no tag, so the frame is the same as without it.
+     */
+    public static byte[] encodeRequest(long correlationId, List<GroupIndex> readAtLeast, Request request) {
         Writer w = new Writer();
         w.u16(request.apiKey().id());
         w.u16(0);
         w.u32(correlationId);
         w.u16(0);
-        w.noTags();
+        putHeaderTags(w, readAtLeast);
         request.write(w);
         return w.toByteArray();
     }
@@ -83,13 +166,16 @@ public final class Frames {
     public static DecodedRequest decodeRequest(byte[] frame) {
         Reader r = new Reader(frame);
         RequestHeader header = new RequestHeader(new ApiKey(r.u16()), r.u16(), r.u32(), r.u16());
-        r.tags();
+        // The tags' content is read after the support check, so a header this library does not speak still gives
+        // UNSUPPORTED and the caller can answer.
+        List<Tag> rawTags = r.tags();
         if (header.apiVersion() != 0 || !ApiKey.isClientKey(header.apiKey())) {
             throw new DecodeException(
                     DecodeException.Kind.UNSUPPORTED,
                     "unsupported API key " + header.apiKey().id() + " version " + header.apiVersion(),
                     header);
         }
+        List<GroupIndex> readAtLeast = getHeaderTags(rawTags);
         Request request;
         switch (header.apiKey().id()) {
             case 0 -> request = Request.ApiVersions.read(r);
@@ -155,17 +241,25 @@ public final class Frames {
             default -> throw new IllegalStateException("checked against the implemented keys");
         }
         r.finish();
-        return new DecodedRequest(header, request);
+        return new DecodedRequest(header, request, readAtLeast);
     }
 
     // ---- responses ----
 
     /** Encodes a response to the request with {@code correlationId}. */
     public static byte[] encodeResponse(long correlationId, Response response) {
+        return encodeResponse(correlationId, List.of(), response);
+    }
+
+    /**
+     * Encodes a response with header tag 0, {@code applied}: the indexes the node had applied when it answered. An
+     * empty list writes no tag.
+     */
+    public static byte[] encodeResponse(long correlationId, List<GroupIndex> applied, Response response) {
         Writer w = new Writer();
         w.u32(correlationId);
         w.u16(response instanceof Response.Error || response instanceof Response.Refused ? Flags.ERROR : 0);
-        w.noTags();
+        putHeaderTags(w, applied);
         response.write(w);
         return w.toByteArray();
     }
@@ -186,7 +280,7 @@ public final class Frames {
         Reader r = new Reader(frame);
         long correlationId = r.u32();
         int flags = r.u16();
-        r.tags();
+        List<GroupIndex> applied = getHeaderTags(r.tags());
         if ((flags & Flags.ERROR) != 0) {
             ErrorCode code = new ErrorCode(r.u16());
             ByteString reason = null;
@@ -198,9 +292,9 @@ public final class Frames {
             }
             r.finish();
             if (reason == null) {
-                return new DecodedResponse(correlationId, new Response.Error(code));
+                return new DecodedResponse(correlationId, new Response.Error(code), applied);
             }
-            return new DecodedResponse(correlationId, new Response.Refused(code, strictUtf8(reason)));
+            return new DecodedResponse(correlationId, new Response.Refused(code, strictUtf8(reason)), applied);
         }
         Response response;
         switch (apiKey.id()) {
@@ -242,7 +336,7 @@ public final class Frames {
             default -> throw DecodeException.malformed("unknown API key");
         }
         r.finish();
-        return new DecodedResponse(correlationId, response);
+        return new DecodedResponse(correlationId, response, applied);
     }
 
     private static String strictUtf8(ByteString s) {

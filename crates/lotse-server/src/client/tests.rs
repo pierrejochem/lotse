@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 /// No follower lags in these tests (ADR 0116).
 static NOT_LAGGING: BTreeSet<GroupId> = BTreeSet::new();
+/// Nor is any voter current, so no leader names one.
+static NO_CURRENT: BTreeMap<GroupId, BTreeSet<NodeId>> = BTreeMap::new();
 
 use bytes::Bytes;
 use lotse_log::LogConfig;
@@ -44,6 +46,8 @@ type Groups = BTreeMap<GroupId, Replica<SimRuntime, Nothing>>;
 struct Five {
     nodes: BTreeMap<NodeId, Groups>,
     queue: Vec<(NodeId, NodeId, Message)>,
+    /// The group the methods below drive: `G` unless a test hosts more.
+    group: GroupId,
 }
 
 impl Five {
@@ -59,19 +63,20 @@ impl Five {
             let r = Replica::open_with(disk, "g", cfg, Nothing, LogConfig::default(), options).await.unwrap();
             nodes.insert(id, BTreeMap::from([(G, r)]));
         }
-        Five { nodes, queue: Vec::new() }
+        Five { nodes, queue: Vec::new(), group: G }
     }
 
     fn raft(&mut self, id: NodeId) -> &mut RaftGroup {
-        self.nodes.get_mut(&id).unwrap().get_mut(&G).unwrap().raft()
+        self.nodes.get_mut(&id).unwrap().get_mut(&self.group).unwrap().raft()
     }
 
     fn get(&self, id: NodeId) -> &RaftGroup {
-        self.nodes[&id][&G].raft_ref()
+        self.nodes[&id][&self.group].raft_ref()
     }
 
     async fn process(&mut self, id: NodeId) {
-        let out = self.nodes.get_mut(&id).unwrap().get_mut(&G).unwrap().process().await.unwrap();
+        let group = self.group;
+        let out = self.nodes.get_mut(&id).unwrap().get_mut(&group).unwrap().process().await.unwrap();
         self.queue.extend(out.messages.into_iter().map(|s| (id, s.to, s.msg)));
     }
 
@@ -170,6 +175,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
@@ -180,6 +186,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             request: produce_request("kept"),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(2, &all, None, |from, to| from == 1 && to == 2).await;
@@ -249,6 +256,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
@@ -261,6 +269,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
                 request: idempotent_request("x", 0),
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         }
@@ -348,6 +357,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
@@ -365,6 +375,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
                 }],
             }],
             allow_follower: false,
+            zone: None,
         });
         let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
         let mut clients = Clients::default();
@@ -376,6 +387,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
                     request: fetch,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 },
                 &view,
                 &mut groups,
@@ -467,6 +479,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         let mut ask = async |offset: u64, isolation: u8, allow_follower: bool| {
@@ -486,6 +499,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
                     }],
                 }],
                 allow_follower,
+                zone: None,
             });
             let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
             let request = ClientRequest {
@@ -494,6 +508,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
                 request: fetch,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(request, &view, &mut groups).await.unwrap();
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -553,6 +568,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -564,6 +580,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     groups,
@@ -633,6 +650,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
@@ -704,6 +722,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -717,6 +736,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     groups,
@@ -805,6 +825,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         // One connection for the consumers, another for the watcher.
         let (outbox, watcher) = (Arc::new(Outbox::default()), Arc::new(Outbox::default()));
@@ -812,8 +833,14 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
         let send = async |clients: &mut Clients, groups: &mut Groups, on: &Arc<Outbox>, request: Request| {
             let key = request.api_key();
             let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
-            let req =
-                ClientRequest { outbox: on.clone(), header, request, principal: Principal::Anonymous, mechanism: 0 };
+            let req = ClientRequest {
+                outbox: on.clone(),
+                header,
+                request,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+                read_at_least: Vec::new(),
+            };
             clients.handle(req, &view, groups).await.unwrap();
             // A delivery takes one more commit: its checkout (ADR 0109).
             for _ in 0..5 {
@@ -922,6 +949,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
@@ -934,6 +962,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: produce_request("a"),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         five.run(6, &all, Some(1), |_, _| true).await;
@@ -948,6 +977,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: ack,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         c1.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
         let near = |f: NodeId, t: NodeId| (f == 1 && (t == 2 || t == 3)) || ((f == 2 || f == 3) && t == 1);
@@ -977,6 +1007,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             request: sub,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let groups = five.nodes.get_mut(&2).unwrap();
         c2.handle(req, &view, groups).await.unwrap();
@@ -1028,6 +1059,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1055,6 +1087,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
                             request,
                             principal: Principal::Anonymous,
                             mechanism: 0,
+                            read_at_least: Vec::new(),
                         },
                         &view,
                         groups,
@@ -1131,6 +1164,7 @@ fn offsets_for_a_released_partition_are_refused() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1158,6 +1192,7 @@ fn offsets_for_a_released_partition_are_refused() {
                             request,
                             principal: Principal::Anonymous,
                             mechanism: 0,
+                            read_at_least: Vec::new(),
                         },
                         &view,
                         groups,
@@ -1219,6 +1254,7 @@ fn offsets_for_a_released_partition_are_refused() {
                         request,
                         principal: Principal::Anonymous,
                         mechanism: 0,
+                        read_at_least: Vec::new(),
                     },
                     &view,
                     &mut groups,
@@ -1280,6 +1316,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         for (applied_at_least, expected) in
@@ -1294,6 +1331,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             match &drain(&outbox, key).0[..] {
@@ -1345,6 +1383,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1356,6 +1395,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 outboxes.push((outbox, key));
@@ -1525,6 +1565,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 unix_ms: 0,
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1536,6 +1577,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 outboxes.push((outbox, key));
@@ -1762,6 +1804,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1779,6 +1822,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             }),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let last = groups[&G].raft_ref().last_index();
 
@@ -1956,6 +2000,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let mut clients = Clients::default();
         let outbox = Arc::new(Outbox::default());
@@ -1975,6 +2020,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
                 request: req,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
@@ -2038,6 +2084,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 unix_ms: 0,
                 access,
                 lagging: &NOT_LAGGING,
+                current_voters: &NO_CURRENT,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -2047,6 +2094,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
             for _ in 0..3 {
@@ -2106,6 +2154,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
             unix_ms: 0,
             access: &after,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         for _ in 0..3 {
             clients.after_round(&view, &mut groups).await.unwrap();
@@ -2158,6 +2207,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2183,6 +2233,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 for _ in 0..3 {
@@ -2276,6 +2327,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     unix_ms: 0,
                     access: &OPEN,
                     lagging: &NOT_LAGGING,
+                    current_voters: &NO_CURRENT,
                 };
                 let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
                     tenant: lotse_proto::DEFAULT_TENANT.into(),
@@ -2296,6 +2348,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     request,
                     principal: Principal::Anonymous,
                     mechanism: 0,
+                    read_at_least: Vec::new(),
                 };
                 clients.handle(req, &view, groups).await.unwrap();
                 for _ in 0..3 {
@@ -2353,6 +2406,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2364,6 +2418,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2496,6 +2551,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2527,6 +2583,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2622,6 +2679,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2633,6 +2691,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2726,6 +2785,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2748,6 +2808,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
             let answer = outbox.queue.lock().unwrap().drain(..).last().unwrap();
@@ -2790,6 +2851,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2801,6 +2863,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -2929,6 +2992,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
             unix_ms: 1_000,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2940,6 +3004,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
                 request,
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, groups).await.unwrap();
         };
@@ -3080,6 +3145,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3092,6 +3158,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
                 request: produce_request(v),
                 principal: Principal::Anonymous,
                 mechanism: 0,
+                read_at_least: Vec::new(),
             };
             clients.handle(req, &view, &mut groups).await.unwrap();
         }
@@ -3118,6 +3185,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
             request: Request::Ack(lotse_proto::AckRequest::plain(7, vec![(1, 2)])),
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         clients.handle(ack, &view, &mut groups).await.unwrap();
         for _ in 0..3 {
@@ -3148,8 +3216,14 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
         let letters = Arc::new(Outbox::default());
         for (key, request) in requests {
             let outbox = if key == ApiKey::DEAD_LETTER { letters.clone() } else { outbox.clone() };
-            let req =
-                ClientRequest { outbox, header: header(key), request, principal: Principal::Anonymous, mechanism: 0 };
+            let req = ClientRequest {
+                outbox,
+                header: header(key),
+                request,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+                read_at_least: Vec::new(),
+            };
             clients.handle(req, &view, &mut groups).await.unwrap();
         }
         for _ in 0..3 {
@@ -3201,6 +3275,7 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             unix_ms: 0,
             access: &OPEN,
             lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3211,6 +3286,7 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             request,
             principal: Principal::Anonymous,
             mechanism: 0,
+            read_at_least: Vec::new(),
         };
         let produced = |outbox: &Outbox| -> Vec<ErrorCode> {
             drain(outbox, ApiKey::PRODUCE)
@@ -3274,5 +3350,922 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             clients.after_round(&view(&none), &mut groups).await.unwrap();
         }
         assert_eq!(produced(&outbox), [ErrorCode::NONE]);
+    });
+}
+
+/// Zones of five nodes: the leader (1) in `a`, nodes 2 and 3 in `b`, node 4
+/// in `c`, node 5 in none.
+fn five_zones() -> BTreeMap<NodeId, String> {
+    BTreeMap::from([(1, "a".into()), (2, "b".into()), (3, "b".into()), (4, "c".into())])
+}
+
+/// A leader points a reader in another zone to the lowest current voter
+/// there (the design's section 1).
+#[test]
+fn a_leader_names_a_current_voter_in_the_zone() {
+    let zones = five_zones();
+    let voters = [1, 2, 3, 4, 5];
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |_| true), Some(2));
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| n == 3), Some(3), "only node 3 is current");
+    assert_eq!(preferred_replica("c", 1, &voters, &zones, |_| true), Some(4));
+}
+
+/// A voter the leader has not heard lately, or that has not reached the
+/// commit index within `follower_max_lag`, is not named (ADR 0116, from the
+/// leader's side).
+#[test]
+fn a_leader_names_no_lagging_voter() {
+    let zones = five_zones();
+    let voters = [1, 2, 3, 4, 5];
+    let lag = Duration::from_secs(10);
+    let t0 = lotse_rt::Instant::from_nanos(1_000_000_000);
+    let progress = |matched: u64, heard_recently: bool| lotse_raft::VoterProgress { matched, heard_recently };
+    let mut samples = crate::node::CommitSamples::default();
+    let mut judge = |commit: u64, two: u64, three: (u64, bool), now| {
+        let progress = [(2, progress(two, true)), (3, progress(three.0, three.1))];
+        crate::node::current_voters(&mut samples, commit, progress, now, lag)
+    };
+    // Both hold everything at first; node 3 is not heard.
+    let current = judge(5, 5, (5, false), t0);
+    assert_eq!(current, BTreeSet::from([2]));
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(2));
+    // The commit index moves on and node 2 does not follow: behind for
+    // exactly the limit it is still current, longer it is not.
+    let at = |ms| t0 + Duration::from_millis(ms);
+    assert_eq!(judge(9, 5, (9, false), at(10_000)), BTreeSet::from([2]));
+    let current = judge(9, 5, (9, false), at(10_001));
+    assert!(current.is_empty(), "{current:?}");
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), None);
+    // Node 3 heard again, holding everything: current at once.
+    let current = judge(9, 5, (9, true), at(10_002));
+    assert_eq!(preferred_replica("b", 1, &voters, &zones, |n| current.contains(&n)), Some(3));
+}
+
+/// Under a steady stream of writes the commit index moves at every sample
+/// and a slower voter trails it by a moment: it stays current, judged by
+/// time, not by whether it holds the commit index of the moment. One whose
+/// match index stops is current until it is `follower_max_lag` behind.
+#[test]
+fn a_voter_a_moment_behind_the_commit_index_stays_current() {
+    let lag = Duration::from_secs(10);
+    let step = Duration::from_millis(100);
+    let t0 = lotse_rt::Instant::from_nanos(1_000_000_000);
+    let progress = |matched: u64| lotse_raft::VoterProgress { matched, heard_recently: true };
+    let mut samples = crate::node::CommitSamples::default();
+    let stopped_at = t0 + Duration::from_secs(5);
+    let mut stopped = 0;
+    for i in 0..300u32 {
+        let now = t0 + step * i;
+        let commit = 10 * u64::from(i) + 10;
+        if now <= stopped_at {
+            stopped = commit;
+        }
+        // Node 2 holds what was committed one sample ago (everything at the
+        // first, when the leader knows no earlier commit index).
+        let two = if i == 0 { commit } else { commit - 10 };
+        let current =
+            crate::node::current_voters(&mut samples, commit, [(2, progress(two)), (3, progress(stopped))], now, lag);
+        assert!(current.contains(&2), "a moment behind at {i}: {current:?}");
+        assert_eq!(current.contains(&3), now - stopped_at <= lag, "stopped, at {i}: {current:?}");
+    }
+}
+
+/// Only a voter in the reader's zone is named; a node in another zone or in
+/// none is not, and neither is a learner.
+#[test]
+fn a_leader_names_no_voter_outside_the_zone() {
+    let zones = five_zones();
+    assert_eq!(preferred_replica("d", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "no node in the zone");
+    assert_eq!(preferred_replica("c", 1, &[1, 2, 3, 5], &zones, |_| true), None, "node 4 is no voter");
+    assert_eq!(preferred_replica("", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None, "an empty zone names nothing");
+}
+
+/// A leader in the reader's zone is where the reader should be: it names
+/// no other replica, not even a current one in the same zone.
+#[test]
+fn a_leader_in_the_zone_names_no_other_replica() {
+    let zones = five_zones();
+    assert_eq!(preferred_replica("b", 2, &[1, 2, 3, 4, 5], &zones, |_| true), None);
+    assert_eq!(preferred_replica("a", 1, &[1, 2, 3, 4, 5], &zones, |_| true), None);
+}
+
+/// Through the node's fetch path: a leader names a preferred replica only
+/// to a fetch that names a zone, and only one the node judged current.
+#[test]
+fn a_fetch_without_zone_gets_no_preferred_replica() {
+    Sim::new(4).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+        let mut groups = five.nodes.remove(&1).unwrap();
+        let streams = [StreamConfig { name: "orders".into(), resource_id: 7, partitions: vec![G] }];
+        let addrs = BTreeMap::new();
+        let zones = five_zones();
+        let current = BTreeMap::from([(G, BTreeSet::from([3, 4]))]);
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &zones,
+            coordinator: None,
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+            current_voters: &current,
+        };
+        let mut clients = Clients::default();
+        let mut ask = async |zone: Option<&str>| {
+            let outbox = Arc::new(Outbox::default());
+            let fetch = Request::Fetch(lotse_proto::FetchRequest {
+                max_wait_ms: 0,
+                min_bytes: 1,
+                max_bytes: 1 << 20,
+                isolation: lotse_proto::isolation::COMMITTED,
+                resources: vec![lotse_proto::FetchResource {
+                    resource_id: 7,
+                    partitions: vec![lotse_proto::FetchPartition {
+                        partition: 0,
+                        fetch_offset: 0,
+                        leader_term: 0,
+                        max_bytes: 1 << 20,
+                    }],
+                }],
+                allow_follower: false,
+                zone: zone.map(String::from),
+            });
+            let header = RequestHeader { api_key: ApiKey::FETCH, api_version: 0, correlation_id: 1, flags: 0 };
+            let request = ClientRequest {
+                outbox: outbox.clone(),
+                header,
+                request: fetch,
+                principal: Principal::Anonymous,
+                mechanism: 0,
+                read_at_least: Vec::new(),
+            };
+            clients.handle(request, &view, &mut groups).await.unwrap();
+            let frame = outbox.queue.lock().unwrap().pop_front().expect("answered at once");
+            let Response::Fetch(f) = lotse_proto::decode_response(frame, ApiKey::FETCH).unwrap().1 else { panic!() };
+            f.resources[0].partitions[0].clone()
+        };
+        let p = ask(None).await;
+        assert_eq!((p.error, p.preferred_replica), (ErrorCode::NONE, None));
+        let p = ask(Some("b")).await;
+        assert_eq!((p.error, p.preferred_replica), (ErrorCode::NONE, Some(3)), "node 2 is not current");
+        assert_eq!(ask(Some("c")).await.preferred_replica, Some(4));
+        assert_eq!(ask(Some("a")).await.preferred_replica, None, "the leader is in the zone");
+    });
+}
+
+/// Zone reads (the zone reads design, section 2): five voters of the
+/// metadata group `G`, node 1 leading, a queue created through it and
+/// applied everywhere.
+async fn five_with_a_queue(rt: &SimRuntime) -> (Five, u64) {
+    let mut five = Five::new(rt).await;
+    let all = [1, 2, 3, 4, 5];
+    five.campaign(1);
+    five.run(6, &all, Some(1), |_, _| true).await;
+    assert_eq!(five.get(1).role(), Role::Leader);
+    let lagging = BTreeSet::new();
+    let view = zone_view(rt, Some(G), None, &lagging, &OPEN);
+    let mut clients = Clients::default();
+    let request = Request::CreateQueue(lotse_proto::CreateQueueRequest {
+        tenant: crate::DEFAULT_TENANT.into(),
+        name: "work".into(),
+        priority_levels: 1,
+        single_active: false,
+        dlq: None,
+        replication: 1,
+        configs: vec![("max.deliveries".into(), "3".into())],
+    });
+    let outbox = Arc::new(Outbox::default());
+    let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest {
+        outbox: outbox.clone(),
+        header,
+        request,
+        principal: Principal::Anonymous,
+        mechanism: 0,
+        read_at_least: Vec::new(),
+    };
+    clients.handle(req, &view, five.nodes.get_mut(&1).unwrap()).await.unwrap();
+    five.run(8, &all, Some(1), |_, _| true).await;
+    let id = five.nodes[&1][&G].metadata().id_of("work").expect("created");
+    for n in all {
+        assert_eq!(five.nodes[&n][&G].applied(), five.nodes[&1][&G].applied(), "node {n} applied it all");
+    }
+    (five, id)
+}
+
+/// A view of a node in the zone reads tests: `metadata` and `coordinator`
+/// the groups it hosts, `lagging` its lagging groups.
+fn zone_view<'a>(
+    rt: &SimRuntime,
+    metadata: Option<GroupId>,
+    coordinator: Option<GroupId>,
+    lagging: &'a BTreeSet<GroupId>,
+    access: &'a crate::access::Access,
+) -> ClusterView<'a> {
+    static ADDRS: BTreeMap<NodeId, String> = BTreeMap::new();
+    static VOTERS: BTreeMap<GroupId, Vec<NodeId>> = BTreeMap::new();
+    ClusterView {
+        streams: &[],
+        queues: &[],
+        exchanges: &[],
+        deleted: &NOTHING_DELETED,
+        group_session: Duration::from_secs(45),
+        group_heartbeat: Duration::from_secs(5),
+        admin: AdminView { metadata, nodes: &[1], configured_groups: 1, voters: &VOTERS, ..AdminView::default() },
+        client_addrs: &ADDRS,
+        zones: &NO_ZONES,
+        coordinator,
+        node: NodeView::default(),
+        now: rt.now(),
+        unix_ms: 0,
+        access,
+        lagging,
+        current_voters: &NO_CURRENT,
+    }
+}
+
+/// Asks node `n` of `five` once, with `read_at_least`, as `principal`.
+async fn zone_ask(
+    five: &mut Five,
+    n: NodeId,
+    view: &ClusterView<'_>,
+    request: Request,
+    read_at_least: Vec<lotse_proto::GroupIndex>,
+    principal: Principal,
+) -> Response {
+    let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+    let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest { outbox: outbox.clone(), header, request, principal, mechanism: 0, read_at_least };
+    let mut clients = Clients::default();
+    clients.handle(req, view, five.nodes.get_mut(&n).unwrap()).await.unwrap();
+    match &drain(&outbox, key).0[..] {
+        [r] => r.clone(),
+        other => panic!("expected one answer, got {other:?}"),
+    }
+}
+
+fn describe_configs(id: u64) -> Request {
+    Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: vec![id] })
+}
+
+fn at(group: GroupId, index: u64) -> Vec<lotse_proto::GroupIndex> {
+    vec![lotse_proto::GroupIndex { group, index }]
+}
+
+#[test]
+fn a_follower_serves_a_read_at_or_below_its_applied_index() {
+    Sim::new(21).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let leader = zone_ask(&mut five, 1, &view, describe_configs(id), Vec::new(), Principal::Anonymous).await;
+        for index in [applied, applied - 1] {
+            let follower =
+                zone_ask(&mut five, 2, &view, describe_configs(id), at(G, index), Principal::Anonymous).await;
+            let Response::DescribeConfigs(d) = &follower else { panic!("{follower:?}") };
+            assert_eq!(d.error, ErrorCode::NONE);
+            assert!(d.resources[0].configs.iter().any(|c| c.key == "max.deliveries" && c.value == "3"), "{d:?}");
+            assert_eq!(follower, leader, "the follower answers what the leader does from the same state");
+        }
+    });
+}
+
+#[test]
+fn a_follower_refuses_a_read_above_its_applied_index() {
+    Sim::new(22).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G, applied + 1), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NOT_LEADER);
+        assert_eq!(d.leader_hint.map(|h| h.leader), Some(1), "it names the leader");
+        assert!(d.resources.is_empty());
+    });
+}
+
+#[test]
+fn a_lagging_follower_refuses_a_read() {
+    Sim::new(23).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::from([G]);
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!((d.error, d.leader_hint.map(|h| h.leader)), (ErrorCode::NOT_LEADER, Some(1)));
+        // The leader is never lagging: it serves what it has.
+        let r = zone_ask(&mut five, 1, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NONE);
+    });
+}
+
+#[test]
+fn a_read_at_zero_is_served_by_a_current_follower() {
+    Sim::new(24).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 3, &view, describe_configs(id), at(G, 0), Principal::Anonymous).await;
+        let Response::DescribeConfigs(d) = &r else { panic!("{r:?}") };
+        assert_eq!(d.error, ErrorCode::NONE);
+        // Every zone read of the metadata group is served the same way.
+        let reads = [
+            Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least: None }),
+            Request::DescribeUsers(lotse_proto::DescribeUsersRequest),
+            Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: None }),
+            Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest),
+            Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest),
+            Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest),
+            Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+            Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+        ];
+        let applied = five.nodes[&3][&G].applied();
+        for read in reads {
+            let served = zone_ask(&mut five, 3, &view, read.clone(), at(G, 0), Principal::Anonymous).await;
+            assert_eq!(error_of(&served), (ErrorCode::NONE, None), "{read:?}");
+            let refused = zone_ask(&mut five, 3, &view, read.clone(), at(G, applied + 1), Principal::Anonymous).await;
+            assert_eq!(error_of(&refused), (ErrorCode::NOT_LEADER, Some(1)), "{read:?}");
+        }
+    });
+}
+
+/// The error and leader hint of an admin read's answer.
+fn error_of(r: &Response) -> (ErrorCode, Option<u32>) {
+    let (error, hint) = match r {
+        Response::DescribeNodes(d) => (d.error, d.leader_hint),
+        Response::DescribeUsers(d) => (d.error, d.leader_hint),
+        Response::DescribeTokens(d) => (d.error, d.leader_hint),
+        Response::DescribeCertificates(d) => (d.error, d.leader_hint),
+        Response::DescribeCertificateRequests(d) => (d.error, d.leader_hint),
+        Response::DescribeUpgrade(d) => (d.error, d.leader_hint),
+        Response::DescribeTenants(d) => (d.error, d.leader_hint),
+        Response::DescribeRoleBindings(d) => (d.error, d.leader_hint),
+        Response::DescribeConfigs(d) => (d.error, d.leader_hint),
+        Response::Refused { code, .. } => (*code, None),
+        other => panic!("{other:?}"),
+    };
+    (error, hint.map(|h| h.leader))
+}
+
+#[test]
+fn a_read_without_the_tag_still_needs_the_leader() {
+    Sim::new(25).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
+        // A tag for another group does not count for this one.
+        let r = zone_ask(&mut five, 2, &view, describe_configs(id), at(G + 1, 0), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)));
+        // Tenants and role bindings answer from any node without the tag, as before.
+        for read in [
+            Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+            Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+        ] {
+            let r = zone_ask(&mut five, 2, &view, read, Vec::new(), Principal::Anonymous).await;
+            assert_eq!(error_of(&r), (ErrorCode::NONE, None));
+        }
+    });
+}
+
+/// A follower behind the client's index says NOT_LEADER, not UNAUTHORIZED:
+/// the role bindings it would judge by may be older than what the client
+/// saw, and the client then asks the leader.
+#[test]
+fn a_follower_behind_refuses_before_it_judges_access() {
+    Sim::new(26).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let auth = crate::AuthConfig { required: true, ..crate::AuthConfig::none() };
+        let access = crate::access::Access::build(&auth, &[], &crate::metadata::MetadataState::default());
+        let user = Principal::User { name: "u".into(), groups: Vec::new() };
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &access);
+        let applied = five.nodes[&2][&G].applied();
+        for read in metadata_zone_reads(id) {
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied + 1), user.clone()).await;
+            assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, Some(1)), "{read:?}");
+            // Caught up, it judges access, and answers what that allows.
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, applied), user.clone()).await;
+            assert_ne!(error_of(&r).0, ErrorCode::NOT_LEADER, "{read:?}");
+        }
+        // This user may not list users.
+        let read = Request::DescribeUsers(lotse_proto::DescribeUsersRequest);
+        let r = zone_ask(&mut five, 2, &view, read, at(G, applied), user).await;
+        assert!(matches!(r, Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }), "{r:?}");
+    });
+}
+
+/// The nine zone reads of the metadata group, `DescribeConfigs` of `id`.
+fn metadata_zone_reads(id: u64) -> [Request; 9] {
+    [
+        describe_configs(id),
+        Request::DescribeNodes(lotse_proto::DescribeNodesRequest { applied_at_least: None }),
+        Request::DescribeUsers(lotse_proto::DescribeUsersRequest),
+        Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: None }),
+        Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest),
+        Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest),
+        Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest),
+        Request::DescribeTenants(lotse_proto::DescribeTenantsRequest),
+        Request::DescribeRoleBindings(lotse_proto::DescribeRoleBindingsRequest),
+    ]
+}
+
+#[test]
+fn offset_fetch_on_a_coordinator_voter_serves_its_applied_offsets() {
+    Sim::new(27).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let applied = five.nodes[&3][&G].applied();
+        assert_eq!(applied, five.nodes[&1][&G].applied());
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let leader = zone_ask(&mut five, 1, &view, fetch.clone(), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(part(&leader), (ErrorCode::NONE, 9));
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), at(G, applied), Principal::Anonymous).await;
+        assert_eq!(r, leader, "the voter answers what the leader does");
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), at(G, applied + 1), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER);
+        let r = zone_ask(&mut five, 3, &view, fetch.clone(), Vec::new(), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "without the tag only the leader serves");
+        let lagging = BTreeSet::from([G]);
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let r = zone_ask(&mut five, 3, &view, fetch, at(G, 0), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "a lagging voter does not serve");
+    });
+}
+
+/// A follower of the coordinator group judges an `OffsetFetch`'s access by
+/// its metadata group's role bindings: one that has not applied the grant
+/// the client saw refuses as a follower behind, not with UNAUTHORIZED, and
+/// serves once it has.
+#[test]
+fn offset_fetch_on_a_follower_waits_for_the_metadata_index_before_it_judges_access() {
+    const C: GroupId = 2;
+    Sim::new(28).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        for id in all {
+            let cfg = Config { pre_vote: false, ..Config::new(id, vec![1, 2, 3, 4, 5]) };
+            let disk = rt.node(&format!("n{id}"));
+            let options = crate::ReplicaOptions::default();
+            let r = Replica::open_with(disk, "c", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+            five.nodes.get_mut(&id).unwrap().insert(C, r);
+        }
+        // Node 1 leads both groups; the coordinator group holds an offset.
+        for g in [G, C] {
+            five.group = g;
+            five.campaign(1);
+            five.run(6, &all, Some(1), |_, _| true).await;
+            assert_eq!(five.get(1).role(), Role::Leader);
+        }
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&C).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let c = five.nodes[&2][&C].applied();
+        // User u becomes a cluster admin at metadata index m, which node 2
+        // does not hear of.
+        five.group = G;
+        let grant = crate::metadata::Change::SetBindings {
+            add: vec![lotse_auth::roles::RoleBinding {
+                subject: lotse_auth::roles::Subject::User("u".into()),
+                role: lotse_auth::roles::Role::ClusterAdmin,
+                tenant: String::new(),
+                prefix: String::new(),
+            }],
+            remove: Vec::new(),
+        };
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(crate::metadata::record(&grant)).unwrap();
+        five.run(8, &all, Some(1), |from, to| from != 2 && to != 2).await;
+        let m = five.nodes[&1][&G].applied();
+        assert!(five.nodes[&2][&G].applied() < m, "node 2 has not applied the grant");
+        let auth = crate::AuthConfig { required: true, ..crate::AuthConfig::none() };
+        let user = Principal::User { name: "u".into(), groups: Vec::new() };
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let tags = vec![lotse_proto::GroupIndex { group: C, index: c }, lotse_proto::GroupIndex { group: G, index: m }];
+        let lagging = BTreeSet::new();
+        let ask = async |five: &mut Five, n: NodeId| {
+            let access = crate::access::Access::build(&auth, &[], five.nodes[&n][&G].metadata());
+            let view = zone_view(&rt, Some(G), Some(C), &lagging, &access);
+            zone_ask(five, n, &view, fetch.clone(), tags.clone(), user.clone()).await
+        };
+        let r = ask(&mut five, 2).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "behind on the metadata group: {r:?}");
+        // Without the grant node 2 would refuse access, as it does with
+        // only the coordinator index named.
+        let access = crate::access::Access::build(&auth, &[], five.nodes[&2][&G].metadata());
+        let view = zone_view(&rt, Some(G), Some(C), &lagging, &access);
+        let r = zone_ask(&mut five, 2, &view, fetch.clone(), at(C, c), user.clone()).await;
+        assert!(matches!(r, Response::Refused { code: ErrorCode::UNAUTHORIZED, .. }), "{r:?}");
+        // The coordinator leader serves as without the tag.
+        assert_eq!(part(&ask(&mut five, 1).await), (ErrorCode::NONE, 9));
+        // Once node 2 applied the grant, it serves.
+        five.run(8, &all, Some(1), |_, _| true).await;
+        assert!(five.nodes[&2][&G].applied() >= m);
+        assert_eq!(part(&ask(&mut five, 2).await), (ErrorCode::NONE, 9));
+    });
+}
+
+/// Cuts node 1, the leader of `G`, off and elects node 2 among the other
+/// four, which commits an entry of its new term. Node 1 hears nothing and
+/// still thinks it leads, as a leader does for up to about two election
+/// timeouts, or longer when its process pauses. Returns node 2's applied
+/// index, which node 1 has not reached.
+async fn depose_node_1(five: &mut Five) -> u64 {
+    let rest = [2, 3, 4, 5];
+    five.campaign(2);
+    five.run(8, &rest, Some(2), |_, _| true).await;
+    assert_eq!(five.get(2).role(), Role::Leader);
+    assert_eq!(five.get(1).role(), Role::Leader, "node 1 has not noticed");
+    let newer = five.nodes[&2][&G].applied();
+    assert!(five.nodes[&1][&G].applied() < newer, "node 1 has not applied the new term's entry");
+    newer
+}
+
+/// A leader deposed without knowing it that has applied less than the
+/// client saw refuses a zone read with NOT_LEADER and no hint, which would
+/// name itself; the new leader serves it (ADR 0141, section 2).
+#[test]
+fn a_deposed_leader_behind_the_client_refuses_a_read() {
+    Sim::new(29).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let old = five.nodes[&1][&G].applied();
+        let newer = depose_node_1(&mut five).await;
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, Some(G), None, &lagging, &OPEN);
+        for read in metadata_zone_reads(id) {
+            let r = zone_ask(&mut five, 1, &view, read.clone(), at(G, newer), Principal::Anonymous).await;
+            assert_eq!(error_of(&r), (ErrorCode::NOT_LEADER, None), "{read:?}");
+            let r = zone_ask(&mut five, 2, &view, read.clone(), at(G, newer), Principal::Anonymous).await;
+            assert_eq!(error_of(&r).0, ErrorCode::NONE, "the new leader serves: {read:?}");
+        }
+        // What the client saw node 1 has applied: it still serves that,
+        // as an untagged read is served (docs/status.md).
+        let r = zone_ask(&mut five, 1, &view, describe_configs(id), at(G, old), Principal::Anonymous).await;
+        assert_eq!(error_of(&r), (ErrorCode::NONE, None));
+    });
+}
+
+/// The same for an `OffsetFetch` at a deposed coordinator leader: a member
+/// that took a partition over at the new leader never reads the older
+/// offset there.
+#[test]
+fn a_deposed_coordinator_behind_the_client_refuses_an_offset_fetch() {
+    Sim::new(30).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        let committed = crate::groups::Committed { offset: 9, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&1).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &all, Some(1), |_, _| true).await;
+        let newer = depose_node_1(&mut five).await;
+        // The new leader commits the offset the next owner went on from.
+        let committed = crate::groups::Committed { offset: 12, leader_term: 0, metadata: None };
+        let record = crate::groups::offsets_record("g", &[((7, 0), committed)]);
+        five.nodes.get_mut(&2).unwrap().get_mut(&G).unwrap().propose_internal(record).unwrap();
+        five.run(8, &[2, 3, 4, 5], Some(2), |_, _| true).await;
+        let newer = five.nodes[&2][&G].applied().max(newer);
+        let lagging = BTreeSet::new();
+        let view = zone_view(&rt, None, Some(G), &lagging, &OPEN);
+        let fetch = Request::OffsetFetch(lotse_proto::OffsetFetchRequest {
+            group_id: "g".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            require_stable: false,
+            resources: vec![lotse_proto::TxnResource { resource_id: 7, partitions: vec![0] }],
+        });
+        let part = |r: &Response| {
+            let Response::OffsetFetch(o) = r else { panic!("{r:?}") };
+            let p = &o.resources[0].partitions[0];
+            (p.error, p.offset)
+        };
+        let r = zone_ask(&mut five, 1, &view, fetch.clone(), at(G, newer), Principal::Anonymous).await;
+        assert_eq!(part(&r).0, ErrorCode::NOT_LEADER, "never the older offset 9: {r:?}");
+        let r = zone_ask(&mut five, 2, &view, fetch, at(G, newer), Principal::Anonymous).await;
+        assert_eq!(part(&r), (ErrorCode::NONE, 12));
+    });
+}
+
+/// Responses in `outbox` with their header tags, decoded as answers to
+/// `key`.
+fn drain_tagged(outbox: &Outbox, key: ApiKey) -> Vec<(lotse_proto::FrameTags, Response)> {
+    let frames: Vec<Bytes> = outbox.queue.lock().unwrap().drain(..).collect();
+    frames
+        .into_iter()
+        .filter(|f| !lotse_proto::is_push(f))
+        .map(|f| {
+            let (_, tags, r) = lotse_proto::decode_response_tagged(f, key).unwrap();
+            (tags, r)
+        })
+        .collect()
+}
+
+/// The index `tags` name for `group`, if any.
+fn applied_of(tags: &lotse_proto::FrameTags, group: GroupId) -> Option<u64> {
+    tags.applied.iter().find(|e| e.group == group).map(|e| e.index)
+}
+
+/// A single-voter replica of a group, led and with its first entries
+/// applied.
+async fn single_led(rt: &SimRuntime, dir: &str) -> Replica<SimRuntime, Nothing> {
+    let r = Replica::open(rt.clone(), dir, Config::new(1, vec![1]), Nothing, LogConfig::default()).await.unwrap();
+    let mut r = r;
+    for _ in 0..40 {
+        r.raft().tick();
+        r.process().await.unwrap();
+    }
+    assert_eq!(r.raft_ref().role(), Role::Leader);
+    r
+}
+
+/// Handles `request` on the node of `groups`, runs a few rounds, and
+/// returns its one answer with the header tags. Also returns the last
+/// index of `group`'s log right after the request was handled: the entry
+/// of a write it proposed.
+async fn ask_tagged(
+    clients: &mut Clients,
+    groups: &mut Groups,
+    view: &ClusterView<'_>,
+    request: Request,
+    group: GroupId,
+) -> (lotse_proto::FrameTags, Response, u64) {
+    let (outbox, key) = (Arc::new(Outbox::default()), request.api_key());
+    let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+    let req = ClientRequest {
+        outbox: outbox.clone(),
+        header,
+        request,
+        principal: Principal::Anonymous,
+        mechanism: 0,
+        read_at_least: Vec::new(),
+    };
+    clients.handle(req, view, groups).await.unwrap();
+    let entry = groups[&group].raft_ref().last_index();
+    for _ in 0..5 {
+        for r in groups.values_mut() {
+            r.process().await.unwrap();
+        }
+        clients.after_round(view, groups).await.unwrap();
+    }
+    match drain_tagged(&outbox, key).as_slice() {
+        [(tags, r)] => (tags.clone(), r.clone(), entry),
+        other => panic!("expected one answer, got {other:?}"),
+    }
+}
+
+fn metadata_view<'a>(rt: &SimRuntime, voters: &'a BTreeMap<GroupId, Vec<NodeId>>) -> ClusterView<'a> {
+    static ADDRS: BTreeMap<NodeId, String> = BTreeMap::new();
+    ClusterView {
+        streams: &[],
+        queues: &[],
+        exchanges: &[],
+        deleted: &NOTHING_DELETED,
+        group_session: Duration::from_secs(1),
+        group_heartbeat: Duration::from_millis(100),
+        admin: AdminView { metadata: Some(G), nodes: &[1], configured_groups: 1, voters, ..AdminView::default() },
+        client_addrs: &ADDRS,
+        zones: &NO_ZONES,
+        coordinator: None,
+        node: NodeView::default(),
+        now: rt.now(),
+        unix_ms: 0,
+        access: &OPEN,
+        lagging: &NOT_LAGGING,
+        current_voters: &NO_CURRENT,
+    }
+}
+
+#[test]
+fn a_metadata_write_answer_carries_the_index_it_applied_at() {
+    // A client that reads its write from a follower names this index, so
+    // the follower answers only once it holds the write (zone reads design,
+    // section 2).
+    Sim::new(11).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(G, single_led(&rt, "m").await)]);
+        let voters = BTreeMap::new();
+        let view = metadata_view(&rt, &voters);
+        let mut clients = Clients::default();
+        let request = Request::CreateStream(lotse_proto::CreateStreamRequest {
+            name: "orders".into(),
+            tenant: crate::DEFAULT_TENANT.into(),
+            partitions: 1,
+            replication: 1,
+            configs: Vec::new(),
+        });
+        let (tags, r, entry) = ask_tagged(&mut clients, &mut groups, &view, request, G).await;
+        let Response::Create(c) = r else { panic!("{r:?}") };
+        assert_eq!(c.error, ErrorCode::NONE);
+        assert!(groups[&G].metadata().id_of("orders").is_some());
+        let applied = applied_of(&tags, G).expect("the metadata group's index");
+        assert!(applied >= entry, "answered at {applied}, the create is at {entry}");
+        assert_eq!(tags.applied.len(), 1, "only the metadata group: {tags:?}");
+    });
+}
+
+#[test]
+fn metadata_carries_applied() {
+    Sim::new(12).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(G, single_led(&rt, "m").await)]);
+        let voters = BTreeMap::new();
+        let view = metadata_view(&rt, &voters);
+        let mut clients = Clients::default();
+        let request = Request::Metadata(lotse_proto::MetadataRequest { names: Vec::new() });
+        let applied = groups[&G].applied();
+        let (tags, r, _) = ask_tagged(&mut clients, &mut groups, &view, request, G).await;
+        assert!(matches!(r, Response::Metadata(_)), "{r:?}");
+        assert_eq!(applied_of(&tags, G), Some(applied));
+    });
+}
+
+#[test]
+fn a_heartbeat_answer_carries_the_coordinator_index() {
+    // A member that takes over a partition reads its committed offset next:
+    // the heartbeat that hands it over must name at least the index of the
+    // previous owner's last commit, so a follower in its zone answers only
+    // with that commit applied (zone reads design, section 2).
+    const C: GroupId = 2;
+    Sim::new(13).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(C, single_led(&rt, "c").await)]);
+        let streams = [StreamConfig { name: "in".into(), resource_id: 7, partitions: vec![20, 21] }];
+        let addrs = BTreeMap::new();
+        let view = ClusterView {
+            streams: &streams,
+            queues: &[],
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(1),
+            group_heartbeat: Duration::from_millis(100),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: Some(C),
+            node: NodeView::default(),
+            now: rt.now(),
+            unix_ms: 0,
+            access: &OPEN,
+            lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
+        };
+        let mut clients = Clients::default();
+        let heartbeat_owning = |member: &str, epoch: i32, owned: Option<Vec<u32>>| {
+            Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
+                tenant: lotse_proto::DEFAULT_TENANT.into(),
+                group_id: "g".into(),
+                member_id: member.into(),
+                member_epoch: epoch,
+                rebalance_timeout_ms: 100,
+                subscribed: (epoch == 0).then(|| vec![7]),
+                owned: owned.map(|p| vec![lotse_proto::TxnResource { resource_id: 7, partitions: p }]),
+                instance_id: None,
+                subscribed_pattern: None,
+            })
+        };
+        let heartbeat = |member: &str, epoch: i32| heartbeat_owning(member, epoch, None);
+        let (_, r, _) = ask_tagged(&mut clients, &mut groups, &view, heartbeat("", 0), C).await;
+        let Response::GroupHeartbeat(a) = r else { panic!("{r:?}") };
+        assert_eq!(a.assignment.as_ref().map(|r| r[0].partitions.len()), Some(2));
+        let commit = Request::CommitOffsets(lotse_proto::CommitOffsetsRequest {
+            tenant: lotse_proto::DEFAULT_TENANT.into(),
+            group_id: "g".into(),
+            member_id: a.member_id.clone(),
+            member_epoch: a.member_epoch,
+            resources: vec![lotse_proto::OffsetCommitResource {
+                resource_id: 7,
+                partitions: vec![lotse_proto::OffsetCommitPartition {
+                    partition: 0,
+                    offset: 9,
+                    leader_term: 0,
+                    metadata: None,
+                }],
+            }],
+        });
+        let (tags, r, entry) = ask_tagged(&mut clients, &mut groups, &view, commit, C).await;
+        let Response::CommitOffsets(c) = r else { panic!("{r:?}") };
+        assert_eq!(c.resources[0].partitions[0].error, ErrorCode::NONE);
+        assert!(applied_of(&tags, C).is_some_and(|i| i >= entry), "the commit's own answer: {tags:?} vs {entry}");
+        // A heartbeat that changes nothing is answered at once, without a
+        // write of its own.
+        let (outbox, key) = (Arc::new(Outbox::default()), ApiKey::GROUP_HEARTBEAT);
+        let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+        let request = heartbeat_owning(&a.member_id, a.member_epoch, Some(vec![0, 1]));
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header,
+            request,
+            principal: Principal::Anonymous,
+            mechanism: 0,
+            read_at_least: Vec::new(),
+        };
+        clients.handle(req, &view, &mut groups).await.unwrap();
+        match drain_tagged(&outbox, key).as_slice() {
+            [(tags, Response::GroupHeartbeat(h))] => {
+                assert_eq!(h.error, ErrorCode::NONE);
+                let applied = applied_of(tags, C).expect("the coordinator group's index");
+                assert!(applied >= entry, "answered at once at {applied}, the commit is at {entry}");
+            }
+            other => panic!("expected an answer at once, got {other:?}"),
+        }
+        // Any member's next heartbeat, a new one's included.
+        for (member, epoch) in [(String::new(), 0), (a.member_id.clone(), a.member_epoch)] {
+            let (tags, r, _) = ask_tagged(&mut clients, &mut groups, &view, heartbeat(&member, epoch), C).await;
+            assert!(matches!(r, Response::GroupHeartbeat(_)), "{r:?}");
+            let applied = applied_of(&tags, C).expect("the coordinator group's index");
+            assert!(applied >= entry, "{member:?} answered at {applied}, the commit is at {entry}");
+        }
+    });
+}
+
+#[test]
+fn find_coordinator_names_the_voters() {
+    Sim::new(14).run(|rt| async move {
+        let mut five = Five::new(&rt).await;
+        let all = [1, 2, 3, 4, 5];
+        five.campaign(1);
+        five.run(6, &all, Some(1), |_, _| true).await;
+        assert_eq!(five.get(1).role(), Role::Leader);
+        let addrs: BTreeMap<NodeId, String> = all.iter().map(|n| (*n, format!("n{n}:9092"))).collect();
+        let mut view = zone_view(&rt, None, Some(G), &NOT_LAGGING, &OPEN);
+        view.client_addrs = &addrs;
+        for n in [1, 3] {
+            let request = Request::FindCoordinator(lotse_proto::FindCoordinatorRequest {
+                key_type: lotse_proto::coordinator::GROUP,
+                key: "g".into(),
+            });
+            let r = zone_ask(&mut five, n, &view, request, Vec::new(), Principal::Anonymous).await;
+            let Response::FindCoordinator(f) = r else { panic!("{r:?}") };
+            assert_eq!((f.error, f.node_id), (ErrorCode::NONE, 1), "node {n}");
+            assert_eq!(f.voters, vec![1, 2, 3, 4, 5], "node {n}");
+        }
+    });
+}
+
+#[test]
+fn a_follower_zone_read_carries_its_applied_index() {
+    Sim::new(15).run(|rt| async move {
+        let (mut five, id) = five_with_a_queue(&rt).await;
+        let view = zone_view(&rt, Some(G), None, &NOT_LAGGING, &OPEN);
+        let applied = five.nodes[&2][&G].applied();
+        let (outbox, key) = (Arc::new(Outbox::default()), ApiKey::DESCRIBE_CONFIGS);
+        let header = RequestHeader { api_key: key, api_version: 0, correlation_id: 1, flags: 0 };
+        let req = ClientRequest {
+            outbox: outbox.clone(),
+            header,
+            request: describe_configs(id),
+            principal: Principal::Anonymous,
+            mechanism: 0,
+            read_at_least: at(G, applied),
+        };
+        Clients::default().handle(req, &view, five.nodes.get_mut(&2).unwrap()).await.unwrap();
+        match drain_tagged(&outbox, key).as_slice() {
+            [(tags, Response::DescribeConfigs(d))] => {
+                assert_eq!(d.error, ErrorCode::NONE);
+                assert_eq!(applied_of(tags, G), Some(applied));
+            }
+            other => panic!("expected one answer, got {other:?}"),
+        }
     });
 }

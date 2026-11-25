@@ -353,6 +353,8 @@ export interface FetchPartitionResponse {
   /** Whole batches, one after the other. */
   readonly records: Uint8Array;
   readonly leaderHint: LeaderHint | null;
+  /** A node in the client's zone that is current for this partition and may serve its next fetch. Tag 1. */
+  readonly preferredReplica?: number;
 }
 
 export interface FetchResourceResponse {

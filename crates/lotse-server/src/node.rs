@@ -240,6 +240,61 @@ fn follower_current(
     hears_leader && caught_up_at.is_some_and(|t| now - t <= max_lag)
 }
 
+/// A leader's commit index over the last `follower_max_lag`, sampled, so
+/// it can tell how long ago a voter's match index was the commit index.
+/// Comparing with the commit index of the moment would not do: with three
+/// voters the faster follower sets it, and under a steady stream of writes
+/// the slower one trails it at every round while only a moment behind.
+#[derive(Debug, Default)]
+pub(crate) struct CommitSamples {
+    /// (when, commit index then), oldest first; the oldest may be older than
+    /// the lag, as the last one that was in force then.
+    samples: VecDeque<(lotse_rt::Instant, u64)>,
+}
+
+impl CommitSamples {
+    /// Takes a sample at most every hundredth of `max_lag` (100 ms by
+    /// default), so a group keeps about a hundred, and drops those no voter
+    /// lagging within `max_lag` can need.
+    pub(crate) fn record(&mut self, now: lotse_rt::Instant, commit: u64, max_lag: Duration) {
+        if self.samples.back().is_none_or(|&(t, _)| now - t >= max_lag / 100) {
+            self.samples.push_back((now, commit));
+        }
+        while self.samples.get(1).is_some_and(|&(t, _)| now - t > max_lag) {
+            self.samples.pop_front();
+        }
+    }
+
+    /// The latest time at which a voter that holds up to `matched` held
+    /// everything committed: now if it holds the commit index of the moment,
+    /// else the latest sample whose commit index it holds.
+    fn caught_up_at(&self, matched: u64, commit: u64, now: lotse_rt::Instant) -> Option<lotse_rt::Instant> {
+        if matched >= commit {
+            return Some(now);
+        }
+        self.samples.iter().rev().find(|&&(_, c)| c <= matched).map(|&(t, _)| t)
+    }
+}
+
+/// The ADR 0116 rule seen from a leader (the zone reads design, section 1):
+/// records the commit index in `samples` and returns the voters it heard
+/// within an election timeout that held, within `max_lag`, everything that
+/// was committed then. A leader names only those to a reader in their zone.
+pub(crate) fn current_voters(
+    samples: &mut CommitSamples,
+    commit: u64,
+    progress: impl IntoIterator<Item = (NodeId, lotse_raft::VoterProgress)>,
+    now: lotse_rt::Instant,
+    max_lag: Duration,
+) -> BTreeSet<NodeId> {
+    samples.record(now, commit, max_lag);
+    progress
+        .into_iter()
+        .filter(|(_, p)| follower_current(p.heard_recently, samples.caught_up_at(p.matched, commit, now), now, max_lag))
+        .map(|(id, _)| id)
+        .collect()
+}
+
 /// How often a leaving node asks a group's next voter to take over: a
 /// transfer whose target did not campaign is given up after an election
 /// timeout.
@@ -1261,6 +1316,11 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     // (ADR 0116).
     let mut caught_up: BTreeMap<GroupId, lotse_rt::Instant> = BTreeMap::new();
     let mut lagging: BTreeSet<GroupId> = BTreeSet::new();
+    // For the groups this node leads: in which term, its commit index over
+    // the last `follower_max_lag`, and the voters current now, which a
+    // leader names to a reader in their zone.
+    let mut commit_samples: BTreeMap<GroupId, (u64, CommitSamples)> = BTreeMap::new();
+    let mut current: BTreeMap<GroupId, BTreeSet<NodeId>> = BTreeMap::new();
     let mut leave_asked: BTreeMap<GroupId, (lotse_rt::Instant, usize)> = BTreeMap::new();
     while !shared.stop.is_set() {
         if known.refresh(rt, cfg, groups, factory, auth, &configured_voters).await? {
@@ -1338,9 +1398,27 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         let now = rt.now();
         caught_up.retain(|g, _| groups.contains_key(g));
         lagging.clear();
+        // A group this node no longer leads, or leads in another term (lost
+        // and won again between two rounds), starts afresh: its voters are
+        // current only once they catch up with this leadership.
+        commit_samples.retain(|g, (term, _)| {
+            groups.get(g).is_some_and(|r| r.raft_ref().role() == Role::Leader && r.raft_ref().term() == *term)
+        });
+        current.clear();
         for (&g, replica) in groups.iter() {
             let raft = replica.raft_ref();
             if raft.role() == Role::Leader {
+                let progress = raft
+                    .membership()
+                    .voters
+                    .iter()
+                    .filter(|&&v| v != cfg.id)
+                    .filter_map(|&v| raft.voter_progress(v).map(|p| (v, p)));
+                let (_, samples) = commit_samples.entry(g).or_insert_with(|| (raft.term(), CommitSamples::default()));
+                let now_current = current_voters(samples, raft.commit(), progress, now, cfg.follower_max_lag);
+                if !now_current.is_empty() {
+                    current.insert(g, now_current);
+                }
                 continue;
             }
             if raft.hears_leader() && replica.applied() >= raft.leader_commit() {
@@ -1415,6 +1493,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             unix_ms: rt.unix_time().as_millis() as u64,
             access: &known.access,
             lagging: &lagging,
+            current_voters: &current,
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {

@@ -69,6 +69,12 @@ internal sealed class FakeNode : IDisposable
         }
     }
 
+    /// <summary>One request as a node heard it: which node, the request and its header's <c>read_at_least</c>.</summary>
+    /// <param name="Node">The node's id.</param>
+    /// <param name="Request">The request.</param>
+    /// <param name="ReadAtLeast">Header tag 0, empty without it.</param>
+    internal sealed record Heard(uint Node, Request Request, IReadOnlyList<GroupIndex> ReadAtLeast);
+
     /// <summary>Close the connection without answering.</summary>
     internal sealed class Drop : Exception
     {
@@ -83,6 +89,8 @@ internal sealed class FakeNode : IDisposable
     private readonly ConcurrentBag<Socket> _sockets = new();
     private readonly ConcurrentQueue<Conn> _conns = new();
     private volatile ConnHandler _handler;
+    private volatile Func<Request, IReadOnlyList<GroupIndex>> _applied = _ => Array.Empty<GroupIndex>();
+    private volatile ConcurrentQueue<Heard> _heard = new();
 
     internal FakeNode(uint id)
     {
@@ -119,6 +127,23 @@ internal sealed class FakeNode : IDisposable
         _handler = (n, c, r) => Task.FromResult(handler(n, c, r));
         return this;
     }
+
+    /// <summary>What header tag 0, <c>applied</c>, of the answer to each request says; none by default.</summary>
+    internal FakeNode Applied(Func<Request, IReadOnlyList<GroupIndex>> applied)
+    {
+        _applied = applied;
+        return this;
+    }
+
+    /// <summary>Records what this node hears in <paramref name="log"/>, which other nodes may share, so the order across them shows.</summary>
+    internal FakeNode HeardIn(ConcurrentQueue<Heard> log)
+    {
+        _heard = log;
+        return this;
+    }
+
+    /// <summary>Every request this node heard, with its <c>read_at_least</c>, in arrival order.</summary>
+    internal List<Heard> HeardHere() => _heard.Where(h => h.Node == Id).ToList();
 
     /// <summary>The connections accepted so far, in order.</summary>
     internal List<Conn> Conns() => _conns.ToList();
@@ -167,6 +192,7 @@ internal sealed class FakeNode : IDisposable
                 await stream.ReadExactlyAsync(frame);
                 Frames.DecodedRequest decoded = Frames.DecodeRequest(frame);
                 _received.Enqueue(decoded.Request);
+                _heard.Enqueue(new Heard(Id, decoded.Request, decoded.ReadAtLeast));
                 conn.Received(decoded.Request);
                 _ = Task.Run(() => Answer(conn, socket, stream, write, decoded));
             }
@@ -186,7 +212,8 @@ internal sealed class FakeNode : IDisposable
             {
                 return;
             }
-            byte[] wire = Frames.WithLengthPrefix(Frames.EncodeResponse(decoded.Header.CorrelationId, response));
+            byte[] wire = Frames.WithLengthPrefix(
+                Frames.EncodeResponse(decoded.Header.CorrelationId, _applied(decoded.Request), response));
             conn.Write(wire);
         }
         catch (Exception)

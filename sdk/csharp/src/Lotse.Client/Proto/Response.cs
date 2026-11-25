@@ -154,16 +154,68 @@ public abstract record Response
     /// <param name="Host">Its host.</param>
     /// <param name="Port">Its port.</param>
     /// <param name="ErrorMsg">Details for humans, or <c>null</c>.</param>
-    public sealed record FindCoordinator(ErrorCode Error, uint NodeId, string Host, ushort Port, string? ErrorMsg) : Response
+    /// <param name="Voters">
+    /// The nodes that vote in the coordinator group, so a client can read from one in its zone; tag 0, left out when
+    /// empty.
+    /// </param>
+    public sealed record FindCoordinator(
+        ErrorCode Error, uint NodeId, string Host, ushort Port, string? ErrorMsg, IReadOnlyList<uint> Voters) : Response
     {
+        /// <summary>FindCoordinator's tag: the coordinator group's voters.</summary>
+        internal const long TagVoters = 0;
+
+        /// <summary>The response without voters.</summary>
+        public FindCoordinator(ErrorCode error, uint nodeId, string host, ushort port, string? errorMsg)
+            : this(error, nodeId, host, port, errorMsg, System.Array.Empty<uint>())
+        {
+        }
+
         /// <inheritdoc/>
-        public override void Write(Writer w) => w.U16(Error.Code).U32(NodeId).String(Host).U16(Port).OptString(ErrorMsg).NoTags();
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code).U32(NodeId).String(Host).U16(Port).OptString(ErrorMsg);
+            if (Voters.Count == 0)
+            {
+                w.NoTags();
+                return;
+            }
+            var v = new Writer();
+            v.U32((uint)Voters.Count);
+            foreach (uint node in Voters)
+            {
+                v.U32(node);
+            }
+            w.Tags(new[] { new Tag(TagVoters, ByteString.CopyOf(v.ToByteArray())) });
+        }
 
         internal static FindCoordinator Read(Reader r)
         {
-            var x = new FindCoordinator(new ErrorCode(r.U16()), r.U32(), r.String(), r.U16(), r.OptString());
-            r.Tags();
-            return x;
+            var error = new ErrorCode(r.U16());
+            uint nodeId = r.U32();
+            string host = r.String();
+            ushort port = r.U16();
+            string? errorMsg = r.OptString();
+            var voters = new List<uint>();
+            foreach (Tag t in r.Tags())
+            {
+                if (t.Number != TagVoters)
+                {
+                    continue; // from a newer version: skipped
+                }
+                var vr = new Reader(t.Value.ToByteArray());
+                uint n = vr.U32();
+                // Each id takes four bytes, so a count beyond what is left is a lie.
+                if (n > vr.Remaining / 4)
+                {
+                    throw DecodeException.Malformed("voter count exceeds the field");
+                }
+                for (uint i = 0; i < n; i++)
+                {
+                    voters.Add(vr.U32());
+                }
+                vr.Finish();
+            }
+            return new FindCoordinator(error, nodeId, host, port, errorMsg, voters);
         }
     }
 
@@ -1233,6 +1285,9 @@ public abstract record Response
     /// <param name="Resources">Per resource and partition.</param>
     public sealed record Fetch(uint ThrottleMs, IReadOnlyList<FetchResourceResponse> Resources) : Response
     {
+        /// <summary>A partition's tag: a node in the client's zone that may serve it.</summary>
+        internal const long TagPreferredReplica = 1;
+
         /// <inheritdoc/>
         public override void Write(Writer w)
         {
@@ -1246,7 +1301,21 @@ public abstract record Response
                     w2.U64(p.HighWatermark).U64(p.LastStableOffset).U64(p.LogStartOffset);
                     w2.Array(p.AbortedTxns, (w3, a) => w3.U64(a.ProducerId).U64(a.FirstOffset));
                     w2.Bytes(p.Records);
-                    PutHint(w2, p.LeaderHint);
+                    // Tags 0 (leader hint) and 1 (preferred replica), ascending, only what is set.
+                    var tags = new List<Tag>();
+                    if (p.LeaderHint is not null)
+                    {
+                        var v = new Writer();
+                        v.U32(p.LeaderHint.Leader).U64(p.LeaderHint.Term);
+                        tags.Add(new Tag(TagLeaderHint, ByteString.CopyOf(v.ToByteArray())));
+                    }
+                    if (p.PreferredReplica is uint preferred)
+                    {
+                        var v = new Writer();
+                        v.U32(preferred);
+                        tags.Add(new Tag(TagPreferredReplica, ByteString.CopyOf(v.ToByteArray())));
+                    }
+                    w2.Tags(tags);
                 });
                 w1.NoTags();
             });
@@ -1259,15 +1328,37 @@ public abstract record Response
             List<FetchResourceResponse> resources = r.Array(10, r1 =>
             {
                 ulong id = r1.U64();
-                List<FetchPartitionResponse> partitions = r1.Array(36, r2 => new FetchPartitionResponse(
-                    r2.U32(),
-                    new ErrorCode(r2.U16()),
-                    r2.U64(),
-                    r2.U64(),
-                    r2.U64(),
-                    r2.Array(16, r3 => new AbortedTxn(r3.U64(), r3.U64())),
-                    r2.Bytes(),
-                    GetHint(r2)));
+                List<FetchPartitionResponse> partitions = r1.Array(36, r2 =>
+                {
+                    uint partition = r2.U32();
+                    var error = new ErrorCode(r2.U16());
+                    ulong highWatermark = r2.U64();
+                    ulong lastStable = r2.U64();
+                    ulong logStart = r2.U64();
+                    List<AbortedTxn> aborted = r2.Array(16, r3 => new AbortedTxn(r3.U64(), r3.U64()));
+                    ByteString records = r2.Bytes();
+                    LeaderHint? hint = null;
+                    uint? preferred = null;
+                    foreach (Tag t in r2.Tags())
+                    {
+                        var vr = new Reader(t.Value.ToByteArray());
+                        if (t.Number == TagLeaderHint)
+                        {
+                            hint = new LeaderHint(vr.U32(), vr.U64());
+                        }
+                        else if (t.Number == TagPreferredReplica)
+                        {
+                            preferred = vr.U32();
+                        }
+                        else
+                        {
+                            continue; // from a newer version: skipped
+                        }
+                        vr.Finish();
+                    }
+                    return new FetchPartitionResponse(
+                        partition, error, highWatermark, lastStable, logStart, aborted, records, hint, preferred);
+                });
                 r1.Tags();
                 return new FetchResourceResponse(id, partitions);
             });

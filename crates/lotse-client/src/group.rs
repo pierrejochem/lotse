@@ -397,7 +397,7 @@ impl<R: Net + Clock + Spawn + Rng> GroupConsumer<'_, R> {
                 .map(|(resource_id, partitions)| TxnResource { resource_id, partitions })
                 .collect(),
         });
-        let Ok(Response::OffsetFetch(resp)) = c.call_coordinator(&self.group, &req).await else {
+        let Ok(Response::OffsetFetch(resp)) = c.call_coordinator_read(&self.group, &req).await else {
             c.forget_coordinator();
             return;
         };

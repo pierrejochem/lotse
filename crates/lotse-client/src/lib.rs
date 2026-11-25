@@ -42,6 +42,7 @@ mod consumer;
 mod group;
 mod publish;
 mod renewal;
+mod zone;
 
 pub use admin::{CreatedToken, RenewedCertificate};
 pub use auth::Credentials;
@@ -62,9 +63,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use lotse_proto::{
-    ApiKey, ErrorCode, FetchPartition, FetchRequest, FetchResource, FindCoordinatorRequest, InitProducerRequest,
-    MetadataRequest, MetadataResponse, ProducePartition, ProduceRequest, ProduceResource, Request, Response,
-    coordinator, isolation,
+    ApiKey, ErrorCode, FetchPartition, FetchRequest, FetchResource, FindCoordinatorRequest, GroupIndex,
+    InitProducerRequest, MetadataRequest, MetadataResponse, ProducePartition, ProduceRequest, ProduceResource, Request,
+    Response, coordinator, isolation,
 };
 use lotse_rt::{Clock, Conn, Net, Rng, Spawn};
 
@@ -320,6 +321,9 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     /// One transaction at a time.
     txn_lock: AsyncLock,
     coordinator_addr: Mutex<Option<String>>,
+    /// The coordinator group's voters, as the last `FindCoordinator` named
+    /// them: where an offset read in this client's zone may go.
+    coordinator_voters: Mutex<Vec<u32>>,
     partition_locks: Mutex<BTreeMap<(String, u32), Arc<AsyncLock>>>,
     conns: Mutex<BTreeMap<String, Arc<Connection<R::Conn>>>>,
     brokers: Mutex<BTreeMap<u32, String>>,
@@ -328,8 +332,18 @@ pub struct Client<R: Net + Clock + Spawn + Rng> {
     /// client's zone; and partitions whose replica in it failed, which are
     /// read from the leader until metadata is asked for again.
     zones: Mutex<BTreeMap<u32, String>>,
+    /// The nodes the latest `Metadata` answer listed: the only candidates
+    /// for a zone read. The maps above only grow, and a node that left
+    /// would otherwise cost every zone read a failed call first.
+    listed: Mutex<BTreeSet<u32>>,
     voters: Mutex<BTreeMap<(String, u32), Vec<u32>>>,
     not_in_zone: Mutex<BTreeSet<(String, u32)>>,
+    /// The replica in this client's zone a partition's leader named as
+    /// current (`preferred_replica`), until metadata is asked for again.
+    zone_replica: Mutex<BTreeMap<(String, u32), u32>>,
+    /// The metadata and coordinator groups' indexes the answers named,
+    /// which a zone read asks a node to have applied.
+    indexes: zone::Indexes,
     /// Resource names by id, for requests that address resources by id.
     names: Mutex<BTreeMap<u64, String>>,
     /// Exchanges by name, for routing published messages, and when they
@@ -406,13 +420,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             txn_producer: Mutex::new(None),
             txn_lock: AsyncLock::default(),
             coordinator_addr: Mutex::new(None),
+            coordinator_voters: Mutex::new(Vec::new()),
             partition_locks: Mutex::new(BTreeMap::new()),
             conns: Mutex::new(BTreeMap::new()),
             brokers: Mutex::new(BTreeMap::new()),
             routes: Mutex::new(BTreeMap::new()),
             zones: Mutex::new(BTreeMap::new()),
+            listed: Mutex::new(BTreeSet::new()),
             voters: Mutex::new(BTreeMap::new()),
             not_in_zone: Mutex::new(BTreeSet::new()),
+            zone_replica: Mutex::new(BTreeMap::new()),
+            indexes: zone::Indexes::default(),
             names: Mutex::new(BTreeMap::new()),
             exchanges: Mutex::new(BTreeMap::new()),
             metadata_leader: Mutex::new(None),
@@ -491,6 +509,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             zones.insert(b.node_id, b.rack.clone());
         }
         drop((brokers, zones));
+        *self.listed.lock().expect("listed lock") = m.brokers.iter().map(|b| b.node_id).collect();
         let mut names = self.names.lock().expect("names lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             names.insert(r.resource_id, r.name.clone());
@@ -499,19 +518,23 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         let mut routes = self.routes.lock().expect("routes lock");
         let mut voters = self.voters.lock().expect("voters lock");
         let mut not_in_zone = self.not_in_zone.lock().expect("zone lock");
+        let mut zone_replica = self.zone_replica.lock().expect("zone replica lock");
         for r in m.resources.iter().filter(|r| r.error == ErrorCode::NONE) {
             for p in &r.partitions {
                 let key = (r.name.clone(), p.partition);
                 routes.insert(key.clone(), Route { resource_id: r.resource_id, leader: p.leader, term: p.leader_term });
                 not_in_zone.remove(&key);
+                zone_replica.remove(&key);
                 voters.insert(key, p.voters.clone());
             }
         }
     }
 
     /// A replica of the partition in this client's zone other than the
-    /// leader, and its address: where fetches go (ADR 0104). `None` without
-    /// a zone, when the leader is in it, or when there is none.
+    /// leader, and its address: where fetches go (ADR 0104). The one the
+    /// leader last named, if any, else a voter in the zone as metadata has
+    /// them. `None` without a zone, when the leader is in it, or when there
+    /// is none.
     fn replica_in_zone(&self, stream: &str, partition: u32, leader: u32) -> Option<String> {
         let zone = self.cfg.zone.as_deref()?;
         let key = (stream.to_string(), partition);
@@ -522,10 +545,13 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         if zones.get(&leader).is_some_and(|z| z == zone) {
             return None;
         }
-        let voters = self.voters.lock().expect("voters lock").get(&key).cloned()?;
-        let node = voters.into_iter().find(|v| zones.get(v).is_some_and(|z| z == zone))?;
+        let named = self.zone_replica.lock().expect("zone replica lock").get(&key).copied().filter(|&n| n != leader);
+        let voters = self.voters.lock().expect("voters lock").get(&key).cloned().unwrap_or_default();
+        let voter = voters.into_iter().find(|v| zones.get(v).is_some_and(|z| z == zone));
+        // `learn` takes the brokers before the zones.
         drop(zones);
-        self.brokers.lock().expect("brokers lock").get(&node).cloned()
+        let brokers = self.brokers.lock().expect("brokers lock");
+        named.and_then(|n| brokers.get(&n).cloned()).or_else(|| voter.and_then(|n| brokers.get(&n).cloned()))
     }
 
     /// The leader's address, refreshing metadata if none is known.
@@ -763,6 +789,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             match self.call(&addr, &find).await {
                 Ok(Response::FindCoordinator(f)) if f.error == ErrorCode::NONE => {
                     let a = format!("{}:{}", f.host, f.port);
+                    *self.coordinator_voters.lock().expect("coordinator lock") = f.voters;
                     *self.coordinator_addr.lock().expect("coordinator lock") = Some(a.clone());
                     return Ok(a);
                 }
@@ -787,14 +814,52 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// One request to the coordinator; retriable failures and lost requests
     /// become `Retry` (every coordinator request may be repeated).
     async fn call_coordinator(&self, key: &str, req: &Request) -> Result<Response, Attempt> {
+        self.call_coordinator_with(key, req, &[]).await
+    }
+
+    /// [`Client::call_coordinator`] with the request header's
+    /// `read_at_least`; empty, no tag.
+    async fn call_coordinator_with(
+        &self,
+        key: &str,
+        req: &Request,
+        read_at_least: &[GroupIndex],
+    ) -> Result<Response, Attempt> {
         let addr = self.coordinator(key).await?;
-        match self.call(&addr, req).await {
+        match self.call_with(&addr, req, read_at_least).await {
             Ok(r) => Ok(r),
             Err(e) => {
                 self.forget_coordinator();
                 Err(e.into())
             }
         }
+    }
+
+    /// A read of the coordinator group's state (`OffsetFetch`): from the
+    /// lowest-id voter in this client's zone, which answers once it has
+    /// applied what this client saw (the zone reads design). A refusal, an
+    /// error or a failed call sends that one read to the coordinator, with
+    /// the same indexes, which a coordinator deposed without knowing it
+    /// refuses (ADR 0141); the next read tries the zone again.
+    pub(crate) async fn call_coordinator_read(&self, key: &str, req: &Request) -> Result<Response, Attempt> {
+        let mut at_least = Vec::new();
+        if let Some(zone) = self.cfg.zone.as_deref() {
+            // Learns the voters, if no `FindCoordinator` did yet.
+            self.coordinator(key).await?;
+            at_least = self.indexes.snapshot();
+            let mut voters = self.coordinator_voters.lock().expect("coordinator lock").clone();
+            let listed = self.listed.lock().expect("listed lock").clone();
+            voters.retain(|v| listed.contains(v));
+            let node = zone::zone_node(zone, voters, &self.zones.lock().expect("zones lock"));
+            let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
+            if let Some(addr) = addr
+                && let Ok(resp) = self.call_with(&addr, req, &at_least).await
+                && !zone::refused(&resp)
+            {
+                return Ok(resp);
+            }
+        }
+        self.call_coordinator_with(key, req, &at_least).await
     }
 
     async fn init_producer_once(&self, txn: Option<&str>) -> Result<(u64, u16), Attempt> {
@@ -1147,6 +1212,8 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 }],
             }],
             allow_follower,
+            // Only the leader names a replica to come back to.
+            zone: if allow_follower { None } else { self.cfg.zone.clone() },
         });
         let resp = match self.call(&addr, &req).await {
             Ok(Response::Fetch(r)) => r,
@@ -1165,6 +1232,21 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
             .ok_or_else(|| Attempt::Retry("empty fetch response".into()))?;
         if allow_follower && p.error != ErrorCode::NONE {
             return leave_replica(format!("{addr}: {}", p.error));
+        }
+        // The leader names a replica in this client's zone that is current
+        // again: the next fetch goes there, without asking for metadata. An
+        // answer with an error says nothing about the partition's replicas,
+        // and a node without a known address cannot be asked: clearing the
+        // fallback for it would send the next fetch to the replica that
+        // failed.
+        if !allow_follower
+            && p.error == ErrorCode::NONE
+            && let Some(node) = p.preferred_replica.filter(|&n| n != route.leader)
+            && self.brokers.lock().expect("brokers lock").contains_key(&node)
+        {
+            let key = (stream.to_string(), partition);
+            self.not_in_zone.lock().expect("zone lock").remove(&key);
+            self.zone_replica.lock().expect("zone replica lock").insert(key, node);
         }
         match p.error {
             ErrorCode::NONE => Ok(Fetched {
@@ -1261,6 +1343,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
 
     /// Sends one request to `addr` and waits for its response.
     async fn call(&self, addr: &str, req: &Request) -> Result<Response, CallError> {
+        self.call_with(addr, req, &[]).await
+    }
+
+    /// [`Client::call`] with the request header's `read_at_least`: a zone
+    /// read the node may answer only once it has applied these indexes.
+    async fn call_with(&self, addr: &str, req: &Request, read_at_least: &[GroupIndex]) -> Result<Response, CallError> {
         let conn = match self.connection(addr).await {
             Ok(c) => c,
             Err(e) => {
@@ -1268,7 +1356,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 return Err(e);
             }
         };
-        let res = conn.call(req, &self.rt, self.cfg.request_timeout).await;
+        let res = conn.call_with(req, read_at_least, &self.rt, self.cfg.request_timeout).await;
         if let Err(e) = &res {
             self.note_fatal(e);
         }
@@ -1320,7 +1408,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 Some(Err(e)) => return Err(CallError::NotSent(format!("cannot connect to {addr}: {e}"))),
                 None => return Err(CallError::NotSent(format!("connecting to {addr} timed out"))),
             };
-        let conn = Arc::new(Connection::new(raw));
+        let conn = Arc::new(Connection::new(raw, self.indexes.clone()));
         // The reader ends when the connection breaks or is closed.
         drop(self.rt.spawn(conn.clone().read_responses()));
         if let Some(creds) = &self.cfg.credentials {
@@ -1448,6 +1536,8 @@ struct Connection<C: Conn> {
     session: Mutex<Option<auth::SessionTimes>>,
     /// Someone is authenticating again.
     renewing: AtomicBool,
+    /// The client's indexes, raised by every answer's `applied`.
+    indexes: zone::Indexes,
 }
 
 fn deliver_push(queue: &PushQueue, push: Result<lotse_proto::DeliverPush, String>) {
@@ -1467,13 +1557,14 @@ fn fill(slot: &Slot, value: Result<Bytes, String>) {
 }
 
 impl<C: Conn> Connection<C> {
-    fn new(conn: C) -> Self {
+    fn new(conn: C, indexes: zone::Indexes) -> Self {
         Connection {
             conn,
             waiting: Mutex::new(Waiting::default()),
             next_id: AtomicU32::new(1),
             session: Mutex::new(None),
             renewing: AtomicBool::new(false),
+            indexes,
         }
     }
 
@@ -1576,6 +1667,16 @@ impl<C: Conn> Connection<C> {
     }
 
     async fn call<T: Clock>(&self, req: &Request, clock: &T, timeout: Duration) -> Result<Response, CallError> {
+        self.call_with(req, &[], clock, timeout).await
+    }
+
+    async fn call_with<T: Clock>(
+        &self,
+        req: &Request,
+        read_at_least: &[GroupIndex],
+        clock: &T,
+        timeout: Duration,
+    ) -> Result<Response, CallError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
         let slot: Slot = Arc::new(Mutex::new((None, None)));
         {
@@ -1585,7 +1686,8 @@ impl<C: Conn> Connection<C> {
             }
             w.slots.insert(id, (req.api_key(), slot.clone()));
         }
-        if let Err(e) = self.conn.send(lotse_proto::encode_request(id, req)).await {
+        let tags = lotse_proto::FrameTags { read_at_least: read_at_least.to_vec(), applied: Vec::new() };
+        if let Err(e) = self.conn.send(lotse_proto::encode_request_tagged(id, &tags, req)).await {
             self.waiting.lock().expect("waiting lock").slots.remove(&id);
             // A failed send may still have put bytes on the wire.
             return Err(CallError::Lost(format!("send failed: {e}")));
@@ -1608,7 +1710,11 @@ impl<C: Conn> Connection<C> {
                 return Err(CallError::Lost(format!("no response within {timeout:?}")));
             }
         };
-        match lotse_proto::decode_response(frame, req.api_key()) {
+        let decoded = lotse_proto::decode_response_tagged(frame, req.api_key()).map(|(id, tags, resp)| {
+            self.indexes.raise(&tags.applied);
+            (id, resp)
+        });
+        match decoded {
             // Not authenticated, or the session ended: sending again with the
             // same credentials gets the same answer.
             Ok((_, Response::Error(ErrorCode::UNAUTHORIZED))) => {

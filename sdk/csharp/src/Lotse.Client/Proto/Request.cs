@@ -196,12 +196,19 @@ public abstract record Request
     /// <param name="Isolation">See <see cref="Messages.Isolation"/>.</param>
     /// <param name="Resources">The partitions to read.</param>
     /// <param name="AllowFollower">A follower may answer with the committed data it has instead of NOT_LEADER (ADR 0104); tag 0.</param>
+    /// <param name="Zone">
+    /// The zone the client reads from, for a leader that points it at a replica there, or <c>null</c>; tag 1, written only
+    /// when set.
+    /// </param>
     public sealed record Fetch(
         uint MaxWaitMs, uint MinBytes, uint MaxBytes, byte Isolation, IReadOnlyList<FetchResource> Resources,
-        bool AllowFollower = false) : Request
+        bool AllowFollower = false, string? Zone = null) : Request
     {
         /// <summary>Fetch's tag: a follower may answer.</summary>
         internal const long TagAllowFollower = 0;
+
+        /// <summary>Fetch's tag: the client's zone.</summary>
+        internal const long TagZone = 1;
 
         /// <inheritdoc/>
         public override ApiKey ApiKey => ApiKey.Fetch;
@@ -223,14 +230,17 @@ public abstract record Request
                 });
                 w1.NoTags();
             });
+            // Ascending tag order, only what is set.
+            var tags = new List<Tag>();
             if (AllowFollower)
             {
-                w.Tags(new[] { new Tag(TagAllowFollower, ByteString.CopyOf(new byte[] { 1 })) });
+                tags.Add(new Tag(TagAllowFollower, ByteString.CopyOf(new byte[] { 1 })));
             }
-            else
+            if (Zone is not null)
             {
-                w.NoTags();
+                tags.Add(StringTag(TagZone, Zone));
             }
+            w.Tags(tags);
         }
 
         internal static Fetch Read(Reader r)
@@ -252,16 +262,25 @@ public abstract record Request
                 return new FetchResource(id, partitions);
             });
             bool allowFollower = false;
+            string? zone = null;
             foreach (Tag t in r.Tags())
             {
+                var vr = new Reader(t.Value.ToByteArray());
                 if (t.Number == TagAllowFollower)
                 {
-                    var vr = new Reader(t.Value.ToByteArray());
                     allowFollower = vr.U8() != 0;
-                    vr.Finish();
                 }
+                else if (t.Number == TagZone)
+                {
+                    zone = vr.String();
+                }
+                else
+                {
+                    continue; // from a newer version: skipped
+                }
+                vr.Finish();
             }
-            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower);
+            return new Fetch(maxWait, minBytes, maxBytes, isolation, resources, allowFollower, zone);
         }
     }
 

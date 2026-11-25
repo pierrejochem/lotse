@@ -1,4 +1,5 @@
 import type { Credentials } from "../auth/credentials.js";
+import type { GroupIndex } from "../proto/frames.js";
 import type { TlsConfig } from "./tls.js";
 
 /**
@@ -22,6 +23,12 @@ export interface ConnectionOptions {
   readonly ticker?: () => bigint;
   /** The source of the SCRAM client nonce. Default `crypto.randomBytes`. */
   readonly random?: (n: number) => Uint8Array;
+  /**
+   * Hears the indexes every answer says its node had applied (header tag 0, `applied`), before the answer's promise
+   * settles; answers without them are not passed on. A client keeps the highest index of each group, which a read in
+   * its zone then asks a node to have applied. What it throws is ignored.
+   */
+  readonly onApplied?: (applied: readonly GroupIndex[]) => void;
 }
 
 export interface ResolvedOptions {
@@ -32,6 +39,7 @@ export interface ResolvedOptions {
   readonly connectTimeoutMs: number;
   readonly ticker: () => bigint;
   readonly random: ((n: number) => Uint8Array) | undefined;
+  readonly onApplied: ((applied: readonly GroupIndex[]) => void) | undefined;
 }
 
 export function resolveOptions(o: ConnectionOptions): ResolvedOptions {
@@ -53,5 +61,6 @@ export function resolveOptions(o: ConnectionOptions): ResolvedOptions {
     connectTimeoutMs,
     ticker: o.ticker ?? process.hrtime.bigint,
     random: o.random,
+    onApplied: o.onApplied,
   };
 }

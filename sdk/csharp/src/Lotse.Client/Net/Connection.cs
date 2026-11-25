@@ -17,7 +17,7 @@ namespace Lotse.Net;
 /// <summary>
 /// One persistent connection to one broker address.
 /// <para>
-/// A read loop decodes the frames the broker sends. Requests are pipelined: <see cref="SendAsync"/> queues the request
+/// A read loop decodes the frames the broker sends. Requests are pipelined: <see cref="SendAsync(Request, CancellationToken)"/> queues the request
 /// and returns a task, and the response completes it whenever it arrives, in any order, matched by correlation id.
 /// Requests go out in the order they were sent, one frame at a time. Correlation ids start at 1 and wrap past 0 (0
 /// marks pushes). Pushes go to the <see cref="IPushListener"/> registered for their subscription; a push that arrives
@@ -306,9 +306,20 @@ public sealed class Connection : IAsyncDisposable, IDisposable
     /// response is dropped.
     /// </summary>
     /// <exception cref="ArgumentException"><c>Credit</c>, which is never answered: use <see cref="SendOnlyAsync"/>.</exception>
-    public Task<Response> SendAsync(Request request, CancellationToken cancellationToken = default)
+    public Task<Response> SendAsync(Request request, CancellationToken cancellationToken = default) =>
+        SendAsync(request, Array.Empty<GroupIndex>(), cancellationToken);
+
+    /// <summary>
+    /// <see cref="SendAsync(Request, CancellationToken)"/> with the request header's <c>read_at_least</c>: the node may
+    /// answer only from state that has applied at least these indexes of those groups. An empty list sends the request
+    /// as without it.
+    /// </summary>
+    /// <exception cref="ArgumentException"><c>Credit</c>, which is never answered: use <see cref="SendOnlyAsync"/>.</exception>
+    public Task<Response> SendAsync(
+        Request request, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(readAtLeast);
         if (request.ApiKey.Equals(ApiKey.Credit))
         {
             throw new ArgumentException("Credit is never answered; use SendOnlyAsync", nameof(request));
@@ -325,7 +336,7 @@ public sealed class Connection : IAsyncDisposable, IDisposable
         byte[] wire;
         try
         {
-            wire = Frames.WithLengthPrefix(Frames.EncodeRequest(id, request));
+            wire = Frames.WithLengthPrefix(Frames.EncodeRequest(id, readAtLeast, request));
         }
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or OverflowException)
         {
@@ -390,9 +401,17 @@ public sealed class Connection : IAsyncDisposable, IDisposable
         await written.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Sends a request and waits for the response; the awaiting form of <see cref="SendAsync"/>.</summary>
+    /// <summary>Sends a request and waits for the response; the awaiting form of <see cref="SendAsync(Request, CancellationToken)"/>.</summary>
     public Task<Response> CallAsync(Request request, CancellationToken cancellationToken = default) =>
         SendAsync(request, cancellationToken);
+
+    /// <summary>
+    /// Sends a request with <c>read_at_least</c> and waits for the response; the awaiting form of
+    /// <see cref="SendAsync(Request, IReadOnlyList{GroupIndex}, CancellationToken)"/>.
+    /// </summary>
+    public Task<Response> CallAsync(
+        Request request, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken cancellationToken = default) =>
+        SendAsync(request, readAtLeast, cancellationToken);
 
     /// <summary>Sends a request and waits for a response of type <typeparamref name="T"/>.</summary>
     /// <exception cref="ConnectionException">The response is of another type.</exception>
@@ -611,16 +630,29 @@ public sealed class Connection : IAsyncDisposable, IDisposable
             // Late: the request timed out, or it was sent with SendOnlyAsync.
             return;
         }
-        Response response;
+        Frames.DecodedResponse decoded;
         try
         {
-            response = Frames.DecodeResponse(frame, slot.Key).Response;
+            decoded = Frames.DecodeResponse(frame, slot.Key);
         }
         catch (DecodeException e)
         {
             slot.Source.TrySetException(new ConnectionException("undecodable response: " + e.Message, true, e));
             throw;
         }
+        // Before the task completes, so a read that follows this answer asks for what it reflected.
+        if (_options.OnApplied is { } onApplied && decoded.Applied.Count > 0)
+        {
+            try
+            {
+                onApplied(decoded.Applied);
+            }
+            catch (Exception)
+            {
+                // A listener's failure is its own; the answer still reaches its caller.
+            }
+        }
+        Response response = decoded.Response;
         switch (response)
         {
             case Response.Failed failed:

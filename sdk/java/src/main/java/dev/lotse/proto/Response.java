@@ -154,18 +154,62 @@ public sealed interface Response {
      * @param host host clients connect to
      * @param port port clients connect to, a {@code u16}
      * @param errorMsg details for humans, or {@code null}
+     * @param voters the nodes that vote in the coordinator group, each a {@code u32}, so a client can read from one in
+     *     its zone; tag 0, left out when empty
      */
-    record FindCoordinator(ErrorCode error, long nodeId, String host, int port, String errorMsg) implements Response {
+    record FindCoordinator(ErrorCode error, long nodeId, String host, int port, String errorMsg, List<Long> voters)
+            implements Response {
+        /** FindCoordinator's tag: the coordinator group's voters. */
+        static final long TAG_VOTERS = 0;
+
+        /** Creates the response. */
+        public FindCoordinator {
+            voters = List.copyOf(voters);
+        }
+
+        /** The response without voters. */
+        public FindCoordinator(ErrorCode error, long nodeId, String host, int port, String errorMsg) {
+            this(error, nodeId, host, port, errorMsg, List.of());
+        }
+
         @Override
         public void write(Writer w) {
-            w.u16(error.code()).u32(nodeId).string(host).u16(port).optString(errorMsg).noTags();
+            w.u16(error.code()).u32(nodeId).string(host).u16(port).optString(errorMsg);
+            if (voters.isEmpty()) {
+                w.noTags();
+                return;
+            }
+            Writer v = new Writer();
+            v.u32(voters.size());
+            for (long node : voters) {
+                v.u32(node);
+            }
+            w.tags(List.of(new Tag(TAG_VOTERS, ByteString.copyOf(v.toByteArray()))));
         }
 
         static FindCoordinator read(Reader r) {
-            FindCoordinator x =
-                    new FindCoordinator(new ErrorCode(r.u16()), r.u32(), r.string(), r.u16(), r.optString());
-            r.tags();
-            return x;
+            ErrorCode error = new ErrorCode(r.u16());
+            long nodeId = r.u32();
+            String host = r.string();
+            int port = r.u16();
+            String errorMsg = r.optString();
+            List<Long> voters = new java.util.ArrayList<>();
+            for (Tag t : r.tags()) {
+                if (t.tag() != TAG_VOTERS) {
+                    continue; // from a newer version: skipped
+                }
+                Reader vr = new Reader(t.value().toByteArray());
+                long n = vr.u32();
+                // Each id takes four bytes, so a count beyond what is left is a lie.
+                if (n > vr.remaining() / 4) {
+                    throw DecodeException.malformed("voter count exceeds the field");
+                }
+                for (long i = 0; i < n; i++) {
+                    voters.add(vr.u32());
+                }
+                vr.finish();
+            }
+            return new FindCoordinator(error, nodeId, host, port, errorMsg, voters);
         }
     }
 
@@ -1396,6 +1440,9 @@ public sealed interface Response {
      * @param resources per resource
      */
     record Fetch(long throttleMs, List<FetchResourceResponse> resources) implements Response {
+        /** A partition's tag: a node in the client's zone that may serve it. */
+        static final long TAG_PREFERRED_REPLICA = 1;
+
         /** Creates the response. */
         public Fetch {
             resources = List.copyOf(resources);
@@ -1411,7 +1458,19 @@ public sealed interface Response {
                     w2.u64(p.highWatermark()).u64(p.lastStableOffset()).u64(p.logStartOffset());
                     w2.array(p.abortedTxns(), (w3, a) -> w3.u64(a.producerId()).u64(a.firstOffset()));
                     w2.bytes(p.records());
-                    Messages.putHint(w2, p.leaderHint());
+                    // Tags 0 (leader hint) and 1 (preferred replica), ascending, only what is set.
+                    List<Tag> tags = new java.util.ArrayList<>();
+                    if (p.leaderHint() != null) {
+                        Writer v = new Writer();
+                        v.u32(p.leaderHint().leader()).u64(p.leaderHint().term());
+                        tags.add(new Tag(Messages.TAG_LEADER_HINT, ByteString.copyOf(v.toByteArray())));
+                    }
+                    if (p.preferredReplica() != null) {
+                        Writer v = new Writer();
+                        v.u32(p.preferredReplica());
+                        tags.add(new Tag(TAG_PREFERRED_REPLICA, ByteString.copyOf(v.toByteArray())));
+                    }
+                    w2.tags(tags);
                 });
                 w1.noTags();
             });
@@ -1422,15 +1481,30 @@ public sealed interface Response {
             long throttle = r.u32();
             List<FetchResourceResponse> resources = r.array(10, r1 -> {
                 long id = r1.u64();
-                List<FetchPartitionResponse> partitions = r1.array(36, r2 -> new FetchPartitionResponse(
-                        r2.u32(),
-                        new ErrorCode(r2.u16()),
-                        r2.u64(),
-                        r2.u64(),
-                        r2.u64(),
-                        r2.array(16, r3 -> new AbortedTxn(r3.u64(), r3.u64())),
-                        r2.bytes(),
-                        Messages.getHint(r2)));
+                List<FetchPartitionResponse> partitions = r1.array(36, r2 -> {
+                    long partition = r2.u32();
+                    ErrorCode error = new ErrorCode(r2.u16());
+                    long highWatermark = r2.u64();
+                    long lastStable = r2.u64();
+                    long logStart = r2.u64();
+                    List<AbortedTxn> aborted = r2.array(16, r3 -> new AbortedTxn(r3.u64(), r3.u64()));
+                    ByteString records = r2.bytes();
+                    LeaderHint hint = null;
+                    Long preferred = null;
+                    for (Tag t : r2.tags()) {
+                        Reader vr = new Reader(t.value().toByteArray());
+                        if (t.tag() == Messages.TAG_LEADER_HINT) {
+                            hint = new LeaderHint(vr.u32(), vr.u64());
+                        } else if (t.tag() == TAG_PREFERRED_REPLICA) {
+                            preferred = vr.u32();
+                        } else {
+                            continue; // from a newer version: skipped
+                        }
+                        vr.finish();
+                    }
+                    return new FetchPartitionResponse(
+                            partition, error, highWatermark, lastStable, logStart, aborted, records, hint, preferred);
+                });
                 r1.tags();
                 return new FetchResourceResponse(id, partitions);
             });

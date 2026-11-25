@@ -235,15 +235,18 @@ impl Clients {
         self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
     }
 
-    /// `DescribeUpgrade`: where the upgrade stands, from the metadata leader.
+    /// `DescribeUpgrade`: where the upgrade stands, from the metadata leader,
+    /// or for a request with `read_at_least` from a follower that may serve
+    /// it ([`Clients::read_replica`]).
     pub(super) fn describe_upgrade<R: Runtime, S: StateMachine>(
         &mut self,
         outbox: &Outbox,
         id: u32,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeUpgradeResponse {

@@ -18,13 +18,13 @@ use lotse_proto::{
     CreateQueueRequest, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest,
     DeleteTenantRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeNodesRequest,
     DescribeRoleBindingsRequest, DescribeSessionsRequest, DescribeSessionsResponse, DescribeTenantsRequest,
-    DescribeUsersRequest, ErrorCode, LeaderHint, NodeEntry, RemoveNodeRequest, Request, Response, RoleBindingData,
-    ScramCredentialData, SettleVotersRequest, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
+    DescribeUsersRequest, ErrorCode, GroupIndex, LeaderHint, NodeEntry, RemoveNodeRequest, Request, Response,
+    RoleBindingData, ScramCredentialData, SettleVotersRequest, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
 
-use crate::{Attempt, CallError, Client, ClientError};
+use crate::{Attempt, CallError, Client, ClientError, zone};
 
 /// PBKDF2 iterations for passwords this client sets (RFC 7677's minimum,
 /// Kafka's default).
@@ -275,13 +275,14 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     }
 
     /// A resource's settings, with where each value comes from
-    /// ([`lotse_proto::config_source`]). Read from the metadata leader, so
-    /// changes this client made are in it.
+    /// ([`lotse_proto::config_source`]). Read from the metadata leader or,
+    /// with a zone, from a node in it that has applied every metadata index
+    /// this client saw, so changes this client made are in it.
     pub async fn describe_configs(&self, name: &str) -> Result<Vec<ConfigEntry>, ClientError> {
         let resource_id = self.resource_id(name).await?;
         let req = Request::DescribeConfigs(DescribeConfigsRequest { resource_ids: vec![resource_id] });
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeConfigs(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     match d.resources.into_iter().next() {
@@ -356,7 +357,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_tenants(&self) -> Result<Vec<TenantEntry>, ClientError> {
         let req = Request::DescribeTenants(DescribeTenantsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeTenants(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.tenants)
@@ -489,7 +490,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_tokens(&self, owner: Option<&str>) -> Result<Vec<lotse_proto::TokenEntry>, ClientError> {
         let req = Request::DescribeTokens(lotse_proto::DescribeTokensRequest { owner: owner.map(str::to_string) });
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeTokens(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.tokens.clone())
@@ -534,9 +535,11 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.nodes_answer(DescribeNodesRequest::default()).await
     }
 
-    /// Internal, for nodes (ADR 0105): the cluster's nodes from a metadata
-    /// leader that has applied at least `index`, so the answer is at least
-    /// as new as the asking node's own metadata state.
+    /// Internal, for nodes (ADR 0105): the cluster's nodes from a replica
+    /// of the metadata group that has applied at least `index`, so the
+    /// answer is at least as new as the asking node's own metadata state:
+    /// the leader or, with a zone, a node in it that has also applied every
+    /// metadata index this client saw.
     pub async fn describe_nodes_since(&self, index: u64) -> Result<Vec<NodeEntry>, ClientError> {
         self.nodes_answer(DescribeNodesRequest { applied_at_least: Some(index) }).await
     }
@@ -544,7 +547,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     async fn nodes_answer(&self, req: DescribeNodesRequest) -> Result<Vec<NodeEntry>, ClientError> {
         let req = Request::DescribeNodes(req);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeNodes(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.nodes)
@@ -631,7 +634,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_upgrade(&self) -> Result<lotse_proto::DescribeUpgradeResponse, ClientError> {
         let req = Request::DescribeUpgrade(lotse_proto::DescribeUpgradeRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeUpgrade(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -656,7 +659,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_certificates(&self) -> Result<lotse_proto::DescribeCertificatesResponse, ClientError> {
         let req = Request::DescribeCertificates(lotse_proto::DescribeCertificatesRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeCertificates(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -742,7 +745,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     ) -> Result<lotse_proto::DescribeCertificateRequestsResponse, ClientError> {
         let req = Request::DescribeCertificateRequests(lotse_proto::DescribeCertificateRequestsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeCertificateRequests(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d)
@@ -773,7 +776,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_role_bindings(&self) -> Result<Vec<(RoleBindingData, u8)>, ClientError> {
         let req = Request::DescribeRoleBindings(DescribeRoleBindingsRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeRoleBindings(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.bindings)
@@ -816,7 +819,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     pub async fn describe_users(&self) -> Result<Vec<UserEntry>, ClientError> {
         let req = Request::DescribeUsers(DescribeUsersRequest);
         self.retrying(|| async {
-            match self.call_admin(&req).await? {
+            match self.call_admin_read(&req).await? {
                 Response::DescribeUsers(d) => {
                     self.admin_answer(d.error, d.leader_hint)?;
                     Ok(d.users)
@@ -963,9 +966,44 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         }
     }
 
+    /// An admin read (one of the zone reads): to the lowest-id node in this
+    /// client's zone, which answers once it has applied what this client
+    /// saw (the zone reads design). A refusal, an error or a failed call
+    /// sends that one read to the metadata leader, whom a refusal may name,
+    /// with the same indexes: a leader deposed without knowing it refuses
+    /// a read it has not applied (ADR 0141), so the retry finds the new
+    /// one. The next read tries the zone again.
+    async fn call_admin_read(&self, req: &Request) -> Result<Response, Attempt> {
+        let mut at_least = Vec::new();
+        if let Some(zone) = self.cfg.zone.as_deref() {
+            at_least = self.indexes.snapshot();
+            let listed = self.listed.lock().expect("listed lock").clone();
+            let node = zone::zone_node(zone, listed, &self.zones.lock().expect("zones lock"));
+            let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
+            if let Some(addr) = addr {
+                match self.call_with(&addr, req, &at_least).await {
+                    Ok(resp) if !zone::refused(&resp) => return Ok(resp),
+                    Ok(resp) => {
+                        if let Some(hint) = zone::leader_hint(&resp) {
+                            *self.metadata_leader.lock().expect("leader lock") = Some(hint.leader);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        self.call_admin_with(req, &at_least).await
+    }
+
     /// Sends an admin request to the metadata leader, or any broker if it
     /// is not known.
     async fn call_admin(&self, req: &Request) -> Result<Response, Attempt> {
+        self.call_admin_with(req, &[]).await
+    }
+
+    /// [`Client::call_admin`] with the request header's `read_at_least`;
+    /// empty, no tag.
+    async fn call_admin_with(&self, req: &Request, read_at_least: &[GroupIndex]) -> Result<Response, Attempt> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
         // A leader whose address this client has not seen (a node added
         // since it last asked): learn the cluster's nodes first, or it
@@ -992,7 +1030,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 pool[n % pool.len()].clone()
             }
         };
-        match self.call(&addr, req).await {
+        match self.call_with(&addr, req, read_at_least).await {
             Ok(r) => Ok(r),
             Err(e @ (CallError::Denied(_) | CallError::Refused(..))) => Err(e.into()),
             Err(e) => {

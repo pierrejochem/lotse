@@ -28,7 +28,13 @@ export interface FindCoordinatorResponse {
   readonly host: string;
   readonly port: number;
   readonly errorMsg: string | null;
+  /** The nodes that vote in the coordinator group, so a client can read from one in its zone. Tag 0, left out when empty. */
+  readonly voters?: readonly number[];
 }
+/** FindCoordinator's tag: the coordinator group's voters. */
+const TAG_VOTERS = 0;
+/** A fetched partition's tag: a node in the client's zone that may serve it. */
+const TAG_PREFERRED_REPLICA = 1;
 export interface InitProducerResponse {
   readonly type: "InitProducer";
   readonly error: ErrorCodeValue;
@@ -390,9 +396,20 @@ export function writeResponse(w: Writer, res: Response): void {
       });
       w.noTags();
       return;
-    case "FindCoordinator":
-      w.u16(res.error).u32(res.nodeId).string(res.host).u16(res.port).optString(res.errorMsg).noTags();
+    case "FindCoordinator": {
+      w.u16(res.error).u32(res.nodeId).string(res.host).u16(res.port).optString(res.errorMsg);
+      const voters = res.voters ?? [];
+      if (voters.length === 0) {
+        w.noTags();
+        return;
+      }
+      const v = new Writer().u32(voters.length);
+      for (const node of voters) {
+        v.u32(node);
+      }
+      w.tags([{ tag: TAG_VOTERS, value: v.toBytes() }]);
       return;
+    }
     case "InitProducer":
       w.u16(res.error).u64(res.producerId).u16(res.producerEpoch);
       m.putHint(w, res.leaderHint);
@@ -699,7 +716,15 @@ export function writeResponse(w: Writer, res: Response): void {
           w2.u64(p.highWatermark).u64(p.lastStableOffset).u64(p.logStartOffset);
           w2.array(p.abortedTxns, (w3, a) => w3.u64(a.producerId).u64(a.firstOffset));
           w2.bytes(p.records);
-          m.putHint(w2, p.leaderHint);
+          // Tags 0 (leader hint) and 1 (preferred replica), ascending, only what is set.
+          const tags: Tag[] = [];
+          if (p.leaderHint !== null) {
+            tags.push({ tag: m.TAG_LEADER_HINT, value: m.hintBytes(p.leaderHint) });
+          }
+          if (p.preferredReplica !== undefined) {
+            tags.push({ tag: TAG_PREFERRED_REPLICA, value: new Writer().u32(p.preferredReplica).toBytes() });
+          }
+          w2.tags(tags);
         });
         w1.noTags();
       });
@@ -779,15 +804,37 @@ export function readResponse(apiKey: number, r: Reader): Response {
       return { type: "Metadata", brokers, resources };
     }
     case ApiKey.FIND_COORDINATOR: {
+      const error = r.u16();
+      const nodeId = r.u32();
+      const host = r.string();
+      const port = r.u16();
+      const errorMsg = r.optString();
+      const voters: number[] = [];
+      for (const t of r.tags()) {
+        if (t.tag !== TAG_VOTERS) {
+          continue; // from a newer version: skipped
+        }
+        const vr = new Reader(t.value);
+        const n = vr.u32();
+        // Each id takes four bytes, so a count beyond what is left is a lie.
+        if (n > Math.floor(vr.remaining / 4)) {
+          throw DecodeError.malformed("voter count exceeds the field");
+        }
+        for (let k = 0; k < n; k++) {
+          voters.push(vr.u32());
+        }
+        vr.finish();
+      }
+      // Left out when empty, as an answer made without them has it.
       const x: FindCoordinatorResponse = {
         type: "FindCoordinator",
-        error: r.u16(),
-        nodeId: r.u32(),
-        host: r.string(),
-        port: r.u16(),
-        errorMsg: r.optString(),
+        error,
+        nodeId,
+        host,
+        port,
+        errorMsg,
+        ...(voters.length > 0 ? { voters } : {}),
       };
-      r.tags();
       return x;
     }
     case ApiKey.INIT_PRODUCER:
@@ -1100,16 +1147,38 @@ export function readResponse(apiKey: number, r: Reader): Response {
       const throttleMs = r.u32();
       const resources = r.array(10, (r1) => {
         const resourceId = r1.u64();
-        const partitions = r1.array(36, (r2) => ({
-          partition: r2.u32(),
-          error: r2.u16(),
-          highWatermark: r2.u64(),
-          lastStableOffset: r2.u64(),
-          logStartOffset: r2.u64(),
-          abortedTxns: r2.array(16, (r3) => ({ producerId: r3.u64(), firstOffset: r3.u64() })),
-          records: r2.bytes(),
-          leaderHint: m.getHint(r2),
-        }));
+        const partitions = r1.array(36, (r2) => {
+          const partition = r2.u32();
+          const error = r2.u16();
+          const highWatermark = r2.u64();
+          const lastStableOffset = r2.u64();
+          const logStartOffset = r2.u64();
+          const abortedTxns = r2.array(16, (r3) => ({ producerId: r3.u64(), firstOffset: r3.u64() }));
+          const records = r2.bytes();
+          let leaderHint: m.LeaderHint | null = null;
+          let preferredReplica: number | undefined;
+          for (const t of r2.tags()) {
+            if (t.tag === m.TAG_LEADER_HINT) {
+              leaderHint = m.hintFromBytes(t.value);
+            } else if (t.tag === TAG_PREFERRED_REPLICA) {
+              const vr = new Reader(t.value);
+              preferredReplica = vr.u32();
+              vr.finish();
+            }
+          }
+          // Left out when not set, as an answer made without it has it.
+          return {
+            partition,
+            error,
+            highWatermark,
+            lastStableOffset,
+            logStartOffset,
+            abortedTxns,
+            records,
+            leaderHint,
+            ...(preferredReplica !== undefined ? { preferredReplica } : {}),
+          };
+        });
         r1.tags();
         return { resourceId, partitions };
       });

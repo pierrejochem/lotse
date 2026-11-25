@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Lotse.Proto;
 using Xunit;
 
@@ -15,8 +16,13 @@ public class ConformanceTests
         Assert.True(vectors.Count >= 40, "the vectors cover every client request");
         foreach (string[] v in vectors)
         {
+            if (Tagged(v))
+            {
+                continue; // AHeaderTagRidesOnItsFrame
+            }
             byte[] frame = Vectors.Hex(v[1]);
             Frames.DecodedRequest decoded = Frames.DecodeRequest(frame);
+            Assert.Empty(decoded.ReadAtLeast);
             uint correlationId = uint.Parse(v[0].Split('-')[1]) + 1;
             Assert.Equal(correlationId, decoded.Header.CorrelationId);
             Assert.Equal(0, decoded.Header.ApiVersion);
@@ -24,6 +30,90 @@ public class ConformanceTests
             Assert.Equal(decoded.Request.ApiKey, decoded.Header.ApiKey);
             Assert.Equal(v[1], Vectors.Hex(Frames.EncodeRequest(correlationId, decoded.Request)));
         }
+    }
+
+    /// <summary>The samples of header tag 0 ride on a frame of their own, labelled <c>-tagged-</c> with correlation id 900.</summary>
+    private static bool Tagged(string[] v) => v[0].Contains("-tagged-", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Header tag 0: <c>read_at_least</c> on a request, <c>applied</c> on a response, read as the broker wrote them and
+    /// written again byte for byte; an empty list writes no tag.
+    /// </summary>
+    [Fact]
+    public void AHeaderTagRidesOnItsFrame()
+    {
+        string[] req = Vectors.Lines("requests.hex").First(Tagged);
+        Frames.DecodedRequest r = Frames.DecodeRequest(Vectors.Hex(req[1]));
+        Assert.Equal(900u, r.Header.CorrelationId);
+        Assert.Equal(new Request.DescribeNodes(), r.Request);
+        var wanted = new[] { new GroupIndex(1, 7), new GroupIndex(2, ulong.MaxValue) };
+        Assert.Equal(wanted, r.ReadAtLeast);
+        Assert.Equal(req[1], Vectors.Hex(Frames.EncodeRequest(900, wanted, r.Request)));
+        Assert.Equal(Frames.EncodeRequest(900, r.Request), Frames.EncodeRequest(900, Array.Empty<GroupIndex>(), r.Request));
+
+        string[] res = Vectors.Lines("responses.hex").First(Tagged);
+        var key = new ApiKey(ushort.Parse(res[1]));
+        Frames.DecodedResponse d = Frames.DecodeResponse(Vectors.Hex(res[2]), key);
+        Assert.Equal(900u, d.CorrelationId);
+        Assert.Equal(new Response.Outcome(ErrorCode.None, null), d.Response);
+        Assert.Equal(new[] { new GroupIndex(1, 9) }, d.Applied);
+        Assert.Equal(res[2], Vectors.Hex(Frames.EncodeResponse(900, d.Applied, d.Response)));
+    }
+
+    /// <summary>A header index count larger than the field holds is refused, not trusted.</summary>
+    [Fact]
+    public void AHeaderIndexCountBeyondTheFieldIsRefused()
+    {
+        var w = new Writer();
+        w.U16(ApiKey.DescribeNodes.Id).U16(0).U32(1).U16(0);
+        var v = new Writer();
+        v.U32(2).U64(1).U64(7);
+        w.Tags(new[] { new Tag(0, Lotse.Record.ByteString.CopyOf(v.ToByteArray())) });
+        new Request.DescribeNodes().Write(w);
+        var e = Assert.Throws<DecodeException>(() => Frames.DecodeRequest(w.ToByteArray()));
+        Assert.Equal(DecodeErrorKind.Malformed, e.Kind);
+    }
+
+    /// <summary>
+    /// The zone reads' message tags: <c>Fetch</c> tag 1 <c>zone</c>, a fetched partition's tag 1
+    /// <c>preferred_replica</c> and <c>FindCoordinator</c>'s tag 0 <c>voters</c>.
+    /// </summary>
+    [Fact]
+    public void ZoneTagsAreReadAsTheBrokerWroteThem()
+    {
+        bool zone = false;
+        foreach (string[] v in Vectors.Lines("requests.hex"))
+        {
+            if (Frames.DecodeRequest(Vectors.Hex(v[1])).Request is Request.Fetch { Zone: not null } f)
+            {
+                zone = true;
+                Assert.Equal("eu-1", f.Zone);
+                Assert.True(f.AllowFollower);
+            }
+        }
+        bool preferred = false;
+        bool voters = false;
+        foreach (string[] v in Vectors.Lines("responses.hex"))
+        {
+            Response r = Frames.DecodeResponse(Vectors.Hex(v[2]), new ApiKey(ushort.Parse(v[1]))).Response;
+            if (r is Response.Fetch f)
+            {
+                foreach (Messages.FetchPartitionResponse p in f.Resources.SelectMany(x => x.Partitions))
+                {
+                    if (p.PreferredReplica is not null)
+                    {
+                        preferred = true;
+                        Assert.Equal(2u, p.PreferredReplica);
+                    }
+                }
+            }
+            if (r is Response.FindCoordinator c && c.Voters.Count > 0)
+            {
+                voters = true;
+                Assert.Equal(new uint[] { 1, 2, 3 }, c.Voters);
+            }
+        }
+        Assert.True(zone && preferred && voters);
     }
 
     [Fact]
@@ -47,9 +137,14 @@ public class ConformanceTests
         Assert.True(vectors.Count >= 40);
         foreach (string[] v in vectors)
         {
+            if (Tagged(v))
+            {
+                continue; // AHeaderTagRidesOnItsFrame
+            }
             byte[] frame = Vectors.Hex(v[2]);
             var key = new ApiKey(ushort.Parse(v[1]));
             Frames.DecodedResponse decoded = Frames.DecodeResponse(frame, key);
+            Assert.Empty(decoded.Applied);
             uint correlationId = uint.Parse(v[0].Split('-')[1]);
             Assert.Equal(correlationId, decoded.CorrelationId);
             Assert.Equal(correlationId, Frames.ResponseCorrelationId(frame));

@@ -41,7 +41,7 @@ ClientConfig config = ClientConfig.CreateBuilder("127.0.0.1:9092", "127.0.0.1:90
 using var client = new LotseClient(config);
 ```
 
-Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithZone`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)).
+Other builder methods include `WithCredentials(Credentials.Scram(user, password))`, `WithTransactionalId`, `WithProducerName`, `WithIdempotence`, `WithTenant`, `WithZone`, `WithRetryFor` and `WithMetadataMaxAge`. Defaults are the Rust client's: 10 s per request, 30 s of retrying, 50 ms between attempts, 5 s for the leader's quorum (see [Rust client](rust-client.md)). With `WithZone`, fetches and offset lookups go to a replica of the partition in that zone, which may lag the leader a little; to the leader if none is there, that replica fails, or it lags too far ([ADR 0116](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0116-followers-answer-listoffsets-and-stop-serving-when-they-lag.md)), and the leader sends the client back once that replica has caught up. Committed offsets and the `Describe*Async` admin reads go to a node in the zone that has applied everything this client has seen, so the client always sees its own writes; otherwise that one read goes to the leader ([ADR 0141](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0141-reads-in-the-client-s-zone-with-read-your-writes.md)).
 
 ## Streams
 

@@ -5,6 +5,7 @@ import {
   type DeliverPush,
   encodePush,
   encodeResponse,
+  type GroupIndex,
   type Response,
   withLengthPrefix,
 } from "../../src/proto/index.js";
@@ -16,8 +17,9 @@ export class Peer {
 
   constructor(private readonly socket: net.Socket) {}
 
-  reply(correlationId: number, response: Response): void {
-    this.raw(encodeResponse(correlationId, response));
+  /** Answers `correlationId`, with header tag 0 `applied` when it is not empty. */
+  reply(correlationId: number, response: Response, applied: readonly GroupIndex[] = []): void {
+    this.raw(encodeResponse(correlationId, response, applied));
   }
 
   push(push: DeliverPush): void {

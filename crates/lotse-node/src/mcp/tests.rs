@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{NO_CREDENTIAL, Reach, SignIn, client};
+use super::{NO_CREDENTIAL, Reach, SignIn, client, client_config};
 
 fn s(v: &str) -> Option<String> {
     Some(v.to_string())
@@ -62,6 +62,7 @@ async fn without_a_ca_only_plain_tcp_on_loopback_when_asked() {
         bootstrap: vec!["127.0.0.1:9092".into()],
         ca,
         plaintext_on_loopback: plain,
+        zone: None,
     };
     let token = || SignIn::Token("t".into());
     assert!(client(&reach(None, false), token()).err().unwrap().contains("--plaintext-on-loopback"));
@@ -69,6 +70,18 @@ async fn without_a_ca_only_plain_tcp_on_loopback_when_asked() {
     assert!(client(&reach(p("ca.pem"), true), token()).is_err(), "a CA and plain TCP exclude each other");
     let cert = SignIn::Certificate { cert: "c.pem".into(), key: "c.key".into() };
     assert!(client(&reach(None, true), cert).err().unwrap().contains("needs TLS"));
-    let none = Reach { bootstrap: Vec::new(), ca: None, plaintext_on_loopback: true };
+    let none = Reach { bootstrap: Vec::new(), ca: None, plaintext_on_loopback: true, zone: None };
     assert!(client(&none, token()).is_err());
+}
+
+#[test]
+fn the_zone_goes_into_the_clients_config() {
+    let reach = |zone: Option<&str>| Reach {
+        bootstrap: vec!["127.0.0.1:9092".into()],
+        ca: None,
+        plaintext_on_loopback: true,
+        zone: zone.map(String::from),
+    };
+    assert_eq!(client_config(&reach(Some("eu-1")), None).zone.as_deref(), Some("eu-1"));
+    assert_eq!(client_config(&reach(None), None).zone, None);
 }

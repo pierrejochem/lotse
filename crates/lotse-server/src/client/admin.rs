@@ -42,7 +42,7 @@ use lotse_raft::{NodeId, Role};
 use lotse_route::{Binding, ExchangeKind};
 use lotse_rt::{Instant, Runtime};
 
-use super::{Clients, ClusterView, Outbox, hint, outcome};
+use super::{Clients, ClusterView, Outbox, hint, outcome, write_applied};
 use crate::auth::Principal;
 use crate::metadata::{
     self, CertKey, Change, Cleanup, DEFAULT_DELETE_RETENTION_MS, MAX_PARTITIONS, MetadataState, QueueChange,
@@ -437,6 +437,60 @@ impl Clients {
             return Err((ErrorCode::COORDINATOR_NOT_AVAILABLE, None));
         }
         Ok(replica)
+    }
+
+    /// The replica a zone read of `group` is answered from (the zone reads
+    /// design, section 2). Without `at_least`, today's leader check: the
+    /// metadata group's [`Clients::metadata_leader`], the coordinator
+    /// group's `coordinator`; the two are never the same group. With it, a
+    /// follower serves too, once it has applied `at_least`, the highest
+    /// index the client saw, and is not lagging (ADR 0116): its applied
+    /// state then holds everything the client saw, the role bindings that
+    /// filter the answer included. The leader passes the leader check and,
+    /// with `at_least`, must have applied it too: a leader applies what is
+    /// committed before it tells anyone, and a newer leader's entries sit
+    /// above everything committed before, so a leader that has applied less
+    /// than the client saw has been deposed without knowing it yet. It says
+    /// NOT_LEADER with no hint, since a hint would name itself (as
+    /// `DescribeNodes` with `applied_at_least` does, ADR 0105), and the
+    /// client looks for the leader.
+    pub(super) fn read_replica<'a, R: Runtime, S: StateMachine>(
+        view: &ClusterView<'_>,
+        groups: &'a mut Groups<R, S>,
+        group: GroupId,
+        at_least: Option<u64>,
+    ) -> Result<&'a mut Replica<R, S>, (ErrorCode, Option<LeaderHint>)> {
+        if let Some(n) = at_least
+            && let Some(replica) = groups.get(&group)
+            && replica.raft_ref().role() != Role::Leader
+        {
+            if replica.applied() < n || view.lagging.contains(&group) {
+                return Err((ErrorCode::NOT_LEADER, hint(replica.raft_ref())));
+            }
+            return Ok(groups.get_mut(&group).expect("found above"));
+        }
+        let replica = if view.admin.metadata == Some(group) {
+            Self::metadata_leader(view, groups)?
+        } else {
+            Self::coordinator(view, groups).map(|(_, replica)| replica)?
+        };
+        if at_least.is_some_and(|n| replica.applied() < n) {
+            return Err((ErrorCode::NOT_LEADER, None));
+        }
+        Ok(replica)
+    }
+
+    /// [`Clients::read_replica`] for the metadata group; without one,
+    /// today's answer.
+    pub(super) fn metadata_read<'a, R: Runtime, S: StateMachine>(
+        view: &ClusterView<'_>,
+        groups: &'a mut Groups<R, S>,
+        at_least: Option<u64>,
+    ) -> Result<&'a mut Replica<R, S>, (ErrorCode, Option<LeaderHint>)> {
+        match view.admin.metadata {
+            Some(g) => Self::read_replica(view, groups, g, at_least),
+            None => Self::metadata_leader(view, groups),
+        }
     }
 
     /// Proposes `change`; answered by `then` once applied.
@@ -858,10 +912,11 @@ impl Clients {
         &mut self,
         outbox: Arc<Outbox>,
         id: u32,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeUsersResponse { error, leader_hint, users: Vec::new() };
@@ -1008,7 +1063,25 @@ impl Clients {
     }
 
     /// The tenants `who` has a role in, with how many resources each holds.
-    pub(super) fn describe_tenants(&mut self, outbox: &Outbox, id: u32, view: &ClusterView<'_>, who: &Principal) {
+    /// From any node without `at_least`, as before zone reads; with it,
+    /// only from one [`Clients::read_replica`] allows.
+    pub(super) fn describe_tenants<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: &Outbox,
+        id: u32,
+        at_least: Option<u64>,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+        who: &Principal,
+    ) {
+        if at_least.is_some()
+            && let Err((error, leader_hint)) = Self::metadata_read(view, groups, at_least)
+        {
+            let resp = DescribeTenantsResponse { error, leader_hint, tenants: Vec::new() };
+            return outbox.push(id, &Response::DescribeTenants(resp));
+        }
+        // `view.access` is built from the metadata group's applied state,
+        // which is what the check above judged.
         let held = |t: &str| view.access.resources.values().filter(|(_, x)| x == t).count() as u32;
         let tenants = view
             .access
@@ -1073,7 +1146,22 @@ impl Clients {
     }
 
     /// Every role binding, configured and made at runtime.
-    pub(super) fn describe_role_bindings(&mut self, outbox: &Outbox, id: u32, view: &ClusterView<'_>) {
+    /// From any node without `at_least`, as before zone reads; with it,
+    /// only from one [`Clients::read_replica`] allows.
+    pub(super) fn describe_role_bindings<R: Runtime, S: StateMachine>(
+        &mut self,
+        outbox: &Outbox,
+        id: u32,
+        at_least: Option<u64>,
+        view: &ClusterView<'_>,
+        groups: &mut Groups<R, S>,
+    ) {
+        if at_least.is_some()
+            && let Err((error, leader_hint)) = Self::metadata_read(view, groups, at_least)
+        {
+            let resp = DescribeRoleBindingsResponse { error, leader_hint, bindings: Vec::new() };
+            return outbox.push(id, &Response::DescribeRoleBindings(resp));
+        }
         let bindings = view
             .access
             .grants
@@ -1122,10 +1210,11 @@ impl Clients {
         outbox: Arc<Outbox>,
         id: u32,
         req: DescribeConfigsRequest,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeConfigsResponse { error, leader_hint, resources: Vec::new() };
@@ -1255,7 +1344,9 @@ impl Clients {
 
     /// Answers admin records that are decided and applied.
     pub(super) fn settle_admin<R: Runtime, S: StateMachine>(&mut self, view: &ClusterView<'_>, groups: &Groups<R, S>) {
-        let Some(replica) = view.admin.metadata.and_then(|g| groups.get(&g)) else { return };
+        let Some((group, replica)) = view.admin.metadata.and_then(|g| groups.get(&g).map(|r| (g, r))) else {
+            return;
+        };
         let writes = std::mem::take(&mut self.admin_writes);
         for w in writes {
             let raft = replica.raft_ref();
@@ -1312,14 +1403,15 @@ impl Clients {
                         }
                         then => then.answer(ErrorCode::NONE, 0, None),
                     };
-                    outbox.push(*id, &resp);
+                    outbox.push_applied(*id, &resp, &write_applied(group, replica, Some(w.last)));
                 }
                 Some(code) => {
                     let h = if code == ErrorCode::NOT_LEADER { hint(raft) } else { None };
-                    outbox.push(*id, &w.then.answer(code, 0, h));
+                    outbox.push_applied(*id, &w.then.answer(code, 0, h), &write_applied(group, replica, None));
                 }
                 None if view.now >= w.deadline => {
-                    outbox.push(*id, &w.then.answer(ErrorCode::REQUEST_TIMED_OUT, 0, None));
+                    let resp = w.then.answer(ErrorCode::REQUEST_TIMED_OUT, 0, None);
+                    outbox.push_applied(*id, &resp, &write_applied(group, replica, None));
                 }
                 None => self.admin_writes.push(w),
             }

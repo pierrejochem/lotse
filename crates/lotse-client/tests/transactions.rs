@@ -47,6 +47,7 @@ async fn broker(rt: SimRuntime, end_called: Arc<AtomicBool>) {
                         host: "b1".into(),
                         port: 9000,
                         error_msg: None,
+                        voters: Vec::new(),
                     }),
                     Request::InitProducer(_) => Response::InitProducer(InitProducerResponse {
                         error: ErrorCode::NONE,
@@ -219,6 +220,7 @@ async fn fanout_broker_refusing(
                         host: "b1".into(),
                         port: 9000,
                         error_msg: None,
+                        voters: Vec::new(),
                     }),
                     Request::InitProducer(_) => Response::InitProducer(InitProducerResponse {
                         error: ErrorCode::NONE,
@@ -442,6 +444,7 @@ async fn noting_broker(rt: SimRuntime, seen: Arc<std::sync::Mutex<Vec<(u64, i32)
                         host: "b1".into(),
                         port: 9000,
                         error_msg: None,
+                        voters: Vec::new(),
                     }),
                     Request::InitProducer(_) => Response::InitProducer(InitProducerResponse {
                         error: ErrorCode::NONE,

@@ -18,6 +18,10 @@ namespace Lotse.Proto;
 /// Push:     correlation_id u32 (0) | flags u16 (PUSH) | tagged_fields | api_key u16 | api_version u16 | body
 /// </code>
 /// <para>
+/// The header's tagged fields have one tag, 0: <c>read_at_least</c> in a request and <c>applied</c> in a response, each a
+/// list of <see cref="GroupIndex"/>. A frame without it reads as an empty list.
+/// </para>
+/// <para>
 /// Check the error flag of a response <em>before</em> decoding a typed body: such a response carries only an error
 /// code (and optionally a reason), whatever the request was. <see cref="DecodeResponse"/> does. Responses on a
 /// connection may come back in another order than the requests; match them by correlation id.
@@ -31,10 +35,30 @@ public static class Frames
     public const int MaxFrame = 16 * 1024 * 1024;
 
     /// <summary>A decoded request frame.</summary>
-    public sealed record DecodedRequest(RequestHeader Header, Request Request);
+    /// <param name="Header">The header.</param>
+    /// <param name="Request">The request.</param>
+    /// <param name="ReadAtLeast">Header tag 0: the indexes the answer must reflect, empty without the tag.</param>
+    public sealed record DecodedRequest(RequestHeader Header, Request Request, IReadOnlyList<GroupIndex> ReadAtLeast)
+    {
+        /// <summary>A frame without header tags.</summary>
+        public DecodedRequest(RequestHeader header, Request request)
+            : this(header, request, Array.Empty<GroupIndex>())
+        {
+        }
+    }
 
     /// <summary>A decoded response frame.</summary>
-    public sealed record DecodedResponse(uint CorrelationId, Response Response);
+    /// <param name="CorrelationId">The request it answers.</param>
+    /// <param name="Response">The response.</param>
+    /// <param name="Applied">Header tag 0: the indexes the node had applied when it answered, empty without the tag.</param>
+    public sealed record DecodedResponse(uint CorrelationId, Response Response, IReadOnlyList<GroupIndex> Applied)
+    {
+        /// <summary>A frame without header tags.</summary>
+        public DecodedResponse(uint correlationId, Response response)
+            : this(correlationId, response, Array.Empty<GroupIndex>())
+        {
+        }
+    }
 
     /// <summary>
     /// A delivery to a queue consumer.
@@ -56,6 +80,54 @@ public static class Frames
         /// batch, no deliveries. Only a subscription that asked for it gets one.
         /// </summary>
         public bool IsActivation => Error.Code == 0 && Batch.Size == 0 && Deliveries.Count == 0;
+    }
+
+    // ---- header tags ----
+
+    /// <summary>Header tag 0: <c>read_at_least</c> in a request, <c>applied</c> in a response.</summary>
+    internal const long TagHeaderIndexes = 0;
+
+    /// <summary>Writes a header's tags: none for an empty list, else tag 0 with a <c>u32</c> count and the entries.</summary>
+    private static void PutHeaderTags(Writer w, IReadOnlyList<GroupIndex> indexes)
+    {
+        if (indexes.Count == 0)
+        {
+            w.NoTags();
+            return;
+        }
+        var v = new Writer();
+        v.U32((uint)indexes.Count);
+        foreach (GroupIndex e in indexes)
+        {
+            v.U64(e.Group).U64(e.Index);
+        }
+        w.Tags(new[] { new Tag(TagHeaderIndexes, ByteString.CopyOf(v.ToByteArray())) });
+    }
+
+    /// <summary>The indexes of header tag 0; other tags come from newer versions and are skipped.</summary>
+    private static IReadOnlyList<GroupIndex> GetHeaderTags(List<Tag> raw)
+    {
+        var output = new List<GroupIndex>();
+        foreach (Tag t in raw)
+        {
+            if (t.Number != TagHeaderIndexes)
+            {
+                continue;
+            }
+            var v = new Reader(t.Value.ToByteArray());
+            uint n = v.U32();
+            // Each entry takes sixteen bytes, so a count beyond what is left is a lie.
+            if (n > v.Remaining / 16)
+            {
+                throw DecodeException.Malformed("index count exceeds the field");
+            }
+            for (uint i = 0; i < n; i++)
+            {
+                output.Add(new GroupIndex(v.U64(), v.U64()));
+            }
+            v.Finish();
+        }
+        return output;
     }
 
     // ---- length prefix ----
@@ -91,14 +163,22 @@ public static class Frames
     // ---- requests ----
 
     /// <summary>Encodes a version-0 request. <paramref name="correlationId"/> must not be 0, which is reserved for pushes.</summary>
-    public static byte[] EncodeRequest(uint correlationId, Request request)
+    public static byte[] EncodeRequest(uint correlationId, Request request) =>
+        EncodeRequest(correlationId, Array.Empty<GroupIndex>(), request);
+
+    /// <summary>
+    /// Encodes a version-0 request with header tag 0, <c>read_at_least</c>: a read the node may serve only once it has
+    /// applied at least these indexes. An empty list writes no tag, so the frame is the same as without it.
+    /// </summary>
+    public static byte[] EncodeRequest(uint correlationId, IReadOnlyList<GroupIndex> readAtLeast, Request request)
     {
+        ArgumentNullException.ThrowIfNull(readAtLeast);
         var w = new Writer();
         w.U16(request.ApiKey.Id);
         w.U16(0);
         w.U32(correlationId);
         w.U16(0);
-        w.NoTags();
+        PutHeaderTags(w, readAtLeast);
         request.Write(w);
         return w.ToByteArray();
     }
@@ -111,7 +191,9 @@ public static class Frames
     {
         var r = new Reader(frame);
         var header = new RequestHeader(new ApiKey(r.U16()), r.U16(), r.U32(), r.U16());
-        r.Tags();
+        // The tags' content is read after the support check, so a header this library does not speak still gives
+        // Unsupported and the caller can answer.
+        List<Tag> rawTags = r.Tags();
         if (header.ApiVersion != 0 || !ApiKey.IsClientKey(header.ApiKey))
         {
             throw new DecodeException(
@@ -119,6 +201,7 @@ public static class Frames
                 $"unsupported API key {header.ApiKey.Id} version {header.ApiVersion}",
                 header);
         }
+        IReadOnlyList<GroupIndex> readAtLeast = GetHeaderTags(rawTags);
         Request request = header.ApiKey.Id switch
         {
             0 => Request.ApiVersions.Read(r),
@@ -184,18 +267,26 @@ public static class Frames
             _ => throw new InvalidOperationException("checked against the implemented keys"),
         };
         r.Finish();
-        return new DecodedRequest(header, request);
+        return new DecodedRequest(header, request, readAtLeast);
     }
 
     // ---- responses ----
 
     /// <summary>Encodes a response to the request with <paramref name="correlationId"/>.</summary>
-    public static byte[] EncodeResponse(uint correlationId, Response response)
+    public static byte[] EncodeResponse(uint correlationId, Response response) =>
+        EncodeResponse(correlationId, Array.Empty<GroupIndex>(), response);
+
+    /// <summary>
+    /// Encodes a response with header tag 0, <c>applied</c>: the indexes the node had applied when it answered. An empty
+    /// list writes no tag.
+    /// </summary>
+    public static byte[] EncodeResponse(uint correlationId, IReadOnlyList<GroupIndex> applied, Response response)
     {
+        ArgumentNullException.ThrowIfNull(applied);
         var w = new Writer();
         w.U32(correlationId);
         w.U16(response is Response.Failed or Response.Refused ? Flags.Error : (ushort)0);
-        w.NoTags();
+        PutHeaderTags(w, applied);
         response.Write(w);
         return w.ToByteArray();
     }
@@ -219,7 +310,7 @@ public static class Frames
         var r = new Reader(frame);
         uint correlationId = r.U32();
         ushort flags = r.U16();
-        r.Tags();
+        IReadOnlyList<GroupIndex> applied = GetHeaderTags(r.Tags());
         if ((flags & Flags.Error) != 0)
         {
             var code = new ErrorCode(r.U16());
@@ -235,9 +326,9 @@ public static class Frames
             r.Finish();
             if (reason is null)
             {
-                return new DecodedResponse(correlationId, new Response.Failed(code));
+                return new DecodedResponse(correlationId, new Response.Failed(code), applied);
             }
-            return new DecodedResponse(correlationId, new Response.Refused(code, StrictUtf8String(reason)));
+            return new DecodedResponse(correlationId, new Response.Refused(code, StrictUtf8String(reason)), applied);
         }
         Response response = apiKey.Id switch
         {
@@ -278,7 +369,7 @@ public static class Frames
             _ => throw DecodeException.Malformed("unknown API key"),
         };
         r.Finish();
-        return new DecodedResponse(correlationId, response);
+        return new DecodedResponse(correlationId, response, applied);
     }
 
     private static string StrictUtf8String(ByteString s)

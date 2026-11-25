@@ -22,8 +22,12 @@ class ConformanceTest {
         List<String[]> vectors = Vectors.lines("requests.hex");
         assertTrue(vectors.size() >= 40, "the vectors cover every client request");
         for (String[] v : vectors) {
+            if (tagged(v)) {
+                continue; // aHeaderTagRidesOnItsFrame
+            }
             byte[] frame = Vectors.hex(v[1]);
             Frames.DecodedRequest decoded = Frames.decodeRequest(frame);
+            assertEquals(List.of(), decoded.readAtLeast(), v[0]);
             long correlationId = Long.parseLong(v[0].split("-")[1]) + 1;
             assertEquals(correlationId, decoded.header().correlationId(), v[0]);
             assertEquals(0, decoded.header().apiVersion(), v[0]);
@@ -31,6 +35,84 @@ class ConformanceTest {
             assertEquals(decoded.request().apiKey(), decoded.header().apiKey(), v[0]);
             assertEquals(v[1], hex(Frames.encodeRequest(correlationId, decoded.request())), v[0]);
         }
+    }
+
+    /** The samples of header tag 0 ride on a frame of their own, labelled {@code -tagged-} with correlation id 900. */
+    private static boolean tagged(String[] v) {
+        return v[0].contains("-tagged-");
+    }
+
+    /**
+     * Header tag 0: {@code read_at_least} on a request, {@code applied} on a response, read as the broker wrote them
+     * and written again byte for byte; an empty list writes no tag.
+     */
+    @Test
+    void aHeaderTagRidesOnItsFrame() {
+        String[] req = Vectors.lines("requests.hex").stream().filter(ConformanceTest::tagged).findFirst().orElseThrow();
+        Frames.DecodedRequest r = Frames.decodeRequest(Vectors.hex(req[1]));
+        assertEquals(900, r.header().correlationId());
+        assertEquals(new Request.DescribeNodes(), r.request());
+        List<GroupIndex> wanted = List.of(new GroupIndex(1, 7), new GroupIndex(2, -1L));
+        assertEquals(wanted, r.readAtLeast());
+        assertEquals(req[1], hex(Frames.encodeRequest(900, wanted, r.request())));
+        assertArrayEquals(Frames.encodeRequest(900, r.request()), Frames.encodeRequest(900, List.of(), r.request()));
+
+        String[] res = Vectors.lines("responses.hex").stream().filter(ConformanceTest::tagged).findFirst().orElseThrow();
+        ApiKey key = new ApiKey(Integer.parseInt(res[1]));
+        Frames.DecodedResponse d = Frames.decodeResponse(Vectors.hex(res[2]), key);
+        assertEquals(900, d.correlationId());
+        assertEquals(new Response.Outcome(ErrorCode.NONE, null), d.response());
+        assertEquals(List.of(new GroupIndex(1, 9)), d.applied());
+        assertEquals(res[2], hex(Frames.encodeResponse(900, d.applied(), d.response())));
+    }
+
+    /** A header index count larger than the field holds is refused, not trusted. */
+    @Test
+    void aHeaderIndexCountBeyondTheFieldIsRefused() {
+        Writer w = new Writer();
+        w.u16(ApiKey.DESCRIBE_NODES.id()).u16(0).u32(1).u16(0);
+        Writer v = new Writer();
+        v.u32(2).u64(1).u64(7);
+        w.tags(List.of(new Tag(0, dev.lotse.record.ByteString.copyOf(v.toByteArray()))));
+        new Request.DescribeNodes().write(w);
+        DecodeException e = assertThrows(DecodeException.class, () -> Frames.decodeRequest(w.toByteArray()));
+        assertEquals(DecodeException.Kind.MALFORMED, e.kind());
+    }
+
+    /**
+     * The zone reads' message tags: {@code Fetch} tag 1 {@code zone}, a fetched partition's tag 1
+     * {@code preferred_replica} and {@code FindCoordinator}'s tag 0 {@code voters}.
+     */
+    @Test
+    void zoneTagsAreReadAsTheBrokerWroteThem() {
+        boolean zone = false;
+        for (String[] v : Vectors.lines("requests.hex")) {
+            if (Frames.decodeRequest(Vectors.hex(v[1])).request() instanceof Request.Fetch f && f.zone() != null) {
+                zone = true;
+                assertEquals("eu-1", f.zone());
+                assertTrue(f.allowFollower());
+            }
+        }
+        boolean preferred = false;
+        boolean voters = false;
+        for (String[] v : Vectors.lines("responses.hex")) {
+            Response r = Frames.decodeResponse(Vectors.hex(v[2]), new ApiKey(Integer.parseInt(v[1]))).response();
+            if (r instanceof Response.Fetch f) {
+                for (Messages.FetchResourceResponse res : f.resources()) {
+                    for (Messages.FetchPartitionResponse p : res.partitions()) {
+                        if (p.preferredReplica() != null) {
+                            preferred = true;
+                            assertEquals(2L, p.preferredReplica());
+                        }
+                    }
+                }
+            }
+            if (r instanceof Response.FindCoordinator c && !c.voters().isEmpty()) {
+                voters = true;
+                assertEquals(List.of(1L, 2L, 3L), c.voters());
+            }
+        }
+        assertTrue(zone && preferred && voters);
     }
 
     @Test
@@ -49,9 +131,13 @@ class ConformanceTest {
         List<String[]> vectors = Vectors.lines("responses.hex");
         assertTrue(vectors.size() >= 40);
         for (String[] v : vectors) {
+            if (tagged(v)) {
+                continue; // aHeaderTagRidesOnItsFrame
+            }
             byte[] frame = Vectors.hex(v[2]);
             ApiKey key = new ApiKey(Integer.parseInt(v[1]));
             Frames.DecodedResponse decoded = Frames.decodeResponse(frame, key);
+            assertEquals(List.of(), decoded.applied(), v[0]);
             long correlationId = Long.parseLong(v[0].split("-")[1]);
             assertEquals(correlationId, decoded.correlationId(), v[0]);
             assertEquals(correlationId, Frames.responseCorrelationId(frame), v[0]);

@@ -224,10 +224,11 @@ impl Clients {
         outbox: &Outbox,
         id: u32,
         req: DescribeNodesRequest,
+        at_least: Option<u64>,
         view: &ClusterView<'_>,
         groups: &mut Groups<R, S>,
     ) {
-        let replica = match Self::metadata_leader(view, groups) {
+        let replica = match Self::metadata_read(view, groups, at_least) {
             Ok(r) => r,
             Err((error, leader_hint)) => {
                 let resp = DescribeNodesResponse { error, leader_hint, nodes: Vec::new() };

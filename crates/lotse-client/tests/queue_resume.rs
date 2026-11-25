@@ -68,6 +68,7 @@ async fn broker(rt: SimRuntime, heard: Arc<Mutex<Vec<Request>>>) {
                         host: "b1".into(),
                         port: 9000,
                         error_msg: None,
+                        voters: Vec::new(),
                     }),
                     Request::InitProducer(_) => Response::InitProducer(InitProducerResponse {
                         error: ErrorCode::NONE,
