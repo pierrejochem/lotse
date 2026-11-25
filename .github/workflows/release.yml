@@ -42,6 +42,10 @@ jobs:
           app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' packaging/helm/lotse/Chart.yaml)
           echo "tag $version, Cargo.toml $cargo, chart $chart, appVersion $app"
           test "$cargo" = "$version" && test "$chart" = "$version" && test "$app" = "$version"
+          # The SDKs carry the release's version too (ADR 0142): their own
+          # workflow publishes them after this one, so a forgotten bump
+          # must stop the release here.
+          packaging/sdk-versions.sh "$version"
 
   simulation:
     name: simulation (${{ matrix.shard }})

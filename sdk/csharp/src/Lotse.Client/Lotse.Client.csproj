@@ -10,6 +10,7 @@
     <RootNamespace>Lotse</RootNamespace>
     <AssemblyName>Lotse.Client</AssemblyName>
     <PackageId>Lotse.Client</PackageId>
+    <Version>0.1.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

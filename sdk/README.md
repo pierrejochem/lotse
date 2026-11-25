@@ -199,7 +199,7 @@ Producers may compress a batch with zstd or lz4, and the broker serves it as sen
 
 ```kotlin
 // Gradle
-implementation("dev.lotse:lotse-client:0.0.1") {
+implementation("dev.lotse:lotse-client:0.1.1") {
     capabilities { requireCapability("dev.lotse:lotse-client-compression") }
 }
 // or name them yourself, also in Maven
