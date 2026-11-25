@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     kotlin("jvm") version "2.4.21"
     `java-library`
@@ -129,7 +131,7 @@ val verifyJavadocJar by tasks.registering {
     dependsOn(jar)
     val jarFile = jar.flatMap { it.archiveFile }
     doLast {
-        val names = java.util.zip.ZipFile(jarFile.get().asFile).use { zip -> zip.entries().toList().map { it.name } }
+        val names = ZipFile(jarFile.get().asFile).use { zip -> zip.entries().toList().map { it.name } }
         val missing = listOf("index.html", "dev/lotse/kotlin/Lotse.html").filter { it !in names }
         if (missing.isNotEmpty()) {
             throw GradleException("the javadoc jar lacks ${missing.joinToString()}; it holds ${names.size} entries")
