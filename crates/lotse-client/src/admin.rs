@@ -18,8 +18,8 @@ use lotse_proto::{
     CreateQueueRequest, CreateStreamRequest, CreateTenantRequest, DeclareExchangeRequest, DeleteResourceRequest,
     DeleteTenantRequest, DescribeConfigsRequest, DescribeMetricsRequest, DescribeMetricsResponse, DescribeNodesRequest,
     DescribeRoleBindingsRequest, DescribeSessionsRequest, DescribeSessionsResponse, DescribeTenantsRequest,
-    DescribeUsersRequest, ErrorCode, LeaderHint, NodeEntry, RemoveNodeRequest, Request, Response, RoleBindingData,
-    ScramCredentialData, SettleVotersRequest, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
+    DescribeUsersRequest, ErrorCode, GroupIndex, LeaderHint, NodeEntry, RemoveNodeRequest, Request, Response,
+    RoleBindingData, ScramCredentialData, SettleVotersRequest, TenantEntry, UserEntry, WhoAmIRequest, WhoAmIResponse,
 };
 use lotse_route::ExchangeKind;
 use lotse_rt::{Clock, Net, Rng, Spawn};
@@ -969,15 +969,19 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// An admin read (one of the zone reads): to the lowest-id node in this
     /// client's zone, which answers once it has applied what this client
     /// saw (the zone reads design). A refusal, an error or a failed call
-    /// sends that one read to the metadata leader, whom a refusal may name;
-    /// the next read tries the zone again.
+    /// sends that one read to the metadata leader, whom a refusal may name,
+    /// with the same indexes: a leader deposed without knowing it refuses
+    /// a read it has not applied (ADR 0141), so the retry finds the new
+    /// one. The next read tries the zone again.
     async fn call_admin_read(&self, req: &Request) -> Result<Response, Attempt> {
+        let mut at_least = Vec::new();
         if let Some(zone) = self.cfg.zone.as_deref() {
+            at_least = self.indexes.snapshot();
             let listed = self.listed.lock().expect("listed lock").clone();
             let node = zone::zone_node(zone, listed, &self.zones.lock().expect("zones lock"));
             let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
             if let Some(addr) = addr {
-                match self.call_with(&addr, req, &self.indexes.snapshot()).await {
+                match self.call_with(&addr, req, &at_least).await {
                     Ok(resp) if !zone::refused(&resp) => return Ok(resp),
                     Ok(resp) => {
                         if let Some(hint) = zone::leader_hint(&resp) {
@@ -988,12 +992,18 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 }
             }
         }
-        self.call_admin(req).await
+        self.call_admin_with(req, &at_least).await
     }
 
     /// Sends an admin request to the metadata leader, or any broker if it
     /// is not known.
     async fn call_admin(&self, req: &Request) -> Result<Response, Attempt> {
+        self.call_admin_with(req, &[]).await
+    }
+
+    /// [`Client::call_admin`] with the request header's `read_at_least`;
+    /// empty, no tag.
+    async fn call_admin_with(&self, req: &Request, read_at_least: &[GroupIndex]) -> Result<Response, Attempt> {
         let leader = *self.metadata_leader.lock().expect("leader lock");
         // A leader whose address this client has not seen (a node added
         // since it last asked): learn the cluster's nodes first, or it
@@ -1020,7 +1030,7 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 pool[n % pool.len()].clone()
             }
         };
-        match self.call(&addr, req).await {
+        match self.call_with(&addr, req, read_at_least).await {
             Ok(r) => Ok(r),
             Err(e @ (CallError::Denied(_) | CallError::Refused(..))) => Err(e.into()),
             Err(e) => {

@@ -612,8 +612,9 @@ class FetchTest {
     }
 
     /**
-     * A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader,
-     * without the tag, and the next read tries the zone again.
+     * A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader with
+     * the same tag, which a leader deposed without knowing it refuses (ADR 0141), and the next read tries the zone
+     * again.
      */
     @Test
     void aRefusedZoneReadGoesToTheLeaderAndTheNextTriesTheZoneAgain() {
@@ -628,7 +629,7 @@ class FetchTest {
         client.describeTenants();
         List<GroupIndex> tagged = at(1, 6, 2, 0);
         assertEquals(
-                List.of(Map.entry(2L, tagged), Map.entry(1L, List.of()), Map.entry(2L, tagged)),
+                List.of(Map.entry(2L, tagged), Map.entry(1L, tagged), Map.entry(2L, tagged)),
                 heardOf(Request.DescribeTenants.class));
     }
 
@@ -795,14 +796,17 @@ class FetchTest {
     }
 
     /**
-     * The zone voter refuses an {@code OffsetFetch}, or the call to it fails: that read goes to the coordinator, and
-     * the next tries the zone again.
+     * The zone voter refuses an {@code OffsetFetch}, or the call to it fails: that read goes to the coordinator with
+     * the same tag, and the next tries the zone again.
      */
     @Test
     void aRefusedOffsetFetchGoesToTheCoordinatorAndTheNextTriesTheZoneAgain() {
         for (boolean failedCall : new boolean[] {false, true}) {
             heard.clear();
             zoneNodes();
+            a.applied(r -> r instanceof Request.Metadata
+                    ? at(1, 4)
+                    : r instanceof Request.FindCoordinator ? at(2, 6) : List.of());
             AtomicBoolean refused = new AtomicBoolean();
             b.on((node, r) -> {
                 if (r instanceof Request.OffsetFetch && !refused.getAndSet(true)) {
@@ -817,7 +821,11 @@ class FetchTest {
                 Response r = client.callCoordinatorRead("g", req);
                 assertTrue(r instanceof Response.OffsetFetch && !Zone.refused(r), r.toString());
             }
-            assertEquals(List.of(2L, 1L, 2L), nodesOf(Request.OffsetFetch.class), "failed call: " + failedCall);
+            List<GroupIndex> tagged = at(1, 4, 2, 6);
+            assertEquals(
+                    List.of(Map.entry(2L, tagged), Map.entry(1L, tagged), Map.entry(2L, tagged)),
+                    heardOf(Request.OffsetFetch.class),
+                    "failed call: " + failedCall);
             client.close();
         }
         client = null;

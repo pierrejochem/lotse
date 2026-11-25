@@ -899,11 +899,14 @@ export class LotseClient {
     throw Attempt.retry(why);
   }
 
-  /** One request to the coordinator; failures become `Attempt`s (every coordinator request may be repeated). */
-  private async callCoordinator(key: string, req: Request): Promise<Response> {
+  /**
+   * One request to the coordinator; failures become `Attempt`s (every coordinator request may be repeated). With
+   * `readAtLeast`, the request header's `read_at_least`; empty, no tag.
+   */
+  private async callCoordinator(key: string, req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     const addr = await this.coordinator(key);
     try {
-      return await this.call(addr, req);
+      return await this.call(addr, req, readAtLeast);
     } catch (e) {
       if (e instanceof CallFailure) {
         this.coordinatorAddress = null;
@@ -916,13 +919,16 @@ export class LotseClient {
   /**
    * A read of the coordinator group's state (`OffsetFetch`): from the lowest-id voter in this client's zone, which
    * answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed call
-   * sends that one read to the coordinator; the next read tries the zone again.
+   * sends that one read to the coordinator with the same indexes, which a coordinator deposed without knowing it
+   * refuses (ADR 0141); the next read tries the zone again.
    */
   private async callCoordinatorRead(key: string, req: Request): Promise<Response> {
     const zone = this.cfg.zone;
+    let atLeast: readonly GroupIndex[] = [];
     if (zone !== null) {
       // Learns the voters, if no FindCoordinator did yet.
       await this.coordinator(key);
+      atLeast = this.indexes.snapshot();
       const node = zoneNode(
         zone,
         this.coordinatorVoters.filter((v) => this.listed.has(v)),
@@ -931,7 +937,7 @@ export class LotseClient {
       const addr = node === null ? undefined : this.brokers.get(node);
       if (addr !== undefined) {
         try {
-          const resp = await this.call(addr, req, this.indexes.snapshot());
+          const resp = await this.call(addr, req, atLeast);
           if (!refused(resp)) {
             return resp;
           }
@@ -943,7 +949,7 @@ export class LotseClient {
         }
       }
     }
-    return this.callCoordinator(key, req);
+    return this.callCoordinator(key, req, atLeast);
   }
 
   private async initProducerOnce(txn: string | null): Promise<ProducerIds> {
@@ -1314,16 +1320,20 @@ export class LotseClient {
   /**
    * An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata listed,
    * which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
-   * call sends that one read to the metadata leader, whom a refusal may name; the next read tries the zone again.
+   * call sends that one read to the metadata leader, whom a refusal may name, with the same indexes: a leader deposed
+   * without knowing it refuses a read it has not applied (ADR 0141), so the retry finds the new one. The next read
+   * tries the zone again.
    */
   private async callAdminRead(req: Request): Promise<Response> {
     const zone = this.cfg.zone;
+    let atLeast: readonly GroupIndex[] = [];
     if (zone !== null) {
+      atLeast = this.indexes.snapshot();
       const node = zoneNode(zone, this.listed, this.zones);
       const addr = node === null ? undefined : this.brokers.get(node);
       if (addr !== undefined) {
         try {
-          const resp = await this.call(addr, req, this.indexes.snapshot());
+          const resp = await this.call(addr, req, atLeast);
           if (!refused(resp)) {
             return resp;
           }
@@ -1339,11 +1349,14 @@ export class LotseClient {
         }
       }
     }
-    return this.callAdmin(req);
+    return this.callAdmin(req, atLeast);
   }
 
-  /** Sends an admin request to the metadata leader, or any broker if it is not known. */
-  private async callAdmin(req: Request): Promise<Response> {
+  /**
+   * Sends an admin request to the metadata leader, or any broker if it is not known. With `readAtLeast`, the request
+   * header's `read_at_least`; empty, no tag.
+   */
+  private async callAdmin(req: Request, readAtLeast: readonly GroupIndex[] = []): Promise<Response> {
     const leader = this.metadataLeader;
     // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's nodes
     // first, or it keeps asking the others. If the broker that answers does not know it either (one that lags), ask the
@@ -1370,7 +1383,7 @@ export class LotseClient {
       addr = targets[this.adminTurn++ % targets.length] as Address;
     }
     try {
-      return await this.call(addr, req);
+      return await this.call(addr, req, readAtLeast);
     } catch (e) {
       if (!(e instanceof CallFailure)) {
         throw e;

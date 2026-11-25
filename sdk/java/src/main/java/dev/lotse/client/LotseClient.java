@@ -783,9 +783,14 @@ public final class LotseClient implements AutoCloseable {
 
     /** One request to the coordinator; failures become {@code Attempt}s (every coordinator request may be repeated). */
     Response callCoordinator(String key, Request req) {
+        return callCoordinator(key, req, List.of());
+    }
+
+    /** {@link #callCoordinator(String, Request)} with the request header's {@code read_at_least}; empty, no tag. */
+    private Response callCoordinator(String key, Request req, List<GroupIndex> readAtLeast) {
         Address addr = coordinator(key);
         try {
-            return call(addr, req);
+            return call(addr, req, readAtLeast);
         } catch (CallFailure e) {
             forgetCoordinator();
             throw e.toAttempt();
@@ -795,13 +800,16 @@ public final class LotseClient implements AutoCloseable {
     /**
      * A read of the coordinator group's state ({@code OffsetFetch}): from the lowest-id voter in this client's zone,
      * which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
-     * call sends that one read to the coordinator; the next read tries the zone again.
+     * call sends that one read to the coordinator with the same indexes, which a coordinator deposed without knowing
+     * it refuses (ADR 0141); the next read tries the zone again.
      */
     Response callCoordinatorRead(String key, Request req) {
         String zone = cfg.zone();
+        List<GroupIndex> atLeast = List.of();
         if (zone != null) {
             // Learns the voters, if no FindCoordinator did yet.
             coordinator(key);
+            atLeast = indexes.snapshot();
             Address addr;
             synchronized (state) {
                 List<Long> candidates = new ArrayList<>(coordinatorVoters);
@@ -811,7 +819,7 @@ public final class LotseClient implements AutoCloseable {
             }
             if (addr != null) {
                 try {
-                    Response resp = call(addr, req, indexes.snapshot());
+                    Response resp = call(addr, req, atLeast);
                     if (!Zone.refused(resp)) {
                         return resp;
                     }
@@ -820,7 +828,7 @@ public final class LotseClient implements AutoCloseable {
                 }
             }
         }
-        return callCoordinator(key, req);
+        return callCoordinator(key, req, atLeast);
     }
 
     ProducerIds initProducerOnce(String txn) {
@@ -2169,12 +2177,15 @@ public final class LotseClient implements AutoCloseable {
     /**
      * An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata
      * listed, which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a
-     * failed call sends that one read to the metadata leader, whom a refusal may name; the next read tries the zone
-     * again.
+     * failed call sends that one read to the metadata leader, whom a refusal may name, with the same indexes: a leader
+     * deposed without knowing it refuses a read it has not applied (ADR 0141), so the retry finds the new one. The
+     * next read tries the zone again.
      */
     private Response callAdminRead(Request req) {
         String zone = cfg.zone();
+        List<GroupIndex> atLeast = List.of();
         if (zone != null) {
+            atLeast = indexes.snapshot();
             Address addr;
             synchronized (state) {
                 Long node = Zone.zoneNode(zone, listed, zones);
@@ -2182,7 +2193,7 @@ public final class LotseClient implements AutoCloseable {
             }
             if (addr != null) {
                 try {
-                    Response resp = call(addr, req, indexes.snapshot());
+                    Response resp = call(addr, req, atLeast);
                     if (!Zone.refused(resp)) {
                         return resp;
                     }
@@ -2195,11 +2206,16 @@ public final class LotseClient implements AutoCloseable {
                 }
             }
         }
-        return callAdmin(req);
+        return callAdmin(req, atLeast);
     }
 
     /** Sends an admin request to the metadata leader, or any broker if it is not known. */
     private Response callAdmin(Request req) {
+        return callAdmin(req, List.of());
+    }
+
+    /** {@link #callAdmin(Request)} with the request header's {@code read_at_least}; empty, no tag. */
+    private Response callAdmin(Request req, List<GroupIndex> readAtLeast) {
         Long leader = metadataLeader;
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
         // nodes first, or it keeps asking the others. If the broker that answers does not know it either (one that
@@ -2223,7 +2239,7 @@ public final class LotseClient implements AutoCloseable {
             addr = targets.get(Math.floorMod(adminTurn.getAndIncrement(), targets.size()));
         }
         try {
-            return call(addr, req);
+            return call(addr, req, readAtLeast);
         } catch (CallFailure e) {
             if (e.kind == CallFailure.Kind.DENIED || e.kind == CallFailure.Kind.REFUSED) {
                 throw e.toAttempt();

@@ -606,8 +606,9 @@ mod zone_reads {
     }
 
     /// A zone node that has not applied what the client saw refuses with
-    /// NOT_LEADER: that read goes to the leader, without the tag, and the
-    /// next read tries the zone again.
+    /// NOT_LEADER: that read goes to the leader with the same tag, which a
+    /// leader deposed without knowing it refuses (ADR 0141), and the next
+    /// read tries the zone again.
     #[test]
     fn a_refused_zone_read_goes_to_the_leader_and_the_next_tries_the_zone_again() {
         lotse_sim::Sim::new(1).run(|rt| async move {
@@ -628,7 +629,7 @@ mod zone_reads {
             let tagged = at(&[(1, 6), (2, 0)]);
             assert_eq!(
                 heard_of(&heard, lotse_proto::ApiKey::DESCRIBE_TENANTS),
-                [("b".into(), tagged.clone()), ("a".into(), vec![]), ("b".into(), tagged)]
+                [("b".into(), tagged.clone()), ("a".into(), tagged.clone()), ("b".into(), tagged)]
             );
         });
     }
@@ -869,14 +870,18 @@ mod zone_reads {
     }
 
     /// The zone voter refuses an `OffsetFetch`, or the call to it fails:
-    /// that read goes to the coordinator, and the next tries the zone
-    /// again.
+    /// that read goes to the coordinator with the same tag, and the next
+    /// tries the zone again.
     #[test]
     fn a_refused_offset_fetch_goes_to_the_coordinator_and_the_next_tries_the_zone_again() {
         for failed_call in [false, true] {
             lotse_sim::Sim::new(1).run(move |rt| async move {
                 let heard = Heard::default();
-                serve(&rt, "a", &heard, |r| (vec![], common(r)));
+                serve(&rt, "a", &heard, |r| match r {
+                    Request::Metadata(_) => (at(&[(1, 4)]), metadata()),
+                    Request::FindCoordinator(_) => (at(&[(2, 6)]), common(r)),
+                    r => (vec![], common(r)),
+                });
                 let refused = Arc::new(Mutex::new(false));
                 serve(&rt, "b", &heard, move |r| match r {
                     Request::OffsetFetch(_) if !std::mem::replace(&mut *refused.lock().unwrap(), true) => {
@@ -905,9 +910,12 @@ mod zone_reads {
                         Err(_) => panic!("the read failed"),
                     }
                 }
-                let hosts: Vec<String> =
-                    heard_of(&heard, lotse_proto::ApiKey::OFFSET_FETCH).into_iter().map(|(h, _)| h).collect();
-                assert_eq!(hosts, ["b", "a", "b"], "failed call: {failed_call}");
+                let tagged = at(&[(1, 4), (2, 6)]);
+                assert_eq!(
+                    heard_of(&heard, lotse_proto::ApiKey::OFFSET_FETCH),
+                    [("b".into(), tagged.clone()), ("a".into(), tagged.clone()), ("b".into(), tagged)],
+                    "failed call: {failed_call}"
+                );
             });
         }
     }

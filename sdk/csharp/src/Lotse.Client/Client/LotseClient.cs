@@ -849,12 +849,20 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     internal void ForgetCoordinator() => _coordinatorAddress = null;
 
     /// <summary>One request to the coordinator; failures become attempts (every coordinator request may be repeated).</summary>
-    internal async Task<Response> CallCoordinatorAsync(string key, Request req, CancellationToken ct)
+    internal Task<Response> CallCoordinatorAsync(string key, Request req, CancellationToken ct) =>
+        CallCoordinatorAsync(key, req, Array.Empty<GroupIndex>(), ct);
+
+    /// <summary>
+    /// <see cref="CallCoordinatorAsync(string, Request, CancellationToken)"/> with the request header's
+    /// <c>read_at_least</c>; empty, no tag.
+    /// </summary>
+    private async Task<Response> CallCoordinatorAsync(
+        string key, Request req, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken ct)
     {
         Address addr = await CoordinatorAsync(key, ct).ConfigureAwait(false);
         try
         {
-            return await CallAsync(addr, req, ct).ConfigureAwait(false);
+            return await CallAsync(addr, req, readAtLeast, ct).ConfigureAwait(false);
         }
         catch (CallFailure e)
         {
@@ -866,15 +874,18 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     /// <summary>
     /// A read of the coordinator group's state (<c>OffsetFetch</c>): from the lowest-id voter in this client's zone,
     /// which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a failed
-    /// call sends that one read to the coordinator; the next read tries the zone again.
+    /// call sends that one read to the coordinator with the same indexes, which a coordinator deposed without knowing
+    /// it refuses (ADR 0141); the next read tries the zone again.
     /// </summary>
     internal async Task<Response> CallCoordinatorReadAsync(string key, Request req, CancellationToken ct)
     {
         string? zone = _cfg.Zone;
+        IReadOnlyList<GroupIndex> atLeast = Array.Empty<GroupIndex>();
         if (zone is not null)
         {
             // Learns the voters, if no FindCoordinator did yet.
             await CoordinatorAsync(key, ct).ConfigureAwait(false);
+            atLeast = _indexes.Snapshot();
             Address? addr = null;
             lock (_state)
             {
@@ -888,7 +899,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             {
                 try
                 {
-                    Response resp = await CallAsync(addr, req, _indexes.Snapshot(), ct).ConfigureAwait(false);
+                    Response resp = await CallAsync(addr, req, atLeast, ct).ConfigureAwait(false);
                     if (!Zone.Refused(resp))
                     {
                         return resp;
@@ -900,7 +911,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 }
             }
         }
-        return await CallCoordinatorAsync(key, req, ct).ConfigureAwait(false);
+        return await CallCoordinatorAsync(key, req, atLeast, ct).ConfigureAwait(false);
     }
 
     internal async Task<(ulong ProducerId, ushort Epoch)> InitProducerOnceAsync(string? txn, CancellationToken ct)
@@ -1326,14 +1337,17 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
     /// <summary>
     /// An admin read (one of the zone reads): to the lowest-id node in this client's zone that the latest metadata
     /// listed, which answers once it has applied what this client saw (the zone reads design). A refusal, an error or a
-    /// failed call sends that one read to the metadata leader, whom a refusal may name; the next read tries the zone
-    /// again.
+    /// failed call sends that one read to the metadata leader, whom a refusal may name, with the same indexes: a leader
+    /// deposed without knowing it refuses a read it has not applied (ADR 0141), so the retry finds the new one. The
+    /// next read tries the zone again.
     /// </summary>
     private async Task<Response> CallAdminReadAsync(Request req, CancellationToken ct)
     {
         string? zone = _cfg.Zone;
+        IReadOnlyList<GroupIndex> atLeast = Array.Empty<GroupIndex>();
         if (zone is not null)
         {
+            atLeast = _indexes.Snapshot();
             Address? addr = null;
             lock (_state)
             {
@@ -1346,7 +1360,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
             {
                 try
                 {
-                    Response resp = await CallAsync(addr, req, _indexes.Snapshot(), ct).ConfigureAwait(false);
+                    Response resp = await CallAsync(addr, req, atLeast, ct).ConfigureAwait(false);
                     if (!Zone.Refused(resp))
                     {
                         return resp;
@@ -1362,11 +1376,18 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 }
             }
         }
-        return await CallAdminAsync(req, ct).ConfigureAwait(false);
+        return await CallAdminAsync(req, atLeast, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sends an admin request to the metadata leader, or any broker if it is not known.</summary>
-    private async Task<Response> CallAdminAsync(Request req, CancellationToken ct)
+    private Task<Response> CallAdminAsync(Request req, CancellationToken ct) =>
+        CallAdminAsync(req, Array.Empty<GroupIndex>(), ct);
+
+    /// <summary>
+    /// <see cref="CallAdminAsync(Request, CancellationToken)"/> with the request header's <c>read_at_least</c>; empty,
+    /// no tag.
+    /// </summary>
+    private async Task<Response> CallAdminAsync(Request req, IReadOnlyList<GroupIndex> readAtLeast, CancellationToken ct)
     {
         long leader = Interlocked.Read(ref _metadataLeader);
         // A leader whose address this client has not seen (a node added since it last asked): learn the cluster's
@@ -1400,7 +1421,7 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
         }
         try
         {
-            return await CallAsync(addr, req, ct).ConfigureAwait(false);
+            return await CallAsync(addr, req, readAtLeast, ct).ConfigureAwait(false);
         }
         catch (CallFailure e)
         {

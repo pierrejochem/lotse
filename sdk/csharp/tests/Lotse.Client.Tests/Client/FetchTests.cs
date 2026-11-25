@@ -552,8 +552,9 @@ public sealed class FetchTests : IDisposable
     }
 
     /// <summary>
-    /// A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader,
-    /// without the tag, and the next read tries the zone again.
+    /// A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader with
+    /// the same tag, which a leader deposed without knowing it refuses (ADR 0141), and the next read tries the zone
+    /// again.
     /// </summary>
     [Fact]
     public async Task ARefusedZoneReadGoesToTheLeaderAndTheNextTriesTheZoneAgain()
@@ -567,7 +568,7 @@ public sealed class FetchTests : IDisposable
         await ZoneClient("y").MetadataAsync();
         await _client!.DescribeTenantsAsync();
         await _client.DescribeTenantsAsync();
-        Assert.Equal(new[] { "2 [1:6 2:0]", "1 []", "2 [1:6 2:0]" }, HeardOf<Request.DescribeTenants>());
+        Assert.Equal(new[] { "2 [1:6 2:0]", "1 [1:6 2:0]", "2 [1:6 2:0]" }, HeardOf<Request.DescribeTenants>());
     }
 
     /// <summary>
@@ -753,8 +754,8 @@ public sealed class FetchTests : IDisposable
     }
 
     /// <summary>
-    /// The zone voter refuses an <c>OffsetFetch</c>, or the call to it fails: that read goes to the coordinator, and the
-    /// next tries the zone again.
+    /// The zone voter refuses an <c>OffsetFetch</c>, or the call to it fails: that read goes to the coordinator with the
+    /// same tag, and the next tries the zone again.
     /// </summary>
     [Fact]
     public async Task ARefusedOffsetFetchGoesToTheCoordinatorAndTheNextTriesTheZoneAgain()
@@ -763,6 +764,12 @@ public sealed class FetchTests : IDisposable
         {
             _heard.Clear();
             ZoneNodes();
+            _a.Applied(r => r switch
+            {
+                Request.Metadata => At(1, 4),
+                Request.FindCoordinator => At(2, 6),
+                _ => None,
+            });
             int refused = 0;
             _b.On((_, r) => r is Request.OffsetFetch && Interlocked.Exchange(ref refused, 1) == 0
                 ? (failedCall ? new Response.Failed(ErrorCode.InvalidRequest) : Read(r, ErrorCode.NotLeader))
@@ -775,7 +782,7 @@ public sealed class FetchTests : IDisposable
                 Response r = await client.CallCoordinatorReadAsync("g", req, CancellationToken.None);
                 Assert.True(r is Response.OffsetFetch && !Zone.Refused(r), r.ToString());
             }
-            Assert.Equal(new uint[] { 2, 1, 2 }, NodesOf<Request.OffsetFetch>());
+            Assert.Equal(new[] { "2 [1:4 2:6]", "1 [1:4 2:6]", "2 [1:4 2:6]" }, HeardOf<Request.OffsetFetch>());
             client.Dispose();
         }
         _client = null;

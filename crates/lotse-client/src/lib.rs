@@ -814,8 +814,19 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// One request to the coordinator; retriable failures and lost requests
     /// become `Retry` (every coordinator request may be repeated).
     async fn call_coordinator(&self, key: &str, req: &Request) -> Result<Response, Attempt> {
+        self.call_coordinator_with(key, req, &[]).await
+    }
+
+    /// [`Client::call_coordinator`] with the request header's
+    /// `read_at_least`; empty, no tag.
+    async fn call_coordinator_with(
+        &self,
+        key: &str,
+        req: &Request,
+        read_at_least: &[GroupIndex],
+    ) -> Result<Response, Attempt> {
         let addr = self.coordinator(key).await?;
-        match self.call(&addr, req).await {
+        match self.call_with(&addr, req, read_at_least).await {
             Ok(r) => Ok(r),
             Err(e) => {
                 self.forget_coordinator();
@@ -827,25 +838,28 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
     /// A read of the coordinator group's state (`OffsetFetch`): from the
     /// lowest-id voter in this client's zone, which answers once it has
     /// applied what this client saw (the zone reads design). A refusal, an
-    /// error or a failed call sends that one read to the coordinator; the
-    /// next read tries the zone again.
+    /// error or a failed call sends that one read to the coordinator, with
+    /// the same indexes, which a coordinator deposed without knowing it
+    /// refuses (ADR 0141); the next read tries the zone again.
     pub(crate) async fn call_coordinator_read(&self, key: &str, req: &Request) -> Result<Response, Attempt> {
+        let mut at_least = Vec::new();
         if let Some(zone) = self.cfg.zone.as_deref() {
             // Learns the voters, if no `FindCoordinator` did yet.
             self.coordinator(key).await?;
+            at_least = self.indexes.snapshot();
             let mut voters = self.coordinator_voters.lock().expect("coordinator lock").clone();
             let listed = self.listed.lock().expect("listed lock").clone();
             voters.retain(|v| listed.contains(v));
             let node = zone::zone_node(zone, voters, &self.zones.lock().expect("zones lock"));
             let addr = node.and_then(|n| self.brokers.lock().expect("brokers lock").get(&n).cloned());
             if let Some(addr) = addr
-                && let Ok(resp) = self.call_with(&addr, req, &self.indexes.snapshot()).await
+                && let Ok(resp) = self.call_with(&addr, req, &at_least).await
                 && !zone::refused(&resp)
             {
                 return Ok(resp);
             }
         }
-        self.call_coordinator(key, req).await
+        self.call_coordinator_with(key, req, &at_least).await
     }
 
     async fn init_producer_once(&self, txn: Option<&str>) -> Result<(u64, u16), Attempt> {

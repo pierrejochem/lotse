@@ -729,8 +729,8 @@ describe("zone reads against scripted nodes", () => {
   });
 
   /**
-   * A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader, without
-   * the tag, and the next read tries the zone again.
+   * A zone node that has not applied what the client saw refuses with NOT_LEADER: that read goes to the leader with the
+   * same tag, which a leader deposed without knowing it refuses (ADR 0141), and the next read tries the zone again.
    */
   test("aRefusedZoneReadGoesToTheLeaderAndTheNextTriesTheZoneAgain", async () => {
     zoneNodes();
@@ -747,7 +747,7 @@ describe("zone reads against scripted nodes", () => {
     await cl.metadata();
     await cl.describeTenants();
     await cl.describeTenants();
-    assert.deepEqual(heardOf("DescribeTenants"), ["2 [1:6 2:0]", "1 []", "2 [1:6 2:0]"]);
+    assert.deepEqual(heardOf("DescribeTenants"), ["2 [1:6 2:0]", "1 [1:6 2:0]", "2 [1:6 2:0]"]);
   });
 
   /**
@@ -901,13 +901,14 @@ describe("zone reads against scripted nodes", () => {
   });
 
   /**
-   * The zone voter refuses an `OffsetFetch`, or the call to it fails: that read goes to the coordinator, and the next
-   * tries the zone again.
+   * The zone voter refuses an `OffsetFetch`, or the call to it fails: that read goes to the coordinator with the same
+   * tag, and the next tries the zone again.
    */
   test("aRefusedOffsetFetchGoesToTheCoordinatorAndTheNextTriesTheZoneAgain", async () => {
     for (const failedCall of [false, true]) {
       heard.length = 0;
       zoneNodes();
+      a.applied((r) => (r.type === "Metadata" ? at(1, 4) : r.type === "FindCoordinator" ? at(2, 6) : []));
       let refusedOnce = false;
       b.on((_node, r) => {
         if (r.type === "OffsetFetch" && !refusedOnce) {
@@ -930,7 +931,7 @@ describe("zone reads against scripted nodes", () => {
         const r = await internal.callCoordinatorRead("g", req);
         assert.ok(r.type === "OffsetFetch" && !refused(r), JSON.stringify(r, (_k, v: unknown) => (typeof v === "bigint" ? String(v) : v)));
       }
-      assert.deepEqual(nodesOf("OffsetFetch"), [2, 1, 2], `failed call: ${failedCall}`);
+      assert.deepEqual(heardOf("OffsetFetch"), ["2 [1:4 2:6]", "1 [1:4 2:6]", "2 [1:4 2:6]"], `failed call: ${failedCall}`);
       cl.close();
     }
     client = undefined;
