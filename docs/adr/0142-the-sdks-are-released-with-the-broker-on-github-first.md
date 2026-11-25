@@ -54,7 +54,15 @@ Every package names the license Apache-2.0, the repository and the maintainer. J
 - **npm:** `npm pack` writes fixed times by itself.
 - **.NET:** `dotnet pack` on .NET 10 names the package's metadata part at random, gives its relationships random ids and stamps the zip with the build time, while the assemblies are already deterministic. `packaging/nupkg-normalise.py` replaces those three with values derived from the package and the commit. .NET 11 does this by itself, and the script goes when the SDK moves there.
 
-**Re-runs.** The release's `SHA256SUMS-sdk` is the record. A re-run whose packages differ from it is refused. A registry that already holds the version counts as done, since the sums matched. The publish job rebuilds the Maven packages with Gradle, which cannot upload files it did not build, and checks them against the compared files first.
+**Re-runs.** The GitHub release is the record:
+
+- A package the release already holds must have the same bytes as the new build; one it lacks is uploaded.
+- `SHA256SUMS-sdk` goes up last, so a release that has it has every package.
+- A registry that already holds the version counts as done, since the bytes matched. Only the registries' own words for that count, not a bare "409".
+- GitHub Packages takes a Maven version file by file, so after "already there" the job checks that the POM, uploaded after the jars, is there.
+- The publish job rebuilds the Maven packages with Gradle, which cannot upload files it did not build, and checks them against the compared files first.
+
+The comparison assumes the same tools: the runner's JDK, Node.js and .NET SDK are not pinned to a patch release. A re-run soon after a failure meets the same tools. One weeks later may build other bytes and is refused before it publishes anything. The packages on the release then stand, and the registries they did not reach are filled by hand from them.
 
 **On pull requests** that touch the SDKs or these scripts, the workflow tests, builds and compares, and checks `sdk-publish.sh` against stand-ins (`packaging/test-sdk-publish.sh`); it publishes nothing.
 

@@ -6,10 +6,10 @@
 # DIR holds every package the build jobs made and compared (sdk-package.sh,
 # sdk-compare.sh). In order:
 #
-# 1. The release assets are the record. If the tag's GitHub release already
-#    holds SHA256SUMS-sdk (a re-run), the packages must match it, since the
-#    builds are reproducible; otherwise all packages and the sums are
-#    uploaded to it.
+# 1. The release assets are the record. A package the release already holds
+#    (a re-run) must have the same bytes, since the builds are reproducible;
+#    one it lacks is uploaded. SHA256SUMS-sdk goes up last, so a release that
+#    has it has every package, and an existing one must match too.
 # 2. GitHub Packages: Java, then Kotlin (its POM names the Java package), C#,
 #    Node.js. A registry that already holds the version counts as done: the
 #    checksums above matched, so it holds these bytes.
@@ -48,7 +48,9 @@ run() {
 # A publish whose output says the version is already there is done; any
 # other failure is a failure.
 already_there() {
-    grep -qiE '409|conflict|already exists|cannot publish over|EPUBLISHCONFLICT' "$1"
+    # Only the registries' own words for it: a bare "409" also turns up in log
+    # file names and line numbers.
+    grep -qE 'status code 409|409 Conflict|code E409|EPUBLISHCONFLICT|[Cc]annot publish over|already exists' "$1"
 }
 
 publish_or_exists() {
@@ -70,17 +72,21 @@ publish_or_exists() {
 
 # 1. The release assets.
 (cd "$dir" && sha256sum -- * | LC_ALL=C sort -k2) > "$work/SHA256SUMS-sdk"
-if gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS-sdk; then
-    gh release download "$tag" --repo "$repo" --pattern SHA256SUMS-sdk --dir "$work/existing"
-    if ! cmp -s "$work/SHA256SUMS-sdk" "$work/existing/SHA256SUMS-sdk"; then
-        echo "the release already holds SDK packages that differ from these:" >&2
-        diff "$work/existing/SHA256SUMS-sdk" "$work/SHA256SUMS-sdk" >&2 || true
-        exit 1
+gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' > "$work/assets"
+for package in "$dir"/* "$work/SHA256SUMS-sdk"; do
+    name=$(basename "$package")
+    if grep -qxF "$name" "$work/assets"; then
+        rm -rf "$work/existing"
+        gh release download "$tag" --repo "$repo" --pattern "$name" --dir "$work/existing"
+        if ! cmp -s "$package" "$work/existing/$name"; then
+            echo "the release already holds $name, and it differs from this build; a re-run must build what the release holds" >&2
+            exit 1
+        fi
+        echo "the release already holds $name"
+    else
+        run gh release upload "$tag" --repo "$repo" "$package"
     fi
-    echo "the release already holds these SDK packages"
-else
-    run gh release upload "$tag" --repo "$repo" "$dir"/* "$work/SHA256SUMS-sdk"
-fi
+done
 
 # 2. GitHub Packages.
 #
@@ -95,6 +101,14 @@ gradle_publish() {
     done
     publish_or_exists "$artifact (GitHub Packages)" \
         sh -c "cd '$root/sdk/$project' && ${GRADLEW:-./gradlew} --quiet --no-daemon publishMavenPublicationToGitHubPackagesRepository"
+    # Gradle uploads a version file by file, and the first one already there
+    # stops it. A version an earlier run left without its POM would count as
+    # done, so the POM, uploaded after the jars, must be there.
+    if [ -z "$dry" ] && ! curl -fsS -o /dev/null -u "${GITHUB_ACTOR:-x}:${GITHUB_TOKEN:-}" \
+        "https://maven.pkg.github.com/$repo/dev/lotse/$artifact/$version/$artifact-$version.pom"; then
+        echo "GitHub Packages holds $artifact $version without its POM: delete that version and run again" >&2
+        exit 1
+    fi
 }
 gradle_publish java lotse-client
 gradle_publish kotlin lotse-client-kotlin
