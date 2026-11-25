@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    `maven-publish`
 }
 
 group = "dev.lotse"
@@ -17,6 +18,9 @@ java {
     registerFeature("compression") {
         usingSourceSet(sourceSets["main"])
     }
+    // Maven Central asks for both (ADR 0142); GitHub Packages takes them too.
+    withSourcesJar()
+    withJavadocJar()
 }
 
 val zstdJni = "com.github.luben:zstd-jni:1.5.7-28"
@@ -76,4 +80,50 @@ val examples: SourceSet by sourceSets.creating {
 
 tasks.check {
     dependsOn(testWithoutCodecs, tasks.named(examples.classesTaskName))
+}
+
+// Release packages (ADR 0142): the same bytes from the same commit, so two builds can be compared.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+            artifactId = "lotse-client"
+            pom {
+                name = "Lotse client"
+                description = "Java client for Lotse, a message broker with reliable queues and persistent streams."
+                url = "https://github.com/pierrejochem/lotse"
+                licenses {
+                    license {
+                        name = "Apache-2.0"
+                        url = "https://www.apache.org/licenses/LICENSE-2.0"
+                    }
+                }
+                developers {
+                    developer {
+                        id = "pierrejochem"
+                        name = "Pierre Jochem"
+                    }
+                }
+                scm {
+                    url = "https://github.com/pierrejochem/lotse"
+                    connection = "scm:git:https://github.com/pierrejochem/lotse.git"
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/pierrejochem/lotse")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
 }
