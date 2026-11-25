@@ -2,6 +2,8 @@ import java.util.zip.ZipFile
 
 plugins {
     kotlin("jvm") version "2.4.21"
+    // The Javadoc of a Kotlin source set: javadoc reads Java only, so without it the javadoc jar would be empty.
+    id("org.jetbrains.dokka-javadoc") version "2.3.0"
     `java-library`
     `maven-publish`
 }
@@ -47,6 +49,11 @@ tasks.test {
 val examples: SourceSet by sourceSets.creating {
     compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
     runtimeClasspath += output + compileClasspath
+}
+
+// The javadoc jar holds Dokka's Javadoc of the Kotlin API, which Maven Central asks for (ADR 0142).
+tasks.named<Jar>("javadocJar") {
+    from(tasks.named("dokkaGeneratePublicationJavadoc"))
 }
 
 // Release packages (ADR 0142): the same bytes from the same commit, so two builds can be compared.
