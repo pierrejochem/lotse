@@ -93,6 +93,8 @@ async fn every_way_in_on_real_sockets() {
             peers: peers.clone(),
             groups: vec![1, 2, 3],
             tick: Duration::from_millis(10),
+            election_timeout: lotse_server::DEFAULT_ELECTION_TIMEOUT,
+            heartbeat_interval: lotse_server::DEFAULT_HEARTBEAT_INTERVAL,
             pre_vote: true,
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),

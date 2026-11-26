@@ -222,6 +222,8 @@ impl World {
                         peers: peers.clone(),
                         groups: groups.clone(),
                         tick,
+                        election_timeout: tick * 10,
+                        heartbeat_interval: tick * 2,
                         pre_vote,
                         log,
                         client_listen: Some(client_addrs[&id].clone()),

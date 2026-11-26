@@ -8,6 +8,8 @@ fn config(peers: &[NodeId], id: NodeId, join: bool) -> NodeConfig {
         peers: peers.iter().map(|p| (*p, format!("n{p}:7000"))).collect(),
         groups: vec![1, 2],
         tick: Duration::from_millis(10),
+        election_timeout: Duration::from_millis(10) * 10,
+        heartbeat_interval: Duration::from_millis(10) * 2,
         pre_vote: true,
         log: LogConfig::default(),
         client_listen: None,

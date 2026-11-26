@@ -50,6 +50,8 @@ In `cluster.data_dir`, `tls.cert` and `tls.key`, the text `{id}` becomes the nod
 | --- | --- | --- | --- |
 | `data_dir` | string, required | none | Where a node keeps its data. |
 | `tick_ms` | integer, ms | 10 | The Raft tick. Must be at least 1. |
+| `election_timeout_ms` | integer, ms | 1000 | A group that hears no leader for this long, up to twice as long, elects another; a leader that hears no quorum for this long steps down. Shorter fails over sooner after a crash, but a node whose disk or CPU stalls that long loses the leadership of its groups ([ADR 0144](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0144-groups-elect-after-a-second.md)). Must be at least twice `heartbeat_ms`. |
+| `heartbeat_ms` | integer, ms | 100 | How often a leader sends heartbeats. Must be at least `tick_ms`. |
 | `segment_bytes` | integer, bytes | 134217728 (128 MiB) | Log segment size. Retention deletes whole segments. Must be at least 4096. |
 | `group_session_timeout_ms` | integer, ms | 45000 | A consumer group member without a heartbeat for this long is removed. |
 | `group_heartbeat_ms` | integer, ms | 5000 | How often group members send heartbeats. |

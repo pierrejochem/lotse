@@ -63,6 +63,15 @@ pub struct NodeConfig {
     pub groups: Vec<GroupId>,
     /// Logical Raft tick.
     pub tick: Duration,
+    /// A follower that hears no leader for this long, and up to twice as
+    /// long (a random time in between), starts an election; a leader that
+    /// hears no quorum for this long steps down. Rounded up to whole ticks
+    /// ([`crate::DEFAULT_ELECTION_TIMEOUT`] by default, ADR 0144).
+    pub election_timeout: Duration,
+    /// How often a leader sends heartbeats, rounded up to whole ticks and
+    /// shorter than the election timeout ([`crate::DEFAULT_HEARTBEAT_INTERVAL`]
+    /// by default, ADR 0144).
+    pub heartbeat_interval: Duration,
     /// Pre-vote on or off.
     pub pre_vote: bool,
     /// Log segment settings.
@@ -128,6 +137,31 @@ pub struct NodeConfig {
     /// being one of their first voters. Only matters on the first start;
     /// after that a group's membership comes from its own log.
     pub join: bool,
+}
+
+impl NodeConfig {
+    /// The Raft settings of one of this node's groups: its election timeout
+    /// and heartbeat in ticks (ADR 0144).
+    fn raft(&self, seed: u64, voters: Vec<NodeId>) -> Config {
+        Config {
+            seed,
+            pre_vote: self.pre_vote,
+            election_ticks: ticks(self.election_timeout, self.tick),
+            heartbeat_ticks: ticks(self.heartbeat_interval, self.tick),
+            ..Config::new(self.id, voters)
+        }
+    }
+
+    /// The election timeout in whole ticks, as the groups count it.
+    fn election(&self) -> Duration {
+        self.tick * ticks(self.election_timeout, self.tick)
+    }
+}
+
+/// `d` in ticks, rounded up, at least one.
+fn ticks(d: Duration, tick: Duration) -> u32 {
+    let n = d.as_nanos().div_ceil(tick.as_nanos().max(1)).max(1);
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// What streams keep by default.
@@ -956,12 +990,21 @@ impl<R: Runtime> Node<R> {
         let voters = first_voters(&rt, &cfg).await?;
         let mut groups = BTreeMap::new();
         for &g in &cfg.groups {
-            let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, voters.clone()) };
+            let raft = cfg.raft(rt.next_u64(), voters.clone());
             let queue = cfg.queues.iter().any(|q| q.group == g);
             let options =
                 ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(&cfg, g, queue) };
-            let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
-            groups.insert(g, replica.await?);
+            let mut replica =
+                Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options).await?;
+            // A group of one voter has nobody to wait for: it elects itself
+            // at its first tick, at a first start and after a restart alike,
+            // not after an election timeout, which is a second by default
+            // (ADR 0144). Electing early is always safe.
+            let m = replica.raft_ref().membership();
+            if m.outgoing.is_empty() && m.voters.len() == 1 && m.voters.contains(&cfg.id) {
+                replica.raft().campaign_soon();
+            }
+            groups.insert(g, replica);
         }
         // Nodes reach each other's client ports too (transaction markers)
         // and can only prove who they are with their certificates.
@@ -1246,9 +1289,13 @@ async fn main_loop<R: Runtime, S: StateMachine>(
     let Around { links, shared, jobs, auth } = around;
     let mut next_tick = rt.now() + cfg.tick;
     // What the groups do and when this loop falls behind, for the log
-    // (ADR 0139); the node runs every group with the default election timeout.
+    // (ADR 0139); every group has the node's election timeout (ADR 0144).
     let mut elections = crate::elections::Elections::default();
-    let election = cfg.tick * Config::new(cfg.id, Vec::new()).election_ticks;
+    let election = cfg.election();
+    // The node's own clients retry across a failover, which takes an
+    // election timeout or two after a leader is lost: at least a second, and
+    // five election timeouts when those are longer.
+    let retry_for = (cfg.tick * 100).max(election * 5);
     let mut clients = Clients::default();
     clients.random = Some(Box::new({
         let rt = rt.clone();
@@ -1259,7 +1306,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         rt.clone(),
         lotse_client::ClientConfig {
             request_timeout: cfg.tick * 100,
-            retry_for: cfg.tick * 100,
+            retry_for,
             backoff: cfg.tick * 5,
             idempotent: false,
             ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
@@ -1272,7 +1319,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         rt.clone(),
         lotse_client::ClientConfig {
             request_timeout: cfg.tick * 100,
-            retry_for: cfg.tick * 100,
+            retry_for,
             backoff: cfg.tick * 5,
             ..lotse_client::ClientConfig::new(cfg.client_addrs.values().cloned().collect())
         },
@@ -2233,7 +2280,7 @@ impl Known {
                 && !groups.contains_key(&g)
             {
                 let first = state.initial_voters(g).unwrap_or(voters).to_vec();
-                let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, first) };
+                let raft = cfg.raft(rt.next_u64(), first);
                 let options =
                     ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(cfg, g, queue) };
                 let mut replica =
@@ -2292,7 +2339,7 @@ async fn tag_on_disk<R: Runtime, S: StateMachine>(
         return Ok(0);
     }
     let first = state.initial_voters(g).or_else(|| state.voters_of(g)).unwrap_or(&[]).to_vec();
-    let raft = Config { seed: rt.next_u64(), pre_vote: cfg.pre_vote, ..Config::new(cfg.id, first) };
+    let raft = cfg.raft(rt.next_u64(), first);
     let replica = Replica::open_with(rt.clone(), dir, raft, factory(g), cfg.log, ReplicaOptions::default()).await?;
     Ok(replica.raft_ref().membership().tag)
 }

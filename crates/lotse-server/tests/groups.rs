@@ -111,6 +111,8 @@ impl World {
                         // Groups 1-3 are `in`, 4 is `out`, 5 coordinates.
                         groups: vec![1, 2, 3, 4, 5],
                         tick: TICK,
+                        election_timeout: TICK * 10,
+                        heartbeat_interval: TICK * 2,
                         pre_vote,
                         log,
                         client_listen: Some(client_addrs[&id].clone()),

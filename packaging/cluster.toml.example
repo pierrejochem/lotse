@@ -9,6 +9,8 @@
 
 [cluster]
 data_dir = "/var/lib/lotse"
+# election_timeout_ms = 1000   # a group elects after this long without a leader, up to twice as long (ADR 0144)
+# heartbeat_ms = 100
 
 [[node]]
 id = 1

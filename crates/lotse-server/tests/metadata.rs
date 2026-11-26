@@ -154,6 +154,8 @@ impl World {
                         // Group 1 is the metadata group, 2 coordinates, 3 is `base`.
                         groups: vec![1, 2, 3],
                         tick: TICK,
+                        election_timeout: TICK * 10,
+                        heartbeat_interval: TICK * 2,
                         pre_vote,
                         log,
                         client_listen: Some(client_addrs[&id].clone()),

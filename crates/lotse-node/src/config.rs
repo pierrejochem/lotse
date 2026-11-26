@@ -92,6 +92,28 @@ pub struct Cluster {
     /// (default 10,000; ADR 0116), like Kafka's `replica.lag.time.max.ms`.
     #[serde(default)]
     pub follower_max_lag_ms: Option<u64>,
+    /// A group that hears no leader for this long, up to twice as long,
+    /// elects another, ms (default 1,000; ADR 0144). Shorter fails over
+    /// sooner, but a node whose disk or CPU stalls that long loses its
+    /// groups' leadership.
+    #[serde(default)]
+    pub election_timeout_ms: Option<u64>,
+    /// How often a leader sends heartbeats, ms (default 100; ADR 0144). At
+    /// most half the election timeout.
+    #[serde(default)]
+    pub heartbeat_ms: Option<u64>,
+}
+
+impl Cluster {
+    /// The election timeout, ms, as set or by default (ADR 0144).
+    pub fn election_timeout_ms(&self) -> u64 {
+        self.election_timeout_ms.unwrap_or(lotse_server::DEFAULT_ELECTION_TIMEOUT.as_millis() as u64)
+    }
+
+    /// The heartbeat interval, ms, as set or by default (ADR 0144).
+    pub fn heartbeat_ms(&self) -> u64 {
+        self.heartbeat_ms.unwrap_or(lotse_server::DEFAULT_HEARTBEAT_INTERVAL.as_millis() as u64)
+    }
 }
 
 fn default_tick_ms() -> u64 {
@@ -396,6 +418,20 @@ impl ClusterFile {
         if self.producers.max == Some(0) {
             return invalid("producers.max must be at least 1".into());
         }
+        let election = self.cluster.election_timeout_ms();
+        let heartbeat = self.cluster.heartbeat_ms();
+        if heartbeat < self.cluster.tick_ms {
+            return invalid(format!(
+                "cluster.heartbeat_ms ({heartbeat}) must be at least cluster.tick_ms ({})",
+                self.cluster.tick_ms
+            ));
+        }
+        if election < 2 * heartbeat {
+            return invalid(format!(
+                "cluster.election_timeout_ms ({election}) must be at least twice cluster.heartbeat_ms ({heartbeat}): \
+                 followers would elect between two heartbeats"
+            ));
+        }
         if self.cluster.follower_max_lag_ms == Some(0) {
             return invalid("cluster.follower_max_lag_ms must be at least 1".into());
         }
@@ -509,6 +545,8 @@ impl ClusterFile {
             peers,
             groups: vec![METADATA_GROUP, COORDINATOR_GROUP],
             tick: Duration::from_millis(self.cluster.tick_ms),
+            election_timeout: Duration::from_millis(self.cluster.election_timeout_ms()),
+            heartbeat_interval: Duration::from_millis(self.cluster.heartbeat_ms()),
             pre_vote: true,
             log: lotse_log::LogConfig { segment_bytes: self.cluster.segment_bytes, ..lotse_log::LogConfig::default() },
             client_listen: Some(me.client_bind.clone().unwrap_or_else(|| me.client.clone())),

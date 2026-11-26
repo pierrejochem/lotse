@@ -72,6 +72,48 @@ struct World {
     leaders: BTreeMap<(GroupId, u64), NodeId>,
 }
 
+/// One node's settings in the simulation.
+fn node_config(
+    id: NodeId,
+    peers: &BTreeMap<NodeId, String>,
+    pre_vote: bool,
+    log: LogConfig,
+    election: Duration,
+    heartbeat: Duration,
+) -> NodeConfig {
+    NodeConfig {
+        id,
+        listen: peers[&id].clone(),
+        peers: peers.clone(),
+        groups: GROUPS.to_vec(),
+        tick: TICK,
+        election_timeout: election,
+        heartbeat_interval: heartbeat,
+        pre_vote,
+        log,
+        client_listen: None,
+        client_addrs: BTreeMap::new(),
+        zones: Default::default(),
+        streams: Vec::new(),
+        queues: Vec::new(),
+        exchanges: Vec::new(),
+        group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
+        group_heartbeat_interval: lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL,
+        metadata: None,
+        coordinator: None,
+        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
+        producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
+        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
+        follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
+        disk_free_limit: lotse_server::FreeLimit::default(),
+        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+        versions: Default::default(),
+        retention: lotse_server::RetentionConfig::keep(),
+        join: false,
+        auth: lotse_server::AuthConfig::none(),
+    }
+}
+
 fn batch(value: &[u8], records: u64) -> Bytes {
     let mut b = BatchBuilder::new(BatchOptions::default());
     for _ in 0..records {
@@ -88,46 +130,15 @@ impl World {
     }
 
     async fn with_log(rt: SimRuntime, log: LogConfig) -> World {
+        // The timing the simulation was tuned for: elections after 10 ticks.
+        World::with_timing(rt, log, TICK * 10, TICK * 2).await
+    }
+
+    async fn with_timing(rt: SimRuntime, log: LogConfig, election: Duration, heartbeat: Duration) -> World {
         let ids: Vec<NodeId> = vec![1, 2, 3];
         let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
         let pre_vote = rt.chance(1, 2);
-        let cfgs = ids
-            .iter()
-            .map(|&id| {
-                (
-                    id,
-                    NodeConfig {
-                        id,
-                        listen: peers[&id].clone(),
-                        peers: peers.clone(),
-                        groups: GROUPS.to_vec(),
-                        tick: TICK,
-                        pre_vote,
-                        log,
-                        client_listen: None,
-                        client_addrs: BTreeMap::new(),
-                        zones: Default::default(),
-                        streams: Vec::new(),
-                        queues: Vec::new(),
-                        exchanges: Vec::new(),
-                        group_session_timeout: lotse_server::DEFAULT_GROUP_SESSION_TIMEOUT,
-                        group_heartbeat_interval: lotse_server::DEFAULT_GROUP_HEARTBEAT_INTERVAL,
-                        metadata: None,
-                        coordinator: None,
-                        max_producers: lotse_server::DEFAULT_MAX_PRODUCERS,
-                        producer_expiration: lotse_server::DEFAULT_PRODUCER_EXPIRATION,
-                        leader_settle: lotse_server::DEFAULT_LEADER_SETTLE,
-                        follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
-                        disk_free_limit: lotse_server::FreeLimit::default(),
-                        disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
-                        versions: Default::default(),
-                        retention: lotse_server::RetentionConfig::keep(),
-                        join: false,
-                        auth: lotse_server::AuthConfig::none(),
-                    },
-                )
-            })
-            .collect();
+        let cfgs = ids.iter().map(|&id| (id, node_config(id, &peers, pre_vote, log, election, heartbeat))).collect();
         let mut w = World {
             // Half the seeds run as with TLS: every node proves its id.
             hosts: {
@@ -307,63 +318,107 @@ fn term(w: &World, g: GroupId) -> u64 {
 fn groups_keep_their_leaders_while_a_slow_disk_takes_writes_to_all_of_them() {
     lotse_sim::check_few_seeds(5, |seed| {
         Sim::new(seed).run(|rt| async move {
-            use lotse_rt::Spawn;
-            // Segments of the default size: sealing one is rare, as on a node.
-            let mut w = World::with_log(rt.clone(), LogConfig::default()).await;
-            let deadline = rt.now() + Duration::from_secs(20);
-            while GROUPS.iter().any(|g| w.leader(*g).is_none()) {
-                assert!(rt.now() < deadline, "the groups found no leaders");
-                rt.sleep(TICK * 5).await;
-            }
-            // The elections of the start settle first.
-            rt.sleep(Duration::from_secs(2)).await;
-            // The disk of the node that leads the most groups gets busy, the
-            // others' do not: their followers count ticks on time while its
-            // loop waits for its syncs.
-            let leads = |id: NodeId| {
-                GROUPS
-                    .iter()
-                    .filter(|g| {
-                        w.running[&id]
-                            .as_ref()
-                            .and_then(|r| r.handle.status(**g))
-                            .is_some_and(|s| s.role == Role::Leader)
-                    })
-                    .count()
-            };
-            let slow = *w.hosts.keys().max_by_key(|id| (leads(**id), std::cmp::Reverse(**id))).expect("three nodes");
-            w.hosts[&slow].set_sync_delay(Duration::from_millis(20));
-            let terms: BTreeMap<GroupId, u64> = GROUPS.iter().map(|g| (*g, term(&w, *g))).collect();
-            let end = rt.now() + Duration::from_secs(3);
-            let mut n = 0u64;
-            while rt.now() < end {
-                // All three groups at once, so their writes share rounds.
-                let mut proposals = Vec::new();
-                for g in GROUPS {
-                    if let Some(leader) = w.leader(g) {
-                        let value = format!("g{g}-{n}");
-                        proposals.push(rt.spawn(async move { leader.propose(g, batch(value.as_bytes(), 1)).await }));
-                        n += 1;
-                    }
-                }
-                for p in proposals {
-                    let _ = p.await;
-                }
-                // Without a leader there is nothing to wait for: time must still pass.
-                rt.sleep(TICK).await;
-                w.check();
-            }
-            for g in GROUPS {
-                assert_eq!(term(&w, g), terms[&g], "group {g} held an election while the slow disk took writes");
-            }
-            assert!(
-                w.hosts[&slow].disk().most_syncs_at_once() >= 2,
-                "no node had two syncs under way at once: the groups of a round were persisted one after the other"
-            );
-            for r in std::mem::take(&mut w.running).into_values().flatten() {
-                r.handle.stop();
-                let _ = r.node.join().await;
-            }
+            let w = World::with_timing(rt.clone(), LogConfig::default(), TICK * 10, TICK * 2).await;
+            slow_disk(rt, w, Duration::from_millis(20)).await;
         })
+    });
+}
+
+/// A disk on CI whose syncs take 100 ms makes a round take 300 ms: longer
+/// than an election timeout of 10 ticks, so the simulation's own timing
+/// would elect, but well within the default of a second (ADR 0144), which a
+/// node gets unless its cluster file says otherwise.
+#[test]
+fn with_the_default_election_timeout_rounds_of_several_hundred_ms_keep_their_leaders() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let (election, heartbeat) =
+                (lotse_server::DEFAULT_ELECTION_TIMEOUT, lotse_server::DEFAULT_HEARTBEAT_INTERVAL);
+            let w = World::with_timing(rt.clone(), LogConfig::default(), election, heartbeat).await;
+            slow_disk(rt, w, Duration::from_millis(100)).await;
+        })
+    });
+}
+
+/// Waits for leaders, makes every sync of the node leading the most groups
+/// take `delay`, writes to all groups at once for three seconds, and checks
+/// that no group elected meanwhile.
+async fn slow_disk(rt: SimRuntime, mut w: World, delay: Duration) {
+    use lotse_rt::Spawn;
+    let deadline = rt.now() + Duration::from_secs(20);
+    while GROUPS.iter().any(|g| w.leader(*g).is_none()) {
+        assert!(rt.now() < deadline, "the groups found no leaders");
+        rt.sleep(TICK * 5).await;
+    }
+    // The elections of the start settle first.
+    rt.sleep(Duration::from_secs(2)).await;
+    // The disk of the node that leads the most groups gets busy, the
+    // others' do not: their followers count ticks on time while its
+    // loop waits for its syncs.
+    let leads = |id: NodeId| {
+        GROUPS
+            .iter()
+            .filter(|g| {
+                w.running[&id].as_ref().and_then(|r| r.handle.status(**g)).is_some_and(|s| s.role == Role::Leader)
+            })
+            .count()
+    };
+    let slow = *w.hosts.keys().max_by_key(|id| (leads(**id), std::cmp::Reverse(**id))).expect("three nodes");
+    w.hosts[&slow].set_sync_delay(delay);
+    let terms: BTreeMap<GroupId, u64> = GROUPS.iter().map(|g| (*g, term(&w, *g))).collect();
+    let end = rt.now() + Duration::from_secs(3);
+    let mut n = 0u64;
+    while rt.now() < end {
+        // All three groups at once, so their writes share rounds.
+        let mut proposals = Vec::new();
+        for g in GROUPS {
+            if let Some(leader) = w.leader(g) {
+                let value = format!("g{g}-{n}");
+                proposals.push(rt.spawn(async move { leader.propose(g, batch(value.as_bytes(), 1)).await }));
+                n += 1;
+            }
+        }
+        for p in proposals {
+            let _ = p.await;
+        }
+        // Without a leader there is nothing to wait for: time must still pass.
+        rt.sleep(TICK).await;
+        w.check();
+    }
+    for g in GROUPS {
+        assert_eq!(term(&w, g), terms[&g], "group {g} held an election while the slow disk took writes");
+    }
+    assert!(
+        w.hosts[&slow].disk().most_syncs_at_once() >= 2,
+        "no node had two syncs under way at once: the groups of a round were persisted one after the other"
+    );
+    for r in std::mem::take(&mut w.running).into_values().flatten() {
+        r.handle.stop();
+        let _ = r.node.join().await;
+    }
+}
+
+/// A cluster of one node has nobody to wait for: its groups elect at the
+/// first tick, at a first start and after a restart, not after the default
+/// election timeout of a second (ADR 0144), so a single node is ready at
+/// once, as the packages' checks expect.
+#[test]
+fn a_one_node_cluster_elects_at_its_first_tick() {
+    Sim::new(1).run(|rt| async move {
+        let host = rt.node("n1");
+        let peers = BTreeMap::from([(1, "n1:7000".to_string())]);
+        let (election, heartbeat) = (lotse_server::DEFAULT_ELECTION_TIMEOUT, lotse_server::DEFAULT_HEARTBEAT_INTERVAL);
+        let cfg = node_config(1, &peers, true, LogConfig::default(), election, heartbeat);
+        for start in ["a first start", "a restart"] {
+            let began = rt.now();
+            let node = Node::start(host.clone(), cfg.clone(), |_| Recorder::default()).await.unwrap();
+            let handle = node.handle();
+            while GROUPS.iter().any(|g| handle.status(*g).is_none_or(|s| s.role != Role::Leader)) {
+                assert!(rt.now() - began < TICK * 10, "after {start} a group had no leader within 10 ticks");
+                rt.sleep(TICK).await;
+            }
+            handle.stop();
+            let _ = node.join().await;
+        }
     });
 }

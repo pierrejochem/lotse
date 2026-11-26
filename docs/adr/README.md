@@ -147,5 +147,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0141 | [Reads in the client's zone, with read-your-writes](0141-reads-in-the-client-s-zone-with-read-your-writes.md) | Accepted |
 | 0142 | [The SDKs are released with the broker, on GitHub first](0142-the-sdks-are-released-with-the-broker-on-github-first.md) | Accepted |
 | 0143 | [A round persists its groups together](0143-a-round-persists-its-groups-together.md) | Accepted |
+| 0144 | [Groups elect after a second](0144-groups-elect-after-a-second.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

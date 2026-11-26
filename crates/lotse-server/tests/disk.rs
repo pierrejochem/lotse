@@ -57,6 +57,8 @@ fn config(id: NodeId) -> NodeConfig {
         // 1 metadata, 2 coordinator, 3 the stream, 4 the queue.
         groups: vec![1, 2, 3, 4],
         tick: TICK,
+        election_timeout: TICK * 10,
+        heartbeat_interval: TICK * 2,
         pre_vote: true,
         log: LogConfig::default(),
         client_listen: Some(format!("n{id}:9000")),

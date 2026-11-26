@@ -43,6 +43,13 @@ pub const DEFAULT_GROUP_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Dur
 /// leader hands the group back to it, when the group saw no other election
 /// recently (ADR 0113).
 pub const DEFAULT_LEADER_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a group goes without hearing its leader before it elects
+/// another (ADR 0144): long enough that a node whose disk or CPU stalls for
+/// a few hundred milliseconds keeps its groups, as in etcd and Kafka.
+pub const DEFAULT_ELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often a leader sends heartbeats by default (ADR 0144): a tenth of the
+/// election timeout.
+pub const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// How long a follower may go without having applied what its leader said
 /// was committed and still serve reads (ADR 0116), like Kafka's
 /// `replica.lag.time.max.ms`.
