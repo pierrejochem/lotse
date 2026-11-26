@@ -125,6 +125,12 @@ impl SimRuntime {
         SimRuntime { cert: Some(cert), ..self.clone() }
     }
 
+    /// Makes every sync on this runtime's disk take `delay` of virtual time,
+    /// as on a busy disk; `Duration::ZERO` makes them instant again.
+    pub fn set_sync_delay(&self, delay: Duration) {
+        self.disk.set_sync_delay((delay > Duration::ZERO).then(|| (self.exec.clone(), delay)));
+    }
+
     /// The documents served over HTTP, shared by every node.
     pub fn http(&self) -> &SimHttp {
         &self.http

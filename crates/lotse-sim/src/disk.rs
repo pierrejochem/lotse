@@ -53,6 +53,16 @@ pub struct CrashReport {
 pub struct SimDisk {
     state: Arc<Mutex<DiskState>>,
     rng: SimRng,
+    syncs: Arc<Mutex<Syncs>>,
+}
+
+/// How long a sync takes, and how many were under way at once: a node's loop
+/// that waits for one group's sync before the next one's shows here (ADR 0143).
+#[derive(Default)]
+struct Syncs {
+    delay: Option<(crate::executor::Executor, std::time::Duration)>,
+    in_flight: usize,
+    most: usize,
 }
 
 impl fmt::Debug for SimDisk {
@@ -63,7 +73,7 @@ impl fmt::Debug for SimDisk {
 }
 
 /// A handle to a file on the simulated disk.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimFile {
     disk: SimDisk,
     path: PathBuf,
@@ -82,7 +92,19 @@ impl SimDisk {
                 free_bytes: 3 << 40,
             })),
             rng,
+            syncs: Arc::default(),
         }
+    }
+
+    /// Makes every sync take `delay` of virtual time from now on, as a busy
+    /// disk's would; `None` makes them instant again.
+    pub(crate) fn set_sync_delay(&self, delay: Option<(crate::executor::Executor, std::time::Duration)>) {
+        self.syncs.lock().expect("disk lock").delay = delay;
+    }
+
+    /// The most syncs that were under way at the same time so far.
+    pub fn most_syncs_at_once(&self) -> usize {
+        self.syncs.lock().expect("disk lock").most
     }
 
     /// Power loss. Unsynced data survives only as a random prefix, and the
@@ -294,10 +316,23 @@ impl SegmentFile for SimFile {
     }
 
     fn sync(&self) -> impl Future<Output = io::Result<()>> + Send {
-        ready(self.disk.with_file(self, true, |f| {
-            f.synced = f.data.len();
-            Ok(())
-        }))
+        let file = self.clone();
+        async move {
+            let delay = file.disk.syncs.lock().expect("disk lock").delay.clone();
+            if let Some((exec, delay)) = delay {
+                {
+                    let mut s = file.disk.syncs.lock().expect("disk lock");
+                    s.in_flight += 1;
+                    s.most = s.most.max(s.in_flight);
+                }
+                exec.sleep(delay).await;
+                file.disk.syncs.lock().expect("disk lock").in_flight -= 1;
+            }
+            file.disk.with_file(&file, true, |f| {
+                f.synced = f.data.len();
+                Ok(())
+            })
+        }
     }
 }
 

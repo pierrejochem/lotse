@@ -15,6 +15,7 @@ mod coordinator;
 mod disk;
 mod elections;
 mod groups;
+mod join;
 mod membership;
 mod metadata;
 mod node;
