@@ -82,10 +82,15 @@ fn batch(value: &[u8], records: u64) -> Bytes {
 
 impl World {
     async fn new(rt: SimRuntime) -> World {
+        // Tiny segments, so sealing, indexes and snapshots happen all the time.
+        let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
+        World::with_log(rt, log).await
+    }
+
+    async fn with_log(rt: SimRuntime, log: LogConfig) -> World {
         let ids: Vec<NodeId> = vec![1, 2, 3];
         let peers: BTreeMap<NodeId, String> = ids.iter().map(|id| (*id, format!("n{id}:7000"))).collect();
         let pre_vote = rt.chance(1, 2);
-        let log = LogConfig { segment_bytes: 300 + rt.below(3_000), index_interval_bytes: 64 };
         let cfgs = ids
             .iter()
             .map(|&id| {
@@ -283,4 +288,82 @@ async fn run(rt: SimRuntime) {
 #[test]
 fn nodes_keep_their_groups_consistent_through_partitions_and_power_loss() {
     check_seeds(20, |seed| Sim::new(seed).run(run));
+}
+
+fn term(w: &World, g: GroupId) -> u64 {
+    w.running.values().flatten().filter_map(|r| r.handle.status(g)).map(|s| s.term).max().unwrap_or(0)
+}
+
+/// A busy disk: every sync on the node that leads the most groups takes
+/// 40 ms, while the shortest election timeout is 100 ms (10 ticks of 10 ms).
+/// Done one group after the other, a round that writes to all three groups
+/// waits for three logs, 120 ms; with the hard state rewritten for every
+/// commit, a group alone waits for two or three syncs. Either way the fast
+/// followers hear no heartbeat for longer than an election timeout. A node
+/// persists the groups of a round at the same time and writes the hard state
+/// only when its term or vote changes (ADR 0143), so a round costs about one
+/// log sync and no group holds an election while all of them take writes.
+#[test]
+fn groups_keep_their_leaders_while_a_slow_disk_takes_writes_to_all_of_them() {
+    lotse_sim::check_few_seeds(5, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            use lotse_rt::Spawn;
+            // Segments of the default size: sealing one is rare, as on a node.
+            let mut w = World::with_log(rt.clone(), LogConfig::default()).await;
+            let deadline = rt.now() + Duration::from_secs(20);
+            while GROUPS.iter().any(|g| w.leader(*g).is_none()) {
+                assert!(rt.now() < deadline, "the groups found no leaders");
+                rt.sleep(TICK * 5).await;
+            }
+            // The elections of the start settle first.
+            rt.sleep(Duration::from_secs(2)).await;
+            // The disk of the node that leads the most groups gets busy, the
+            // others' do not: their followers count ticks on time while its
+            // loop waits for its syncs.
+            let leads = |id: NodeId| {
+                GROUPS
+                    .iter()
+                    .filter(|g| {
+                        w.running[&id]
+                            .as_ref()
+                            .and_then(|r| r.handle.status(**g))
+                            .is_some_and(|s| s.role == Role::Leader)
+                    })
+                    .count()
+            };
+            let slow = *w.hosts.keys().max_by_key(|id| (leads(**id), std::cmp::Reverse(**id))).expect("three nodes");
+            w.hosts[&slow].set_sync_delay(Duration::from_millis(40));
+            let terms: BTreeMap<GroupId, u64> = GROUPS.iter().map(|g| (*g, term(&w, *g))).collect();
+            let end = rt.now() + Duration::from_secs(3);
+            let mut n = 0u64;
+            while rt.now() < end {
+                // All three groups at once, so their writes share rounds.
+                let mut proposals = Vec::new();
+                for g in GROUPS {
+                    if let Some(leader) = w.leader(g) {
+                        let value = format!("g{g}-{n}");
+                        proposals.push(rt.spawn(async move { leader.propose(g, batch(value.as_bytes(), 1)).await }));
+                        n += 1;
+                    }
+                }
+                for p in proposals {
+                    let _ = p.await;
+                }
+                // Without a leader there is nothing to wait for: time must still pass.
+                rt.sleep(TICK).await;
+                w.check();
+            }
+            for g in GROUPS {
+                assert_eq!(term(&w, g), terms[&g], "group {g} held an election while the slow disk took writes");
+            }
+            assert!(
+                w.hosts[&slow].disk().most_syncs_at_once() >= 2,
+                "no node had two syncs under way at once: the groups of a round were persisted one after the other"
+            );
+            for r in std::mem::take(&mut w.running).into_values().flatten() {
+                r.handle.stop();
+                let _ = r.node.join().await;
+            }
+        })
+    });
 }

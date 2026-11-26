@@ -1577,19 +1577,30 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         // persisted too: a queue leader checks out messages it has just
         // appended, and the append that carries them carries the checkout
         // as well, so both commit together (ADR 0111).
+        //
+        // The groups persist at the same time (ADR 0143): each keeps its own
+        // order (log, hard state, apply, ADR 0023), and the round waits for
+        // the slowest group's syncs, not for their sum. One after the other,
+        // a busy disk made a round outlast an election timeout, and the
+        // followers of every group this node leads started elections.
         let persisting = rt.now();
         let mut sends: BTreeMap<GroupId, Vec<lotse_raft::Send>> = BTreeMap::new();
-        for (&g, group) in groups.iter_mut() {
-            let out = group.process_unfilled().await?;
-            sends.entry(g).or_default().extend(out.messages);
+        for (g, out) in
+            crate::join::all(groups.iter_mut().map(|(&g, group)| async move { (g, group.process_unfilled().await) }))
+                .await
+        {
+            sends.entry(g).or_default().extend(out?.messages);
         }
         let marker_jobs = clients.after_round(&view, groups).await?;
+        let again = groups.iter_mut().filter(|(_, group)| group.raft_ref().has_ready());
+        for (g, out) in
+            crate::join::all(again.map(|(&g, group)| async move { (g, group.process_unfilled().await) })).await
+        {
+            sends.entry(g).or_default().extend(out?.messages);
+        }
         let mut outbound: BTreeMap<NodeId, Vec<(GroupId, Message)>> = BTreeMap::new();
         for (&g, group) in groups.iter_mut() {
             let mut messages = sends.remove(&g).unwrap_or_default();
-            if group.raft_ref().has_ready() {
-                messages.extend(group.process_unfilled().await?.messages);
-            }
             group.fill_messages(&mut messages).await?;
             for s in messages {
                 outbound.entry(s.to).or_default().push((g, s.msg));

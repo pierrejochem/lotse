@@ -1131,3 +1131,42 @@ fn the_oldest_record_is_the_first_data_batch_at_the_log_start() {
         assert_eq!(r.oldest_timestamp_ms(), Some(1_000));
     });
 }
+
+/// The vote a replica sends, if any, in answer to a vote request.
+async fn answer_vote(r: &mut Replica<SimRuntime, Recorder>, from: NodeId, term: u64) -> Option<bool> {
+    r.step(from, Message::Vote { term, last_index: 0, last_term: 0, pre: false, transfer: true });
+    let out = r.process().await.unwrap();
+    out.messages.into_iter().find_map(|s| match s.msg {
+        Message::VoteReply { granted, pre: false, .. } if s.to == from => Some(granted),
+        _ => None,
+    })
+}
+
+/// A hard state that changes only the commit index is not written (ADR
+/// 0143), but one that changes only the vote is: a replica that already
+/// knows term 5 and then votes in it must find the vote after a power loss,
+/// or it could vote for a second candidate and two leaders could share the
+/// term.
+#[test]
+fn a_vote_in_a_term_it_already_knew_survives_a_power_loss() {
+    Sim::new(1).run(|rt| async move {
+        let open3 =
+            || Replica::open(rt.clone(), "v", Config::new(1, vec![1, 2, 3]), Recorder::default(), LogConfig::default());
+        let mut r = open3().await.unwrap();
+        // Term 5 with no leader and no vote: the term alone changes.
+        r.step(2, Message::AppendReply { term: 5, result: lotse_raft::AppendResult::Accepted { last: 0 }, seq: 0 });
+        r.process().await.unwrap();
+        assert_eq!(r.raft_ref().term(), 5);
+        // A candidate in the same term: the vote alone changes.
+        assert_eq!(answer_vote(&mut r, 3, 5).await, Some(true), "the first candidate of term 5 gets the vote");
+        drop(r);
+        rt.crash();
+        let mut r = open3().await.unwrap();
+        assert_eq!(r.raft_ref().term(), 5, "the term was on disk");
+        assert_eq!(
+            answer_vote(&mut r, 2, 5).await,
+            Some(false),
+            "after a power loss the replica voted again in term 5: its vote was not on disk"
+        );
+    });
+}

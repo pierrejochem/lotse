@@ -10,7 +10,7 @@ Three kinds, most urgent first: weaknesses that can bite today, things not built
 
 ### Weaknesses
 
-- **Groups without a leader on loaded machines:** tests against real nodes fail now and then on CI runners because a group answers `NOT_LEADER` or delivers nothing for seconds, far longer than an election takes. The cause is not found yet; the suspicion is a node loop that falls behind on a slow disk or a starved CPU. Nodes log their groups' elections and their loop's stalls (ADR 0139), and CI turns that on, so the next failure shows where the time went.
+- **Groups without a leader on loaded machines:** tests against real nodes failed now and then on CI runners because a group answered `NOT_LEADER` or delivered nothing for seconds. One cause is found and fixed (ADR 0143): a node persisted its groups one after the other and rewrote every group's hard state for every commit, so on a busy disk a round outlasted the 100 ms election timeout and the fast followers of every group the slow node led elected again. Each group still syncs its own log every round, now at the same time as the others; one log for all groups on a node would make it one sync. Whether a starved CPU causes the same is not known. Nodes log their groups' elections and their loop's stalls (ADR 0139), and CI turns that on, so a further failure shows where the time went.
 
 ### Not built yet
 
