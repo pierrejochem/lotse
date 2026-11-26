@@ -26,6 +26,7 @@ Other Raft systems set a longer election timeout by default for this reason. etc
   - a queue leader's recent quorum ([ADR 0097](0097-a-queue-leader-delivers-only-with-a-recent-quorum.md));
   - the voters a leader counts as answering;
   - the stall warnings of ADR 0139.
+- A group whose only voter is this node elects itself at its first tick, at a first start and after a restart, since it has nobody to wait for. A cluster of one node is then ready at once, as the packages' checks expect, not after a second.
 - A node's own clients (transaction markers, publishes) retry for five election timeouts when that is longer than a second, so they outlast a failover.
 - The simulations keep the timing they were tuned for, 10 and 2 ticks, which they set explicitly. Two simulations show the difference:
   - one slow disk making rounds of about 300 ms keeps every group's leader with the default;
@@ -35,7 +36,8 @@ Other Raft systems set a longer election timeout by default for this reason. etc
 
 - A node whose disk or CPU stalls for up to about a second keeps the leadership of its groups.
 - After a real crash, a group takes one to two seconds to elect a new leader, not 0.1 to 0.2 s. A stopped node hands its groups over first ([ADR 0114](0114-a-stopping-node-hands-its-groups-over-first.md)), and a handover does not wait for the timeout, so rolling restarts are not slower. An operator who wants faster failover and trusts the machines sets a shorter timeout in the cluster file.
-- Mutation-checked: when a node does not pass its election timeout to the Raft core, the simulation with the default timing fails (group 1 elects).
+- Mutation-checked: when a node does not pass its election timeout to the Raft core, the simulation with the default timing fails (group 1 elects); when a one-voter group waits for the timeout, `a_one_node_cluster_elects_at_its_first_tick` fails.
+- The configured groups of a new cluster of several nodes elect their first leader after one to two seconds; runtime groups start on their preferred node at once (ADR 0095).
 - During a rolling upgrade, nodes of the previous release still elect after 100 to 200 ms. Raft does not need every node to use the same timeout, so the cluster works throughout; until the upgrade ends, the old nodes may elect sooner than the new ones would.
 - Clients and SDKs are unchanged. They retry `NOT_LEADER` and broken connections for longer than a failover takes.
 - No request, format or stored state changes, so there are no `lotse mcp` tools and no cluster-version gate.

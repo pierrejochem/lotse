@@ -994,8 +994,17 @@ impl<R: Runtime> Node<R> {
             let queue = cfg.queues.iter().any(|q| q.group == g);
             let options =
                 ReplicaOptions { max_producers: cfg.max_producers, queue, retention: retention_of(&cfg, g, queue) };
-            let replica = Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options);
-            groups.insert(g, replica.await?);
+            let mut replica =
+                Replica::open_with(rt.clone(), group_dir(g), raft, state_machine(g), cfg.log, options).await?;
+            // A group of one voter has nobody to wait for: it elects itself
+            // at its first tick, at a first start and after a restart alike,
+            // not after an election timeout, which is a second by default
+            // (ADR 0144). Electing early is always safe.
+            let m = replica.raft_ref().membership();
+            if m.outgoing.is_empty() && m.voters.len() == 1 && m.voters.contains(&cfg.id) {
+                replica.raft().campaign_soon();
+            }
+            groups.insert(g, replica);
         }
         // Nodes reach each other's client ports too (transaction markers)
         // and can only prove who they are with their certificates.
