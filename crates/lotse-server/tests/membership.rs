@@ -86,6 +86,8 @@ fn config(id: NodeId, log: LogConfig, pre_vote: bool) -> NodeConfig {
         peers: known.iter().map(|n| (*n, addr(*n, 7000))).collect(),
         groups: vec![1, 2],
         tick: TICK,
+        election_timeout: TICK * 10,
+        heartbeat_interval: TICK * 2,
         pre_vote,
         log,
         client_listen: Some(addr(id, 9000)),

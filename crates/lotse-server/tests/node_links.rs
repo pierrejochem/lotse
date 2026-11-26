@@ -42,6 +42,8 @@ fn config(id: NodeId) -> NodeConfig {
         peers,
         groups: vec![GROUP],
         tick: Duration::from_millis(10),
+        election_timeout: Duration::from_millis(10) * 10,
+        heartbeat_interval: Duration::from_millis(10) * 2,
         pre_vote: true,
         log: LogConfig::default(),
         client_listen: None,

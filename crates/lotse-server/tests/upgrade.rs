@@ -69,6 +69,8 @@ fn config(id: NodeId, versions: Versions) -> NodeConfig {
         // votes in each.
         groups: vec![1, 2, 3],
         tick: TICK,
+        election_timeout: TICK * 10,
+        heartbeat_interval: TICK * 2,
         pre_vote: true,
         log: LogConfig::default(),
         client_listen: Some(format!("n{id}:9000")),

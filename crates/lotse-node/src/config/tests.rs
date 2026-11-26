@@ -191,3 +191,20 @@ fn access_tokens_can_be_switched_off() {
     assert!(!c.auth.tokens);
     assert!(!c.auth.mechanisms().contains(&"LOTSE-TOKEN".to_string()));
 }
+
+#[test]
+fn groups_elect_after_a_second_unless_the_file_says_otherwise() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.election_timeout, Duration::from_secs(1));
+    assert_eq!(c.heartbeat_interval, Duration::from_millis(100));
+    let set = |lines: &str| {
+        let text = THREE.replace("data_dir = \"/var/lib/lotse/node-{id}\"", &format!("data_dir = \"d\"\n{lines}"));
+        ClusterFile::parse(&text, "t").and_then(|f| f.node_config(1))
+    };
+    let c = set("election_timeout_ms = 300\nheartbeat_ms = 50").unwrap();
+    assert_eq!((c.election_timeout, c.heartbeat_interval), (Duration::from_millis(300), Duration::from_millis(50)));
+    let refused = |lines: &str| set(lines).unwrap_err().to_string();
+    assert!(refused("heartbeat_ms = 5").contains("at least cluster.tick_ms"));
+    assert!(refused("election_timeout_ms = 150").contains("at least twice cluster.heartbeat_ms"));
+    assert!(refused("election_timeout_ms = 200\nheartbeat_ms = 150").contains("twice"));
+}

@@ -79,6 +79,8 @@ async fn main() {
             // 1 metadata, 2 coordinator, 3-5 the stream's partitions, 6 the queue.
             groups: vec![1, 2, 3, 4, 5, 6],
             tick: Duration::from_millis(10),
+            election_timeout: lotse_server::DEFAULT_ELECTION_TIMEOUT,
+            heartbeat_interval: lotse_server::DEFAULT_HEARTBEAT_INTERVAL,
             pre_vote: true,
             log: LogConfig::default(),
             client_listen: Some(clients[&id].clone()),
