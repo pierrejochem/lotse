@@ -459,7 +459,7 @@ async fn stdio_never_logs_the_token_even_at_debug() {
     .unwrap();
     let logged = std::fs::read_to_string(&log).unwrap();
     assert!(logged.contains("serving MCP on stdio"), "the log is written, at debug: {logged}");
-    let secret = token.text.rsplit('_').next().unwrap();
+    let secret = token.text.splitn(4, '_').nth(3).unwrap();
     for (what, text) in [("token", token.text.as_str()), ("secret", secret)] {
         assert!(!logged.contains(text), "the {what} is in the log:\n{logged}");
     }
@@ -892,7 +892,7 @@ async fn http_bearer_token_and_basic_password_both_work() {
     // log is at debug.
     let log = mcp.log_text();
     assert!(!log.is_empty(), "the log is written");
-    let secret = token.text.rsplit('_').next().unwrap();
+    let secret = token.text.splitn(4, '_').nth(3).unwrap();
     for (what, text) in [("token", token.text.as_str()), ("secret", secret), ("password", password)] {
         assert!(!log.contains(text), "the {what} is in the log");
     }
@@ -914,7 +914,7 @@ async fn http_never_logs_a_bearer_token_even_at_debug() {
 
     let log = mcp.log_text();
     assert!(log.contains("listening") || !log.is_empty(), "the log is written at debug");
-    let secret = token.text.rsplit('_').next().unwrap();
+    let secret = token.text.splitn(4, '_').nth(3).unwrap();
     for (what, text) in [("token", token.text.as_str()), ("secret", secret), ("refused token", unknown)] {
         assert!(!log.contains(text), "the {what} is in the log:\n{log}");
     }
