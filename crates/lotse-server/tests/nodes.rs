@@ -295,14 +295,14 @@ fn term(w: &World, g: GroupId) -> u64 {
 }
 
 /// A busy disk: every sync on the node that leads the most groups takes
-/// 40 ms, while the shortest election timeout is 100 ms (10 ticks of 10 ms).
-/// Done one group after the other, a round that writes to all three groups
-/// waits for three logs, 120 ms; with the hard state rewritten for every
-/// commit, a group alone waits for two or three syncs. Either way the fast
-/// followers hear no heartbeat for longer than an election timeout. A node
-/// persists the groups of a round at the same time and writes the hard state
-/// only when its term or vote changes (ADR 0143), so a round costs about one
-/// log sync and no group holds an election while all of them take writes.
+/// 20 ms, while the shortest election timeout is 100 ms (10 ticks of 10 ms).
+/// Each group's write is a log sync and the hard state's two (the file and
+/// its directory). Done one group after the other, a round that writes to
+/// all three groups waits for nine syncs, 180 ms, and the fast followers hear
+/// no heartbeat for longer than an election timeout. A node persists the
+/// groups of a round at the same time (ADR 0143), so a round costs about one
+/// group's syncs and no group holds an election while all of them take
+/// writes.
 #[test]
 fn groups_keep_their_leaders_while_a_slow_disk_takes_writes_to_all_of_them() {
     lotse_sim::check_few_seeds(5, |seed| {
@@ -332,7 +332,7 @@ fn groups_keep_their_leaders_while_a_slow_disk_takes_writes_to_all_of_them() {
                     .count()
             };
             let slow = *w.hosts.keys().max_by_key(|id| (leads(**id), std::cmp::Reverse(**id))).expect("three nodes");
-            w.hosts[&slow].set_sync_delay(Duration::from_millis(40));
+            w.hosts[&slow].set_sync_delay(Duration::from_millis(20));
             let terms: BTreeMap<GroupId, u64> = GROUPS.iter().map(|g| (*g, term(&w, *g))).collect();
             let end = rt.now() + Duration::from_secs(3);
             let mut n = 0u64;

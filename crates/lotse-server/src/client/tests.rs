@@ -332,13 +332,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
         r.propose(transactional_batch(5, 0, 0)).unwrap();
         r.process().await.unwrap();
         r.process().await.unwrap();
-        // A replica no longer writes a hard state for a commit alone (ADR
-        // 0143), but one written with a vote, or by the previous release,
-        // carries the commit index: write it the way that release did.
-        let hs = lotse_raft::HardState { term: r.raft_ref().term(), vote: Some(1), commit: r.raft_ref().commit() };
         drop(r);
-        let bytes = crate::replica::encode_hard_state(&hs);
-        crate::replica::write_atomic(&rt, std::path::Path::new("g"), crate::replica::HARD_STATE, bytes).await.unwrap();
         let mut r = single(&rt).await;
         while r.raft_ref().role() != Role::Leader {
             r.raft().tick();

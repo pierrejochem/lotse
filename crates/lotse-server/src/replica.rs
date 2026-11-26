@@ -326,11 +326,6 @@ pub struct Replica<D: Disk, S> {
     retention: Retention,
     compactor: compaction::Compactor,
     state: PartitionState,
-    /// The term and vote on disk. A hard state that changes only the commit
-    /// index is not written (ADR 0143): Raft needs the term and the vote to
-    /// survive a crash, not the commit index, which a restarted replica
-    /// learns again from its leader.
-    durable_vote: (u64, Option<NodeId>),
     /// Largest number of bytes per append message (at least one entry).
     pub max_fill_bytes: usize,
     /// The tag of the move that removed this replica's log, if one did.
@@ -457,7 +452,6 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                 offset = batch.next_offset();
             }
         }
-        let durable_vote = (hard_state.term, hard_state.vote);
         let restored = Restored {
             hard_state,
             log: runs,
@@ -479,7 +473,6 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             retention: options.retention,
             compactor: compaction::Compactor::default(),
             state,
-            durable_vote,
             max_fill_bytes: 1 << 20,
             moved_at,
             idle: IdleClock::default(),
@@ -809,19 +802,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         // snapshot written above. Written first, a crash could leave it
         // pointing into a log that still holds a conflicting suffix, and a
         // restart would apply entries that were never committed.
-        //
-        // A change of the commit index alone is not written: it is two syncs
-        // (the file and its directory) for every committed write, after the
-        // log's own, and on a busy disk they made a round outlast an election
-        // timeout (ADR 0143). The commit index on disk only bounds where a
-        // restarted replica starts applying; it learns the rest from its
-        // leader. The term and the vote are written, and synced, before the
-        // messages that depend on them go out.
-        if let Some(hs) = ready.hard_state
-            && (hs.term, hs.vote) != self.durable_vote
-        {
+        if let Some(hs) = ready.hard_state {
             write_atomic(&self.disk, &self.dir, HARD_STATE, encode_hard_state(&hs)).await?;
-            self.durable_vote = (hs.term, hs.vote);
         }
         if let Some((first, last)) = ready.committed {
             self.apply(first, last).await?;

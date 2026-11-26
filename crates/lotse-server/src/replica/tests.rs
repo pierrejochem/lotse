@@ -1142,9 +1142,8 @@ async fn answer_vote(r: &mut Replica<SimRuntime, Recorder>, from: NodeId, term: 
     })
 }
 
-/// A hard state that changes only the commit index is not written (ADR
-/// 0143), but one that changes only the vote is: a replica that already
-/// knows term 5 and then votes in it must find the vote after a power loss,
+/// A hard state that changes only the vote is written: a replica that
+/// already knows term 5 and then votes in it must find the vote after a power loss,
 /// or it could vote for a second candidate and two leaders could share the
 /// term.
 #[test]
