@@ -35,6 +35,7 @@ import type { Request } from "../proto/request.js";
 import type {
   DescribeMetricsResponse,
   DescribeSessionsResponse,
+  DescribeQuotasResponse,
   DescribeUpgradeResponse,
   Response,
   WhoAmIResponse,
@@ -2244,6 +2245,37 @@ export class LotseClient {
   async revokeToken(id: bigint | number, options: CallOptions = {}): Promise<void> {
     this.checkOpen();
     return this.adminChange({ type: "RevokeToken", id: BigInt(id) }, options.signal);
+  }
+
+  /**
+   * Sets a storage limit in bytes, every replica counted, or removes it with `null` (ADR 0147): a tenant's own with an
+   * empty `prefix`, which needs the cluster-admin role, or one on the names that start with `prefix`, which a tenant
+   * admin may set under their binding's prefix too, unless a cluster admin set it. Once a limit is full, new data under
+   * it is refused with `QUOTA_EXCEEDED`.
+   */
+  async alterQuota(tenant: string, prefix: string, bytes: bigint | number | null, options: CallOptions = {}): Promise<void> {
+    this.checkOpen();
+    const limit = bytes === null ? null : BigInt(bytes);
+    return this.adminChange({ type: "AlterQuota", tenant, prefix, bytes: limit }, options.signal);
+  }
+
+  /**
+   * The storage limits and usage of `tenant`, or of every tenant the caller may see with `null` (ADR 0147), from the
+   * metadata leader, which counts the usage.
+   */
+  async describeQuotas(tenant: string | null = null, options: CallOptions = {}): Promise<DescribeQuotasResponse> {
+    this.checkOpen();
+    return this.retrying(
+      async () => {
+        const r = await this.callAdmin({ type: "DescribeQuotas", tenant });
+        if (r.type !== "DescribeQuotas") {
+          throw Attempt.retry(`unexpected response ${r.type}`);
+        }
+        this.adminAnswer(r.error, r.leaderHint, null, false);
+        return r;
+      },
+      options.signal,
+    );
   }
 
   /**

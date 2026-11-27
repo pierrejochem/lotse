@@ -318,6 +318,21 @@ export interface RevokeTokenRequest {
   readonly type: "RevokeToken";
   readonly id: bigint;
 }
+/** `AlterQuota` (key 69): sets or removes a storage limit (ADR 0147). Answered with `Admin`. */
+export interface AlterQuotaRequest {
+  readonly type: "AlterQuota";
+  readonly tenant: string;
+  /** A name prefix; empty for the tenant's own limit. */
+  readonly prefix: string;
+  /** The limit in bytes, every replica counted; `null` removes it. */
+  readonly bytes: bigint | null;
+}
+/** `DescribeQuotas` (key 70): the storage limits and usage the asker may see (ADR 0147). */
+export interface DescribeQuotasRequest {
+  readonly type: "DescribeQuotas";
+  /** Only this tenant, or `null` for every tenant the asker may see. */
+  readonly tenant: string | null;
+}
 /** `RequestCertificate` (key 55): asks for a certificate with a signing request (ADR 0092). Cluster admin. */
 export interface RequestCertificateRequest {
   readonly type: "RequestCertificate";
@@ -460,6 +475,8 @@ export type Request =
   | CreateTokenRequest
   | DescribeTokensRequest
   | RevokeTokenRequest
+  | AlterQuotaRequest
+  | DescribeQuotasRequest
   | RenewCertificateRequest
   | RecordCertificatesRequest
   | RequestCertificateRequest
@@ -521,6 +538,8 @@ const KEYS: { readonly [T in Request["type"]]: number } = {
   CreateToken: ApiKey.CREATE_TOKEN,
   DescribeTokens: ApiKey.DESCRIBE_TOKENS,
   RevokeToken: ApiKey.REVOKE_TOKEN,
+  AlterQuota: ApiKey.ALTER_QUOTA,
+  DescribeQuotas: ApiKey.DESCRIBE_QUOTAS,
   RenewCertificate: ApiKey.RENEW_CERTIFICATE,
   RecordCertificates: ApiKey.RECORD_CERTIFICATES,
   RequestCertificate: ApiKey.REQUEST_CERTIFICATE,
@@ -825,6 +844,18 @@ export function writeRequest(w: Writer, req: Request): void {
       return;
     case "RevokeToken":
       w.u64(req.id).noTags();
+      return;
+    case "AlterQuota":
+      w.string(req.tenant).string(req.prefix);
+      if (req.bytes === null) {
+        w.u8(0);
+      } else {
+        w.u8(1).u64(req.bytes);
+      }
+      w.noTags();
+      return;
+    case "DescribeQuotas":
+      w.optString(req.tenant).noTags();
       return;
     case "RevokeCertificate":
       w.bytes(req.issuer).bytes(req.serial).u64(req.notAfterMs).string(req.reason).noTags();
@@ -1246,6 +1277,19 @@ export function readRequest(apiKey: number, r: Reader): Request {
     }
     case ApiKey.REVOKE_TOKEN: {
       const x: RevokeTokenRequest = { type: "RevokeToken", id: r.u64() };
+      r.tags();
+      return x;
+    }
+    case ApiKey.ALTER_QUOTA: {
+      const tenant = r.string();
+      const prefix = r.string();
+      const bytes = r.u8() === 0 ? null : r.u64();
+      const x: AlterQuotaRequest = { type: "AlterQuota", tenant, prefix, bytes };
+      r.tags();
+      return x;
+    }
+    case ApiKey.DESCRIBE_QUOTAS: {
+      const x: DescribeQuotasRequest = { type: "DescribeQuotas", tenant: r.optString() };
       r.tags();
       return x;
     }

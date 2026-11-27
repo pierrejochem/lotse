@@ -571,6 +571,21 @@ export interface TokenEntry {
   readonly createdBy: string;
 }
 
+/** One storage limit, or one tenant without a limit of its own, in `DescribeQuotas` (ADR 0147). */
+export interface QuotaEntry {
+  readonly tenant: string;
+  /** The name prefix; empty for the tenant's own limit, or for a tenant listed without one. */
+  readonly prefix: string;
+  /** The limit in bytes, every replica counted; `null` for a tenant listed without a limit. */
+  readonly bytes: bigint | null;
+  /** A cluster admin set it, so only a cluster admin changes it. */
+  readonly setByClusterAdmin: boolean;
+  /** The limit is full: new data under it is refused. */
+  readonly full: boolean;
+  /** Bytes used at the last count, every replica counted; `null` before the first count. */
+  readonly usedBytes: bigint | null;
+}
+
 /** One client certificate in the inventory (`DescribeCertificates`). */
 export interface CertificateEntry {
   /** SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes). */
