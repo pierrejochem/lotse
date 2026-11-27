@@ -1408,13 +1408,25 @@ async fn cluster_version_is(rt: &SimRuntime, admin: &Client<SimRuntime>, v: u32)
     panic!("the cluster never took version {}", lotse_server::version::display(v));
 }
 
+/// Waits until the cluster has taken cluster version `v` or a newer one: a
+/// new cluster takes the newest its nodes run.
+async fn cluster_version_at_least(rt: &SimRuntime, admin: &Client<SimRuntime>, v: u32) {
+    for _ in 0..600 {
+        if admin.describe_upgrade().await.ok().and_then(|d| d.cluster_version).is_some_and(|got| got >= v) {
+            return;
+        }
+        rt.sleep(TICK * 10).await;
+    }
+    panic!("the cluster never took version {} or newer", lotse_server::version::display(v));
+}
+
 /// The cluster with SCRAM users alice, bob and mon (a cluster viewer), at
-/// cluster version 0.1, which tokens need.
+/// cluster version 0.1 or newer, which tokens need.
 async fn token_cluster(rt: &SimRuntime) -> Vec<Node<SimRuntime>> {
     let nodes = cluster(rt).await;
     setup_token_users(rt).await;
     let admin = client(rt, "tv", scram("admin", "admin-pw"));
-    cluster_version_is(rt, &admin, lotse_server::version::TOKENS_SINCE).await;
+    cluster_version_at_least(rt, &admin, lotse_server::version::TOKENS_SINCE).await;
     nodes
 }
 

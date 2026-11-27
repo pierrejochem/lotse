@@ -152,11 +152,12 @@ impl Setup {
         )
     }
 
-    /// Waits until the cluster has taken cluster version 0.1, which tokens need.
+    /// Waits until the cluster has taken cluster version 0.1 or newer, which
+    /// tokens need.
     async fn tokens_allowed(&self) {
         let admin = self.client(Credentials::Scram { user: "admin".into(), password: "admin-pw".into() });
         for _ in 0..300 {
-            if admin.describe_upgrade().await.ok().and_then(|d| d.cluster_version) == Some(of(0, 1)) {
+            if admin.describe_upgrade().await.ok().and_then(|d| d.cluster_version).is_some_and(|v| v >= of(0, 1)) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
