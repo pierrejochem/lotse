@@ -589,6 +589,7 @@ impl ClusterFile {
                 ms: pick(self.retention.ms, defaults.ms),
                 bytes: pick(self.retention.bytes, defaults.bytes),
                 compaction_map_bytes: self.compaction.map_bytes.unwrap_or(lotse_server::DEFAULT_COMPACTION_MAP_BYTES),
+                segment_ms: lotse_server::DEFAULT_SEGMENT_MS,
             },
             join: false,
         })

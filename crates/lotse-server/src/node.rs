@@ -175,7 +175,14 @@ pub struct RetentionConfig {
     /// Bytes the map of keys of a compaction sweep may take; the node runs
     /// one sweep at a time (ADR 0098).
     pub compaction_map_bytes: u64,
+    /// A runtime stream's or queue's active segment closes once it is this
+    /// many ms old, unless the resource sets `segment.ms` (ADR 0146).
+    pub segment_ms: u64,
 }
+
+/// A segment's age unless the node or the resource says otherwise: an hour,
+/// so a drained queue frees its space within about that (ADR 0146).
+pub const DEFAULT_SEGMENT_MS: u64 = 3_600_000;
 
 /// What a compaction sweep's map may take unless the node says otherwise:
 /// 64 MiB, about 1.4 million keys.
@@ -188,6 +195,7 @@ impl Default for RetentionConfig {
             ms: Some(7 * 24 * 3600 * 1000),
             bytes: None,
             compaction_map_bytes: DEFAULT_COMPACTION_MAP_BYTES,
+            segment_ms: DEFAULT_SEGMENT_MS,
         }
     }
 }
@@ -195,7 +203,12 @@ impl Default for RetentionConfig {
 impl RetentionConfig {
     /// Keep everything.
     pub fn keep() -> Self {
-        RetentionConfig { ms: None, bytes: None, compaction_map_bytes: DEFAULT_COMPACTION_MAP_BYTES }
+        RetentionConfig {
+            ms: None,
+            bytes: None,
+            compaction_map_bytes: DEFAULT_COMPACTION_MAP_BYTES,
+            segment_ms: DEFAULT_SEGMENT_MS,
+        }
     }
 }
 
@@ -1715,6 +1728,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 if let Some(r) = own.get(&g) {
                     group.set_retention(*r);
                 }
+                // Runtime streams and queues close their segments by age
+                // (ADR 0146); the node's own groups hold no one's data.
+                let runtime = cfg.metadata != Some(g) && cfg.coordinator != Some(g);
+                group.set_segment_ms(runtime.then_some(cfg.retention.segment_ms));
                 let sweep = crate::replica::Sweep {
                     may_start: sweeping.is_none_or(|s| s == g),
                     map_bytes: cfg.retention.compaction_map_bytes,

@@ -134,7 +134,7 @@ Two new requests, keys 69 and 70 (names proposed):
 - **Retention cuts at snapshot points** where applying reaches a segment base. The builder checks that a segment closed by age, followed by no new data, can still be cut. If it cannot, that is part of this work, with a test.
 - **Settings:**
   - `[cluster] segment_ms` (node default, 1 hour);
-  - `segment.ms` per runtime stream or queue through `CreateStream`, `CreateQueue`, `AlterConfigs` and `DescribeConfigs`, at least 60,000 ms.
+  - `segment.ms` per runtime stream or queue, changed on its own through `AlterConfigs` (like `replication.factor`) and shown by `DescribeConfigs`, at least 60,000 ms (builder's ruling: not at create, see the plan's ledger).
   - Whether a per-resource value needs the cluster version: it is a config entry, read either way. The builder checks how runtime configs are stored and gates them if their format changes.
 - **Tests:**
   - a log unit test: a segment closes by age with no new appends;

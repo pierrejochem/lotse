@@ -19,8 +19,8 @@
 - **Release 0.2.0:** `CLUSTER_VERSION` 0.2, `OLDEST_CLUSTER_VERSION` 0.1. `QUOTAS_SINCE = SEGMENT_AGE_SINCE = cluster_version::of(0, 2)`. New formats are written only while `MetadataState::writes(<since>)` and read either way. Each format has a test with 0.1 in force.
 - **Numbers:**
   - request keys: 69 `AlterQuota`, 70 `DescribeQuotas`;
-  - metadata change tags: 37 `SetQuota`, 38 `QuotaFull`;
-  - metadata snapshot section: 20;
+  - metadata change tags: 37 `SetSegmentMs` (Task 4), 38 `SetQuota`, 39 `QuotaFull`;
+  - metadata snapshot sections: 20 segment ages (Task 4), 21 quotas;
   - error `QUOTA_EXCEEDED` = 10, not retriable.
 - **Limits:**
   - bytes at least 1; absent removes the limit;
@@ -196,16 +196,16 @@
 - Produces:
   - `pub(crate) struct Quota { pub(crate) bytes: u64, pub(crate) by_cluster_admin: bool, pub(crate) full: bool }`
   - `MetadataState.quotas: BTreeMap<(String, String), Quota>`, keyed by (tenant, prefix); `""` is the tenant limit.
-  - `Change::SetQuota { tenant: String, prefix: String, bytes: Option<u64>, by_cluster_admin: bool }` (tag 37). `None` removes the limit. A changed limit keeps its `full` flag until the next count.
-  - `Change::QuotaFull { tenant: String, prefix: String, full: bool }` (tag 38). It does nothing for a limit that no longer exists.
-  - Snapshot section 20, written only when `quotas` is non-empty and `writes(QUOTAS_SINCE)`.
+  - `Change::SetQuota { tenant: String, prefix: String, bytes: Option<u64>, by_cluster_admin: bool }` (tag 38). `None` removes the limit. A changed limit keeps its `full` flag until the next count.
+  - `Change::QuotaFull { tenant: String, prefix: String, full: bool }` (tag 39). It does nothing for a limit that no longer exists.
+  - Snapshot section 21, written only when `quotas` is non-empty and `writes(QUOTAS_SINCE)`.
   - `pub(crate) const MAX_PREFIX_QUOTAS: usize = 100;`. Apply ignores a `SetQuota` that would be the 101st prefix limit of a tenant; the request checks it first, so only a race reaches apply.
   - Deleting a tenant drops its quotas.
 
 - [ ] **Step 1: Write the failing tests:**
   - `quotas_round_trip_in_the_snapshot`;
   - `a_quota_change_reads_back`, an encode and decode test for both changes;
-  - `quota_records_wait_for_0_2`: with 0.1 in force, the snapshot has 19 sections even with quotas present (follow the token test);
+  - `quota_records_wait_for_0_2`: with 0.1 in force, the snapshot has no quota section even with quotas present (follow the token test);
   - `a_deleted_tenant_drops_its_quotas` (Review Focus 1): set a limit, mark it full, delete the tenant, create it again → no quotas;
   - `the_101st_prefix_limit_is_ignored`;
   - `quota_full_for_a_removed_limit_does_nothing`.
