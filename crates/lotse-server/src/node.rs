@@ -125,6 +125,12 @@ pub struct NodeConfig {
     /// How often this node reads its data volume's free space for that
     /// limit (ADR 0124; [`crate::DEFAULT_DISK_CHECK_INTERVAL`] by default).
     pub disk_check_interval: Duration,
+    /// How often the metadata group's leader asks every node for its
+    /// groups' sizes, which weigh rebalancing (ADR 0052) and count storage
+    /// quotas (ADR 0147); [`crate::DEFAULT_QUOTA_CHECK_INTERVAL`] by
+    /// default. A tenant may overshoot its limit by what it writes in about
+    /// two of these.
+    pub quota_check_interval: Duration,
     /// This node's release and the cluster versions it runs with (ADR
     /// 0127); the build's own by default. Simulations give nodes others.
     pub versions: crate::version::Versions,
@@ -183,6 +189,10 @@ pub struct RetentionConfig {
 /// A segment's age unless the node or the resource says otherwise: an hour,
 /// so a drained queue frees its space within about that (ADR 0146).
 pub const DEFAULT_SEGMENT_MS: u64 = 3_600_000;
+
+/// How often the metadata leader counts group sizes unless the node says
+/// otherwise (ADR 0147): ten seconds, as the size poll always ran.
+pub const DEFAULT_QUOTA_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What a compaction sweep's map may take unless the node says otherwise:
 /// 64 MiB, about 1.4 million keys.
@@ -493,6 +503,27 @@ fn membership_pass<R: Runtime, S: StateMachine>(
         let _ = meta.propose_internal(crate::metadata::record(&change));
     }
     drop(removed);
+    // Storage quotas (ADR 0147): what the last poll's sizes make full or
+    // clear, once every runtime group has a size. Sizes of groups no
+    // resource holds any more go.
+    let sized_at = *shared.sized_at.lock().expect("sized lock");
+    let Some(at) = sized_at else { return };
+    let usage = {
+        let mut sizes = shared.sizes.lock().expect("sizes lock");
+        let live: BTreeSet<GroupId> = state
+            .streams
+            .values()
+            .flat_map(|s| s.partitions.iter().map(|(g, _)| *g))
+            .chain(state.queues.values().map(|q| q.group))
+            .collect();
+        sizes.retain(|g, _| live.contains(g) || cfg.metadata == Some(*g) || cfg.coordinator == Some(*g));
+        crate::quota::count(state, &sizes)
+    };
+    let Some(usage) = usage else { return };
+    for change in crate::quota::changes(state, &usage) {
+        let _ = meta.propose_internal(crate::metadata::record(&change));
+    }
+    *shared.quota_usage.lock().expect("usage lock") = Some(Arc::new((at, usage)));
 }
 
 /// Tells the metadata group that this node went low on disk or back, as
@@ -814,6 +845,12 @@ struct Shared {
     /// metadata leader last asked the nodes: what rebalancing weighs moves
     /// by (ADR 0052).
     sizes: Mutex<BTreeMap<GroupId, u64>>,
+    /// On the metadata leader: when the size poll last finished, ms since
+    /// the Unix epoch, and what its count found (ADR 0147). Empty on any
+    /// other node, and until a poll has given every runtime group a size.
+    quota_usage: Mutex<Option<Arc<(u64, crate::quota::Usage)>>>,
+    /// When the last size poll finished, ms since the Unix epoch.
+    sized_at: Mutex<Option<u64>>,
     /// On the metadata leader: the metadata index through which each node
     /// that answered has removed the files of deleted resources (ADR 0100).
     removed_through: Mutex<BTreeMap<NodeId, Option<u64>>>,
@@ -1424,7 +1461,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             ask_for_nodes(rt, cfg, groups, &known, &configured_voters, &marker_client, shared, jobs, &asking);
         }
         if rt.now() >= next_sizes {
-            next_sizes = rt.now() + cfg.tick * SIZES_EVERY_TICKS;
+            next_sizes = rt.now() + cfg.quota_check_interval;
             ask_for_sizes(rt, cfg, groups, &marker_client, shared, jobs, &sizing);
         }
         if *shared.deleted.lock().expect("deleted lock") != known.deleted {
@@ -1513,6 +1550,10 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         // Nodes low on disk: as the metadata group recorded them, and this
         // one at once, before its record commits (ADR 0122).
+        // Full storage limits as this node applied them (ADR 0147).
+        let quotas_full: BTreeSet<(String, String)> =
+            known.state.quotas.iter().filter(|(_, q)| q.full).map(|(k, _)| k.clone()).collect();
+        let quota_usage = shared.quota_usage.lock().expect("usage lock").clone();
         let mut disk_low = known.state.disk_low.clone();
         if disk.low {
             disk_low.insert(cfg.id);
@@ -1548,6 +1589,8 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 token_sign_ins: &auth.token_sign_ins,
                 disk: disk.metrics(),
                 disk_low: &disk_low,
+                quotas_full: &quotas_full,
+                quota_usage: quota_usage.as_deref(),
             },
             now: rt.now(),
             unix_ms: rt.unix_time().as_millis() as u64,
@@ -1912,14 +1955,13 @@ async fn judge_stopping<R: Runtime>(
     fill(&reply, answer);
 }
 
-/// How often the metadata group's leader asks the nodes for their groups'
-/// sizes.
-const SIZES_EVERY_TICKS: u32 = 1_000;
-
 /// On the metadata group's leader: asks every node for its metrics and
 /// keeps each group's size, the largest any replica reported, for the
-/// planner to weigh moves by (ADR 0052). Sizes may be minutes old; they
-/// only choose between moves the replica counts already call for.
+/// planner to weigh moves by (ADR 0052) and to count storage quotas by
+/// (ADR 0147). A group no node reported this time keeps the size it had,
+/// so a node that is down does not shrink a count; a node that stops
+/// leading forgets them all, and a new leader counts only once every group
+/// has a size again.
 fn ask_for_sizes<R: Runtime, S: StateMachine>(
     rt: &R,
     cfg: &NodeConfig,
@@ -1930,9 +1972,16 @@ fn ask_for_sizes<R: Runtime, S: StateMachine>(
     sizing: &Arc<std::sync::atomic::AtomicBool>,
 ) {
     let leads = cfg.metadata.and_then(|g| groups.get(&g)).is_some_and(|r| r.raft_ref().role() == Role::Leader);
-    if !leads || sizing.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    if !leads {
+        shared.sizes.lock().expect("sizes lock").clear();
+        *shared.sized_at.lock().expect("sized lock") = None;
+        *shared.quota_usage.lock().expect("usage lock") = None;
         return;
     }
+    if sizing.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let rt2 = rt.clone();
     let (client, shared, sizing) = (client.clone(), shared.clone(), sizing.clone());
     let stop = shared.stop.clone();
     jobs.spawn(rt, async move {
@@ -1946,7 +1995,8 @@ fn ask_for_sizes<R: Runtime, S: StateMachine>(
                     *s = (*s).max(p.size_bytes);
                 }
             }
-            *shared.sizes.lock().expect("sizes lock") = sizes;
+            shared.sizes.lock().expect("sizes lock").extend(sizes);
+            *shared.sized_at.lock().expect("sized lock") = Some(rt2.unix_time().as_millis() as u64);
             *shared.removed_through.lock().expect("removed lock") = removed;
         }
         sizing.store(false, std::sync::atomic::Ordering::Relaxed);

@@ -152,6 +152,21 @@ jobs:
         env:
           LOTSE_SIM_SEEDS: "5000"
 
+  # The quota simulation (ADR 0147): a tenant writes under a storage limit
+  # and another without one while nodes crash.
+  quota-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - run: cargo test -p lotse-server --release --test quotas
+        env:
+          LOTSE_SIM_SEEDS: "5000"
+
   # The retention simulation (ADR 0046): short limits and small segments
   # under faults.
   retention-simulation:
@@ -215,6 +230,7 @@ jobs:
       - group-simulation
       - metadata-simulation
       - access-simulation
+      - quota-simulation
       - retention-simulation
       - compaction-simulation
       - membership-simulation
@@ -247,6 +263,7 @@ jobs:
       - group-simulation
       - metadata-simulation
       - access-simulation
+      - quota-simulation
       - retention-simulation
       - compaction-simulation
       - membership-simulation

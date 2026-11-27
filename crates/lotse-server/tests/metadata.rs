@@ -178,6 +178,7 @@ impl World {
                         follower_max_lag: lotse_server::DEFAULT_FOLLOWER_MAX_LAG,
                         disk_free_limit: lotse_server::FreeLimit::default(),
                         disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+                        quota_check_interval: lotse_server::DEFAULT_QUOTA_CHECK_INTERVAL,
                         versions: Default::default(),
                         retention: lotse_server::RetentionConfig::keep(),
                         join: false,

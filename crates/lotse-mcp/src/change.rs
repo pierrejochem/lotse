@@ -113,6 +113,21 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             false,
             false,
         ),
+        spec(
+            "set_quota",
+            "Sets or removes a storage limit, in bytes with every replica counted: a tenant's own limit (no \
+             prefix), which needs the cluster-admin role, or a limit on the names that start with prefix, which a \
+             tenant admin may set under the prefix of their binding unless a cluster admin set it. Once a limit is \
+             full, new data under it is refused; nothing is deleted.",
+            json!({
+                "tenant": {"type": "string", "description": "The tenant."},
+                "prefix": {"type": "string", "description": "A name prefix; leave out for the tenant's own limit."},
+                "bytes": {"type": "integer", "minimum": 1, "description": "The limit in bytes; leave out to remove the limit."},
+            }),
+            &["tenant"],
+            false,
+            false,
+        ),
     ]
 }
 
@@ -222,6 +237,20 @@ pub(crate) async fn alter_configs<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a
         json!({"name": name, "set": set.into_iter().map(|(k, v)| (k, json!(v))).collect::<serde_json::Map<_, _>>(), "reset": reset}),
         text,
     )
+}
+
+pub(crate) async fn set_quota<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let tenant = a.str("tenant")?;
+    let prefix = a.opt_str("prefix")?.unwrap_or("");
+    let bytes = a.opt_ranged("bytes", 1, u64::MAX)?;
+    c.alter_quota(tenant, prefix, bytes).await?;
+    let what =
+        if prefix.is_empty() { format!("tenant {tenant}") } else { format!("prefix {prefix} in tenant {tenant}") };
+    let text = match bytes {
+        Some(n) => format!("The storage limit of {what} is {n} bytes."),
+        None => format!("The storage limit of {what} is removed."),
+    };
+    done(json!({"tenant": tenant, "prefix": prefix, "bytes": bytes}), text)
 }
 
 pub(crate) async fn create_partitions<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {

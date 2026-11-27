@@ -289,6 +289,7 @@ async fn the_console_acts_as_whoever_signed_in() {
         // Real disks: what the machine has free must not decide (ADR 0122).
         disk_free_limit: lotse_server::FreeLimit::OFF,
         disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+        quota_check_interval: lotse_server::DEFAULT_QUOTA_CHECK_INTERVAL,
         versions: Default::default(),
         retention: lotse_server::RetentionConfig::keep(),
         join: false,

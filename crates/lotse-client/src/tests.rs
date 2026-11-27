@@ -284,6 +284,129 @@ fn a_broker_behind_does_not_make_a_stream_unknown() {
     });
 }
 
+/// A full storage limit (ADR 0147) ends a produce at once, with the
+/// broker's message: QUOTA_EXCEEDED is not retried, since a full tenant
+/// usually stays full until someone acts.
+#[test]
+fn quota_exceeded_ends_a_produce_at_once() {
+    use lotse_proto::{
+        MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceResourceResponse, ProduceResponse,
+        Request, Response,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let all = brokers(&[(1, "a")]);
+        let produces = Arc::new(AtomicUsize::new(0));
+        let seen = produces.clone();
+        serve(&rt, "a", move |r| match r {
+            Request::Produce(_) => {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Response::Produce(ProduceResponse {
+                    throttle_ms: 0,
+                    resources: vec![ProduceResourceResponse {
+                        resource_id: 7,
+                        partitions: vec![ProducePartitionResponse {
+                            partition: 0,
+                            error: ErrorCode::QUOTA_EXCEEDED,
+                            base_offset: 0,
+                            append_ts: -1,
+                            error_msg: Some("the storage limit of tenant \"shop\" is reached".into()),
+                            leader_hint: None,
+                        }],
+                    }],
+                })
+            }
+            _ => Response::Metadata(MetadataResponse {
+                brokers: all.clone(),
+                resources: vec![ResourceMetadata {
+                    partitions: vec![PartitionMetadata {
+                        partition: 0,
+                        leader: 1,
+                        leader_term: 1,
+                        voters: vec![1],
+                        pinned_leader: 0,
+                        placed: false,
+                    }],
+                    ..resource("s", 7)
+                }],
+            }),
+        });
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig {
+                retry_for: std::time::Duration::from_secs(5),
+                idempotent: false,
+                ..crate::ClientConfig::new(vec!["a:9000".into()])
+            },
+        );
+        let mut b = lotse_record::BatchBuilder::new(lotse_record::BatchOptions::default());
+        b.push(0, None, Some(b"v"), &[]);
+        let err = client.produce("s", 0, b.finish().unwrap()).await.expect_err("a full limit refuses");
+        assert!(matches!(&err, crate::ClientError::Broker { code: ErrorCode::QUOTA_EXCEEDED, .. }), "{err:?}");
+        assert!(err.to_string().contains("storage limit of tenant"), "{err}");
+        assert_eq!(produces.load(Ordering::SeqCst), 1, "one attempt, no retry");
+    });
+}
+
+/// `alter_quota` and `describe_quotas` reach the metadata leader with what
+/// the caller gave.
+#[test]
+fn alter_and_describe_quotas_reach_the_metadata_leader() {
+    use lotse_proto::{AdminResponse, DescribeQuotasResponse, MetadataResponse, QuotaEntry, Request, Response};
+    use std::sync::{Arc, Mutex};
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let all = brokers(&[(1, "a")]);
+        let asked: Arc<Mutex<Vec<Request>>> = Arc::default();
+        let log = asked.clone();
+        serve(&rt, "a", move |r| match r {
+            Request::AlterQuota(_) => {
+                log.lock().unwrap().push(r.clone());
+                Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None })
+            }
+            Request::DescribeQuotas(_) => {
+                log.lock().unwrap().push(r.clone());
+                Response::DescribeQuotas(DescribeQuotasResponse {
+                    error: ErrorCode::NONE,
+                    leader_hint: None,
+                    counted_at_ms: Some(5),
+                    quotas: vec![QuotaEntry {
+                        tenant: "shop".into(),
+                        prefix: String::new(),
+                        bytes: Some(10),
+                        set_by_cluster_admin: true,
+                        full: false,
+                        used_bytes: Some(3),
+                    }],
+                })
+            }
+            _ => Response::Metadata(MetadataResponse { brokers: all.clone(), resources: vec![] }),
+        });
+        let client = crate::Client::new(rt.node("client"), crate::ClientConfig::new(vec!["a:9000".into()]));
+        client.alter_quota("shop", "orders.", Some(10)).await.expect("set");
+        client.alter_quota("shop", "orders.", None).await.expect("removed");
+        let d = client.describe_quotas(Some("shop")).await.expect("described");
+        assert_eq!((d.counted_at_ms, d.quotas.len()), (Some(5), 1));
+        let asked = asked.lock().unwrap();
+        assert_eq!(
+            asked[..],
+            [
+                Request::AlterQuota(lotse_proto::AlterQuotaRequest {
+                    tenant: "shop".into(),
+                    prefix: "orders.".into(),
+                    bytes: Some(10)
+                }),
+                Request::AlterQuota(lotse_proto::AlterQuotaRequest {
+                    tenant: "shop".into(),
+                    prefix: "orders.".into(),
+                    bytes: None
+                }),
+                Request::DescribeQuotas(lotse_proto::DescribeQuotasRequest { tenant: Some("shop".into()) }),
+            ]
+        );
+    });
+}
+
 /// What `create_token` sends is the hash of the secret and nothing else of
 /// it: the cluster never sees the secret, and the text the caller gets
 /// carries the id the cluster chose.

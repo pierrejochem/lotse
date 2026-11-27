@@ -3481,6 +3481,151 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
     });
 }
 
+/// A full storage limit (ADR 0147) refuses new data under it with
+/// QUOTA_EXCEEDED and a message naming the limit: the tenant's own, or a
+/// prefix the name starts with, and no other prefix. A retry of a batch
+/// taken before is answered as written, a refused batch's sequence stays
+/// free, dead letters wait in their source, and acks pass, so consumers
+/// can drain the tenant back under its limit.
+#[test]
+fn a_full_storage_limit_refuses_only_new_data_under_it() {
+    Sim::new(6).run(|rt| async move {
+        let options = crate::ReplicaOptions { queue: true, ..crate::ReplicaOptions::default() };
+        let cfg = Config::new(1, vec![1]);
+        let r = Replica::open_with(rt.clone(), "q", cfg, Nothing, LogConfig::default(), options).await.unwrap();
+        let mut groups: Groups = BTreeMap::from([(G, r)]);
+        for _ in 0..40 {
+            let replica = groups.get_mut(&G).unwrap();
+            replica.raft().tick();
+            replica.process().await.unwrap();
+        }
+        let queues = [QueueConfig::new("orders.jobs", 7, G)];
+        let access = crate::access::Access::build(
+            &crate::AuthConfig::none(),
+            &[(7, "orders.jobs".to_string())],
+            &crate::metadata::MetadataState::default(),
+        );
+        let addrs = BTreeMap::new();
+        let tenant = lotse_proto::DEFAULT_TENANT.to_string();
+        let none = BTreeSet::new();
+        let tenant_full = BTreeSet::from([(tenant.clone(), String::new())]);
+        let prefix_full = BTreeSet::from([(tenant.clone(), "orders.".to_string())]);
+        let other_full = BTreeSet::from([(tenant.clone(), "billing.".to_string()), ("other".into(), String::new())]);
+        let view = |quotas_full| ClusterView {
+            streams: &[],
+            queues: &queues,
+            exchanges: &[],
+            deleted: &NOTHING_DELETED,
+            group_session: Duration::from_secs(45),
+            group_heartbeat: Duration::from_secs(5),
+            admin: AdminView::default(),
+            client_addrs: &addrs,
+            zones: &NO_ZONES,
+            coordinator: None,
+            node: NodeView { quotas_full, ..NodeView::default() },
+            now: rt.now(),
+            unix_ms: 0,
+            access: &access,
+            lagging: &NOT_LAGGING,
+            current_voters: &NO_CURRENT,
+            metadata_behind: false,
+        };
+        let outbox = Arc::new(Outbox::default());
+        let mut clients = Clients::default();
+        let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 5, flags: 0 };
+        let request = |key, request| ClientRequest {
+            outbox: outbox.clone(),
+            header: header(key),
+            request,
+            principal: Principal::Anonymous,
+            mechanism: 0,
+            read_at_least: Vec::new(),
+        };
+        let produced = |outbox: &Outbox| -> Vec<(ErrorCode, Option<String>)> {
+            drain(outbox, ApiKey::PRODUCE)
+                .0
+                .iter()
+                .map(|r| match r {
+                    Response::Produce(p) => {
+                        let part = &p.resources[0].partitions[0];
+                        (part.error, part.error_msg.clone())
+                    }
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        async fn rounds(clients: &mut Clients, view: &ClusterView<'_>, groups: &mut Groups) {
+            for _ in 0..3 {
+                groups.get_mut(&G).unwrap().process().await.unwrap();
+                clients.after_round(view, groups).await.unwrap();
+            }
+        }
+        // Taken while there is room, and while only other limits are full.
+        clients.handle(request(ApiKey::PRODUCE, idempotent_request("a", 0)), &view(&none), &mut groups).await.unwrap();
+        rounds(&mut clients, &view(&none), &mut groups).await;
+        clients.handle(request(ApiKey::PRODUCE, produce_request("b")), &view(&other_full), &mut groups).await.unwrap();
+        rounds(&mut clients, &view(&other_full), &mut groups).await;
+        let got: Vec<ErrorCode> = produced(&outbox).into_iter().map(|(e, _)| e).collect();
+        assert_eq!(
+            got,
+            [ErrorCode::NONE, ErrorCode::NONE],
+            "another tenant's or another prefix's limit is not this one"
+        );
+
+        // a_full_tenant_refuses_new_data and a_duplicate_of_a_taken_batch_is_still_written.
+        let full = view(&tenant_full);
+        for req in [idempotent_request("c", 1), idempotent_request("a", 0)] {
+            clients.handle(request(ApiKey::PRODUCE, req), &full, &mut groups).await.unwrap();
+        }
+        rounds(&mut clients, &full, &mut groups).await;
+        let mut got = produced(&outbox);
+        got.sort_by_key(|(e, _)| e.0);
+        assert_eq!(got[0], (ErrorCode::NONE, None), "the retry is answered as written");
+        assert_eq!(got[1].0, ErrorCode::QUOTA_EXCEEDED);
+        let why = got[1].1.clone().unwrap_or_default();
+        assert!(why.contains("tenant \"default\"") && why.contains("nothing was written"), "{why}");
+
+        // a_full_prefix_refuses_only_its_names.
+        let full = view(&prefix_full);
+        clients.handle(request(ApiKey::PRODUCE, produce_request("d")), &full, &mut groups).await.unwrap();
+        rounds(&mut clients, &full, &mut groups).await;
+        let got = produced(&outbox);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, ErrorCode::QUOTA_EXCEEDED);
+        assert!(got[0].1.as_deref().is_some_and(|m| m.contains("prefix \"orders.\"")), "{got:?}");
+
+        // Dead letters stay owed in their source.
+        let Request::Produce(x) = produce_request("x") else { unreachable!() };
+        let record = Batch::parse(&x.resources[0].partitions[0].batch).unwrap().0.records().unwrap().remove(0);
+        let info = lotse_record::DeadLetterInfo {
+            queue: "orders.other",
+            queue_id: 8,
+            offset: 3,
+            floor: 0,
+            reason: lotse_record::dead_letter::Reason::Expired,
+            deliveries: 1,
+        };
+        let letter = lotse_record::dead_letter_item(&record, info).unwrap();
+        let dead = Request::DeadLetter(lotse_proto::DeadLetterRequest { queue_id: 7, batches: vec![letter] });
+        clients.handle(request(ApiKey::DEAD_LETTER, dead), &full, &mut groups).await.unwrap();
+        let (r, _) = drain(&outbox, ApiKey::DEAD_LETTER);
+        assert!(matches!(&r[..], [Response::Outcome(o)] if o.error == ErrorCode::QUOTA_EXCEEDED), "{r:?}");
+
+        // acks_and_reads_pass_in_a_full_tenant: an ack is no new data.
+        let full = view(&tenant_full);
+        let ack = Request::Ack(lotse_proto::AckRequest::plain(7, vec![(0, 1)]));
+        clients.handle(request(ApiKey::ACK, ack), &full, &mut groups).await.unwrap();
+        rounds(&mut clients, &full, &mut groups).await;
+        let (r, _) = drain(&outbox, ApiKey::ACK);
+        assert!(matches!(&r[..], [Response::Outcome(o)] if o.error == ErrorCode::NONE), "{r:?}");
+
+        // a_refused_sequence_stays_free: room again, the refused batch goes in.
+        clients.handle(request(ApiKey::PRODUCE, idempotent_request("c", 1)), &view(&none), &mut groups).await.unwrap();
+        rounds(&mut clients, &view(&none), &mut groups).await;
+        assert_eq!(produced(&outbox), [(ErrorCode::NONE, None)]);
+    });
+}
+
 /// Zones of five nodes: the leader (1) in `a`, nodes 2 and 3 in `b`, node 4
 /// in `c`, node 5 in none.
 fn five_zones() -> BTreeMap<NodeId, String> {

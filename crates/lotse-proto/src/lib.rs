@@ -189,6 +189,10 @@ impl ApiKey {
     pub const DESCRIBE_TOKENS: ApiKey = ApiKey(67);
     /// Revokes an access token by id.
     pub const REVOKE_TOKEN: ApiKey = ApiKey(68);
+    /// Sets or removes a storage limit (ADR 0147).
+    pub const ALTER_QUOTA: ApiKey = ApiKey(69);
+    /// The storage limits and usage the asker may see (ADR 0147).
+    pub const DESCRIBE_QUOTAS: ApiKey = ApiKey(70);
     /// Publishes messages through exchanges; the node routes (ADR 0079).
     pub const PUBLISH: ApiKey = ApiKey(9);
     /// Subscribes to a queue.
@@ -213,7 +217,7 @@ impl ApiKey {
     pub const WRITE_TXN_MARKERS: ApiKey = ApiKey(1000);
 
     /// The keys this crate encodes, with their version range.
-    pub const SUPPORTED: [ApiVersionRange; 68] = [
+    pub const SUPPORTED: [ApiVersionRange; 70] = [
         ApiVersionRange { api_key: ApiKey::API_VERSIONS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::METADATA, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::FIND_COORDINATOR, min: 0, max: 0 },
@@ -281,6 +285,8 @@ impl ApiKey {
         ApiVersionRange { api_key: ApiKey::CREATE_TOKEN, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::DESCRIBE_TOKENS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::REVOKE_TOKEN, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::ALTER_QUOTA, min: 0, max: 0 },
+        ApiVersionRange { api_key: ApiKey::DESCRIBE_QUOTAS, min: 0, max: 0 },
         ApiVersionRange { api_key: ApiKey::PUBLISH, min: 0, max: 0 },
     ];
 }
@@ -623,6 +629,10 @@ pub enum Request {
     DescribeTokens(DescribeTokensRequest),
     /// [`ApiKey::REVOKE_TOKEN`].
     RevokeToken(RevokeTokenRequest),
+    /// [`ApiKey::ALTER_QUOTA`].
+    AlterQuota(AlterQuotaRequest),
+    /// [`ApiKey::DESCRIBE_QUOTAS`].
+    DescribeQuotas(DescribeQuotasRequest),
     /// [`ApiKey::PUBLISH`].
     Publish(PublishRequest),
 }
@@ -698,6 +708,8 @@ impl Request {
             Request::CreateToken(_) => ApiKey::CREATE_TOKEN,
             Request::DescribeTokens(_) => ApiKey::DESCRIBE_TOKENS,
             Request::RevokeToken(_) => ApiKey::REVOKE_TOKEN,
+            Request::AlterQuota(_) => ApiKey::ALTER_QUOTA,
+            Request::DescribeQuotas(_) => ApiKey::DESCRIBE_QUOTAS,
             Request::Publish(_) => ApiKey::PUBLISH,
         }
     }
@@ -758,6 +770,8 @@ pub enum Response {
     CreateToken(CreateTokenResponse),
     /// Answer to [`Request::DescribeTokens`].
     DescribeTokens(DescribeTokensResponse),
+    /// Answer to [`Request::DescribeQuotas`].
+    DescribeQuotas(DescribeQuotasResponse),
     /// Answer to [`Request::RenewCertificate`].
     RenewCertificate(RenewCertificateResponse),
     /// Answer to [`Request::DescribeCertificateRequests`].
@@ -934,6 +948,8 @@ pub fn encode_request_tagged(correlation_id: u32, tags: &FrameTags, request: &Re
         Request::CreateToken(r) => r.put(&mut w),
         Request::DescribeTokens(r) => r.put(&mut w),
         Request::RevokeToken(r) => r.put(&mut w),
+        Request::AlterQuota(r) => r.put(&mut w),
+        Request::DescribeQuotas(r) => r.put(&mut w),
         Request::Publish(r) => r.put(&mut w),
     }
     w.finish()
@@ -1032,6 +1048,8 @@ pub fn decode_request_tagged(frame: Bytes) -> Result<(RequestHeader, FrameTags, 
         ApiKey::CREATE_TOKEN => Request::CreateToken(CreateTokenRequest::get(&mut r)?),
         ApiKey::DESCRIBE_TOKENS => Request::DescribeTokens(DescribeTokensRequest::get(&mut r)?),
         ApiKey::REVOKE_TOKEN => Request::RevokeToken(RevokeTokenRequest::get(&mut r)?),
+        ApiKey::ALTER_QUOTA => Request::AlterQuota(AlterQuotaRequest::get(&mut r)?),
+        ApiKey::DESCRIBE_QUOTAS => Request::DescribeQuotas(DescribeQuotasRequest::get(&mut r)?),
         ApiKey::PUBLISH => Request::Publish(PublishRequest::get(&mut r)?),
         _ => unreachable!("checked against SUPPORTED"),
     };
@@ -1076,6 +1094,7 @@ pub fn encode_response_tagged(correlation_id: u32, tags: &FrameTags, response: &
         Response::DescribeUpgrade(r) => r.put(&mut w),
         Response::CreateToken(r) => r.put(&mut w),
         Response::DescribeTokens(r) => r.put(&mut w),
+        Response::DescribeQuotas(r) => r.put(&mut w),
         Response::RenewCertificate(r) => r.put(&mut w),
         Response::DescribeCertificateRequests(r) => r.put(&mut w),
         Response::DescribeTenants(r) => r.put(&mut w),
@@ -1201,6 +1220,7 @@ pub fn decode_response_tagged(frame: Bytes, api_key: ApiKey) -> Result<(u32, Fra
         | ApiKey::REPORT_VERSION
         | ApiKey::ALTER_UPGRADE
         | ApiKey::REVOKE_TOKEN
+        | ApiKey::ALTER_QUOTA
         | ApiKey::REQUEST_CERTIFICATE
         | ApiKey::RECORD_CERTIFICATE
         | ApiKey::REASSIGN_PARTITION
@@ -1216,6 +1236,7 @@ pub fn decode_response_tagged(frame: Bytes, api_key: ApiKey) -> Result<(u32, Fra
         ApiKey::DESCRIBE_UPGRADE => Response::DescribeUpgrade(DescribeUpgradeResponse::get(&mut r)?),
         ApiKey::CREATE_TOKEN => Response::CreateToken(CreateTokenResponse::get(&mut r)?),
         ApiKey::DESCRIBE_TOKENS => Response::DescribeTokens(DescribeTokensResponse::get(&mut r)?),
+        ApiKey::DESCRIBE_QUOTAS => Response::DescribeQuotas(DescribeQuotasResponse::get(&mut r)?),
         ApiKey::RENEW_CERTIFICATE => Response::RenewCertificate(RenewCertificateResponse::get(&mut r)?),
         ApiKey::DESCRIBE_CERTIFICATE_REQUESTS => {
             Response::DescribeCertificateRequests(DescribeCertificateRequestsResponse::get(&mut r)?)

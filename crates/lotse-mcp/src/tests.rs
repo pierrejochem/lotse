@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 
-const NAMES: [&str; 23] = [
+const NAMES: [&str; 25] = [
     "cluster_overview",
     "list_resources",
     "describe_stream",
@@ -11,6 +11,7 @@ const NAMES: [&str; 23] = [
     "node_metrics",
     "list_sessions",
     "describe_upgrade",
+    "describe_quotas",
     "read_stream",
     "produce",
     "publish",
@@ -22,6 +23,7 @@ const NAMES: [&str; 23] = [
     "unbind",
     "alter_configs",
     "create_partitions",
+    "set_quota",
     "delete_resource",
     "purge_queue",
     "requeue_dead_letters",
@@ -47,6 +49,7 @@ fn tools_are_listed_in_a_fixed_order_with_schemas() {
         "node_metrics",
         "list_sessions",
         "describe_upgrade",
+        "describe_quotas",
         "read_stream",
         "list_offsets",
         "list_tokens",

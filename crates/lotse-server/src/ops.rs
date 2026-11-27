@@ -123,6 +123,38 @@ pub struct Observation {
     /// Whether the scraper that asked may read the metrics: they name every
     /// tenant's resources (ADR 0021).
     pub may_scrape: bool,
+    /// Storage limits as this node's replica of the metadata group has
+    /// applied them (ADR 0147).
+    pub quotas: Vec<QuotaGauge>,
+    /// On the metadata leader, what its last count found for every limit
+    /// and every tenant (its own limit or not, prefix empty); `None`
+    /// elsewhere and before the first count.
+    pub quota_usage: Option<Vec<QuotaUsage>>,
+}
+
+/// One storage limit on `/metrics` (ADR 0147).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaGauge {
+    /// The tenant.
+    pub tenant: String,
+    /// The name prefix; empty for the tenant's own limit.
+    pub prefix: String,
+    /// The limit, bytes.
+    pub bytes: u64,
+    /// Whether it is recorded full.
+    pub full: bool,
+}
+
+/// What the metadata leader's last count found for a limit or a tenant
+/// (ADR 0147).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaUsage {
+    /// The tenant.
+    pub tenant: String,
+    /// The name prefix; empty for the tenant as a whole.
+    pub prefix: String,
+    /// Bytes used, every voter replica counted.
+    pub used_bytes: u64,
 }
 
 impl Observation {
@@ -209,6 +241,31 @@ pub fn render(obs: &Observation) -> String {
     out.family("lotse_tokens", "gauge", "Access tokens that have not expired, as this node has applied them.", "");
     if let Some(n) = obs.tokens {
         out.sample("lotse_tokens", &node, n);
+    }
+    let quota = |t: &str, p: &str| -> Vec<(&str, String)> {
+        vec![("node", obs.node_id.to_string()), ("tenant", t.to_string()), ("prefix", p.to_string())]
+    };
+    out.family(
+        "lotse_quota_bytes",
+        "gauge",
+        "Storage limits, every replica counted, as this node has applied them.",
+        "bytes",
+    );
+    for q in &obs.quotas {
+        out.sample("lotse_quota_bytes", &quota(&q.tenant, &q.prefix), q.bytes);
+    }
+    out.family("lotse_quota_full", "gauge", "1 while a storage limit is full and new data under it is refused.", "");
+    for q in &obs.quotas {
+        out.sample("lotse_quota_full", &quota(&q.tenant, &q.prefix), u64::from(q.full));
+    }
+    out.family(
+        "lotse_quota_used_bytes",
+        "gauge",
+        "Storage used under each limit and by each tenant, every replica counted, at the metadata leader's last count.",
+        "bytes",
+    );
+    for u in obs.quota_usage.iter().flatten() {
+        out.sample("lotse_quota_used_bytes", &quota(&u.tenant, &u.prefix), u.used_bytes);
     }
     out.family("lotse_token_sign_ins", "counter", "Sign-ins with an access token on this node, by result.", "");
     for (result, n) in [("ok", obs.token_sign_ins_ok), ("failed", obs.token_sign_ins_failed)] {

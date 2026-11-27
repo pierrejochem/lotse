@@ -63,7 +63,15 @@ pub(crate) struct NodeView<'a> {
     /// Nodes whose disk is below their limit (ADR 0122): those the metadata
     /// group recorded, and this node itself at once when it is.
     pub(crate) disk_low: &'a std::collections::BTreeSet<NodeId>,
+    /// Storage limits the metadata group recorded full (ADR 0147), by
+    /// tenant and prefix; the empty prefix is the tenant's own.
+    pub(crate) quotas_full: &'a std::collections::BTreeSet<(String, String)>,
+    /// On the metadata leader: when it last counted storage usage, ms
+    /// since the Unix epoch, and what it found (ADR 0147).
+    pub(crate) quota_usage: Option<&'a (u64, crate::quota::Usage)>,
 }
+
+static NO_FULL_QUOTAS: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
 
 static NO_LOW: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
 
@@ -90,6 +98,8 @@ impl Default for NodeView<'_> {
             token_sign_ins: &NO_SIGN_INS,
             disk: None,
             disk_low: &NO_LOW,
+            quotas_full: &NO_FULL_QUOTAS,
+            quota_usage: None,
         }
     }
 }
@@ -387,6 +397,34 @@ impl Clients {
             token_sign_ins_ok,
             token_sign_ins_failed,
             may_scrape: false,
+            quotas: metadata
+                .map(|state| {
+                    state
+                        .quotas
+                        .iter()
+                        .map(|((tenant, prefix), q)| crate::ops::QuotaGauge {
+                            tenant: tenant.clone(),
+                            prefix: prefix.clone(),
+                            bytes: q.bytes,
+                            full: q.full,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            quota_usage: view.node.quota_usage.map(|(_, u)| {
+                let tenants = u.per_tenant.iter().map(|(t, n)| (t.clone(), String::new(), *n));
+                let limits = u
+                    .per_limit
+                    .iter()
+                    .filter(|((_, p), _)| !p.is_empty())
+                    .map(|((t, p), n)| (t.clone(), p.clone(), *n));
+                let mut all: Vec<crate::ops::QuotaUsage> = tenants
+                    .chain(limits)
+                    .map(|(tenant, prefix, used_bytes)| crate::ops::QuotaUsage { tenant, prefix, used_bytes })
+                    .collect();
+                all.sort_by(|a, b| (&a.tenant, &a.prefix).cmp(&(&b.tenant, &b.prefix)));
+                all
+            }),
         }
     }
 }

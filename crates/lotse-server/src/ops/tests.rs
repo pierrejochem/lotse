@@ -161,6 +161,7 @@ fn metrics_render_as_openmetrics() {
         token_sign_ins_ok: 6,
         token_sign_ins_failed: 2,
         may_scrape: true,
+        ..Observation::default()
     };
     let text = render(&obs);
     assert!(text.contains("lotse_certificate_requests_pending{node=\"1\"} 3\n"));
@@ -213,4 +214,34 @@ fn metrics_render_as_openmetrics() {
             );
         }
     }
+}
+
+#[test]
+fn quota_metrics_render() {
+    let limits = vec![
+        QuotaGauge { tenant: "shop".into(), prefix: String::new(), bytes: 1_000, full: false },
+        QuotaGauge { tenant: "shop".into(), prefix: "orders.\"x".into(), bytes: 500, full: true },
+    ];
+    let usage = vec![
+        QuotaUsage { tenant: "lab".into(), prefix: String::new(), used_bytes: 7 },
+        QuotaUsage { tenant: "shop".into(), prefix: String::new(), used_bytes: 700 },
+        QuotaUsage { tenant: "shop".into(), prefix: "orders.\"x".into(), used_bytes: 600 },
+    ];
+    let leader = Observation { node_id: 2, quotas: limits.clone(), quota_usage: Some(usage), ..Observation::default() };
+    let text = render(&leader);
+    for line in [
+        "# TYPE lotse_quota_bytes gauge",
+        "lotse_quota_bytes{node=\"2\",tenant=\"shop\",prefix=\"\"} 1000",
+        "lotse_quota_bytes{node=\"2\",tenant=\"shop\",prefix=\"orders.\\\"x\"} 500",
+        "lotse_quota_full{node=\"2\",tenant=\"shop\",prefix=\"\"} 0",
+        "lotse_quota_full{node=\"2\",tenant=\"shop\",prefix=\"orders.\\\"x\"} 1",
+        "lotse_quota_used_bytes{node=\"2\",tenant=\"lab\",prefix=\"\"} 7",
+        "lotse_quota_used_bytes{node=\"2\",tenant=\"shop\",prefix=\"orders.\\\"x\"} 600",
+    ] {
+        assert!(text.lines().any(|l| l == line), "missing {line:?} in:\n{text}");
+    }
+    let follower = Observation { node_id: 3, quotas: limits, quota_usage: None, ..Observation::default() };
+    let text = render(&follower);
+    assert!(text.contains("lotse_quota_full{node=\"3\""), "every node reports the limits it applied");
+    assert!(!text.lines().any(|l| l.starts_with("lotse_quota_used_bytes{")), "only the metadata leader counts usage");
 }

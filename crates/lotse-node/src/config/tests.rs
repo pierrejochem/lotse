@@ -219,3 +219,17 @@ fn segment_ms_has_a_default_and_a_floor() {
     let short = THREE.replace("[cluster]\n", "[cluster]\nsegment_ms = 59999\n");
     assert!(err(&short).contains("segment_ms"), "{}", err(&short));
 }
+
+#[test]
+fn check_interval_ms_is_read_and_bounded() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.quota_check_interval, Duration::from_secs(10), "ten seconds by default");
+    let set = format!("{THREE}\n[quotas]\ncheck_interval_ms = 2000\n");
+    let c = ClusterFile::parse(&set, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.quota_check_interval, Duration::from_millis(2_000));
+    for bad in [999, 600_001] {
+        let text = format!("{THREE}\n[quotas]\ncheck_interval_ms = {bad}\n");
+        assert!(err(&text).contains("quotas.check_interval_ms"), "{}", err(&text));
+    }
+    assert!(ClusterFile::parse(&format!("{THREE}\n[quotas]\ninterval = 1\n"), "t").is_err(), "an unknown key");
+}

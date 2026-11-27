@@ -171,6 +171,7 @@ async fn the_console_shows_a_real_cluster() {
             // One byte: whatever the machine's disk, never low (ADR 0122).
             disk_free_limit: lotse_server::FreeLimit { bytes: 1, permille: 0 },
             disk_check_interval: lotse_server::DEFAULT_DISK_CHECK_INTERVAL,
+            quota_check_interval: lotse_server::DEFAULT_QUOTA_CHECK_INTERVAL,
             versions: Default::default(),
             retention: lotse_server::RetentionConfig::keep(),
             join: false,

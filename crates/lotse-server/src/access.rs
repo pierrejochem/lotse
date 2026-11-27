@@ -298,6 +298,24 @@ impl Access {
                 Principal::User { .. } => Ok(()),
                 _ => admin(),
             },
+            // Storage limits (ADR 0147): a tenant's own limit is a cluster
+            // admin's; a prefix limit also a tenant admin's under their
+            // binding. Judged here on any node, so a refusal does not wait
+            // for the metadata leader; whether a cluster admin set the
+            // limit only the metadata state knows, so the handler judges
+            // that. Anyone lists what they may see.
+            Request::AlterQuota(r) if r.prefix.is_empty() => admin(),
+            Request::AlterQuota(r) => {
+                if self.cluster_admin(p) || self.may(p, Admin, &r.tenant, &r.prefix) {
+                    Ok(())
+                } else {
+                    Err(format!("{p} has no role that allows a limit on {:?} in tenant {}", r.prefix, r.tenant))
+                }
+            }
+            Request::DescribeQuotas(_) => match p {
+                Principal::User { .. } => Ok(()),
+                _ => admin(),
+            },
             // A user asks in their own name and sees their own requests; a
             // cluster admin asks for anyone and sees all (ADR 0119).
             Request::RequestCertificate(r) => match p {

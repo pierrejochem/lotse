@@ -74,6 +74,7 @@ mod offsets;
 mod publish;
 pub(crate) use nodes::{managed_groups, moving};
 mod queues;
+mod quotas;
 mod retire;
 mod session;
 mod sessions;
@@ -428,6 +429,34 @@ impl ClusterView<'_> {
         Some(format!("{who} less free disk space than the limit; nothing was written, try again later"))
     }
 
+    /// Why a group takes no new data now because a storage limit over its
+    /// resource is full (ADR 0147): its tenant's own limit, or a prefix
+    /// limit its name starts with. Asked, like the disk, only about batches
+    /// new to the leader.
+    pub(crate) fn quota_full(&self, g: GroupId) -> Option<String> {
+        if self.node.quotas_full.is_empty() {
+            return None;
+        }
+        let (id, _) = self.resource_of(g)?;
+        let (name, tenant) = self.access.resources.get(&id)?;
+        if self.node.quotas_full.contains(&(tenant.clone(), String::new())) {
+            return Some(format!(
+                "the storage limit of tenant {tenant:?} is reached; nothing was written. Free space or raise the limit"
+            ));
+        }
+        let prefix = self
+            .node
+            .quotas_full
+            .range((tenant.clone(), String::new())..)
+            .take_while(|(t, _)| t == tenant)
+            .find(|(_, p)| !p.is_empty() && name.starts_with(p.as_str()))?;
+        Some(format!(
+            "the storage limit of prefix {:?} in tenant {tenant:?} is reached; nothing was written. Free space or \
+             raise the limit",
+            prefix.1
+        ))
+    }
+
     /// The stream or queue partition a group serves.
     fn resource_of(&self, g: GroupId) -> Option<(u64, u32)> {
         if let Some(q) = self.queues.iter().find(|q| q.group == g) {
@@ -546,7 +575,9 @@ fn answer_groups(request: &Request, view: &ClusterView<'_>) -> Vec<GroupId> {
         | Request::DescribeUpgrade(_)
         | Request::CreateToken(_)
         | Request::DescribeTokens(_)
-        | Request::RevokeToken(_) => [metadata, None],
+        | Request::RevokeToken(_)
+        | Request::AlterQuota(_)
+        | Request::DescribeQuotas(_) => [metadata, None],
         Request::InitProducer(_)
         | Request::AddPartitionsToTxn(_)
         | Request::VerifyTxn(_)
@@ -821,6 +852,8 @@ impl Clients {
             Request::CreateToken(req) => self.create_token(outbox, id, req, (&principal, mechanism), view, groups),
             Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, at_least, view, groups),
             Request::RevokeToken(req) => self.revoke_token(outbox, id, req, &principal, view, groups),
+            Request::AlterQuota(req) => self.alter_quota(outbox, id, req, &principal, view, groups),
+            Request::DescribeQuotas(req) => self.describe_quotas(&outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,
@@ -895,7 +928,7 @@ impl Clients {
                                 let qc = view.queues.iter().find(|q| q.group == g);
                                 let gate = qc.and_then(|qc| self.gate(qc, replica));
                                 let at = (ri, pi);
-                                let admission = Admission::of(view, replica, gate.as_ref());
+                                let admission = Admission::of(view, g, replica, gate.as_ref());
                                 let (w, end) = propose_one(replica, g, batch, bytes, &mut out, at, admission);
                                 waiting.extend(w);
                                 self.took_batch(g, end, &p.batch);
@@ -1170,24 +1203,32 @@ fn settle<R: Runtime, S: StateMachine>(
 struct Admission<'a> {
     /// Why the group takes no new data now: a voter low on disk (ADR 0122).
     full: Option<String>,
+    /// Why its resource takes no new data now: a full storage limit
+    /// (ADR 0147).
+    quota: Option<String>,
     /// A queue's length limit (ADR 0118).
     gate: Option<&'a length::Gate>,
 }
 
 impl<'a> Admission<'a> {
-    /// What a new batch to `replica` must pass, with `gate` for a queue's
-    /// length limit.
+    /// What a new batch to `replica`, group `g`, must pass, with `gate` for
+    /// a queue's length limit.
     fn of<R: Runtime, S: StateMachine>(
         view: &ClusterView<'_>,
+        g: GroupId,
         replica: &Replica<R, S>,
         gate: Option<&'a length::Gate>,
     ) -> Self {
-        Admission { full: view.storage_full(replica.raft_ref().membership()), gate }
+        let quota = view.quota_full(g);
+        Admission { full: view.storage_full(replica.raft_ref().membership()), quota, gate }
     }
 
     fn check(&self, b: &Batch) -> Result<(), ProposeError> {
         if let Some(why) = &self.full {
             return Err(ProposeError::StorageFull(why.clone()));
+        }
+        if let Some(why) = &self.quota {
+            return Err(ProposeError::QuotaExceeded(why.clone()));
         }
         self.gate.map_or(Ok(()), |gate| gate.check(length::amount_of(b))).map_err(ProposeError::QueueFull)
     }
@@ -1247,6 +1288,10 @@ fn propose_one<R: Runtime, S: StateMachine>(
         }
         Err(ProposeError::StorageFull(why)) => {
             out.error = ErrorCode::STORAGE_FULL;
+            out.error_msg = Some(why);
+        }
+        Err(ProposeError::QuotaExceeded(why)) => {
+            out.error = ErrorCode::QUOTA_EXCEEDED;
             out.error_msg = Some(why);
         }
         Err(e) => {
