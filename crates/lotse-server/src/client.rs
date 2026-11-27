@@ -400,6 +400,12 @@ pub(crate) struct ClusterView<'a> {
     /// up within `follower_max_lag`, which it may name to a reader in their
     /// zone. A group with none is absent.
     pub(crate) current_voters: &'a BTreeMap<GroupId, BTreeSet<NodeId>>,
+    /// Whether this node's metadata state may be behind its leader's: it
+    /// follows the metadata group and lags (as above), or leads it and has
+    /// not applied an entry of its own term yet. Such a node does not call
+    /// a name unknown, since a resource its state lacks may well exist
+    /// (ADR 0145).
+    pub(crate) metadata_behind: bool,
 }
 
 impl ClusterView<'_> {
@@ -1605,6 +1611,19 @@ fn metadata<R: Runtime, S: StateMachine>(
                         exchange: None,
                         ..r
                     }
+                } else {
+                    r
+                }
+            })
+            // A node whose state may be behind does not know that a name is
+            // unknown: after a restart, it holds a stream its state has not
+            // applied yet. It says so with a retriable error, and the client
+            // asks the other nodes (ADR 0145). A name hidden from the
+            // principal is answered the same, so the answer gives nothing
+            // away.
+            .map(|r| {
+                if view.metadata_behind && r.error == ErrorCode::UNKNOWN_RESOURCE {
+                    ResourceMetadata { error: ErrorCode::NOT_LEADER, ..r }
                 } else {
                     r
                 }

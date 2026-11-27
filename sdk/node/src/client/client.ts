@@ -406,6 +406,11 @@ export class LotseClient {
         const m = await this.call(addr, { type: "Metadata", names: asked });
         if (m.type === "Metadata") {
           this.learn(m);
+          // A broker whose metadata may be behind its leader's answers a name it lacks with a
+          // retriable error (ADR 0145): it has not answered for that name.
+          if (m.resources.some((r) => isRetriable(r.error))) {
+            allAnswered = false;
+          }
           mergeNewest(merged, m.resources);
         } else {
           allAnswered = false;

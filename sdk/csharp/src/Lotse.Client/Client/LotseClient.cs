@@ -229,6 +229,12 @@ public sealed partial class LotseClient : IDisposable, IAsyncDisposable
                 if (await CallAsync(addr, new Request.Metadata(asked), ct).ConfigureAwait(false) is Response.Metadata m)
                 {
                     Learn(m);
+                    // A broker whose metadata may be behind its leader's answers a name it lacks with a
+                    // retriable error (ADR 0145): it has not answered for that name.
+                    if (m.Resources.Any(r => r.Error.Retriable))
+                    {
+                        all = false;
+                    }
                     MergeNewest(merged, m.Resources);
                 }
                 else

@@ -60,6 +60,11 @@ final class Fx {
         return new ResourceMetadata(ErrorCode.NONE, name, "default", id, Messages.ResourceKind.STREAM, List.of(partitions), null);
     }
 
+    /** A name a broker whose metadata may be behind does not call unknown (ADR 0145). */
+    static ResourceMetadata behind(String name) {
+        return new ResourceMetadata(ErrorCode.NOT_LEADER, name, "", 0, Messages.ResourceKind.STREAM, List.of(), null);
+    }
+
     static ResourceMetadata unknown(String name) {
         return new ResourceMetadata(ErrorCode.UNKNOWN_RESOURCE, name, "", 0, Messages.ResourceKind.STREAM, List.of(), null);
     }

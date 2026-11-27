@@ -207,6 +207,83 @@ fn a_stream_is_unknown_only_once_every_broker_says_so() {
     });
 }
 
+/// After a whole cluster restarted, every broker answers, but one whose
+/// metadata may be behind its leader's answers the name with `NOT_LEADER`
+/// (ADR 0145): that is not a broker saying the stream is unknown. The client
+/// tries again until that broker has caught up and knows it.
+#[test]
+fn a_broker_behind_does_not_make_a_stream_unknown() {
+    use lotse_proto::{
+        MetadataResponse, PartitionMetadata, ProducePartitionResponse, ProduceResourceResponse, ProduceResponse,
+        Request, Response,
+    };
+    use lotse_rt::Clock as _;
+    use std::sync::{Arc, Mutex};
+    lotse_sim::Sim::new(1).run(|rt| async move {
+        let all = brokers(&[(1, "a"), (2, "b")]);
+        let unknown = all.clone();
+        serve(&rt, "a", move |_| {
+            Response::Metadata(MetadataResponse {
+                brokers: unknown.clone(),
+                resources: vec![ResourceMetadata { error: ErrorCode::UNKNOWN_RESOURCE, ..resource("s", 0) }],
+            })
+        });
+        // b answers at once, behind for its first second, then caught up.
+        let caught_up = Arc::new(Mutex::new(None));
+        let clock = rt.clone();
+        serve(&rt, "b", move |r| {
+            let start = *caught_up.lock().unwrap().get_or_insert(clock.now());
+            let behind = clock.now() - start < std::time::Duration::from_secs(1);
+            match r {
+                Request::Produce(_) => Response::Produce(ProduceResponse {
+                    throttle_ms: 0,
+                    resources: vec![ProduceResourceResponse {
+                        resource_id: 7,
+                        partitions: vec![ProducePartitionResponse {
+                            partition: 0,
+                            error: ErrorCode::NONE,
+                            base_offset: 41,
+                            append_ts: -1,
+                            error_msg: None,
+                            leader_hint: None,
+                        }],
+                    }],
+                }),
+                _ if behind => Response::Metadata(MetadataResponse {
+                    brokers: all.clone(),
+                    resources: vec![ResourceMetadata { error: ErrorCode::NOT_LEADER, ..resource("s", 0) }],
+                }),
+                _ => Response::Metadata(MetadataResponse {
+                    brokers: all.clone(),
+                    resources: vec![ResourceMetadata {
+                        partitions: vec![PartitionMetadata {
+                            partition: 0,
+                            leader: 2,
+                            leader_term: 1,
+                            voters: vec![1, 2],
+                            pinned_leader: 0,
+                            placed: false,
+                        }],
+                        ..resource("s", 7)
+                    }],
+                }),
+            }
+        });
+        let client = crate::Client::new(
+            rt.node("client"),
+            crate::ClientConfig {
+                retry_for: std::time::Duration::from_secs(5),
+                idempotent: false,
+                ..crate::ClientConfig::new(vec!["a:9000".into(), "b:9000".into()])
+            },
+        );
+        let mut b = lotse_record::BatchBuilder::new(lotse_record::BatchOptions::default());
+        b.push(0, None, Some(b"v"), &[]);
+        let offset = client.produce("s", 0, b.finish().unwrap()).await.expect("b catches up in time");
+        assert_eq!(offset, 41);
+    });
+}
+
 /// What `create_token` sends is the hash of the secret and nothing else of
 /// it: the cluster never sees the secret, and the text the caller gets
 /// carries the id the cluster chose.
