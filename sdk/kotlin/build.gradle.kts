@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "dev.lotse"
-version = "0.1.1"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
@@ -17,7 +17,7 @@ repositories {
 
 dependencies {
     // The Java core (substituted by the included build) and coroutines: the layer's only dependencies.
-    api("dev.lotse:lotse-client:0.1.1")
+    api("dev.lotse:lotse-client:0.2.0")
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
