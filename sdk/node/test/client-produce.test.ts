@@ -339,6 +339,16 @@ describe("produce against a scripted broker", () => {
     });
   });
 
+  test("a full storage limit after a lost attempt is reported as unknown", async () => {
+    // ADR 0147: the same refusal as a full queue; the lost attempt may still commit.
+    serve((n) => (n === 1 ? DROP : fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUOTA_EXCEEDED)));
+    await assert.rejects(client(true).produce("s", 0, messages(1)), (e: unknown) => {
+      assert.ok(e instanceof UnknownOutcomeError);
+      assert.match(e.message, /may have been carried out/);
+      return true;
+    });
+  });
+
   test("produce to the same partition is serialised and to others is not", async () => {
     let release!: () => void;
     const released = new Promise<void>((r) => {

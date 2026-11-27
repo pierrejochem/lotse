@@ -457,14 +457,15 @@ public final class LotseClient implements AutoCloseable {
                 switch (a.kind) {
                     case FAIL -> {
                         // A failed login or a refusal now says nothing of an earlier attempt whose answer was lost:
-                        // that one may have been carried out. So does a full queue (ADR 0118): an earlier attempt
-                        // may commit at a leader that has it in its log. (An answer about the request itself, such
-                        // as RESOURCE_EXISTS, is the caller's to read.)
+                        // that one may have been carried out. So does a full queue (ADR 0118) or a full storage
+                        // limit (ADR 0147): an earlier attempt may commit at a leader that has it in its log. (An
+                        // answer about the request itself, such as RESOURCE_EXISTS, is the caller's to read.)
                         ClientException e = a.error;
                         boolean refusal = e instanceof ClientException.Authentication
                                 || (e instanceof ClientException.Broker b
                                         && (b.code().equals(ErrorCode.UNAUTHORIZED)
-                                                || b.code().equals(ErrorCode.QUEUE_FULL)));
+                                                || b.code().equals(ErrorCode.QUEUE_FULL)
+                                                || b.code().equals(ErrorCode.QUOTA_EXCEEDED)));
                         if (maybeDone && refusal) {
                             throw new ClientException.Unknown(
                                     "an earlier attempt may have been carried out; then " + e.getMessage());

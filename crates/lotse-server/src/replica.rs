@@ -950,14 +950,15 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
                 now_ms
             }
         };
-        if now_ms.saturating_sub(since) < age || !self.log.roll().await? {
+        // Roll only with everything applied, so a boundary is noted at the new
+        // segment's base: applying never reaches a base no batch starts at,
+        // and a quiet log could then never be cut. A later pass rolls.
+        let next = self.log.next_offset();
+        if now_ms.saturating_sub(since) < age || self.applied != next || !self.log.roll().await? {
             return Ok(());
         }
         self.active_since = None;
-        let next = self.log.next_offset();
-        if self.applied == next {
-            self.note_boundary(next).await?;
-        }
+        self.note_boundary(next).await?;
         Ok(())
     }
 

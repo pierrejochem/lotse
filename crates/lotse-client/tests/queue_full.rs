@@ -1,7 +1,8 @@
 //! A queue at its length limit refuses with `QUEUE_FULL` (ADR 0118):
 //! nothing was written, so the sequence stays free; but after an attempt
 //! whose answer was lost the refusal says nothing about that attempt, which
-//! may still commit, and the produce's outcome is unknown. Against a
+//! may still commit, and the produce's outcome is unknown. A full storage
+//! limit (`QUOTA_EXCEEDED`, ADR 0147) is the same refusal. Against a
 //! scripted broker on the simulated network.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,8 +25,10 @@ struct Script {
     swallow_then: AtomicU64,
     /// Swallow this many produces: their answers are lost.
     swallow: AtomicU64,
-    /// Answer this many produces with `QUEUE_FULL`.
+    /// Answer this many produces with `refusal`.
     full: AtomicU64,
+    /// The refusal: `QUEUE_FULL` or `QUOTA_EXCEEDED`.
+    refusal: Mutex<ErrorCode>,
     /// Every produce: resource id, producer id, base sequence.
     seen: Mutex<Vec<(u64, u64, i32)>>,
 }
@@ -94,7 +97,7 @@ async fn broker(rt: SimRuntime, script: Arc<Script>) {
                             continue; // the answer is lost: written or not, nobody knows
                         }
                         let error = if full {
-                            ErrorCode::QUEUE_FULL
+                            *script.refusal.lock().unwrap()
                         } else if id == script.current.load(Ordering::Relaxed) {
                             ErrorCode::NONE
                         } else {
@@ -131,8 +134,8 @@ fn batch() -> Bytes {
     b.finish().unwrap()
 }
 
-fn setup(rt: &SimRuntime) -> (Arc<Script>, Client<SimRuntime>) {
-    let script = Arc::new(Script { current: AtomicU64::new(7), ..Script::default() });
+fn setup(rt: &SimRuntime, refusal: ErrorCode) -> (Arc<Script>, Client<SimRuntime>) {
+    let script = Arc::new(Script { current: AtomicU64::new(7), refusal: Mutex::new(refusal), ..Script::default() });
     drop(rt.spawn(broker(rt.node("b1"), script.clone())));
     let client = Client::new(
         rt.node("c1"),
@@ -145,18 +148,37 @@ fn setup(rt: &SimRuntime) -> (Arc<Script>, Client<SimRuntime>) {
     (script, client)
 }
 
-fn full(r: &Result<u64, ClientError>) -> bool {
-    matches!(r, Err(ClientError::Broker { code, .. }) if *code == ErrorCode::QUEUE_FULL)
+fn refused(r: &Result<u64, ClientError>, refusal: ErrorCode) -> bool {
+    matches!(r, Err(ClientError::Broker { code, .. }) if *code == refusal)
 }
 
 #[test]
 fn a_full_queue_refuses_and_the_sequence_stays_free() {
-    Sim::new(1).run(|rt| async move {
-        let (script, client) = setup(&rt);
+    refuses_and_the_sequence_stays_free(ErrorCode::QUEUE_FULL);
+}
+
+#[test]
+fn a_full_storage_limit_refuses_and_the_sequence_stays_free() {
+    refuses_and_the_sequence_stays_free(ErrorCode::QUOTA_EXCEEDED);
+}
+
+#[test]
+fn a_full_queue_after_an_attempt_in_doubt_leaves_the_outcome_unknown() {
+    after_an_attempt_in_doubt_the_outcome_is_unknown(ErrorCode::QUEUE_FULL);
+}
+
+#[test]
+fn a_full_storage_limit_after_an_attempt_in_doubt_leaves_the_outcome_unknown() {
+    after_an_attempt_in_doubt_the_outcome_is_unknown(ErrorCode::QUOTA_EXCEEDED);
+}
+
+fn refuses_and_the_sequence_stays_free(refusal: ErrorCode) {
+    Sim::new(1).run(move |rt| async move {
+        let (script, client) = setup(&rt, refusal);
         client.produce("s", 0, batch()).await.unwrap();
         script.full.store(1, Ordering::Relaxed);
         let r = client.produce("s", 0, batch()).await;
-        assert!(full(&r), "refused at once, not retried: {r:?}");
+        assert!(refused(&r, refusal), "refused at once, not retried: {r:?}");
         client.produce("s", 0, batch()).await.unwrap();
         let seen = script.seen.lock().unwrap().clone();
         assert_eq!(seen, [(7, 10, 0), (7, 10, 1), (7, 10, 1)], "the refused batch's sequence is used again");
@@ -164,13 +186,12 @@ fn a_full_queue_refuses_and_the_sequence_stays_free() {
     });
 }
 
-#[test]
-fn a_full_queue_after_an_attempt_in_doubt_leaves_the_outcome_unknown() {
-    Sim::new(1).run(|rt| async move {
-        let (script, client) = setup(&rt);
+fn after_an_attempt_in_doubt_the_outcome_is_unknown(refusal: ErrorCode) {
+    Sim::new(1).run(move |rt| async move {
+        let (script, client) = setup(&rt, refusal);
         client.produce("s", 0, batch()).await.unwrap();
         // The first attempt's answer is lost; it may commit later at a
-        // leader that has it. The retry is refused as full.
+        // leader that has it. The retry is refused: full queue or limit.
         script.swallow.store(1, Ordering::Relaxed);
         script.full.store(1, Ordering::Relaxed);
         let r = client.produce("s", 0, batch()).await;

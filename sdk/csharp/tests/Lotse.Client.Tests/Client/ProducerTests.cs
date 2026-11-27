@@ -264,6 +264,16 @@ public sealed class ProducerTests : IDisposable
     }
 
     [Fact]
+    public async Task AFullStorageLimitAfterALostAttemptIsReportedAsUnknown()
+    {
+        // ADR 0147: the same refusal as a full queue; the lost attempt may still commit.
+        Serve(n => n == 1 ? throw new FakeNode.Drop() : Fx.Produced(StreamId, 0, ErrorCode.QuotaExceeded, 0));
+        LotseClient lotse = Client(true);
+        var e = await Assert.ThrowsAsync<OutcomeUnknownException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        Assert.Contains("may have been carried out", e.Message);
+    }
+
+    [Fact]
     public async Task AnOutcomeStillUnknownWhenTimeRunsOutIsReportedAndTheNextProduceGetsANewProducerId()
     {
         int phase = 0;

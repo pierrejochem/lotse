@@ -651,13 +651,17 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 Ok(v) => return Ok(v),
                 // A failed login or a refusal now says nothing of an earlier
                 // attempt whose answer was lost: that one may have been
-                // carried out. So does a full queue (ADR 0118): an earlier
-                // attempt may commit at a leader that has it in its log.
-                // (An answer about the request itself, such as
-                // RESOURCE_EXISTS, is the caller's to read.)
+                // carried out. So does a full queue (ADR 0118) or a full
+                // storage limit (ADR 0147): an earlier attempt may commit at
+                // a leader that has it in its log. (An answer about the
+                // request itself, such as RESOURCE_EXISTS, is the caller's
+                // to read.)
                 Err(Attempt::Fail(
                     e @ (ClientError::Authentication(_)
-                    | ClientError::Broker { code: ErrorCode::UNAUTHORIZED | ErrorCode::QUEUE_FULL, .. }),
+                    | ClientError::Broker {
+                        code: ErrorCode::UNAUTHORIZED | ErrorCode::QUEUE_FULL | ErrorCode::QUOTA_EXCEEDED,
+                        ..
+                    }),
                 )) if maybe_done => {
                     return Err(ClientError::Unknown(format!(
                         "an earlier attempt may have been carried out; then {e}"

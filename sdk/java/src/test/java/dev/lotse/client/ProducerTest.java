@@ -209,6 +209,20 @@ class ProducerTest {
         assertTrue(e.getMessage().contains("may have been carried out"), e.getMessage());
     }
 
+    @Test
+    void aFullStorageLimitAfterALostAttemptIsReportedAsUnknown() {
+        // ADR 0147: the same refusal as a full queue; the lost attempt may still commit.
+        serve(n -> {
+            if (n == 1) {
+                throw new FakeNode.Drop();
+            }
+            return Fx.produced(STREAM_ID, 0, ErrorCode.QUOTA_EXCEEDED, 0, null);
+        });
+        LotseClient lotse = client(true);
+        ClientException.Unknown e = assertThrows(ClientException.Unknown.class, () -> lotse.produce("s", 0, messages(1)));
+        assertTrue(e.getMessage().contains("may have been carried out"), e.getMessage());
+    }
+
     /**
      * Stream {@code s} has the resource id in {@code current}. A produce to another id is refused with NOT_LEADER
      * (nothing written), as a node that applied the delete would; with {@code swallowThen} set, the next produce's

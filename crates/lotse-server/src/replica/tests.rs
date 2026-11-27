@@ -1218,6 +1218,30 @@ fn an_aged_stream_is_cut_without_new_data() {
 }
 
 #[test]
+fn a_segment_aged_while_a_batch_waits_to_apply_is_cut_once_applied() {
+    Sim::new(63).run(|rt| async move {
+        let retention = Retention::Stream { ms: Some(1_000), bytes: None, compact: None };
+        let mut r = open_unsized(&rt, "waiting", retention).await;
+        r.set_segment_ms(Some(60_000));
+        elect(&mut r).await;
+        commit(&mut r, batch_at("v0", 0)).await;
+        r.retain(0).await.unwrap();
+        // The last batch is in the log but not applied when the segment's
+        // age is reached: no boundary could be noted at a roll then, so the
+        // segment stays open until it can be.
+        r.propose(batch_at("v1", 0)).unwrap();
+        r.process().await.unwrap();
+        r.retain(60_000).await.unwrap();
+        r.process().await.unwrap();
+        let end = r.log().next_offset();
+        // No new data comes; the stream still frees its space.
+        r.retain(61_000).await.unwrap().expect("the aged segment goes once everything is applied");
+        assert_eq!(r.log().start_offset(), end);
+        assert!(kept(&r).await.is_empty());
+    });
+}
+
+#[test]
 fn no_roll_without_a_segment_age() {
     Sim::new(62).run(|rt| async move {
         let retention = Retention::Stream { ms: None, bytes: None, compact: None };
