@@ -1853,6 +1853,34 @@ public final class LotseClient implements AutoCloseable {
     }
 
     /**
+     * Sets a storage limit in bytes, every replica counted, or removes it with {@code null} (ADR 0147): a tenant's
+     * own with an empty {@code prefix}, which needs the cluster-admin role, or one on the names that start with
+     * {@code prefix}, which a tenant admin may set under their binding's prefix too, unless a cluster admin set it.
+     * Once a limit is full, new data under it is refused with {@code QUOTA_EXCEEDED}.
+     */
+    public void alterQuota(String tenant, String prefix, Long bytes) {
+        checkOpen();
+        adminChange(new Request.AlterQuota(tenant, prefix, bytes));
+    }
+
+    /**
+     * The storage limits and usage of {@code tenant}, or of every tenant the caller may see with {@code null}
+     * (ADR 0147), from the metadata leader, which counts the usage.
+     */
+    public Response.DescribeQuotas describeQuotas(String tenant) {
+        checkOpen();
+        Request req = new Request.DescribeQuotas(tenant);
+        return retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.DescribeQuotas d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d;
+        });
+    }
+
+    /**
      * Pauses ({@code true}) or resumes ({@code false}) the cluster's restart turns (ADR 0127): while paused, no node
      * takes the next turn, and the one that holds it keeps it. Needs the cluster-admin role.
      */

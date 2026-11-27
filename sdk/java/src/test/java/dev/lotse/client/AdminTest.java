@@ -93,6 +93,9 @@ class AdminTest {
         if (r instanceof Request.DescribeCertificateRequests) {
             return new Response.DescribeCertificateRequests(ErrorCode.NOT_LEADER, hint, 0L, List.of());
         }
+        if (r instanceof Request.DescribeQuotas) {
+            return new Response.DescribeQuotas(ErrorCode.NOT_LEADER, hint, null, List.of());
+        }
         if (r instanceof Request.DescribeUpgrade) {
             return new Response.DescribeUpgrade(ErrorCode.NOT_LEADER, hint, null, false, null, List.of());
         }
@@ -289,6 +292,21 @@ class AdminTest {
         assertEquals(1, b.requests(Request.DescribeUpgrade.class).size(), "node 1 pointed to the leader");
         assertEquals(state, got);
         assertEquals(0L, got.clusterVersion(), "version 0.0 is a version, not none");
+    }
+
+    @Test
+    void alterAndDescribeQuotasReachTheMetadataLeader() {
+        // ADR 0147: limits are set and read on the leader, which counts the usage.
+        Response.DescribeQuotas state = new Response.DescribeQuotas(
+                ErrorCode.NONE, null, 5L, List.of(new Messages.QuotaEntry("shop", "", 10L, true, false, 3L)));
+        serve((n, r) -> r instanceof Request.DescribeQuotas ? state : ok());
+        client.alterQuota("shop", "orders.", 10L);
+        client.alterQuota("shop", "orders.", null);
+        assertEquals(state, client.describeQuotas("shop"));
+        assertEquals(
+                List.of(new Request.AlterQuota("shop", "orders.", 10L), new Request.AlterQuota("shop", "orders.", null)),
+                b.requests(Request.AlterQuota.class));
+        assertEquals(List.of(new Request.DescribeQuotas("shop")), b.requests(Request.DescribeQuotas.class));
     }
 
     @Test

@@ -227,6 +227,18 @@ public sealed class ProducerTests : IDisposable
     }
 
     [Fact]
+    public async Task AFullStorageLimitEndsAProduceAtOnce()
+    {
+        // ADR 0147: QUOTA_EXCEEDED is not retried; a full tenant usually stays full until someone acts.
+        Serve(n => n == 2 ? Fx.Produced(StreamId, 0, ErrorCode.QuotaExceeded, 0) : Ok());
+        LotseClient lotse = Client(true);
+        await lotse.ProduceAsync("s", 0, Fx.Msgs(1));
+        var e = await Assert.ThrowsAsync<BrokerErrorException>(() => lotse.ProduceAsync("s", 0, Fx.Msgs(1)));
+        Assert.Equal(ErrorCode.QuotaExceeded, e.Code);
+        Assert.Equal(2, _node.Requests<Request.Produce>().Count); // not asked again
+    }
+
+    [Fact]
     public async Task AFullQueueRefusesAtOnceAndTheSequenceStaysFree()
     {
         // ADR 0118: nothing was written, and the caller decides whether to try again.

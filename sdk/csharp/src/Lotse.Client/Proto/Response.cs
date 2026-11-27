@@ -1483,4 +1483,56 @@ public abstract record Response
             return new DescribeTokens(error, GetHint(r), tokens);
         }
     }
+
+    /// <summary>
+    /// <c>DescribeQuotas</c> (70): storage limits and usage, from the metadata leader (ADR 0147). The leader hint is
+    /// the structure's block of tagged fields, after the limits.
+    /// </summary>
+    /// <param name="Error">The outcome.</param>
+    /// <param name="LeaderHint">The metadata leader, after <c>NOT_LEADER</c>.</param>
+    /// <param name="CountedAtMs">When usage was last counted, ms since the epoch; <c>null</c> before the first count.</param>
+    /// <param name="Quotas">The limits, and the tenants without one.</param>
+    public sealed record DescribeQuotas(ErrorCode Error, LeaderHint? LeaderHint, ulong? CountedAtMs, IReadOnlyList<QuotaEntry> Quotas) : Response
+    {
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.U16(Error.Code);
+            PutOptional(w, CountedAtMs);
+            w.Array(Quotas, (w1, q) =>
+            {
+                w1.String(q.Tenant).String(q.Prefix);
+                PutOptional(w1, q.Bytes);
+                w1.Bool(q.SetByClusterAdmin).Bool(q.Full);
+                PutOptional(w1, q.UsedBytes);
+                w1.NoTags();
+            });
+            PutHint(w, LeaderHint);
+        }
+
+        private static void PutOptional(Writer w, ulong? v)
+        {
+            w.Bool(v.HasValue);
+            if (v.HasValue)
+            {
+                w.U64(v.Value);
+            }
+        }
+
+        private static ulong? GetOptional(Reader r) => r.Bool() ? r.U64() : null;
+
+        internal static DescribeQuotas Read(Reader r)
+        {
+            var error = new ErrorCode(r.U16());
+            ulong? countedAtMs = GetOptional(r);
+            // tenant, prefix, bytes?, two flags, used?, no tags
+            List<QuotaEntry> quotas = r.Array(2 + 2 + 1 + 1 + 1 + 1 + 1, r1 =>
+            {
+                var q = new QuotaEntry(r1.String(), r1.String(), GetOptional(r1), r1.Bool(), r1.Bool(), GetOptional(r1));
+                r1.Tags();
+                return q;
+            });
+            return new DescribeQuotas(error, GetHint(r), countedAtMs, quotas);
+        }
+    }
 }

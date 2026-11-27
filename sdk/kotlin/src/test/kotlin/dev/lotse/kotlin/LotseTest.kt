@@ -231,4 +231,28 @@ class LotseTest {
             }
         }
     }
+
+    @Test
+    fun storageLimitsAreSetAndReadFromACoroutine() = runBlocking {
+        val state = Response.DescribeQuotas(
+            ErrorCode.NONE, null, 5L, listOf(Messages.QuotaEntry("shop", "", 10L, true, false, 3L)),
+        )
+        FakeBroker { r ->
+            when (r) {
+                is Request.AlterQuota -> Response.Admin(ErrorCode.NONE, null, null)
+                is Request.DescribeQuotas -> state
+                else -> throw AssertionError("unexpected $r")
+            }
+        }.use { b ->
+            client(b).use { lotse ->
+                lotse.alterQuota("shop", bytes = 10L)
+                lotse.alterQuota("shop", "orders.", null)
+                assertEquals(state, lotse.describeQuotas("shop"))
+                assertEquals(
+                    listOf(Request.AlterQuota("shop", "", 10L), Request.AlterQuota("shop", "orders.", null)),
+                    b.requests<Request.AlterQuota>(),
+                )
+            }
+        }
+    }
 }

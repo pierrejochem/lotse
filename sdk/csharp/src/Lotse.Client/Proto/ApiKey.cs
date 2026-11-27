@@ -201,6 +201,12 @@ public readonly record struct ApiKey(ushort Id)
     /// <summary>Revokes an access token: its sessions end on every node (ADR 0133).</summary>
     public static readonly ApiKey RevokeToken = new(68);
 
+    /// <summary>Sets or removes a storage limit of a tenant or a name prefix in it (ADR 0147).</summary>
+    public static readonly ApiKey AlterQuota = new(69);
+
+    /// <summary>The storage limits and usage the asker may see, from the metadata leader (ADR 0147).</summary>
+    public static readonly ApiKey DescribeQuotas = new(70);
+
     /// <summary>Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker.</summary>
     public static readonly ApiKey WriteTxnMarkers = new(1000);
 
@@ -225,7 +231,7 @@ public readonly record struct ApiKey(ushort Id)
         Range(CreatePartitions), Range(RevokeCertificate), Range(DescribeCertificates), Range(RecordCertificates),
         Range(RequestCertificate), Range(DescribeCertificateRequests), Range(RecordCertificate), Range(ReassignPartition), Range(DescribeSessions), Range(RenewCertificate),
         Range(AlterUpgrade), Range(DescribeUpgrade), Range(CreateToken), Range(DescribeTokens), Range(RevokeToken),
-        Range(Publish),
+        Range(AlterQuota), Range(DescribeQuotas), Range(Publish),
     };
 
     private static ApiVersionRange Range(ApiKey key) => new(key, 0, 0);
