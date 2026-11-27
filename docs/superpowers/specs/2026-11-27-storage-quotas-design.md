@@ -56,6 +56,9 @@ Throttling (`throttle_ms`, byte-rate, connection and request-rate quotas) is the
     This is a log change with its own ADR.
 12. **The release becomes 0.2.0 in this change.** That covers `Cargo.toml`, the Helm chart, every SDK (`packaging/sdk-versions.sh`) and `docs/releases/0.2.0.md`. So `QUOTAS_SINCE = 0.2` is reachable, quotas work end to end, and the 0.1 window is tested. A 0.2 node runs beside 0.1 nodes (ADR 0127).
 13. **A prefix limit set by a cluster admin** can be changed or removed only by a cluster admin. Each limit records whether a cluster admin set it. A tenant admin changes only the prefix limits tenant admins set.
+14. **At most 100 prefix limits per tenant.**
+15. **A limit may be set below current usage;** it becomes full at the next count and stops growth at once.
+16. **The console warns from 80 % of a limit.**
 
 ## Approaches considered
 
@@ -76,8 +79,8 @@ Throttling (`throttle_ms`, byte-rate, connection and request-rate quotas) is the
 - **What a limit is:** a tenant, a prefix (empty for the tenant itself) and a number of bytes, at least 1. Setting no number removes the limit.
 - **Where limits live:** in the metadata state, so they are in its snapshot.
 - **Deleting a tenant** removes its limits. A tenant created again starts with none (incarnations, ADR 0069).
-- **At most 100 prefix limits per tenant** (proposed). One more is refused with `INVALID_REQUEST` and a message.
-- **A limit below current usage** is allowed, and the limit becomes full at the next count.
+- **At most 100 prefix limits per tenant** (decision 14). One more is refused with `INVALID_REQUEST` and a message.
+- **A limit below current usage** is allowed, and the limit becomes full at the next count (decision 15).
 - **A prefix limit above the tenant's limit** is allowed; the tenant's limit still applies first.
 - **A prefix limit on a tenant without a limit** is allowed.
 
@@ -163,7 +166,7 @@ This change raises the workspace and every SDK to 0.2.0 and adds `docs/releases/
 
 - **Tenant page (`Tenants.tsx`):**
   - each tenant's limit, usage, and prefix limits;
-  - a warning from 80 % of a limit (proposed), and a full state at 100 %.
+  - a warning from 80 % of a limit (decision 16), and a full state at 100 %.
 - **Who can change what:** cluster admins set and remove tenant limits, and tenant admins set and remove prefix limits, all as themselves (rule 8). Follow ADR 0140 and the v2 mockups.
 - **The create-queue dialog** no longer refuses in a full tenant. It may still say the tenant is full, since writes will be refused.
 
