@@ -720,10 +720,16 @@ async fn run(rt: SimRuntime) {
             // Nothing here compacts: the compaction settings stay at their
             // defaults (ADR 0067).
             // Nor does anything set a replication factor (ADR 0115): the
-            // first partition's voter count, by default.
-            let [ms, bytes, policy, tombstones, replication] = &configs[..] else {
+            // first partition's voter count, by default; nor a segment age
+            // (ADR 0146): the node's.
+            let [ms, bytes, policy, tombstones, replication, segment] = &configs[..] else {
                 panic!("{name} has settings {configs:?}")
             };
+            assert_eq!(
+                (segment.key.as_str(), segment.source),
+                ("segment.ms", lotse_proto::config_source::DEFAULT),
+                "{name}"
+            );
             assert_eq!(replication.key, "replication.factor", "{name}");
             assert_eq!(replication.source, lotse_proto::config_source::DEFAULT, "{name}");
             assert!(replication.value.parse::<usize>().is_ok_and(|n| (1..=3).contains(&n)), "{name}: {replication:?}");
@@ -757,10 +763,15 @@ async fn run(rt: SimRuntime) {
         }
         // The ack timeout, then the limits (ADR 0055), single active consumer
         // (ADR 0076), priority levels (ADR 0078), the resume window (ADR
-        // 0109), the length limit (ADR 0118) and the replication factor (ADR
+        // 0109), the length limit (ADR 0118), the replication factor (ADR
         // 0115), which this run never sets: the queue's voter count, by
-        // default.
-        let [c, limits @ .., replication] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        // default, and the segment age (ADR 0146), the node's.
+        let [c, limits @ .., replication, segment] = &configs[..] else { panic!("{name} has settings {configs:?}") };
+        assert_eq!(
+            (segment.key.as_str(), segment.source),
+            ("segment.ms", lotse_proto::config_source::DEFAULT),
+            "{name}"
+        );
         assert_eq!(replication.key, "replication.factor", "{name}");
         assert_eq!(replication.source, lotse_proto::config_source::DEFAULT, "{name}");
         assert!(replication.value.parse::<usize>().is_ok_and(|n| (1..=3).contains(&n)), "{name}: {replication:?}");
