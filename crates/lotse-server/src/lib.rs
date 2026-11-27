@@ -21,6 +21,7 @@ mod metadata;
 mod node;
 pub mod ops;
 mod producers;
+mod quota;
 mod replica;
 mod signal;
 mod txns;
