@@ -269,10 +269,11 @@ public sealed class RealAdminTests : IClassFixture<RealCluster>, IAsyncLifetime
     {
         await Client.CreateStreamAsync("adm-cfg-s", 1, 3);
         Dictionary<string, Messages.ConfigEntry> start = ByKey(await Client.DescribeConfigsAsync("adm-cfg-s"));
-        Assert.Equal(new[] { "cleanup.policy", "delete.retention.ms", "replication.factor", "retention.bytes", "retention.ms" }, start.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new[] { "cleanup.policy", "delete.retention.ms", "replication.factor", "retention.bytes", "retention.ms", "segment.ms" }, start.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
         Assert.All(start.Values, e => Assert.Equal(Messages.ConfigSource.Default, e.Source));
         Assert.Equal("delete", start["cleanup.policy"].Value);
         Assert.Equal("-1", start["retention.ms"].Value); // the node's default in this cluster file
+        Assert.Equal("3600000", start["segment.ms"].Value); // the node's segment age (ADR 0146)
 
         await Client.AlterConfigsAsync(
             "adm-cfg-s",

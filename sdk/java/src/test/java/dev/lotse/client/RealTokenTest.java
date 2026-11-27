@@ -63,7 +63,10 @@ class RealTokenTest {
 
     private static boolean signedOut(ClientException e) {
         return e instanceof ClientException.Authentication
-                || (e instanceof ClientException.Broker b && b.code().equals(ErrorCode.UNAUTHORIZED));
+                || (e instanceof ClientException.Broker b && b.code().equals(ErrorCode.UNAUTHORIZED))
+                // The revocation closed the connection while a call was on it: the client reports the refusal
+                // that followed as unknown, as it does after any lost attempt.
+                || (e instanceof ClientException.Unknown && e.getMessage().endsWith("authentication failed"));
     }
 
     @Test
