@@ -305,3 +305,146 @@ async fn transactions_and_publishes(rt: SimRuntime) {
 fn a_full_prefix_lets_transactions_abort_and_publishes_write_the_rest() {
     check_few_seeds(3, |seed| Sim::new(seed).run(transactions_and_publishes));
 }
+
+/// The quota simulation (ADR 0147): while nodes crash, some mid-write,
+/// tenant `default` writes under a limit and tenant `b` without one. The
+/// oracle, from what the clients saw:
+/// 1. `b` is never refused with QUOTA_EXCEEDED;
+/// 2. once the cluster is whole again, writes to the limited tenant are
+///    refused within a few counts and stay refused;
+/// 3. reads in the full tenant go on;
+/// 4. after the limit is raised, its writes are taken again;
+/// 5. every acknowledged write is in the log and no refused one is.
+async fn under_faults(rt: SimRuntime) {
+    use lotse_rt::Rng;
+    let interval = Duration::from_millis(200 + rt.below(600));
+    let mut w = World::new(&rt, interval).await;
+    let admin = client(&rt, "admin");
+    quotas_allowed(&rt, &admin).await;
+    admin.create_tenant("b").await.expect("tenant b");
+    admin.create_stream("a.s", 1, 3).await.expect("a.s");
+    let in_b = Client::new(
+        rt.node("b-admin"),
+        ClientConfig {
+            tenant: "b".into(),
+            retry_for: Duration::from_secs(20),
+            ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+        },
+    );
+    in_b.create_stream("b.s", 1, 3).await.expect("b.s");
+    let limit = 6 * 1024 + rt.below(6 * 1024);
+    admin.alter_quota("default", "", Some(limit)).await.expect("a limit");
+
+    let (mut acked, mut refused) = (BTreeMap::new(), Vec::new());
+    let mut b_written = 0;
+    let faults_end = rt.now() + Duration::from_secs(20);
+    let mut i = 0u64;
+    let mut next_fault = rt.now() + Duration::from_millis(500 + rt.below(2_000));
+    let mut down: Option<(NodeId, lotse_rt::Instant)> = None;
+    while rt.now() < faults_end {
+        if down.is_none() && rt.now() >= next_fault {
+            let id = 1 + rt.below(3);
+            if rt.chance(1, 2) {
+                w.hosts[&id].disk().arm_power_loss(rt.below(6));
+                rt.sleep(TICK * 3).await;
+            }
+            w.crash(id).await;
+            down = Some((id, rt.now() + Duration::from_millis(200 + rt.below(3_000))));
+        }
+        if let Some((id, until)) = down
+            && rt.now() >= until
+        {
+            w.start(id).await;
+            down = None;
+            next_fault = rt.now() + Duration::from_millis(500 + rt.below(3_000));
+        }
+        let value = format!("a-{i}-{}", "y".repeat(60));
+        i += 1;
+        match admin.produce("a.s", 0, batch(&value)).await {
+            Ok(offset) => {
+                acked.insert(offset, value);
+            }
+            Err(e) if exceeded(&e) => refused.push(value),
+            Err(ClientError::Unknown(_)) => {}
+            Err(e) => panic!("a.s under faults: {e}"),
+        }
+        match in_b.produce("b.s", 0, batch(&format!("b-{i}"))).await {
+            Ok(_) => b_written += 1,
+            Err(e) => assert!(!exceeded(&e), "tenant b has no limit and was refused: {e}"),
+        }
+        rt.sleep(TICK * 2).await;
+    }
+    if let Some((id, _)) = down {
+        w.start(id).await;
+    }
+
+    // 2. Whole again: the limited tenant is refused within a few counts,
+    // and stays so.
+    let deadline = rt.now() + interval * 6 + Duration::from_secs(5);
+    loop {
+        let value = format!("a-{i}-late");
+        i += 1;
+        match admin.produce("a.s", 0, batch(&value)).await {
+            Ok(offset) => {
+                acked.insert(offset, value);
+                assert!(rt.now() < deadline, "the healed cluster never refused tenant default: limit {limit}");
+            }
+            Err(e) if exceeded(&e) => {
+                refused.push(value);
+                break;
+            }
+            Err(ClientError::Unknown(_)) => {}
+            Err(e) => panic!("{e}"),
+        }
+        rt.sleep(interval / 4).await;
+    }
+    for _ in 0..5 {
+        let value = format!("a-{i}-still");
+        i += 1;
+        let e = admin.produce("a.s", 0, batch(&value)).await.expect_err("a full limit stays full");
+        assert!(exceeded(&e), "{e}");
+        refused.push(value);
+        rt.sleep(interval / 2).await;
+    }
+    assert!(b_written > 0, "tenant b wrote nothing: the run checked little");
+
+    // 3 and 5: reads go on; what was acknowledged is there, nothing refused is.
+    let mut at = 0;
+    let mut seen: BTreeMap<u64, String> = BTreeMap::new();
+    let end = acked.keys().next_back().map_or(0, |o| o + 1);
+    while at < end {
+        let f = admin.fetch("a.s", 0, at, TICK * 20).await.expect("reads in a full tenant");
+        for b in f.committed_batches().expect("whole valid batches") {
+            if let Some(v) = b.records().unwrap()[0].value.as_deref() {
+                seen.insert(b.base_offset(), String::from_utf8_lossy(v).into_owned());
+            }
+        }
+        at = f.next_offset(at);
+    }
+    for (offset, value) in &acked {
+        assert_eq!(seen.get(offset), Some(value), "acknowledged write at {offset} is missing");
+    }
+    let refused_set: std::collections::BTreeSet<&String> = refused.iter().collect();
+    for (offset, v) in &seen {
+        assert!(!refused_set.contains(v), "refused write {v} is in the log at {offset}");
+    }
+
+    // 4. Raised, the tenant writes again.
+    admin.alter_quota("default", "", Some(1 << 30)).await.expect("raised");
+    let deadline = rt.now() + interval * 6 + Duration::from_secs(5);
+    loop {
+        match admin.produce("a.s", 0, batch("after the raise")).await {
+            Ok(_) => break,
+            Err(e) if exceeded(&e) => assert!(rt.now() < deadline, "the raised limit never cleared"),
+            Err(ClientError::Unknown(_)) => {}
+            Err(e) => panic!("{e}"),
+        }
+        rt.sleep(interval / 4).await;
+    }
+    w.stop().await;
+}
+
+#[test]
+fn storage_limits_hold_under_faults() {
+    lotse_sim::check_seeds(20, |seed| Sim::new(seed).run(under_faults));
+}
