@@ -51,8 +51,7 @@ fn release_0_2_runs_beside_0_1() {
 #[test]
 fn quota_formats_wait_for_0_2() {
     use crate::metadata::MetadataState;
-    let mut state = MetadataState::default();
-    state.cluster_version = Some(cluster_version::of(0, 1));
+    let mut state = MetadataState { cluster_version: Some(cluster_version::of(0, 1)), ..Default::default() };
     assert!(!state.writes(QUOTAS_SINCE), "the previous release's version");
     assert!(!state.writes(SEGMENT_AGE_SINCE), "the previous release's version");
     state.cluster_version = Some(cluster_version::of(0, 2));

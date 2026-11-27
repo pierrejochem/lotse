@@ -1717,6 +1717,23 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                         .collect()
                 })
                 .unwrap_or_default();
+            // Runtime resources' own segment ages (ADR 0146), by group.
+            let ages: BTreeMap<GroupId, u64> = cfg
+                .metadata
+                .and_then(|m| groups.get(&m))
+                .map(|meta| {
+                    let state = meta.metadata();
+                    let mut ages = BTreeMap::new();
+                    for (id, ms) in &state.segment_ms {
+                        if let Some(s) = state.streams.get(id) {
+                            ages.extend(s.partitions.iter().map(|(g, _)| (*g, *ms)));
+                        } else if let Some(q) = state.queues.get(id) {
+                            ages.insert(q.group, *ms);
+                        }
+                    }
+                    ages
+                })
+                .unwrap_or_default();
             // One sweep at a time: the replica that holds one goes on with
             // it; when none does, the groups after the last to start get the
             // first chance.
@@ -1731,7 +1748,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 // Runtime streams and queues close their segments by age
                 // (ADR 0146); the node's own groups hold no one's data.
                 let runtime = cfg.metadata != Some(g) && cfg.coordinator != Some(g);
-                group.set_segment_ms(runtime.then_some(cfg.retention.segment_ms));
+                group.set_segment_ms(runtime.then(|| ages.get(&g).copied().unwrap_or(cfg.retention.segment_ms)));
                 let sweep = crate::replica::Sweep {
                     may_start: sweeping.is_none_or(|s| s == g),
                     map_bytes: cfg.retention.compaction_map_bytes,

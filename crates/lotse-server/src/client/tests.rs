@@ -1784,9 +1784,109 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 ("retention.bytes", "4096", lotse_proto::config_source::DYNAMIC),
                 ("cleanup.policy", "compact,delete", lotse_proto::config_source::DYNAMIC),
                 ("delete.retention.ms", "0", lotse_proto::config_source::DYNAMIC),
-                ("replication.factor", "1", lotse_proto::config_source::DEFAULT)
+                ("replication.factor", "1", lotse_proto::config_source::DEFAULT),
+                ("segment.ms", "3600000", lotse_proto::config_source::DEFAULT)
             ]
         );
+
+        // segment_ms_waits_for_0_2: a resource's own segment age is a new
+        // format (ADR 0146), refused until the cluster version allows it.
+        let segment = |id: u64, set: Vec<(&str, &str)>, delete: Vec<&str>| {
+            Request::AlterConfigs(lotse_proto::AlterConfigsRequest {
+                resource_id: id,
+                set: set.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                delete: delete.into_iter().map(String::from).collect(),
+            })
+        };
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![segment(c.resource_id, vec![("segment.ms", "120000")], vec![])],
+        )
+        .await;
+        let [Response::Admin(early)] = &answers[..] else { panic!("{answers:?}") };
+        assert_eq!(early.error, ErrorCode::UNSUPPORTED_VERSION, "{early:?}");
+        assert!(early.error_msg.as_deref().is_some_and(|m| m.contains("0.2")), "{early:?}");
+        assert!(groups[&G].metadata().segment_ms.is_empty(), "nothing was written");
+        {
+            let replica = groups.get_mut(&G).unwrap();
+            let version = crate::metadata::Change::SetClusterVersion { version: crate::version::SEGMENT_AGE_SINCE };
+            replica.propose_internal(crate::metadata::record(&version)).unwrap();
+            for _ in 0..3 {
+                replica.process().await.unwrap();
+            }
+        }
+
+        // segment_ms_is_set_altered_and_described: on its own, at least a
+        // minute, reset to the node's default.
+        let created = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![
+                Request::CreateQueue(lotse_proto::CreateQueueRequest {
+                    tenant: crate::DEFAULT_TENANT.into(),
+                    name: "aged".into(),
+                    priority_levels: 1,
+                    single_active: false,
+                    dlq: None,
+                    replication: 1,
+                    configs: vec![],
+                }),
+                stream(vec![("segment.ms", "120000")]),
+            ],
+        )
+        .await;
+        let [Response::Create(aq), Response::Create(at_create)] = &created[..] else { panic!("{created:?}") };
+        assert_eq!(aq.error, ErrorCode::NONE);
+        assert_eq!(at_create.error, ErrorCode::INVALID_REQUEST, "set with AlterConfigs after creating");
+        assert!(at_create.error_msg.as_deref().is_some_and(|m| m.contains("AlterConfigs")), "{at_create:?}");
+        let answers = ask(
+            &mut clients,
+            &mut groups,
+            &[],
+            &[],
+            vec![
+                segment(c.resource_id, vec![("segment.ms", "59999")], vec![]),
+                segment(c.resource_id, vec![("segment.ms", "120000"), ("retention.ms", "5000")], vec![]),
+                segment(c.resource_id, vec![("segment.ms", "120000")], vec![]),
+                segment(aq.resource_id, vec![("segment.ms", "180000")], vec![]),
+            ],
+        )
+        .await;
+        let [Response::Admin(short), Response::Admin(mixed), Response::Admin(set), Response::Admin(on_queue)] =
+            &answers[..]
+        else {
+            panic!("{answers:?}")
+        };
+        assert_eq!((short.error, mixed.error), (ErrorCode::INVALID_REQUEST, ErrorCode::INVALID_REQUEST));
+        assert_eq!((set.error, on_queue.error), (ErrorCode::NONE, ErrorCode::NONE));
+        assert_eq!(
+            groups[&G].metadata().segment_ms,
+            BTreeMap::from([(c.resource_id, 120_000), (aq.resource_id, 180_000)])
+        );
+        let describe =
+            |ids: Vec<u64>| Request::DescribeConfigs(lotse_proto::DescribeConfigsRequest { resource_ids: ids });
+        let answers =
+            ask(&mut clients, &mut groups, &[], &[], vec![describe(vec![c.resource_id, aq.resource_id])]).await;
+        let [Response::DescribeConfigs(d)] = &answers[..] else { panic!("{answers:?}") };
+        let age = |i: usize| {
+            let e = d.resources[i].configs.iter().find(|e| e.key == "segment.ms").expect("segment.ms described");
+            (e.value.clone(), e.source)
+        };
+        assert_eq!(age(0), ("120000".to_string(), lotse_proto::config_source::DYNAMIC));
+        assert_eq!(age(1), ("180000".to_string(), lotse_proto::config_source::DYNAMIC));
+        let answers =
+            ask(&mut clients, &mut groups, &[], &[], vec![segment(c.resource_id, vec![], vec!["segment.ms"])]).await;
+        let [Response::Admin(reset)] = &answers[..] else { panic!("{answers:?}") };
+        assert_eq!(reset.error, ErrorCode::NONE);
+        let answers = ask(&mut clients, &mut groups, &[], &[], vec![describe(vec![c.resource_id])]).await;
+        let [Response::DescribeConfigs(d)] = &answers[..] else { panic!("{answers:?}") };
+        let e = d.resources[0].configs.iter().find(|e| e.key == "segment.ms").unwrap();
+        assert_eq!((e.value.as_str(), e.source), ("3600000", lotse_proto::config_source::DEFAULT));
     });
 }
 

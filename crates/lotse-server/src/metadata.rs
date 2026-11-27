@@ -135,6 +135,10 @@ pub(crate) enum Change {
     /// partitions an operator placed are released. 0 removes the setting:
     /// partitions keep the voters they have.
     SetReplication { resource_id: u64, replication: u32 },
+    /// A runtime stream's or queue's own segment age, `segment.ms`
+    /// (ADR 0146), in ms; 0 returns it to the node's default. Written only
+    /// from cluster version 0.2.
+    SetSegmentMs { resource_id: u64, ms: u64 },
     /// An operator places a runtime group on these voters (ADR 0115), like
     /// [`Change::SetVoters`], and the spreading of replicas leaves it there.
     /// No voters releases it.
@@ -566,6 +570,9 @@ pub(crate) struct MetadataState {
     /// Runtime resources' `replication.factor`, where one is set
     /// (ADR 0115).
     pub(crate) replication: BTreeMap<u64, u32>,
+    /// Runtime resources' own segment age, `segment.ms` (ADR 0146), where
+    /// one is set; the rest close their segments at the node's default.
+    pub(crate) segment_ms: BTreeMap<u64, u64>,
     /// Groups an operator placed (ADR 0115): rebalancing and the
     /// replication factor leave them alone; a drain still moves them.
     pub(crate) placed: BTreeSet<GroupId>,
@@ -858,6 +865,7 @@ impl MetadataState {
                     return Ok(());
                 }
                 self.replication.remove(&resource_id);
+                self.segment_ms.remove(&resource_id);
                 let groups = if let Some(s) = self.streams.remove(&resource_id) {
                     for (g, _) in &s.partitions {
                         self.pins.remove(g);
@@ -978,6 +986,16 @@ impl MetadataState {
                 }
                 for g in groups {
                     self.placed.remove(&g);
+                }
+            }
+            Change::SetSegmentMs { resource_id, ms } => {
+                if !self.streams.contains_key(&resource_id) && !self.queues.contains_key(&resource_id) {
+                    return Ok(());
+                }
+                if ms == 0 {
+                    self.segment_ms.remove(&resource_id);
+                } else {
+                    self.segment_ms.insert(resource_id, ms);
                 }
             }
             Change::RenewCertificate { cert, principal, not_before_ms, not_after_ms, renews, at_ms } => {
@@ -1289,7 +1307,8 @@ impl MetadataState {
         // queues' resume windows (ADR 0109), replication factors and placed
         // groups (ADR 0115), queues' length limits (ADR 0118), nodes low on
         // disk (ADR 0122), renewed certificates (ADR 0123), access tokens (ADR
-        // 0133, written only once the cluster version allows). A later
+        // 0133, written only once the cluster version allows), resources'
+        // segment ages (ADR 0146, the same). A later
         // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -1312,7 +1331,9 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections = if !self.tokens.is_empty() && self.writes(crate::version::TOKENS_SINCE) {
+        let sections = if !self.segment_ms.is_empty() && self.writes(crate::version::SEGMENT_AGE_SINCE) {
+            20
+        } else if !self.tokens.is_empty() && self.writes(crate::version::TOKENS_SINCE) {
             19
         } else if self.cluster_version.is_some() || !self.versions.is_empty() || self.turn.is_some() || self.turns_held
         {
@@ -1513,6 +1534,13 @@ impl MetadataState {
                 b.put_u64_le(t.created_at_ms);
                 b.put_u64_le(t.expires_at_ms);
                 put_str(&mut b, &t.created_by);
+            }
+        }
+        if sections >= 20 {
+            b.put_u32_le(self.segment_ms.len() as u32);
+            for (id, ms) in &self.segment_ms {
+                b.put_u64_le(*id);
+                b.put_u64_le(*ms);
             }
         }
         b.freeze()
@@ -1784,6 +1812,13 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                need(b, 16)?;
+                let id = b.get_u64_le();
+                s.segment_ms.insert(id, b.get_u64_le());
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1940,6 +1975,11 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u64_le(*group);
             b.put_u8(u8::from(node.is_some()));
             b.put_u64_le(node.unwrap_or(0));
+        }
+        Change::SetSegmentMs { resource_id, ms } => {
+            b.put_u8(37);
+            b.put_u64_le(*resource_id);
+            b.put_u64_le(*ms);
         }
         Change::SetReplication { resource_id, replication } => {
             b.put_u8(25);
@@ -2380,6 +2420,10 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         36 => {
             need(b, 8)?;
             Change::RevokeToken { id: b.get_u64_le() }
+        }
+        37 => {
+            need(b, 16)?;
+            Change::SetSegmentMs { resource_id: b.get_u64_le(), ms: b.get_u64_le() }
         }
         _ => return Err("unknown metadata change".into()),
     };

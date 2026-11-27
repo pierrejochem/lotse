@@ -232,6 +232,14 @@ const CLEANUP_POLICY: &str = "cleanup.policy";
 /// (ADR 0115); set on its own.
 const REPLICATION_FACTOR: &str = "replication.factor";
 const DELETE_RETENTION_MS: &str = "delete.retention.ms";
+/// How old a stream's or queue's active segment may get before it closes
+/// (ADR 0146); set on its own.
+const SEGMENT_MS: &str = "segment.ms";
+/// The shortest segment age: more segments than one a minute per partition
+/// would be files for nothing.
+const MIN_SEGMENT_MS: u64 = 60_000;
+/// Why `segment.ms` is not taken at creation.
+const SEGMENT_MS_AT_CREATE: &str = "segment.ms is set on its own with AlterConfigs once the resource exists";
 
 /// Sets (`Some`) or resets (`None`) one of a stream's settings: for the
 /// retention limits a positive number or -1 for no limit, for
@@ -589,6 +597,9 @@ impl Clients {
             return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
         }
         let mut given = StreamChange::default();
+        if req.configs.iter().any(|(k, _)| k == SEGMENT_MS) {
+            return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(SEGMENT_MS_AT_CREATE), None));
+        }
         for (k, v) in &req.configs {
             if let Err(why) = set_stream(&mut given, k, Some(v)) {
                 return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(&why), None));
@@ -651,6 +662,9 @@ impl Clients {
         let mut refused = None;
         if req.priority_levels == 0 || req.priority_levels > MAX_PRIORITY_LEVELS {
             refused = Some(format!("priority levels: from 1 to {MAX_PRIORITY_LEVELS}"));
+        }
+        if req.configs.iter().any(|(k, _)| k == SEGMENT_MS) {
+            return outbox.push(id, &created(ErrorCode::INVALID_REQUEST, 0, Some(SEGMENT_MS_AT_CREATE), None));
         }
         let mut given = QueueChange::default();
         let mut wanted_dlq = req.dlq.clone();
@@ -834,6 +848,36 @@ impl Clients {
                 },
             };
             let change = Change::SetReplication { resource_id: req.resource_id, replication };
+            return self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
+        }
+        let names_segment = req.set.iter().any(|(k, _)| k == SEGMENT_MS) || req.delete.iter().any(|k| k == SEGMENT_MS);
+        if names_segment {
+            // Its own record (ADR 0146), a format of cluster version 0.2.
+            if req.set.len() + req.delete.len() != 1 {
+                return outbox.push(id, &refuse(format!("{SEGMENT_MS} is changed on its own")));
+            }
+            let state = replica.metadata();
+            if !state.streams.contains_key(&req.resource_id) && !state.queues.contains_key(&req.resource_id) {
+                return outbox.push(id, &refuse("exchanges have no segments".into()));
+            }
+            if !state.writes(crate::version::SEGMENT_AGE_SINCE) {
+                let why = format!(
+                    "{SEGMENT_MS} needs cluster version {}; raise it with `lotse upgrade finalize`",
+                    crate::version::display(crate::version::SEGMENT_AGE_SINCE)
+                );
+                return outbox.push(id, &admin_response(ErrorCode::UNSUPPORTED_VERSION, Some(&why), None));
+            }
+            let ms = match req.set.first() {
+                None => 0,
+                Some((_, v)) => match v.parse::<u64>() {
+                    Ok(n) if n >= MIN_SEGMENT_MS => n,
+                    _ => {
+                        let why = format!("{SEGMENT_MS} = {v}: a number of ms from {MIN_SEGMENT_MS}");
+                        return outbox.push(id, &refuse(why));
+                    }
+                },
+            };
+            let change = Change::SetSegmentMs { resource_id: req.resource_id, ms };
             return self.propose_admin(replica, view.now, &change, (outbox, id), AdminThen::Changed);
         }
         let (change, then) = if replica.metadata().streams.contains_key(&req.resource_id) {
@@ -1276,6 +1320,15 @@ impl Clients {
                 source: config_source::DEFAULT,
             },
         };
+        // A runtime resource's segment age: its own, or the node's (ADR 0146).
+        let segment = |resource_id: u64| match state.segment_ms.get(&resource_id) {
+            Some(ms) => ConfigEntry { key: SEGMENT_MS.into(), value: ms.to_string(), source: config_source::DYNAMIC },
+            None => ConfigEntry {
+                key: SEGMENT_MS.into(),
+                value: view.admin.retention.segment_ms.to_string(),
+                source: config_source::DEFAULT,
+            },
+        };
         let resources = req
             .resource_ids
             .iter()
@@ -1298,10 +1351,12 @@ impl Clients {
                         config_source::DYNAMIC,
                     ));
                     all.push(replication(resource_id, q.voters.len()));
+                    all.push(segment(resource_id));
                     Some(all)
                 } else if let Some(st) = state.streams.get(&resource_id) {
                     let mut all = stream_configs(st.settings, view.admin.retention);
                     all.push(replication(resource_id, st.partitions.first().map_or(0, |(_, v)| v.len())));
+                    all.push(segment(resource_id));
                     Some(all)
                 } else if state.exchanges.contains_key(&resource_id) {
                     Some(Vec::new())
