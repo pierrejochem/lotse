@@ -397,6 +397,34 @@ impl Clients {
             token_sign_ins_ok,
             token_sign_ins_failed,
             may_scrape: false,
+            quotas: metadata
+                .map(|state| {
+                    state
+                        .quotas
+                        .iter()
+                        .map(|((tenant, prefix), q)| crate::ops::QuotaGauge {
+                            tenant: tenant.clone(),
+                            prefix: prefix.clone(),
+                            bytes: q.bytes,
+                            full: q.full,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            quota_usage: view.node.quota_usage.map(|(_, u)| {
+                let tenants = u.per_tenant.iter().map(|(t, n)| (t.clone(), String::new(), *n));
+                let limits = u
+                    .per_limit
+                    .iter()
+                    .filter(|((_, p), _)| !p.is_empty())
+                    .map(|((t, p), n)| (t.clone(), p.clone(), *n));
+                let mut all: Vec<crate::ops::QuotaUsage> = tenants
+                    .chain(limits)
+                    .map(|(tenant, prefix, used_bytes)| crate::ops::QuotaUsage { tenant, prefix, used_bytes })
+                    .collect();
+                all.sort_by(|a, b| (&a.tenant, &a.prefix).cmp(&(&b.tenant, &b.prefix)));
+                all
+            }),
         }
     }
 }
