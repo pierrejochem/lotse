@@ -1161,3 +1161,100 @@ fn segment_ages_are_not_written_before_0_2() {
     let decoded = MetadataState::decode(&s.encode()).unwrap();
     assert!(decoded.segment_ms.is_empty(), "a 0.1 node could not read section 20");
 }
+
+fn set_quota(tenant: &str, prefix: &str, bytes: Option<u64>, by_cluster_admin: bool) -> Change {
+    Change::SetQuota { tenant: tenant.into(), prefix: prefix.into(), bytes, by_cluster_admin }
+}
+
+fn quota_full(tenant: &str, prefix: &str, full: bool) -> Change {
+    Change::QuotaFull { tenant: tenant.into(), prefix: prefix.into(), full }
+}
+
+/// A state at cluster version 0.2 with tenant `shop` created at index 2.
+fn quota_state() -> MetadataState {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&Change::SetClusterVersion { version: crate::version::QUOTAS_SINCE })).unwrap();
+    s.apply(2, &payload(&Change::CreateTenant { name: "shop".into(), incarnated: true })).unwrap();
+    s
+}
+
+#[test]
+fn a_quota_change_reads_back() {
+    for change in [
+        set_quota("shop", "", Some(1 << 30), true),
+        set_quota("shop", "orders.", None, false),
+        quota_full("shop", "orders.", true),
+        quota_full("shop", "", false),
+    ] {
+        assert_eq!(decode_change(&payload(&change)).unwrap(), change);
+    }
+}
+
+#[test]
+fn quotas_round_trip_in_the_snapshot() {
+    let mut s = quota_state();
+    s.apply(3, &payload(&set_quota("shop", "", Some(1_000), true))).unwrap();
+    s.apply(4, &payload(&set_quota("shop", "orders.", Some(500), false))).unwrap();
+    s.apply(5, &payload(&quota_full("shop", "orders.", true))).unwrap();
+    let want = Quota { bytes: 500, by_cluster_admin: false, full: true };
+    assert_eq!(s.quotas[&("shop".to_string(), "orders.".to_string())], want);
+    let decoded = MetadataState::decode(&s.encode()).unwrap();
+    assert_eq!(decoded, s);
+    assert_eq!(decoded.quotas.len(), 2);
+}
+
+#[test]
+fn a_changed_limit_keeps_its_full_flag_and_none_removes_it() {
+    let mut s = quota_state();
+    s.apply(3, &payload(&set_quota("shop", "", Some(1_000), true))).unwrap();
+    s.apply(4, &payload(&quota_full("shop", "", true))).unwrap();
+    s.apply(5, &payload(&set_quota("shop", "", Some(10_000), true))).unwrap();
+    let q = s.quotas[&("shop".to_string(), String::new())];
+    assert_eq!((q.bytes, q.full), (10_000, true), "full until the next count says otherwise");
+    s.apply(6, &payload(&set_quota("shop", "", None, true))).unwrap();
+    assert!(s.quotas.is_empty());
+}
+
+#[test]
+fn quota_records_wait_for_0_2() {
+    let mut s = quota_state();
+    s.apply(3, &payload(&set_quota("shop", "", Some(1_000), true))).unwrap();
+    s.cluster_version = Some(crate::version::TOKENS_SINCE);
+    let decoded = MetadataState::decode(&s.encode()).unwrap();
+    assert!(decoded.quotas.is_empty(), "a 0.1 node could not read the quota section");
+}
+
+#[test]
+fn a_deleted_tenant_drops_its_quotas() {
+    let mut s = quota_state();
+    s.apply(3, &payload(&set_quota("shop", "", Some(1_000), true))).unwrap();
+    s.apply(4, &payload(&set_quota("shop", "orders.", Some(500), false))).unwrap();
+    s.apply(5, &payload(&quota_full("shop", "", true))).unwrap();
+    s.apply(6, &payload(&Change::DeleteTenant { name: "shop".into() })).unwrap();
+    assert!(s.quotas.is_empty(), "they go with the tenant");
+    s.apply(7, &payload(&Change::CreateTenant { name: "shop".into(), incarnated: true })).unwrap();
+    assert!(s.quotas.is_empty(), "a tenant created again starts without limits");
+    s.apply(8, &payload(&quota_full("shop", "", true))).unwrap();
+    assert!(s.quotas.is_empty(), "nor does an old count bring one back");
+}
+
+#[test]
+fn the_101st_prefix_limit_is_ignored() {
+    let mut s = quota_state();
+    for i in 0..crate::metadata::MAX_PREFIX_QUOTAS {
+        s.apply(10 + i as u64, &payload(&set_quota("shop", &format!("p{i}."), Some(1), false))).unwrap();
+    }
+    s.apply(500, &payload(&set_quota("shop", "", Some(1), true))).unwrap();
+    s.apply(501, &payload(&set_quota("shop", "extra.", Some(1), false))).unwrap();
+    assert_eq!(s.quotas.len(), crate::metadata::MAX_PREFIX_QUOTAS + 1, "100 prefixes and the tenant's own");
+    assert!(!s.quotas.contains_key(&("shop".to_string(), "extra.".to_string())));
+    s.apply(502, &payload(&set_quota("shop", "p0.", Some(2), false))).unwrap();
+    assert_eq!(s.quotas[&("shop".to_string(), "p0.".to_string())].bytes, 2, "an existing one still changes");
+}
+
+#[test]
+fn quota_full_for_a_removed_limit_does_nothing() {
+    let mut s = quota_state();
+    s.apply(3, &payload(&quota_full("shop", "orders.", true))).unwrap();
+    assert!(s.quotas.is_empty());
+}

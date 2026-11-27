@@ -139,6 +139,14 @@ pub(crate) enum Change {
     /// (ADR 0146), in ms; 0 returns it to the node's default. Written only
     /// from cluster version 0.2.
     SetSegmentMs { resource_id: u64, ms: u64 },
+    /// Sets (`Some`) or removes (`None`) a storage limit of a tenant
+    /// (`prefix` empty) or of its resources whose names start with
+    /// `prefix` (ADR 0147). A changed limit keeps whether it is full until
+    /// the next count. Written only from cluster version 0.2.
+    SetQuota { tenant: String, prefix: String, bytes: Option<u64>, by_cluster_admin: bool },
+    /// The metadata leader's count found a limit full, or below 95 % of it
+    /// again (ADR 0147). Does nothing for a limit that no longer exists.
+    QuotaFull { tenant: String, prefix: String, full: bool },
     /// An operator places a runtime group on these voters (ADR 0115), like
     /// [`Change::SetVoters`], and the spreading of replicas leaves it there.
     /// No voters releases it.
@@ -497,6 +505,20 @@ pub(crate) struct DynExchange {
 }
 
 /// See the module docs.
+/// One storage limit (ADR 0147).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Quota {
+    /// The limit, bytes, every voter replica counted.
+    pub(crate) bytes: u64,
+    /// A cluster admin set it: only a cluster admin changes it.
+    pub(crate) by_cluster_admin: bool,
+    /// The last count found it full: new data under it is refused.
+    pub(crate) full: bool,
+}
+
+/// The most prefix limits a tenant holds (ADR 0147).
+pub(crate) const MAX_PREFIX_QUOTAS: usize = 100;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MetadataState {
     pub(crate) streams: BTreeMap<u64, DynStream>,
@@ -573,6 +595,9 @@ pub(crate) struct MetadataState {
     /// Runtime resources' own segment age, `segment.ms` (ADR 0146), where
     /// one is set; the rest close their segments at the node's default.
     pub(crate) segment_ms: BTreeMap<u64, u64>,
+    /// Storage limits (ADR 0147), by tenant and name prefix; the empty
+    /// prefix is the tenant's own limit.
+    pub(crate) quotas: BTreeMap<(String, String), Quota>,
     /// Groups an operator placed (ADR 0115): rebalancing and the
     /// replication factor leave them alone; a drain still moves them.
     pub(crate) placed: BTreeSet<GroupId>,
@@ -939,6 +964,7 @@ impl MetadataState {
                     self.tenants.remove(&name);
                     self.deleted_tenants.insert(name.clone());
                     self.bindings_of_roles.retain(|b| b.role.cluster_wide() || b.tenant != name);
+                    self.quotas.retain(|(t, _), _| *t != name);
                 }
             }
             Change::SetBindings { add, remove } => {
@@ -986,6 +1012,32 @@ impl MetadataState {
                 }
                 for g in groups {
                     self.placed.remove(&g);
+                }
+            }
+            Change::SetQuota { tenant, prefix, bytes, by_cluster_admin } => {
+                if self.deleted_tenants.contains(&tenant) {
+                    return Ok(());
+                }
+                let key = (tenant, prefix);
+                match bytes {
+                    None => {
+                        self.quotas.remove(&key);
+                    }
+                    Some(bytes) => {
+                        let new_prefix = !key.1.is_empty() && !self.quotas.contains_key(&key);
+                        let held = self.quotas.keys().filter(|(t, p)| *t == key.0 && !p.is_empty()).count();
+                        // Checked when proposed; only a race gets here.
+                        if new_prefix && held >= MAX_PREFIX_QUOTAS {
+                            return Ok(());
+                        }
+                        let full = self.quotas.get(&key).is_some_and(|q| q.full);
+                        self.quotas.insert(key, Quota { bytes, by_cluster_admin, full });
+                    }
+                }
+            }
+            Change::QuotaFull { tenant, prefix, full } => {
+                if let Some(q) = self.quotas.get_mut(&(tenant, prefix)) {
+                    q.full = full;
                 }
             }
             Change::SetSegmentMs { resource_id, ms } => {
@@ -1308,7 +1360,8 @@ impl MetadataState {
         // groups (ADR 0115), queues' length limits (ADR 0118), nodes low on
         // disk (ADR 0122), renewed certificates (ADR 0123), access tokens (ADR
         // 0133, written only once the cluster version allows), resources'
-        // segment ages (ADR 0146, the same). A later
+        // segment ages (ADR 0146, the same), storage limits (ADR 0147, the
+        // same). A later
         // section needs the ones before it, empty or not.
         let compacting: Vec<&DynStream> = self.streams.values().filter(|s| s.settings.has_compaction()).collect();
         let single: Vec<u64> = self.queues.values().filter(|q| q.limits.single_active).map(|q| q.resource_id).collect();
@@ -1331,7 +1384,9 @@ impl MetadataState {
             .filter(|q| q.limits.length != lotse_queue::LengthLimit::default())
             .map(|q| (q.resource_id, q.limits.length))
             .collect();
-        let sections = if !self.segment_ms.is_empty() && self.writes(crate::version::SEGMENT_AGE_SINCE) {
+        let sections = if !self.quotas.is_empty() && self.writes(crate::version::QUOTAS_SINCE) {
+            21
+        } else if !self.segment_ms.is_empty() && self.writes(crate::version::SEGMENT_AGE_SINCE) {
             20
         } else if !self.tokens.is_empty() && self.writes(crate::version::TOKENS_SINCE) {
             19
@@ -1541,6 +1596,15 @@ impl MetadataState {
             for (id, ms) in &self.segment_ms {
                 b.put_u64_le(*id);
                 b.put_u64_le(*ms);
+            }
+        }
+        if sections >= 21 {
+            b.put_u32_le(self.quotas.len() as u32);
+            for ((tenant, prefix), q) in &self.quotas {
+                put_str(&mut b, tenant);
+                put_str(&mut b, prefix);
+                b.put_u64_le(q.bytes);
+                b.put_u8(u8::from(q.by_cluster_admin) | u8::from(q.full) << 1);
             }
         }
         b.freeze()
@@ -1819,6 +1883,16 @@ impl MetadataState {
             }
         }
         if b.has_remaining() {
+            for _ in 0..count(b)? {
+                let (tenant, prefix) = (get_str(b)?, get_str(b)?);
+                need(b, 9)?;
+                let bytes = b.get_u64_le();
+                let flags = b.get_u8();
+                let q = Quota { bytes, by_cluster_admin: flags & 1 != 0, full: flags & 2 != 0 };
+                s.quotas.insert((tenant, prefix), q);
+            }
+        }
+        if b.has_remaining() {
             return Err("metadata state has trailing bytes".into());
         }
         Ok(s)
@@ -1975,6 +2049,21 @@ fn change_bytes(change: &Change) -> Bytes {
             b.put_u64_le(*group);
             b.put_u8(u8::from(node.is_some()));
             b.put_u64_le(node.unwrap_or(0));
+        }
+        Change::SetQuota { tenant, prefix, bytes, by_cluster_admin } => {
+            b.put_u8(38);
+            put_str(&mut b, tenant);
+            put_str(&mut b, prefix);
+            b.put_u8(u8::from(bytes.is_some()) | u8::from(*by_cluster_admin) << 1);
+            if let Some(n) = bytes {
+                b.put_u64_le(*n);
+            }
+        }
+        Change::QuotaFull { tenant, prefix, full } => {
+            b.put_u8(39);
+            put_str(&mut b, tenant);
+            put_str(&mut b, prefix);
+            b.put_u8(u8::from(*full));
         }
         Change::SetSegmentMs { resource_id, ms } => {
             b.put_u8(37);
@@ -2424,6 +2513,23 @@ fn decode_change(mut b: &[u8]) -> Result<Change, String> {
         37 => {
             need(b, 16)?;
             Change::SetSegmentMs { resource_id: b.get_u64_le(), ms: b.get_u64_le() }
+        }
+        38 => {
+            let (tenant, prefix) = (get_str(b)?, get_str(b)?);
+            need(b, 1)?;
+            let flags = b.get_u8();
+            let bytes = if flags & 1 != 0 {
+                need(b, 8)?;
+                Some(b.get_u64_le())
+            } else {
+                None
+            };
+            Change::SetQuota { tenant, prefix, bytes, by_cluster_admin: flags & 2 != 0 }
+        }
+        39 => {
+            let (tenant, prefix) = (get_str(b)?, get_str(b)?);
+            need(b, 1)?;
+            Change::QuotaFull { tenant, prefix, full: b.get_u8() != 0 }
         }
         _ => return Err("unknown metadata change".into()),
     };
