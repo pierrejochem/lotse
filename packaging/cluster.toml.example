@@ -13,6 +13,9 @@ data_dir = "/var/lib/lotse"
 # heartbeat_ms = 100
 # segment_ms = 3600000       # a stream's or queue's segment closes at this age, so retention can free it (ADR 0146)
 
+[quotas]
+# check_interval_ms = 10000   # how often storage quotas are counted; a tenant may overshoot by what it writes in about two of these (ADR 0147)
+
 [[node]]
 id = 1
 peer = "10.0.0.1:7000"

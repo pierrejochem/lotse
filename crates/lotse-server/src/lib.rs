@@ -34,7 +34,8 @@ pub use client::{QueueConfig, StreamConfig};
 pub use disk::FreeLimit;
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};
 pub use node::{
-    DEFAULT_COMPACTION_MAP_BYTES, DEFAULT_SEGMENT_MS, GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig,
+    DEFAULT_COMPACTION_MAP_BYTES, DEFAULT_QUOTA_CHECK_INTERVAL, DEFAULT_SEGMENT_MS, GroupStatus, Node, NodeConfig,
+    NodeHandle, RetentionConfig,
 };
 pub use producers::{DEFAULT_MAX_PRODUCERS, DEFAULT_PRODUCER_EXPIRATION};
 

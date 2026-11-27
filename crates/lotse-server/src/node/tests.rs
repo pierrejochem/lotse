@@ -28,6 +28,7 @@ fn config(peers: &[NodeId], id: NodeId, join: bool) -> NodeConfig {
         follower_max_lag: crate::DEFAULT_FOLLOWER_MAX_LAG,
         disk_free_limit: crate::FreeLimit::default(),
         disk_check_interval: crate::DEFAULT_DISK_CHECK_INTERVAL,
+        quota_check_interval: crate::DEFAULT_QUOTA_CHECK_INTERVAL,
         versions: Default::default(),
         auth: AuthConfig::none(),
         retention: RetentionConfig::keep(),

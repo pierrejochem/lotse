@@ -61,6 +61,9 @@ pub struct ClusterFile {
     /// How much free space nodes keep on their data volume.
     #[serde(default)]
     pub disk: DiskSection,
+    /// How the metadata leader counts storage quotas.
+    #[serde(default)]
+    pub quotas: QuotasSection,
     /// How clients authenticate.
     #[serde(default)]
     pub auth: Auth,
@@ -216,6 +219,18 @@ pub struct Compaction {
     /// (default 64 MiB, about 1.4 million keys).
     #[serde(default)]
     pub map_bytes: Option<u64>,
+}
+
+/// How storage quotas are counted (ADR 0147).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotasSection {
+    /// How often the metadata leader asks every node for its groups' sizes
+    /// and counts each limit's usage, ms (default 10,000, 1,000 to 600,000).
+    /// A tenant can overshoot its limit by what it writes in about two of
+    /// these.
+    #[serde(default)]
+    pub check_interval_ms: Option<u64>,
 }
 
 /// How much free space nodes keep on their data volume (ADR 0122).
@@ -452,6 +467,11 @@ impl ClusterFile {
         {
             return invalid(format!("disk.check_interval_ms is {ms}: give 10 to 60000 (10 ms to a minute)"));
         }
+        if let Some(ms) = self.quotas.check_interval_ms
+            && !(1_000..=600_000).contains(&ms)
+        {
+            return invalid(format!("quotas.check_interval_ms is {ms}: give 1000 to 600000 (a second to ten minutes)"));
+        }
         if self.producers.expiration_ms == Some(0) {
             return invalid("producers.expiration_ms must be at least 1".into());
         }
@@ -595,6 +615,10 @@ impl ClusterFile {
                 .disk
                 .check_interval_ms
                 .map_or(lotse_server::DEFAULT_DISK_CHECK_INTERVAL, Duration::from_millis),
+            quota_check_interval: self
+                .quotas
+                .check_interval_ms
+                .map_or(lotse_server::DEFAULT_QUOTA_CHECK_INTERVAL, Duration::from_millis),
             versions: lotse_server::version::Versions::default(),
             auth,
             retention: lotse_server::RetentionConfig {
