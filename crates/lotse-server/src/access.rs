@@ -298,6 +298,13 @@ impl Access {
                 Principal::User { .. } => Ok(()),
                 _ => admin(),
             },
+            // Storage limits (ADR 0147): who may set which limit depends on
+            // the limit's record, which only the metadata state holds, so
+            // the handler judges; anyone lists what they may see.
+            Request::AlterQuota(_) | Request::DescribeQuotas(_) => match p {
+                Principal::User { .. } => Ok(()),
+                _ => admin(),
+            },
             // A user asks in their own name and sees their own requests; a
             // cluster admin asks for anyone and sees all (ADR 0119).
             Request::RequestCertificate(r) => match p {

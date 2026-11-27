@@ -74,6 +74,7 @@ mod offsets;
 mod publish;
 pub(crate) use nodes::{managed_groups, moving};
 mod queues;
+mod quotas;
 mod retire;
 mod session;
 mod sessions;
@@ -574,7 +575,9 @@ fn answer_groups(request: &Request, view: &ClusterView<'_>) -> Vec<GroupId> {
         | Request::DescribeUpgrade(_)
         | Request::CreateToken(_)
         | Request::DescribeTokens(_)
-        | Request::RevokeToken(_) => [metadata, None],
+        | Request::RevokeToken(_)
+        | Request::AlterQuota(_)
+        | Request::DescribeQuotas(_) => [metadata, None],
         Request::InitProducer(_)
         | Request::AddPartitionsToTxn(_)
         | Request::VerifyTxn(_)
@@ -849,6 +852,8 @@ impl Clients {
             Request::CreateToken(req) => self.create_token(outbox, id, req, (&principal, mechanism), view, groups),
             Request::DescribeTokens(req) => self.describe_tokens(&outbox, id, req, &principal, at_least, view, groups),
             Request::RevokeToken(req) => self.revoke_token(outbox, id, req, &principal, view, groups),
+            Request::AlterQuota(req) => self.alter_quota(outbox, id, req, &principal, view, groups),
+            Request::DescribeQuotas(req) => self.describe_quotas(&outbox, id, req, &principal, view, groups),
             // Answered by the connection's own task, never forwarded.
             Request::SaslHandshake(_) | Request::SaslAuthenticate(_) => {}
             Request::ListOffsets(req) => self.list_offsets(outbox, id, req, view, groups).await?,

@@ -523,7 +523,7 @@ fn membership_pass<R: Runtime, S: StateMachine>(
     for change in crate::quota::changes(state, &usage) {
         let _ = meta.propose_internal(crate::metadata::record(&change));
     }
-    *shared.quota_usage.lock().expect("usage lock") = Some((at, usage));
+    *shared.quota_usage.lock().expect("usage lock") = Some(Arc::new((at, usage)));
 }
 
 /// Tells the metadata group that this node went low on disk or back, as
@@ -848,7 +848,7 @@ struct Shared {
     /// On the metadata leader: when the size poll last finished, ms since
     /// the Unix epoch, and what its count found (ADR 0147). Empty on any
     /// other node, and until a poll has given every runtime group a size.
-    quota_usage: Mutex<Option<(u64, crate::quota::Usage)>>,
+    quota_usage: Mutex<Option<Arc<(u64, crate::quota::Usage)>>>,
     /// When the last size poll finished, ms since the Unix epoch.
     sized_at: Mutex<Option<u64>>,
     /// On the metadata leader: the metadata index through which each node
@@ -1553,6 +1553,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         // Full storage limits as this node applied them (ADR 0147).
         let quotas_full: BTreeSet<(String, String)> =
             known.state.quotas.iter().filter(|(_, q)| q.full).map(|(k, _)| k.clone()).collect();
+        let quota_usage = shared.quota_usage.lock().expect("usage lock").clone();
         let mut disk_low = known.state.disk_low.clone();
         if disk.low {
             disk_low.insert(cfg.id);
@@ -1589,6 +1590,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 disk: disk.metrics(),
                 disk_low: &disk_low,
                 quotas_full: &quotas_full,
+                quota_usage: quota_usage.as_deref(),
             },
             now: rt.now(),
             unix_ms: rt.unix_time().as_millis() as u64,

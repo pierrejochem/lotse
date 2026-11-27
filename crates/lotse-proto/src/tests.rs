@@ -734,3 +734,86 @@ fn a_malformed_header_tag_on_an_unsupported_version_is_still_unsupported() {
     w.no_tags();
     assert!(matches!(decode_request_tagged(w.finish()), Err(DecodeError::Unsupported(h)) if h.correlation_id == 5));
 }
+
+#[test]
+fn quota_messages_round_trip() {
+    let set = Request::AlterQuota(AlterQuotaRequest { tenant: "shop".into(), prefix: "".into(), bytes: Some(1 << 30) });
+    let set_prefix =
+        Request::AlterQuota(AlterQuotaRequest { tenant: "shop".into(), prefix: "orders.".into(), bytes: Some(1) });
+    let remove =
+        Request::AlterQuota(AlterQuotaRequest { tenant: "shop".into(), prefix: "orders.".into(), bytes: None });
+    let all = Request::DescribeQuotas(DescribeQuotasRequest { tenant: None });
+    let one = Request::DescribeQuotas(DescribeQuotasRequest { tenant: Some("shop".into()) });
+    for (i, req) in [set, set_prefix, remove, all, one].into_iter().enumerate() {
+        let key = req.api_key();
+        assert!([ApiKey::ALTER_QUOTA, ApiKey::DESCRIBE_QUOTAS].contains(&key));
+        let (header, back) = decode_request(encode_request(i as u32, &req)).unwrap();
+        assert_eq!((back, header.api_key), (req, key));
+    }
+    assert_eq!((ApiKey::ALTER_QUOTA.0, ApiKey::DESCRIBE_QUOTAS.0), (69, 70));
+    for key in [ApiKey::ALTER_QUOTA, ApiKey::DESCRIBE_QUOTAS] {
+        assert!(ApiKey::SUPPORTED.iter().any(|r| r.api_key == key), "{key:?} is advertised");
+    }
+    let responses = [
+        (
+            ApiKey::ALTER_QUOTA,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::INVALID_REQUEST,
+                error_msg: Some("a tenant holds at most 100 prefix limits".into()),
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_QUOTAS,
+            Response::DescribeQuotas(DescribeQuotasResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                counted_at_ms: Some(1_800_000_000_000),
+                quotas: vec![
+                    QuotaEntry {
+                        tenant: "shop".into(),
+                        prefix: "".into(),
+                        bytes: Some(1 << 30),
+                        set_by_cluster_admin: true,
+                        full: false,
+                        used_bytes: Some(4096),
+                    },
+                    QuotaEntry {
+                        tenant: "shop".into(),
+                        prefix: "orders.".into(),
+                        bytes: Some(1024),
+                        set_by_cluster_admin: false,
+                        full: true,
+                        used_bytes: Some(2048),
+                    },
+                    QuotaEntry {
+                        tenant: "lab".into(),
+                        prefix: "".into(),
+                        bytes: None,
+                        set_by_cluster_admin: false,
+                        full: false,
+                        used_bytes: None,
+                    },
+                ],
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_QUOTAS,
+            Response::DescribeQuotas(DescribeQuotasResponse {
+                error: ErrorCode::NOT_LEADER,
+                leader_hint: Some(LeaderHint { leader: 2, term: 7 }),
+                counted_at_ms: None,
+                quotas: vec![],
+            }),
+        ),
+    ];
+    for (key, resp) in responses {
+        assert_eq!(decode_response(encode_response(9, &resp), key).unwrap().1, resp);
+    }
+}
+
+#[test]
+fn quota_exceeded_is_not_retriable() {
+    assert!(!ErrorCode::QUOTA_EXCEEDED.retriable());
+    assert_eq!(ErrorCode::QUOTA_EXCEEDED.0, 10);
+}

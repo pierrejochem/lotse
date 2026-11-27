@@ -4983,6 +4983,124 @@ impl RevokeTokenRequest {
     }
 }
 
+/// `AlterQuota` (ADR 0147): sets or removes a storage limit of a tenant
+/// (`prefix` empty) or of the resources whose names start with `prefix` in
+/// it. Served by the metadata group's leader; answered with
+/// [`AdminResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterQuotaRequest {
+    /// The tenant.
+    pub tenant: String,
+    /// A name prefix; empty for the tenant's own limit.
+    pub prefix: String,
+    /// The limit in bytes, every replica counted; absent removes it.
+    pub bytes: Option<u64>,
+}
+
+impl AlterQuotaRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.string(&self.tenant);
+        w.string(&self.prefix);
+        put_opt_u64(w, self.bytes);
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = AlterQuotaRequest { tenant: r.string()?, prefix: r.string()?, bytes: get_opt_u64(r)? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// `DescribeQuotas` (ADR 0147): the storage limits and usage of the
+/// tenants the asker may see. Served by the metadata group's leader, which
+/// counts the usage; answered with [`DescribeQuotasResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DescribeQuotasRequest {
+    /// Only this tenant; absent for every tenant the asker may see.
+    pub tenant: Option<String>,
+}
+
+impl DescribeQuotasRequest {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.opt_string(self.tenant.as_deref());
+        w.no_tags();
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let req = DescribeQuotasRequest { tenant: r.opt_string()? };
+        r.tags()?;
+        Ok(req)
+    }
+}
+
+/// One limit, or one tenant without a limit, in [`DescribeQuotasResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaEntry {
+    /// The tenant.
+    pub tenant: String,
+    /// The name prefix; empty for the tenant's own limit, or for a tenant
+    /// listed without one.
+    pub prefix: String,
+    /// The limit in bytes; absent for a tenant listed without a limit.
+    pub bytes: Option<u64>,
+    /// A cluster admin set it, so only a cluster admin changes it.
+    pub set_by_cluster_admin: bool,
+    /// The limit is full: new data under it is refused.
+    pub full: bool,
+    /// Bytes used at the last count, every replica counted; absent before
+    /// the first count.
+    pub used_bytes: Option<u64>,
+}
+
+/// Answer to [`DescribeQuotasRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DescribeQuotasResponse {
+    /// Outcome.
+    pub error: ErrorCode,
+    /// The metadata group's leader, with [`ErrorCode::NOT_LEADER`].
+    pub leader_hint: Option<LeaderHint>,
+    /// When usage was last counted, ms since the Unix epoch; absent before
+    /// the first count.
+    pub counted_at_ms: Option<u64>,
+    /// The limits, and the tenants without one.
+    pub quotas: Vec<QuotaEntry>,
+}
+
+impl DescribeQuotasResponse {
+    pub(crate) fn put(&self, w: &mut Writer) {
+        w.u16(self.error.0);
+        put_opt_u64(w, self.counted_at_ms);
+        w.array(&self.quotas, |w, q| {
+            w.string(&q.tenant);
+            w.string(&q.prefix);
+            put_opt_u64(w, q.bytes);
+            w.u8(u8::from(q.set_by_cluster_admin));
+            w.u8(u8::from(q.full));
+            put_opt_u64(w, q.used_bytes);
+            w.no_tags();
+        });
+        // The leader hint is the structure's block of tagged fields.
+        put_hint(w, self.leader_hint);
+    }
+    pub(crate) fn get(r: &mut Reader) -> Result<Self, DecodeError> {
+        let error = ErrorCode(r.u16()?);
+        let counted_at_ms = get_opt_u64(r)?;
+        // tenant, prefix, bytes?, two flags, used?, no tags.
+        let quotas = r.array(2 + 2 + 1 + 1 + 1 + 1 + 1, |r| {
+            let q = QuotaEntry {
+                tenant: r.string()?,
+                prefix: r.string()?,
+                bytes: get_opt_u64(r)?,
+                set_by_cluster_admin: r.u8()? != 0,
+                full: r.u8()? != 0,
+                used_bytes: get_opt_u64(r)?,
+            };
+            r.tags()?;
+            Ok(q)
+        })?;
+        Ok(DescribeQuotasResponse { error, leader_hint: get_hint(r)?, counted_at_ms, quotas })
+    }
+}
+
 /// `PurgeQueue` and `Requeue` (ADR 0064): an action on a queue's ready
 /// messages, served by the queue's leader. Each request acts on at most a
 /// few thousand messages below `up_to`; the answer says whether more are

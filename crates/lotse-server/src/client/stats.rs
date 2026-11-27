@@ -66,6 +66,9 @@ pub(crate) struct NodeView<'a> {
     /// Storage limits the metadata group recorded full (ADR 0147), by
     /// tenant and prefix; the empty prefix is the tenant's own.
     pub(crate) quotas_full: &'a std::collections::BTreeSet<(String, String)>,
+    /// On the metadata leader: when it last counted storage usage, ms
+    /// since the Unix epoch, and what it found (ADR 0147).
+    pub(crate) quota_usage: Option<&'a (u64, crate::quota::Usage)>,
 }
 
 static NO_FULL_QUOTAS: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
@@ -96,6 +99,7 @@ impl Default for NodeView<'_> {
             disk: None,
             disk_low: &NO_LOW,
             quotas_full: &NO_FULL_QUOTAS,
+            quota_usage: None,
         }
     }
 }
