@@ -103,6 +103,18 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             true,
             false,
         ),
+        spec(
+            "describe_quotas",
+            "Storage limits and usage of the tenants you may see: each tenant's own limit and its prefix limits, \
+             in bytes with every replica counted, whether each is full, and the usage at the last count, which runs \
+             every few seconds. A tenant without a limit is listed with its usage.",
+            json!({
+                "tenant": {"type": "string", "description": "Only this tenant."},
+            }),
+            &[],
+            true,
+            false,
+        ),
     ]
 }
 
@@ -677,6 +689,31 @@ pub(crate) async fn list_sessions<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -
     }
     let text = format!("{} open sessions; {} nodes did not answer.", sessions.len(), silent.len());
     done(json!({ "sessions": sessions, "nodes_not_answering": silent }), text)
+}
+
+pub(crate) async fn describe_quotas<R: Net + Clock + Spawn + Rng>(c: &Client<R>, a: &Args<'_>) -> Outcome {
+    let d = c.describe_quotas(a.opt_str("tenant")?).await?;
+    let quotas: Vec<Value> = d
+        .quotas
+        .iter()
+        .map(|q| {
+            json!({
+                "tenant": q.tenant,
+                "prefix": q.prefix,
+                "bytes": q.bytes,
+                "full": q.full,
+                "set_by_cluster_admin": q.set_by_cluster_admin,
+                "used_bytes": q.used_bytes,
+            })
+        })
+        .collect();
+    let full = d.quotas.iter().filter(|q| q.full).count();
+    let limits = d.quotas.iter().filter(|q| q.bytes.is_some()).count();
+    let text = match d.counted_at_ms {
+        Some(_) => format!("{limits} storage limits, {full} full."),
+        None => format!("{limits} storage limits, {full} full; usage is not counted yet."),
+    };
+    done(json!({"quotas": quotas, "counted_at_ms": d.counted_at_ms}), text)
 }
 
 pub(crate) async fn describe_upgrade<R: Net + Clock + Spawn + Rng>(c: &Client<R>) -> Outcome {

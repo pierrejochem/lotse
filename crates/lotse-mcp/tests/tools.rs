@@ -514,3 +514,58 @@ fn invalid_arguments_are_tool_errors_not_panics() {
         });
     });
 }
+
+/// Storage limits (ADR 0147): a cluster admin sets a tenant's limit and
+/// reads it back with its usage; a viewer reads but sets nothing.
+#[test]
+fn storage_limits_are_set_and_read_through_the_tools() {
+    lotse_sim::check_few_seeds(2, |seed| {
+        Sim::new(seed).run(|rt| async move {
+            let nodes = cluster(&rt).await;
+            let root = tools(&rt, "root", "default");
+            // Quotas need cluster version 0.2, which a new cluster takes
+            // once every node has reported its release.
+            let deadline = rt.now() + Duration::from_secs(60);
+            loop {
+                let up = root.call("describe_upgrade", json!({})).await;
+                if up.structured["cluster_version"].as_str().is_some_and(|v| v != "0.0" && v != "0.1") {
+                    break;
+                }
+                assert!(rt.now() < deadline, "no cluster version 0.2: {}", up.structured);
+                rt.sleep(TICK * 20).await;
+            }
+            ok(&root, "create_stream", json!({"name": "s", "partitions": 1, "replication": 3})).await;
+            ok(&root, "set_quota", json!({"tenant": "default", "bytes": 1_000_000})).await;
+            ok(&root, "set_quota", json!({"tenant": "default", "prefix": "s", "bytes": 500_000})).await;
+            let q = ok(&root, "describe_quotas", json!({"tenant": "default"})).await;
+            let limits = q["quotas"].as_array().unwrap();
+            let own = limits.iter().find(|l| l["prefix"] == "").expect("the tenant's own limit");
+            assert_eq!((own["bytes"].as_u64(), own["full"].as_bool()), (Some(1_000_000), Some(false)), "{q}");
+            assert!(limits.iter().any(|l| l["prefix"] == "s" && l["bytes"] == 500_000), "{q}");
+            ok(&root, "set_quota", json!({"tenant": "default", "prefix": "s"})).await;
+            let q = ok(&root, "describe_quotas", json!({})).await;
+            assert!(!q["quotas"].as_array().unwrap().iter().any(|l| l["prefix"] == "s"), "removed: {q}");
+
+            let admin = Client::new(
+                rt.node("c-setup"),
+                ClientConfig {
+                    credentials: Some(Credentials::Scram { user: "root".into(), password: "root-pw".into() }),
+                    ..ClientConfig::new((1..=3).map(|i| format!("n{i}:9000")).collect())
+                },
+            );
+            let viewer = RoleBindingData {
+                subject_kind: subject_kind::USER,
+                subject: "v".into(),
+                role: role::VIEWER,
+                tenant: "default".into(),
+                prefix: String::new(),
+            };
+            admin.alter_role_bindings(vec![viewer], vec![]).await.unwrap();
+            settle(&rt).await;
+            let v = tools(&rt, "v", "default");
+            ok(&v, "describe_quotas", json!({})).await;
+            fails(&v, "set_quota", json!({"tenant": "default", "prefix": "x.", "bytes": 1}), "UNAUTHORIZED").await;
+            stop(nodes).await;
+        });
+    });
+}

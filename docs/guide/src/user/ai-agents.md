@@ -80,6 +80,7 @@ Each tool takes and returns JSON. A result carries `structuredContent` and a sho
 | `node_metrics` | Each node's traffic, connections, CPU, memory, disk and commit latency; `node_id` narrows it |
 | `list_sessions` | Open sessions with principal, mechanism, peer and the `token_id` of a token sign-in (16 hex digits, as `list_tokens` gives it): all for a cluster admin or viewer, your own for anyone else |
 | `describe_upgrade` | The cluster version, the restart turn and each node's release; needs cluster-admin or cluster-viewer |
+| `describe_quotas` | Storage limits of the tenants you may see, whether each is full, and the usage at the last count |
 
 `lag` is to the last stable offset, which is what a `read_committed` group can read; `lag_against` says so, and `lag_to_high_watermark` sits beside it. Both count offsets.
 
@@ -96,7 +97,7 @@ No tool takes messages from a queue. A consumer that reads takes them out of fli
 
 **Change**
 
-`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs` and `create_partitions`. They work on resources created at runtime, as the same requests do over the native protocol. `alter_configs` is marked `destructiveHint` too. A change to `retention.ms`, `retention.bytes`, `delete.retention.ms`, `cleanup.policy`, `max.length`, `max.length.bytes`, `overflow`, `message.ttl.ms` or `max.deliveries` can delete data (the last two drop messages when the queue has no dead-letter queue), so it runs only when `confirm` is the resource's name; without it the call changes nothing, not even the other settings it names. Other settings change without `confirm`.
+`create_stream`, `create_queue`, `declare_exchange`, `bind`, `unbind`, `alter_configs`, `create_partitions` and `set_quota`, which sets or removes a storage limit (a tenant's own needs cluster-admin; a prefix limit a tenant admin may set under their binding). They work on resources created at runtime, as the same requests do over the native protocol. `alter_configs` is marked `destructiveHint` too. A change to `retention.ms`, `retention.bytes`, `delete.retention.ms`, `cleanup.policy`, `max.length`, `max.length.bytes`, `overflow`, `message.ttl.ms` or `max.deliveries` can delete data (the last two drop messages when the queue has no dead-letter queue), so it runs only when `confirm` is the resource's name; without it the call changes nothing, not even the other settings it names. Other settings change without `confirm`.
 
 **Destroy**
 
