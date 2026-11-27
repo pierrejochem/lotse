@@ -1,6 +1,6 @@
 # 11. Flow control: throttle, never drop
 
-- Status: Accepted; the disk limits are superseded by [ADR 0122](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) (one free space limit per node, refusing new data in the groups it votes in)
+- Status: Accepted; the disk limits are superseded by [ADR 0122](0122-a-node-low-on-disk-stops-new-data-in-its-groups.md) (one free space limit per node, refusing new data in the groups it votes in); the storage quotas are superseded by [ADR 0147](0147-storage-quotas-per-tenant-and-prefix.md) (per tenant and name prefix, not per principal or client id)
 - Date: 2026-10-27
 
 ## Context

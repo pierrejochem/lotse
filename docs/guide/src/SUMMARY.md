@@ -17,6 +17,7 @@
 - [Authentication and roles](admin/authentication-and-roles.md)
 - [Nodes](admin/nodes.md)
 - [Retention and compaction](admin/retention-and-compaction.md)
+- [Storage quotas](admin/storage-quotas.md)
 - [Monitoring](admin/monitoring.md)
 - [Operations](admin/operations.md)
 - [Upgrades](admin/upgrades.md)

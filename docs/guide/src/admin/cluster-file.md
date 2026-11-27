@@ -120,6 +120,14 @@ How much free space each node keeps on its data volume ([ADR 0122](https://githu
 
 A node reads its volume every `check_interval_ms`. Below the limit it is low: the leaders of every group with a replica on it refuse produces, publishes and dead letters with `STORAGE_FULL`, which clients retry; reads, acks and metadata changes go on. It is no longer low once its free space is a tenth above the limit. The node tells the metadata group at once, so other nodes learn of it within a few seconds; the node itself refuses at once for the groups it leads. See [Nodes](nodes.md#a-node-low-on-disk).
 
+## `[quotas]`
+
+How the metadata leader counts storage quotas ([ADR 0147](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0147-storage-quotas-per-tenant-and-prefix.md)); see [Storage quotas](storage-quotas.md).
+
+| Key | Type, unit | Default | Meaning |
+| --- | --- | --- | --- |
+| `check_interval_ms` | integer, ms | 10000 | How often the metadata leader asks every node for its groups' sizes and counts each limit. A tenant may overshoot its limit by what it writes in about two of these. 1000 to 600000. |
+
 ## `[producers]`
 
 How each partition keeps idempotent producers ([ADR 0110](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0110-idle-producers-expire-and-a-full-partition-refuses-new-ones.md)). Use the same values on every node.
