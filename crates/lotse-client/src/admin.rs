@@ -508,6 +508,36 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
         self.admin_change(Request::RevokeToken(lotse_proto::RevokeTokenRequest { id })).await
     }
 
+    /// Sets (`Some`) or removes (`None`) a storage limit in bytes, every
+    /// replica counted (ADR 0147): a tenant's own with an empty `prefix`,
+    /// which needs the cluster-admin role, or one on the names starting
+    /// with `prefix`, which a tenant admin of that tenant may set under
+    /// their binding's prefix too, unless a cluster admin set it.
+    pub async fn alter_quota(&self, tenant: &str, prefix: &str, bytes: Option<u64>) -> Result<(), ClientError> {
+        let req = lotse_proto::AlterQuotaRequest { tenant: tenant.into(), prefix: prefix.into(), bytes };
+        self.admin_change(Request::AlterQuota(req)).await
+    }
+
+    /// The storage limits and usage of `tenant`, or of every tenant the
+    /// caller may see (ADR 0147), from the metadata leader, which counts
+    /// the usage.
+    pub async fn describe_quotas(
+        &self,
+        tenant: Option<&str>,
+    ) -> Result<lotse_proto::DescribeQuotasResponse, ClientError> {
+        let req = Request::DescribeQuotas(lotse_proto::DescribeQuotasRequest { tenant: tenant.map(str::to_string) });
+        self.retrying(|| async {
+            match self.call_admin(&req).await? {
+                Response::DescribeQuotas(d) => {
+                    self.admin_answer(d.error, d.leader_hint)?;
+                    Ok(d)
+                }
+                other => Err(Attempt::Retry(format!("unexpected response {other:?}"))),
+            }
+        })
+        .await
+    }
+
     /// Revokes one client certificate (ADR 0090): each node ends the
     /// connections that showed it and refuses it from then on, until it
     /// expires at `not_after_ms` (ms since the Unix epoch). `issuer` is the
