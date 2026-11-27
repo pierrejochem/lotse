@@ -77,7 +77,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
     : { name, tenant: hasTenants && tenant ? tenant : null, priority_levels: 1, single_active: false, ttl_ms: null, dlq: null, max_deliveries: null, create_dlq: false };
   const nameError = touched && !NAME.test(name) ? 'Use lowercase letters, digits, dots and hyphens, starting with a letter or digit.' : null;
   const selected = tenants.data?.tenants.find((t) => t.name === tenant);
-  const overQuota = selected?.quota_bytes != null ? selected.used_bytes >= selected.quota_bytes : false;
+  const overQuota = selected ? selected.quota_full || (selected.quota_bytes != null && selected.used_bytes >= selected.quota_bytes) : false;
   const preview = useMemo(() => cliPreview(req), [JSON.stringify(req)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function submit(e: FormEvent) {
@@ -162,9 +162,9 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
                   {selected && (
                     <span className={overQuota ? 'error-text' : 'help'}>
                       {overQuota
-                        ? 'Storage quota reached; new queues are refused.'
+                        ? 'Storage limit reached: the queue can be created, but writes to it are refused until there is room.'
                         : selected.quota_bytes != null
-                          ? `${bytes(selected.used_bytes)} of ${bytes(selected.quota_bytes)} quota used`
+                          ? `${bytes(selected.used_bytes)} of ${bytes(selected.quota_bytes)} limit used`
                           : `${bytes(selected.used_bytes)} stored`}
                     </span>
                   )}
@@ -233,7 +233,7 @@ export function CreateQueueDialog({ cluster }: { cluster: string }) {
 
             <div className="dialog-foot">
               <Dialog.Close className="btn" type="button">Cancel</Dialog.Close>
-              <button type="submit" className="btn primary" disabled={create.isPending || overQuota}>
+              <button type="submit" className="btn primary" disabled={create.isPending}>
                 {create.isPending ? 'Creating…' : 'Create queue'}
               </button>
             </div>

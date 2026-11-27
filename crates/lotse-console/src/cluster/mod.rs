@@ -18,7 +18,7 @@ use crate::metrics::{ChartSample, Visibility};
 use crate::model::{
     BindingRow, BindingsView, CertificateRequestsView, CertificatesView, ClusterRef, CreateQueue, CreateTokenBody,
     CreatedTokenView, Credential, Isolation, MoveLeader, NodesView, Overview, PlacePartition, QueueDetail, QueueRow,
-    RecordView, SessionsView, SetReplication, StreamDetail, StreamRow, TenantsView, TokensView, UsersView,
+    RecordView, SessionsView, SetQuota, SetReplication, StreamDetail, StreamRow, TenantsView, TokensView, UsersView,
 };
 
 /// One managed cluster.
@@ -63,6 +63,9 @@ pub trait Cluster: Send + Sync + 'static {
 
     /// Sets a resource's `replication.factor` (ADR 0115).
     async fn set_replication(&self, who: &Identity, req: &SetReplication) -> ApiResult<()>;
+
+    /// Sets or removes a storage limit as `who` (ADR 0147).
+    async fn set_quota(&self, who: &Identity, req: &SetQuota) -> ApiResult<()>;
 
     /// Places a partition on named nodes, or releases it (ADR 0115).
     async fn place_partition(&self, who: &Identity, req: &PlacePartition) -> ApiResult<()>;

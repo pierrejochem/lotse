@@ -962,6 +962,76 @@
         }
       }
     },
+    "/api/v1/clusters/{cluster}/quotas": {
+      "post": {
+        "tags": [],
+        "summary": "Sets or removes a storage limit of a tenant or a name prefix in it, as\nthe signed-in user (ADR 0147).",
+        "operationId": "set_quota",
+        "parameters": [
+          {
+            "name": "cluster",
+            "in": "path",
+            "description": "Cluster ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetQuota"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The signed-in user may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster or tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/clusters/{cluster}/replication": {
       "post": {
         "tags": [],
@@ -3169,6 +3239,45 @@
           }
         }
       },
+      "PrefixQuota": {
+        "type": "object",
+        "description": "A storage limit on a name prefix inside a tenant (ADR 0147).",
+        "required": [
+          "prefix",
+          "bytes",
+          "full",
+          "set_by_cluster_admin"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The limit, bytes, every replica counted.",
+            "minimum": 0
+          },
+          "full": {
+            "type": "boolean",
+            "description": "New data under it is refused."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The name prefix."
+          },
+          "set_by_cluster_admin": {
+            "type": "boolean",
+            "description": "A cluster admin set it, so only a cluster admin changes it."
+          },
+          "used_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bytes used at the cluster's last count; `None` before the first.",
+            "minimum": 0
+          }
+        }
+      },
       "PriorityLevel": {
         "type": "object",
         "description": "A queue priority level (ADR 0078: levels share the queue's one log).",
@@ -3909,6 +4018,32 @@
           }
         }
       },
+      "SetQuota": {
+        "type": "object",
+        "description": "Request to set or remove a storage limit (ADR 0147).",
+        "required": [
+          "tenant"
+        ],
+        "properties": {
+          "bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The limit in bytes, every replica counted; absent or `null` removes it.",
+            "minimum": 0
+          },
+          "prefix": {
+            "type": "string",
+            "description": "A name prefix; empty for the tenant's own limit."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "The tenant."
+          }
+        }
+      },
       "SetReplication": {
         "type": "object",
         "description": "Request to give every partition of a stream or queue a number of\nreplicas (`replication.factor`, ADR 0115). Releases its placed\npartitions.",
@@ -4120,6 +4255,8 @@
         "required": [
           "name",
           "used_bytes",
+          "quota_full",
+          "prefix_quotas",
           "streams",
           "queues",
           "principals",
@@ -4129,6 +4266,13 @@
           "name": {
             "type": "string",
             "description": "Tenant name."
+          },
+          "prefix_quotas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrefixQuota"
+            },
+            "description": "Limits on name prefixes inside the tenant (ADR 0147)."
           },
           "principals": {
             "type": "integer",
@@ -4150,6 +4294,10 @@
             "format": "int64",
             "description": "Storage quota, bytes; `None` where the cluster has no quotas.",
             "minimum": 0
+          },
+          "quota_full": {
+            "type": "boolean",
+            "description": "The tenant's own limit is full: new data is refused (ADR 0147)."
           },
           "state": {
             "$ref": "#/components/schemas/Chip",

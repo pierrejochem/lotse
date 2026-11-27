@@ -1054,6 +1054,14 @@ impl Cluster for NativeCluster {
         self.seat(who).client.alter_configs(&req.resource, &set, &[]).await.map_err(|e| refused("the change", e))
     }
 
+    async fn set_quota(&self, who: &Identity, req: &SetQuota) -> ApiResult<()> {
+        self.seat(who)
+            .client
+            .alter_quota(&req.tenant, &req.prefix, req.bytes)
+            .await
+            .map_err(|e| refused("the limit", e))
+    }
+
     async fn place_partition(&self, who: &Identity, req: &PlacePartition) -> ApiResult<()> {
         let nodes = req.nodes.iter().map(|n| node_id(&self.id, n)).collect::<ApiResult<Vec<u64>>>()?;
         let seat = self.seat(who);
@@ -1150,6 +1158,9 @@ impl Cluster for NativeCluster {
             Err(e) => return Err(failed(e)),
         };
         let applies = |b: &RoleBindingData, t: &str| cluster_wide(b.role) || b.tenant == t;
+        // Storage limits (ADR 0147), from the metadata leader, which counts
+        // the usage; a cluster without them (before 0.2) shows none.
+        let quotas = seat.client.describe_quotas(None).await.ok().map(|d| d.quotas).unwrap_or_default();
         let rows = tenants
             .iter()
             .map(|t| {
@@ -1159,10 +1170,29 @@ impl Cluster for NativeCluster {
                     .filter(|b| applies(b, &t.name))
                     .map(|b| (b.subject_kind, b.subject.as_str()))
                     .collect();
+                let own = quotas.iter().find(|q| q.tenant == t.name && q.prefix.is_empty());
+                let counted = own.and_then(|q| q.used_bytes);
+                let prefix_quotas = quotas
+                    .iter()
+                    .filter(|q| q.tenant == t.name && !q.prefix.is_empty())
+                    .filter_map(|q| {
+                        Some(PrefixQuota {
+                            prefix: q.prefix.clone(),
+                            bytes: q.bytes?,
+                            used_bytes: q.used_bytes,
+                            full: q.full,
+                            set_by_cluster_admin: q.set_by_cluster_admin,
+                        })
+                    })
+                    .collect();
                 Tenant {
                     name: t.name.clone(),
-                    used_bytes: mine.iter().flat_map(|r| s.replicas(r.resource_id)).map(|p| p.size_bytes).sum(),
-                    quota_bytes: None,
+                    used_bytes: counted.unwrap_or_else(|| {
+                        mine.iter().flat_map(|r| s.replicas(r.resource_id)).map(|p| p.size_bytes).sum()
+                    }),
+                    quota_bytes: own.and_then(|q| q.bytes),
+                    quota_full: own.is_some_and(|q| q.full),
+                    prefix_quotas,
                     streams: mine.iter().filter(|r| r.kind == kind::STREAM).count() as u32,
                     queues: mine.iter().filter(|r| r.kind == kind::QUEUE).count() as u32,
                     principals: subjects.len() as u32,

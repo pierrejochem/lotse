@@ -53,6 +53,9 @@ struct State {
     placements: BTreeMap<(String, u32), Vec<String>>,
     /// Replication factors set here, by resource.
     factors: BTreeMap<String, u32>,
+    /// Storage limits set here, by tenant and prefix; `None` removed one
+    /// (ADR 0147).
+    quotas: BTreeMap<(String, String), Option<u64>>,
     /// Users created or changed here, by name, with their iterations; the
     /// demo's sample users are `SAMPLE_USERS`. Deleted names are in `gone`.
     users: BTreeMap<String, u32>,
@@ -899,12 +902,9 @@ impl Cluster for DemoCluster {
             .iter()
             .find(|t| &t.name == wanted)
             .ok_or_else(|| ApiError::NotFound(format!("There is no tenant \"{wanted}\".")))?;
-        if tenant.quota_bytes.is_some_and(|q| tenant.used_bytes >= q) {
-            return Err(ApiError::Forbidden(format!(
-                "Tenant {} has reached its storage quota. Raise the quota before adding queues.",
-                tenant.name
-            )));
-        }
+        // A full tenant still creates queues (ADR 0147): creating uses no
+        // space; writes to them are refused until there is room.
+        let _ = tenant;
         if self.queues(who).await?.iter().any(|q| q.name == req.name) {
             return Err(ApiError::Conflict(format!("A queue named \"{}\" exists already.", req.name)));
         }
@@ -951,16 +951,48 @@ impl Cluster for DemoCluster {
     }
 
     async fn tenants(&self, _who: &Identity) -> ApiResult<TenantsView> {
+        let set = self.lock().quotas.clone();
         let t = |name: &str, used: u64, quota: u64, streams, queues, principals| {
-            let ratio = used as f64 / quota as f64;
-            let state = if ratio >= 1.0 {
-                chip(Tone::Critical, "Quota reached, writes rejected")
+            let quota = match set.get(&(name.to_string(), String::new())) {
+                Some(changed) => *changed,
+                None => Some(quota),
+            };
+            let ratio = quota.map_or(0.0, |q| used as f64 / q as f64);
+            let state = if quota.is_none() {
+                chip(Tone::Ok, "No limit")
+            } else if ratio >= 1.0 {
+                chip(Tone::Critical, "Full, writes refused")
             } else if ratio >= 0.8 {
                 chip(Tone::Warn, &format!("{:.0} % used", ratio * 100.0))
             } else {
-                chip(Tone::Ok, "Within quota")
+                chip(Tone::Ok, "Within limit")
             };
-            Tenant { name: name.into(), used_bytes: used, quota_bytes: Some(quota), streams, queues, principals, state }
+            let prefix_quotas = set
+                .iter()
+                .filter(|((t, p), _)| t == name && !p.is_empty())
+                .filter_map(|((_, p), b)| {
+                    let bytes = (*b)?;
+                    let used_bytes = used / 4;
+                    Some(PrefixQuota {
+                        prefix: p.clone(),
+                        bytes,
+                        used_bytes: Some(used_bytes),
+                        full: used_bytes >= bytes,
+                        set_by_cluster_admin: true,
+                    })
+                })
+                .collect();
+            Tenant {
+                name: name.into(),
+                used_bytes: used,
+                quota_bytes: quota,
+                quota_full: quota.is_some_and(|q| used >= q),
+                prefix_quotas,
+                streams,
+                queues,
+                principals,
+                state,
+            }
         };
         let created = |tenant: &str| {
             self.lock().created.values().filter(|(q, _)| q.tenant.as_deref() == Some(tenant)).count() as u32
@@ -1078,6 +1110,14 @@ impl Cluster for DemoCluster {
             }
         }
     }
+    async fn set_quota(&self, _who: &Identity, req: &SetQuota) -> ApiResult<()> {
+        if req.bytes == Some(0) {
+            return Err(ApiError::BadRequest("The cluster refused the limit: a limit is at least 1 byte.".into()));
+        }
+        self.lock().quotas.insert((req.tenant.clone(), req.prefix.clone()), req.bytes);
+        Ok(())
+    }
+
     async fn set_replication(&self, who: &Identity, req: &SetReplication) -> ApiResult<()> {
         self.replicas_of(who, &req.resource, 0).await?;
         if req.factor == 0 || req.factor as usize > DEMO_NODES.len() {
@@ -1661,7 +1701,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tenant_over_quota_cannot_add_queues() {
+    async fn a_tenant_over_quota_still_adds_queues() {
+        // ADR 0147: a full limit refuses new data, not new resources.
         let c = DemoCluster::new("t");
         let req = CreateQueue {
             name: "x".into(),
@@ -1673,6 +1714,6 @@ mod tests {
             max_deliveries: None,
             create_dlq: false,
         };
-        assert!(matches!(c.create_queue(&me(), &req).await, Err(ApiError::Forbidden(_))));
+        assert!(c.create_queue(&me(), &req).await.is_ok());
     }
 }
