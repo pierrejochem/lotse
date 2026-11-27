@@ -32,7 +32,9 @@ pub use auth::{AuthConfig, ClientCas, DEFAULT_MAX_SESSION, JWKS_REFETCH_EVERY, O
 pub use client::{QueueConfig, StreamConfig};
 pub use disk::FreeLimit;
 pub use metadata::{DYNAMIC_BASE, MAX_PARTITIONS};
-pub use node::{DEFAULT_COMPACTION_MAP_BYTES, GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig};
+pub use node::{
+    DEFAULT_COMPACTION_MAP_BYTES, DEFAULT_SEGMENT_MS, GroupStatus, Node, NodeConfig, NodeHandle, RetentionConfig,
+};
 pub use producers::{DEFAULT_MAX_PRODUCERS, DEFAULT_PRODUCER_EXPIRATION};
 
 /// How long a group member may go without a heartbeat (Kafka's default).

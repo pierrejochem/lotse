@@ -11,6 +11,7 @@
 data_dir = "/var/lib/lotse"
 # election_timeout_ms = 1000   # a group elects after this long without a leader, up to twice as long (ADR 0144)
 # heartbeat_ms = 100
+# segment_ms = 3600000       # a stream's or queue's segment closes at this age, so retention can free it (ADR 0146)
 
 [[node]]
 id = 1

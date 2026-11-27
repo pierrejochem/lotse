@@ -483,3 +483,42 @@ fn an_index_file_of_a_shorter_segment_is_not_trusted() {
         assert_reads(&log, &expected).await;
     });
 }
+
+#[test]
+fn roll_seals_the_active_segment() {
+    Sim::new(40).run(|rt| async move {
+        let mut log = Log::open(rt.clone(), "p0", LogConfig::default()).await.unwrap();
+        let mut expected = Vec::new();
+        for i in 0..3u64 {
+            let b = batch(i, &[b"x"]);
+            log.append(b.clone()).await.unwrap();
+            expected.push(b);
+        }
+        assert!(log.roll().await.unwrap());
+        assert_eq!(log.segment_count(), 2);
+        assert_eq!(log.segments().last().unwrap().base_offset, log.next_offset());
+        assert_eq!(log.segments().last().unwrap().bytes, 0);
+        assert_reads(&log, &expected).await;
+        log.sync().await.unwrap();
+        drop(log);
+        let log = Log::open(rt, "p0", LogConfig::default()).await.unwrap();
+        assert_eq!(log.segment_count(), 2);
+        assert_eq!(log.next_offset(), 3);
+        assert_reads(&log, &expected).await;
+    });
+}
+
+#[test]
+fn roll_of_an_empty_active_segment_does_nothing() {
+    Sim::new(41).run(|rt| async move {
+        let mut log = Log::open(rt, "p0", LogConfig::default()).await.unwrap();
+        assert!(!log.roll().await.unwrap());
+        assert_eq!(log.segment_count(), 1);
+        log.append(batch(0, &[b"x"])).await.unwrap();
+        assert!(log.roll().await.unwrap());
+        assert!(!log.roll().await.unwrap());
+        assert_eq!(log.segment_count(), 2);
+        log.append(batch(1, &[b"y"])).await.unwrap();
+        assert_eq!(log.next_offset(), 2);
+    });
+}

@@ -208,3 +208,14 @@ fn groups_elect_after_a_second_unless_the_file_says_otherwise() {
     assert!(refused("election_timeout_ms = 150").contains("at least twice cluster.heartbeat_ms"));
     assert!(refused("election_timeout_ms = 200\nheartbeat_ms = 150").contains("twice"));
 }
+
+#[test]
+fn segment_ms_has_a_default_and_a_floor() {
+    let c = ClusterFile::parse(THREE, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.retention.segment_ms, 3_600_000, "an hour");
+    let set = THREE.replace("[cluster]\n", "[cluster]\nsegment_ms = 120000\n");
+    let c = ClusterFile::parse(&set, "t").unwrap().node_config(1).unwrap();
+    assert_eq!(c.retention.segment_ms, 120_000);
+    let short = THREE.replace("[cluster]\n", "[cluster]\nsegment_ms = 59999\n");
+    assert!(err(&short).contains("segment_ms"), "{}", err(&short));
+}

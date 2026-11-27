@@ -4,7 +4,9 @@
 
 A log is trimmed only at a snapshot point. When applying reaches the base offset of a segment, a replica records a snapshot of its state there, in a file of the group's directory. Retention picks a point and the replica cuts at the newest such boundary at or below it, deleting whole segments ([ADR 0046](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0046-retention.md)). Each node runs retention for each of its groups once a second, by its own clock.
 
-Because only whole segments go, a partition keeps up to a segment more than its limits. `cluster.segment_bytes` (default 128 MiB) sets the size of a segment. The active segment is never deleted. Nothing at or above the last stable offset is deleted, so an open transaction's records stay until it ends.
+Because only whole segments go, a partition keeps up to a segment more than its limits. `cluster.segment_bytes` (default 128 MiB) sets the size of a segment. The active segment is never deleted.
+
+A segment also closes by age, so a log that stops growing still frees its space ([ADR 0146](https://github.com/pierrejochem/lotse/blob/main/docs/adr/0146-segments-close-by-age.md)). A runtime stream's or queue's active segment closes once it has held data for `cluster.segment_ms` (default 3,600,000 ms, an hour, at least 60,000 ms). A drained queue or a stream past its retention then frees its space within about that time, without new data. A resource sets its own age with `segment.ms`, changed on its own with `AlterConfigs` once the resource exists, and needs cluster version 0.2. A restarted node starts the age again, so it may close its segments up to one age later than the others. Nothing at or above the last stable offset is deleted, so an open transaction's records stay until it ends.
 
 ### What each kind of log keeps
 

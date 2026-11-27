@@ -1110,7 +1110,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lotse-auth"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "hmac 0.13.0",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-client"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "lotse-auth",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-console"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-log"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-mcp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-node"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-queue"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "lotse-record",
@@ -1269,14 +1269,14 @@ dependencies = [
 
 [[package]]
 name = "lotse-raft"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "lotse-record"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1288,21 +1288,21 @@ dependencies = [
 
 [[package]]
 name = "lotse-route"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "lotse-rt"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "lotse-rt-tokio"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "lotse-sim"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "lotse-log",

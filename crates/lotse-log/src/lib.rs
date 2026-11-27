@@ -437,16 +437,7 @@ impl<D: Disk> Log<D> {
             active.size > 0 && active.size + len > self.config.segment_bytes
         };
         if roll {
-            // Sealed from here on: synced, then indexed, before the next
-            // segment exists, so on open a segment that is not the last
-            // always is whole.
-            let active_base = self.active_base();
-            let disk = self.disk.clone();
-            let active = self.active_mut();
-            active.file.sync().await?;
-            write_index(&disk, active_base, active).await?;
-            let base = self.next_offset;
-            self.create_segment(base).await?;
+            self.seal_active().await?;
         }
         let interval = self.config.index_interval_bytes;
         let active = self.active_mut();
@@ -457,6 +448,31 @@ impl<D: Disk> Log<D> {
         active.next_offset = parsed.next_offset();
         self.next_offset = parsed.next_offset();
         Ok(Appended { base_offset: parsed.base_offset(), next_offset: parsed.next_offset() })
+    }
+
+    /// Seals the active segment and starts an empty one at the next offset,
+    /// as a segment that reached `segment_bytes` is sealed: so that a
+    /// segment that stopped growing can still go by age (retention) or be
+    /// compacted. Returns `false`, and does nothing, when the active segment
+    /// holds no batch.
+    pub async fn roll(&mut self) -> Result<bool, Error> {
+        if self.active().size == 0 {
+            return Ok(false);
+        }
+        self.seal_active().await?;
+        Ok(true)
+    }
+
+    /// Sealed from here on: synced, then indexed, before the next segment
+    /// exists, so on open a segment that is not the last always is whole.
+    async fn seal_active(&mut self) -> Result<(), Error> {
+        let active_base = self.active_base();
+        let disk = self.disk.clone();
+        let active = self.active_mut();
+        active.file.sync().await?;
+        write_index(&disk, active_base, active).await?;
+        let base = self.next_offset;
+        self.create_segment(base).await
     }
 
     /// Makes every appended batch durable.

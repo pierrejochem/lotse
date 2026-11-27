@@ -149,5 +149,6 @@ Each record states one decision: why it was needed, what was decided and what fo
 | 0143 | [A round persists its groups together](0143-a-round-persists-its-groups-together.md) | Accepted |
 | 0144 | [Groups elect after a second](0144-groups-elect-after-a-second.md) | Accepted |
 | 0145 | [A node behind does not call a name unknown](0145-a-node-behind-does-not-call-a-name-unknown.md) | Accepted |
+| 0146 | [Segments close by age](0146-segments-close-by-age.md) | Accepted |
 
 To add one: copy [template.md](template.md), take the next number, and link it here in the same change.

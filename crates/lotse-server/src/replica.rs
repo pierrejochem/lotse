@@ -324,6 +324,13 @@ pub struct Replica<D: Disk, S> {
     /// The file the chunks of a snapshot being received go to.
     incoming: Option<D::File>,
     retention: Retention,
+    /// Close the active segment once it is this many ms old (ADR 0146);
+    /// `None` closes it by size only.
+    segment_ms: Option<u64>,
+    /// The active segment's base and when this replica first saw it hold a
+    /// batch, by the time retention is given; forgotten on a restart, so
+    /// the age starts again then.
+    active_since: Option<(u64, u64)>,
     compactor: compaction::Compactor,
     state: PartitionState,
     /// Largest number of bytes per append message (at least one entry).
@@ -471,6 +478,8 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
             boundaries: std::collections::BTreeMap::new(),
             incoming: None,
             retention: options.retention,
+            segment_ms: None,
+            active_since: None,
             compactor: compaction::Compactor::default(),
             state,
             max_fill_bytes: 1 << 20,
@@ -909,6 +918,46 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
         self.retention = r;
     }
 
+    /// Closes the active segment once it is `ms` old, and never with
+    /// `None` (ADR 0146): a segment that stops growing, because its stream
+    /// gets no new data or a full tenant may write none, can then still go
+    /// by age, below a queue's ack floor or by compaction.
+    pub fn set_segment_ms(&mut self, ms: Option<u64>) {
+        self.segment_ms = ms;
+    }
+
+    /// Seals the active segment if it is older than the segment age. With
+    /// everything applied, the state now is where retention can cut, so a
+    /// boundary is noted at the new segment's base: no new batch has to
+    /// come for the old segment to go.
+    async fn roll_by_age(&mut self, now_ms: u64) -> Result<(), Error> {
+        let Some(age) = self.segment_ms else {
+            self.active_since = None;
+            return Ok(());
+        };
+        let active = self.log.segments().last().expect("a log has an active segment");
+        if active.bytes == 0 {
+            self.active_since = None;
+            return Ok(());
+        }
+        let since = match self.active_since {
+            Some((base, at)) if base == active.base_offset => at,
+            _ => {
+                self.active_since = Some((active.base_offset, now_ms));
+                now_ms
+            }
+        };
+        if now_ms.saturating_sub(since) < age || !self.log.roll().await? {
+            return Ok(());
+        }
+        self.active_since = None;
+        let next = self.log.next_offset();
+        if self.applied == next {
+            self.note_boundary(next).await?;
+        }
+        Ok(())
+    }
+
     /// The offset retention would like the log to start at, before it is
     /// held back by snapshots: never past what is applied, nor into an open
     /// transaction. `None` if nothing is to go.
@@ -958,6 +1007,7 @@ impl<D: Disk, S: StateMachine> Replica<D, S> {
     /// [`Replica::retain`], with a compaction sweep allowed to start only
     /// as `sweep` says: a node runs one at a time (ADR 0098).
     pub async fn retain_with(&mut self, now_ms: u64, sweep: Sweep) -> Result<Option<u64>, Error> {
+        self.roll_by_age(now_ms).await?;
         if let Retention::Stream { compact: Some(tombstone_ms), .. } = self.retention {
             self.compact_log(tombstone_ms, now_ms, sweep).await?;
         }

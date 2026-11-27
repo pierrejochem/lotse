@@ -40,6 +40,16 @@ pub const OLDEST_CLUSTER_VERSION: u32 =
 /// while the cluster version in force is at least this (ADR 0127).
 pub const TOKENS_SINCE: u32 = cluster_version::of(0, 1);
 
+/// The cluster version that introduced storage quotas: their limits and
+/// full records are written only while the cluster version in force is at
+/// least this (ADR 0127).
+pub const QUOTAS_SINCE: u32 = cluster_version::of(0, 2);
+
+/// The cluster version that introduced a resource's own segment age
+/// (`segment.ms`): written only while the cluster version in force is at
+/// least this (ADR 0127).
+pub const SEGMENT_AGE_SINCE: u32 = cluster_version::of(0, 2);
+
 // The window of ADR 0127: one minor release back, never more. A release
 // whose window is wrong does not build.
 const _: () = assert!(

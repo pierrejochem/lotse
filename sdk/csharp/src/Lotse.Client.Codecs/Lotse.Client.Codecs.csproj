@@ -10,7 +10,7 @@
     <RootNamespace>Lotse.Codecs</RootNamespace>
     <AssemblyName>Lotse.Client.Codecs</AssemblyName>
     <PackageId>Lotse.Client.Codecs</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.2.0</Version>
     <Description>The zstd and LZ4 codecs for Lotse.Client (optional; ADR 0084).</Description>
   </PropertyGroup>
 

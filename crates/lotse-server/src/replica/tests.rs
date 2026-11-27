@@ -1169,3 +1169,64 @@ fn a_vote_in_a_term_it_already_knew_survives_a_power_loss() {
         );
     });
 }
+
+async fn open_unsized(rt: &SimRuntime, dir: &str, retention: Retention) -> Replica<SimRuntime, Recorder> {
+    let options = ReplicaOptions { retention, ..ReplicaOptions::default() };
+    Replica::open_with(rt.clone(), dir, Config::new(1, vec![1]), Recorder::default(), LogConfig::default(), options)
+        .await
+        .unwrap()
+}
+
+#[test]
+fn a_segment_closes_by_age() {
+    Sim::new(60).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: None };
+        let mut r = open_unsized(&rt, "age", retention).await;
+        r.set_segment_ms(Some(60_000));
+        elect(&mut r).await;
+        commit(&mut r, batch_at("a", 0)).await;
+        r.retain(0).await.unwrap();
+        r.retain(59_999).await.unwrap();
+        assert_eq!(r.log().segment_count(), 1, "not old yet");
+        r.retain(60_000).await.unwrap();
+        assert_eq!(r.log().segment_count(), 2, "closed at its age");
+        r.retain(200_000).await.unwrap();
+        assert_eq!(r.log().segment_count(), 2, "an empty segment does not close");
+    });
+}
+
+#[test]
+fn an_aged_stream_is_cut_without_new_data() {
+    Sim::new(61).run(|rt| async move {
+        let retention = Retention::Stream { ms: Some(1_000), bytes: None, compact: None };
+        let mut r = open_unsized(&rt, "aged", retention).await;
+        r.set_segment_ms(Some(60_000));
+        elect(&mut r).await;
+        for i in 0..5 {
+            commit(&mut r, batch_at(&format!("v{i}"), 0)).await;
+        }
+        let end = r.log().next_offset();
+        assert_eq!(r.retain(0).await.unwrap(), None, "the active segment never goes");
+        assert_eq!(r.retain(59_999).await.unwrap(), None, "not closed yet");
+        // Closed by age and, its records long past their retention, gone in
+        // the same pass: no new batch had to come.
+        r.retain(60_000).await.unwrap().expect("the aged segment goes with no new data");
+        assert_eq!(r.log().start_offset(), end);
+        assert_eq!(r.log().segment_count(), 1);
+        assert!(kept(&r).await.is_empty());
+    });
+}
+
+#[test]
+fn no_roll_without_a_segment_age() {
+    Sim::new(62).run(|rt| async move {
+        let retention = Retention::Stream { ms: None, bytes: None, compact: None };
+        let mut r = open_unsized(&rt, "never", retention).await;
+        r.set_segment_ms(None);
+        elect(&mut r).await;
+        commit(&mut r, batch_at("a", 0)).await;
+        r.retain(0).await.unwrap();
+        r.retain(u64::MAX / 2).await.unwrap();
+        assert_eq!(r.log().segment_count(), 1);
+    });
+}

@@ -1,6 +1,6 @@
 {
   "name": "@pierrejochem/lotse-client",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Node.js client for Lotse, a message broker with reliable queues and persistent streams.",
   "license": "Apache-2.0",
   "author": "Pierre Jochem",

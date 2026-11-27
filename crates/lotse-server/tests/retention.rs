@@ -671,3 +671,109 @@ async fn quiet(rt: SimRuntime) {
 fn requests_learn_their_outcome_while_retention_cuts_the_coordinator_log() {
     lotse_sim::check_few_seeds(5, |seed| Sim::new(seed).run(quiet));
 }
+
+/// Drained queues and aged streams free their space (ADR 0146): a runtime
+/// stream with a short retention and a queue whose every message was acked
+/// get no new data, and still drop their old segments on every replica
+/// within their segment age, a node crashing and coming back meanwhile.
+async fn aging(rt: SimRuntime) {
+    let mut w = World::new(rt.clone(), RetentionConfig::keep()).await;
+    let n = w.cfgs.len() as u64;
+    let admin = Client::new(rt.node("admin"), ClientConfig { retry_for: Duration::from_secs(20), ..client_config(n) });
+    // segment.ms is a format of cluster version 0.2, which a new cluster
+    // takes once every node has reported its release.
+    let deadline = rt.now() + Duration::from_secs(60);
+    loop {
+        let v = admin.describe_upgrade().await.ok().and_then(|d| d.cluster_version);
+        if v.is_some_and(|v| v >= lotse_server::version::SEGMENT_AGE_SINCE) {
+            break;
+        }
+        assert!(rt.now() < deadline, "the cluster never took cluster version 0.2: {v:?}");
+        rt.sleep(TICK * 20).await;
+    }
+    let replication = n.min(3) as u8;
+    let stream = match admin.create_stream_with("aged", 1, replication, &[("retention.ms", "1000")]).await {
+        Ok(id) | Err(ClientError::ResourceExists { resource_id: id, .. }) => id,
+        Err(e) => panic!("the cluster does not create a stream: {e}"),
+    };
+    let queue = match admin.create_queue("drained", replication, None).await {
+        Ok(id) | Err(ClientError::ResourceExists { resource_id: id, .. }) => id,
+        Err(e) => panic!("the cluster does not create a queue: {e}"),
+    };
+    for name in ["aged", "drained"] {
+        loop {
+            match admin.alter_configs(name, &[("segment.ms", "60000")], &[]).await {
+                Ok(()) => break,
+                Err(ClientError::Unknown(_) | ClientError::UnknownStream(..)) => rt.sleep(TICK * 5).await,
+                Err(e) => panic!("{name}: segment.ms not taken: {e}"),
+            }
+        }
+    }
+    let mut ends = BTreeMap::new();
+    for (name, id) in [("aged", stream), ("drained", queue)] {
+        for i in 0..5 {
+            let value = format!("{name}-{i}");
+            let end = loop {
+                match admin.produce(name, 0, batch(&value, now_ms(&rt))).await {
+                    Ok(o) => break o + 1,
+                    Err(ClientError::Unknown(_) | ClientError::UnknownStream(..)) => rt.sleep(TICK * 5).await,
+                    Err(e) => panic!("{name}: {e}"),
+                }
+            };
+            ends.insert(id, end);
+        }
+    }
+    let mut consumer = admin.subscribe("drained", 10).await.expect("a subscription");
+    let mut acked = BTreeSet::new();
+    let deadline = rt.now() + Duration::from_secs(30);
+    while acked.len() < 5 {
+        assert!(rt.now() < deadline, "only {} of 5 messages acked", acked.len());
+        let Some(m) = consumer.next(TICK * 20).await.expect("deliveries") else { continue };
+        consumer.ack(&m).await.expect("an ack");
+        acked.insert(m.offset());
+    }
+    drop(consumer);
+    // A crash while the segments age: the restarted node starts their age
+    // again, which costs it one more age at most.
+    let victim = 1 + rt.below(n);
+    rt.sleep(Duration::from_secs(20)).await;
+    w.crash(victim, rt.chance(1, 2)).await;
+    rt.sleep(Duration::from_secs(10)).await;
+    w.start(victim).await;
+    let deadline = rt.now() + Duration::from_secs(300);
+    loop {
+        let mut left = Vec::new();
+        let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
+        for (node, m) in admin.node_metrics().await.unwrap_or_default() {
+            let Ok(m) = m else {
+                left.push(format!("node {node} did not answer"));
+                continue;
+            };
+            for pm in m.partitions.iter().filter(|pm| ends.contains_key(&pm.resource_id)) {
+                *seen.entry(pm.resource_id).or_default() += 1;
+                if pm.log_start < ends[&pm.resource_id] {
+                    left.push(format!(
+                        "{} on node {node}: start {} below {}",
+                        pm.resource_id, pm.log_start, ends[&pm.resource_id]
+                    ));
+                }
+            }
+        }
+        let all = seen.values().all(|c| *c == usize::from(replication)) && seen.len() == 2;
+        if left.is_empty() && all {
+            break;
+        }
+        assert!(rt.now() < deadline, "old segments stay without new data: {left:?}, replicas {seen:?}");
+        rt.sleep(Duration::from_secs(2)).await;
+    }
+    drop(admin);
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn drained_queues_and_aged_streams_free_their_space() {
+    lotse_sim::check_few_seeds(5, |seed| Sim::new(seed).run(aging));
+}

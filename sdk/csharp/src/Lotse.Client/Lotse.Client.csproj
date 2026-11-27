@@ -10,7 +10,7 @@
     <RootNamespace>Lotse</RootNamespace>
     <AssemblyName>Lotse.Client</AssemblyName>
     <PackageId>Lotse.Client</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.2.0</Version>
     <Description>Client for Lotse, a message broker with reliable queues and persistent streams.</Description>
   </PropertyGroup>
 

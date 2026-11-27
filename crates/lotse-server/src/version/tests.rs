@@ -40,6 +40,21 @@ fn the_token_format_waits_for_cluster_version_0_1() {
     assert!(!state.writes(TOKENS_SINCE), "the previous release's version");
     state.cluster_version = Some(cluster_version::of(0, 1));
     assert!(state.writes(TOKENS_SINCE));
-    assert_eq!(OLDEST_CLUSTER_VERSION, cluster_version::of(0, 0));
-    assert_eq!(CLUSTER_VERSION, cluster_version::of(0, 1));
+}
+
+#[test]
+fn release_0_2_runs_beside_0_1() {
+    assert_eq!(OLDEST_CLUSTER_VERSION, cluster_version::of(0, 1));
+    assert_eq!(CLUSTER_VERSION, cluster_version::of(0, 2));
+}
+
+#[test]
+fn quota_formats_wait_for_0_2() {
+    use crate::metadata::MetadataState;
+    let mut state = MetadataState { cluster_version: Some(cluster_version::of(0, 1)), ..Default::default() };
+    assert!(!state.writes(QUOTAS_SINCE), "the previous release's version");
+    assert!(!state.writes(SEGMENT_AGE_SINCE), "the previous release's version");
+    state.cluster_version = Some(cluster_version::of(0, 2));
+    assert!(state.writes(QUOTAS_SINCE));
+    assert!(state.writes(SEGMENT_AGE_SINCE));
 }

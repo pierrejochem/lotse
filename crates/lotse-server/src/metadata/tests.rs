@@ -1120,3 +1120,44 @@ fn token_changes_round_trip_through_their_record() {
     }
     assert!(decode_change(&payload(&Change::RevokeToken { id: 77 })[..5]).is_err());
 }
+
+/// A state at `version` with one runtime stream (id from index 2) whose
+/// segment age is two minutes.
+fn aged_state(version: u32) -> (MetadataState, u64) {
+    let mut s = MetadataState::default();
+    s.apply(1, &payload(&Change::SetClusterVersion { version })).unwrap();
+    let create = Change::CreateStream {
+        name: "s".into(),
+        tenant: crate::DEFAULT_TENANT.into(),
+        partitions: vec![vec![1]],
+        settings: StreamSettings::default(),
+    };
+    s.apply(2, &payload(&create)).unwrap();
+    let id = crate::metadata::resource_id(2);
+    s.apply(3, &payload(&Change::SetSegmentMs { resource_id: id, ms: 120_000 })).unwrap();
+    (s, id)
+}
+
+#[test]
+fn segment_ages_survive_a_snapshot_and_go_with_their_resource() {
+    let (mut s, id) = aged_state(crate::version::SEGMENT_AGE_SINCE);
+    assert_eq!(s.segment_ms, BTreeMap::from([(id, 120_000)]));
+    let decoded = MetadataState::decode(&s.encode()).unwrap();
+    assert_eq!(decoded, s);
+    let change = Change::SetSegmentMs { resource_id: id, ms: 0 };
+    assert_eq!(decode_change(&payload(&change)).unwrap(), change);
+    s.apply(4, &payload(&Change::SetSegmentMs { resource_id: id, ms: 0 })).unwrap();
+    assert!(s.segment_ms.is_empty(), "0 returns it to the default");
+    s.apply(5, &payload(&Change::SetSegmentMs { resource_id: id, ms: 90_000 })).unwrap();
+    s.apply(6, &payload(&Change::Delete { resource_id: id })).unwrap();
+    assert!(s.segment_ms.is_empty(), "it goes with the resource");
+    s.apply(7, &payload(&Change::SetSegmentMs { resource_id: id, ms: 90_000 })).unwrap();
+    assert!(s.segment_ms.is_empty(), "nor comes back for a deleted one");
+}
+
+#[test]
+fn segment_ages_are_not_written_before_0_2() {
+    let (s, _) = aged_state(crate::version::TOKENS_SINCE);
+    let decoded = MetadataState::decode(&s.encode()).unwrap();
+    assert!(decoded.segment_ms.is_empty(), "a 0.1 node could not read section 20");
+}

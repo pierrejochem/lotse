@@ -80,6 +80,11 @@ pub struct Cluster {
     /// segments.
     #[serde(default = "default_segment_bytes")]
     pub segment_bytes: u64,
+    /// A runtime stream's or queue's active segment closes once it is this
+    /// old, ms, unless the resource sets `segment.ms` (default an hour,
+    /// at least a minute; ADR 0146).
+    #[serde(default = "default_segment_ms")]
+    pub segment_ms: u64,
     /// Consumer groups: a member without a heartbeat for this long is
     /// removed, ms.
     #[serde(default)]
@@ -118,6 +123,10 @@ impl Cluster {
 
 fn default_tick_ms() -> u64 {
     10
+}
+
+fn default_segment_ms() -> u64 {
+    lotse_server::DEFAULT_SEGMENT_MS
 }
 
 fn default_segment_bytes() -> u64 {
@@ -406,6 +415,9 @@ impl ClusterFile {
         if self.cluster.tick_ms == 0 {
             return invalid("cluster.tick_ms must be at least 1".into());
         }
+        if self.cluster.segment_ms < 60_000 {
+            return invalid("cluster.segment_ms must be at least 60000 (a minute)".into());
+        }
         if self.cluster.segment_bytes < 4096 {
             return invalid("cluster.segment_bytes must be at least 4096".into());
         }
@@ -589,6 +601,7 @@ impl ClusterFile {
                 ms: pick(self.retention.ms, defaults.ms),
                 bytes: pick(self.retention.bytes, defaults.bytes),
                 compaction_map_bytes: self.compaction.map_bytes.unwrap_or(lotse_server::DEFAULT_COMPACTION_MAP_BYTES),
+                segment_ms: self.cluster.segment_ms,
             },
             join: false,
         })
