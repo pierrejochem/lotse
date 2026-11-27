@@ -63,7 +63,12 @@ pub(crate) struct NodeView<'a> {
     /// Nodes whose disk is below their limit (ADR 0122): those the metadata
     /// group recorded, and this node itself at once when it is.
     pub(crate) disk_low: &'a std::collections::BTreeSet<NodeId>,
+    /// Storage limits the metadata group recorded full (ADR 0147), by
+    /// tenant and prefix; the empty prefix is the tenant's own.
+    pub(crate) quotas_full: &'a std::collections::BTreeSet<(String, String)>,
 }
+
+static NO_FULL_QUOTAS: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
 
 static NO_LOW: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
 
@@ -90,6 +95,7 @@ impl Default for NodeView<'_> {
             token_sign_ins: &NO_SIGN_INS,
             disk: None,
             disk_low: &NO_LOW,
+            quotas_full: &NO_FULL_QUOTAS,
         }
     }
 }

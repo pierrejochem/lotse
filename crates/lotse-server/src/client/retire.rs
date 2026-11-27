@@ -411,6 +411,10 @@ impl Clients {
         if view.storage_full(replica.raft_ref().membership()).is_some() {
             return refuse(ErrorCode::STORAGE_FULL, None);
         }
+        // Nor while a storage limit over the queue is full (ADR 0147).
+        if view.quota_full(qc.group).is_some() {
+            return refuse(ErrorCode::QUOTA_EXCEEDED, None);
+        }
         // A full queue with `reject-publish` takes no dead letters either:
         // they stay owed in their source queue, which sends them again
         // later (ADR 0118).

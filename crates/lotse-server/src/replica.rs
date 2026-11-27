@@ -128,6 +128,9 @@ pub enum ProposeError {
     /// A voter of the group has too little free disk space (ADR 0122).
     #[error("{0}")]
     StorageFull(String),
+    /// A storage limit over the resource is full (ADR 0147).
+    #[error("{0}")]
+    QuotaExceeded(String),
 }
 
 /// What became of a marker the coordinator asked for.

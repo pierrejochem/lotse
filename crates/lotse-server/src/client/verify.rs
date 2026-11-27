@@ -141,7 +141,7 @@ impl Clients {
                         let gate = qc.and_then(|qc| self.gate(qc, replica));
                         let at = (h.resource, h.partition);
                         let batch = h.batch.clone();
-                        let admission = Admission::of(view, replica, gate.as_ref());
+                        let admission = Admission::of(view, key.group, replica, gate.as_ref());
                         let (w, end) = propose_one(replica, key.group, h.batch, h.bytes, out, at, admission);
                         p.waiting.extend(w);
                         self.took_batch(key.group, end, &batch);

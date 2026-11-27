@@ -1550,6 +1550,9 @@ async fn main_loop<R: Runtime, S: StateMachine>(
         }
         // Nodes low on disk: as the metadata group recorded them, and this
         // one at once, before its record commits (ADR 0122).
+        // Full storage limits as this node applied them (ADR 0147).
+        let quotas_full: BTreeSet<(String, String)> =
+            known.state.quotas.iter().filter(|(_, q)| q.full).map(|(k, _)| k.clone()).collect();
         let mut disk_low = known.state.disk_low.clone();
         if disk.low {
             disk_low.insert(cfg.id);
@@ -1585,6 +1588,7 @@ async fn main_loop<R: Runtime, S: StateMachine>(
                 token_sign_ins: &auth.token_sign_ins,
                 disk: disk.metrics(),
                 disk_low: &disk_low,
+                quotas_full: &quotas_full,
             },
             now: rt.now(),
             unix_ms: rt.unix_time().as_millis() as u64,
