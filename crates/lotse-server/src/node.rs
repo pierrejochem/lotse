@@ -1541,6 +1541,13 @@ async fn main_loop<R: Runtime, S: StateMachine>(
             access: &known.access,
             lagging: &lagging,
             current_voters: &current,
+            metadata_behind: cfg.metadata.is_some_and(|g| match groups.get(&g) {
+                Some(r) if r.raft_ref().role() == Role::Leader => {
+                    r.raft_ref().log().term_at(r.applied()) != Some(r.raft_ref().term())
+                }
+                Some(_) => lagging.contains(&g),
+                None => false,
+            }),
         };
         let commands: Vec<Command> = shared.commands.lock().expect("commands lock").drain(..).collect();
         for command in commands {

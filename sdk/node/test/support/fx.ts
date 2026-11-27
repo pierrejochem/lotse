@@ -53,6 +53,11 @@ export function stream(name: string, id: bigint | number, ...partitions: Partiti
   };
 }
 
+/** A name a broker whose metadata may be behind does not call unknown (ADR 0145). */
+export function behind(name: string): ResourceMetadata {
+  return { ...unknown(name), error: ErrorCode.NOT_LEADER };
+}
+
 export function unknown(name: string): ResourceMetadata {
   return {
     error: ErrorCode.UNKNOWN_RESOURCE,

@@ -257,6 +257,28 @@ class RoutingTest {
     }
 
     @Test
+    void aNameABrokerBehindDoesNotKnowIsRetriedUntilItCatchesUp() {
+        // After a whole cluster restarted every broker answers, but 3, whose metadata is behind, says NOT_LEADER for
+        // the name at first (ADR 0145): that is not 3 saying it is unknown.
+        a.on((node, request) -> Fx.metadata(all, Fx.unknown("s")));
+        b.on((node, request) -> Fx.metadata(all, Fx.unknown("s")));
+        java.util.concurrent.atomic.AtomicInteger asked = new java.util.concurrent.atomic.AtomicInteger();
+        c.on((node, request) -> {
+            if (request instanceof Request.Metadata) {
+                if (asked.incrementAndGet() <= 2) {
+                    return Fx.metadata(all, Fx.behind("s"));
+                }
+                return Fx.metadata(all, Fx.stream("s", STREAM_ID, Fx.partition(0, 3, 1, 3L)));
+            }
+            return Fx.produced(STREAM_ID, 0, 7);
+        });
+        LotseClient lotse = client(a);
+
+        assertEquals(7, lotse.produce("s", 0, OutMessage.value("x")).baseOffset());
+        assertTrue(asked.get() >= 3, "asked again until 3 caught up");
+    }
+
+    @Test
     void aPartitionThatDoesNotExistIsAnUnknownStream() {
         a.on((node, request) -> Fx.metadata(all, Fx.stream("s", STREAM_ID, Fx.partition(0, 1, 1, 1L))));
         LotseClient lotse = client(a);

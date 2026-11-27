@@ -1165,3 +1165,44 @@ async fn take_over_from_a_follower_behind(rt: SimRuntime) {
 fn a_member_taking_over_reads_its_predecessors_commit_past_a_follower_behind() {
     check_few_seeds(3, |seed| Sim::new(seed).run(take_over_from_a_follower_behind));
 }
+
+/// After every node restarted, a node that has not heard its metadata
+/// leader yet may hold a state behind the log: it answers a name its state
+/// lacks with `NOT_LEADER`, not as unknown, and calls the name unknown once
+/// it has caught up (ADR 0145).
+async fn restart_and_ask(rt: SimRuntime) {
+    let mut w = World::build(rt.clone(), Producers::DEFAULT, 3, BTreeMap::new(), Setup::PRODUCTION).await;
+    let writer = Client::new(rt.node("writer"), ClientConfig { retry_for: Duration::from_secs(10), ..client_config() });
+    writer.produce(STREAM, 0, batch("before", 1)).await.expect("written");
+    for id in 1..=3 {
+        w.crash(id, false).await;
+    }
+    for id in 1..=3 {
+        w.start(id).await;
+    }
+    let ask = |name: &str| {
+        let client = Client::new(rt.node("asker"), ClientConfig::new(vec!["n1:9000".into()]));
+        let name = name.to_string();
+        async move { client.metadata(&[name.as_str()]).await.expect("an answer").resources[0].error }
+    };
+    assert_eq!(
+        ask("nowhere").await,
+        lotse_proto::ErrorCode::NOT_LEADER,
+        "a node that has not heard its leader called a name unknown"
+    );
+    rt.sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        ask("nowhere").await,
+        lotse_proto::ErrorCode::UNKNOWN_RESOURCE,
+        "a node that caught up still does not know"
+    );
+    for (node, handle) in std::mem::take(&mut w.running).into_values().flatten() {
+        handle.stop();
+        let _ = node.join().await;
+    }
+}
+
+#[test]
+fn a_restarted_node_does_not_call_a_name_unknown_before_it_catches_up() {
+    check_few_seeds(5, |seed| Sim::new(seed).run(restart_and_ask));
+}

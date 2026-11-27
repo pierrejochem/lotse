@@ -494,6 +494,12 @@ impl<R: Net + Clock + Spawn + Rng> Client<R> {
                 continue;
             };
             self.learn(&m);
+            // A broker whose metadata may be behind its leader's answers a
+            // name it lacks with a retriable error (ADR 0145): it has not
+            // answered for that name.
+            if m.resources.iter().any(|r| r.error.retriable()) {
+                all = false;
+            }
             merge_newest(&mut merged.resources, m.resources);
             merged.brokers = m.brokers;
         }

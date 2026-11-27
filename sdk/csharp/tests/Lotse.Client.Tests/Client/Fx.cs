@@ -26,6 +26,10 @@ internal static class Fx
     internal static Messages.ResourceMetadata Stream(string name, ulong id, params Messages.PartitionMetadata[] partitions) =>
         new(ErrorCode.None, name, "default", id, Messages.ResourceKind.Stream, partitions, null);
 
+    /// <summary>A name a broker whose metadata may be behind does not call unknown (ADR 0145).</summary>
+    internal static Messages.ResourceMetadata Behind(string name) =>
+        new(ErrorCode.NotLeader, name, string.Empty, 0, Messages.ResourceKind.Stream, Array.Empty<Messages.PartitionMetadata>(), null);
+
     internal static Messages.ResourceMetadata Unknown(string name) =>
         new(ErrorCode.UnknownResource, name, string.Empty, 0, Messages.ResourceKind.Stream, Array.Empty<Messages.PartitionMetadata>(), null);
 

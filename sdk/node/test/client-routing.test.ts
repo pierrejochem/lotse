@@ -245,6 +245,24 @@ describe("routing against scripted brokers", () => {
     assert.ok(asked >= 3, "asked again until 3 answered");
   });
 
+  test("a name a broker behind does not know is retried until it catches up", async () => {
+    // After a whole cluster restarted every broker answers, but 3, whose metadata is behind, says NOT_LEADER for
+    // the name at first (ADR 0145): that is not 3 saying it is unknown.
+    a.on(() => fx.metadata(all, fx.unknown("s")));
+    b.on(() => fx.metadata(all, fx.unknown("s")));
+    let asked = 0;
+    c.on((_n, request) => {
+      if (request.type === "Metadata") {
+        asked += 1;
+        return fx.metadata(all, asked <= 2 ? fx.behind("s") : fx.stream("s", fx.STREAM_ID, fx.partition(0, 3, 1, 3)));
+      }
+      return fx.produced(fx.STREAM_ID, 0, 7);
+    });
+    const lotse = open([a]);
+    assert.equal((await lotse.produce("s", 0, x)).baseOffset, 7n);
+    assert.ok(asked >= 3, "asked again until 3 caught up");
+  });
+
   test("a partition that does not exist is an unknown stream", async () => {
     a.on(() => fx.metadata(all, fx.stream("s", fx.STREAM_ID, fx.partition(0, 1, 1, 1))));
     await assert.rejects(open([a]).produce("s", 5, x), (e: unknown) => {

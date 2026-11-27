@@ -176,6 +176,7 @@ fn a_replaced_entry_is_not_reported_as_failed_until_the_commit_decides() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let header = RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: 9, flags: 0 };
@@ -257,6 +258,7 @@ fn a_retry_of_a_batch_in_flight_waits_for_the_original() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let header = |id| RequestHeader { api_key: ApiKey::PRODUCE, api_version: 0, correlation_id: id, flags: 0 };
         let mut clients = Clients::default();
@@ -358,6 +360,7 @@ fn after_a_restart_an_unapplied_open_transaction_stays_hidden() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let fetch = Request::Fetch(lotse_proto::FetchRequest {
@@ -480,6 +483,7 @@ fn a_follower_serves_committed_data_and_nothing_beyond() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let mut clients = Clients::default();
         let mut ask = async |offset: u64, isolation: u8, allow_follower: bool| {
@@ -569,6 +573,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
                 current_voters: &NO_CURRENT,
+                metadata_behind: false,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -651,6 +656,7 @@ fn a_commit_racing_a_timeout_abort_is_refused() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         clients.after_round(&view, &mut groups).await.unwrap();
         assert!(clients.busy.contains(&coord::Busy::Txn("t".into())), "the abort is in flight");
@@ -723,6 +729,7 @@ fn a_queue_refuses_acks_beyond_its_log_and_delivers_what_is_not_acked() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -826,6 +833,7 @@ fn a_late_nack_does_not_take_back_what_a_newer_subscription_holds() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         // One connection for the consumers, another for the watcher.
         let (outbox, watcher) = (Arc::new(Outbox::default()), Arc::new(Outbox::default()));
@@ -950,6 +958,7 @@ fn a_new_queue_leader_delivers_only_after_applying_its_own_term() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let header = |key| RequestHeader { api_key: key, api_version: 0, correlation_id: 3, flags: 0 };
@@ -1060,6 +1069,7 @@ fn a_member_slow_to_release_is_removed_no_sooner_than_a_session() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1165,6 +1175,7 @@ fn offsets_for_a_released_partition_are_refused() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -1317,6 +1328,7 @@ fn the_node_list_is_answered_only_as_new_as_the_asking_node_knows_it() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let mut clients = Clients::default();
         for (applied_at_least, expected) in
@@ -1384,6 +1396,7 @@ fn dead_letter_settings_are_created_described_changed_and_protect_their_queue() 
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
                 current_voters: &NO_CURRENT,
+                metadata_behind: false,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1566,6 +1579,7 @@ fn a_bind_or_alter_overtaken_by_a_delete_is_not_acknowledged() {
                 access: &OPEN,
                 lagging: &NOT_LAGGING,
                 current_voters: &NO_CURRENT,
+                metadata_behind: false,
             };
             let mut outboxes = Vec::new();
             for request in requests {
@@ -1805,6 +1819,7 @@ fn a_transactional_batch_waits_for_the_coordinator() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2001,6 +2016,7 @@ fn list_offsets_with(seed: u64, segment_bytes: u64) {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let mut clients = Clients::default();
         let outbox = Arc::new(Outbox::default());
@@ -2085,6 +2101,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
                 access,
                 lagging: &NOT_LAGGING,
                 current_voters: &NO_CURRENT,
+                metadata_behind: false,
             };
             let header = RequestHeader { api_key: request.api_key(), api_version: 0, correlation_id: id, flags: 0 };
             let api_key = request.api_key();
@@ -2155,6 +2172,7 @@ fn the_coordinator_forgets_the_ids_of_a_tenant_incarnation_that_is_gone() {
             access: &after,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         for _ in 0..3 {
             clients.after_round(&view, &mut groups).await.unwrap();
@@ -2208,6 +2226,7 @@ fn a_member_with_an_instance_id_comes_back_to_its_partitions() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2328,6 +2347,7 @@ fn a_subscription_to_a_stream_the_coordinator_has_not_applied_yet_is_kept() {
                     access: &OPEN,
                     lagging: &NOT_LAGGING,
                     current_voters: &NO_CURRENT,
+                    metadata_behind: false,
                 };
                 let request = Request::GroupHeartbeat(lotse_proto::GroupHeartbeatRequest {
                     tenant: lotse_proto::DEFAULT_TENANT.into(),
@@ -2407,6 +2427,7 @@ fn a_transactional_ack_is_verified_fenced_and_checked_against_the_log() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2552,6 +2573,7 @@ fn a_publish_is_routed_checked_and_answered_once_written() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2680,6 +2702,7 @@ fn a_push_for_a_subscription_that_ended_meanwhile_is_released() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2786,6 +2809,7 @@ fn the_first_subscriber_of_a_single_active_consumer_is_active_at_once() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2852,6 +2876,7 @@ fn a_message_is_pushed_only_once_its_checkout_is_applied() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -2993,6 +3018,7 @@ fn a_queue_leader_checks_out_appended_plain_data_and_stops_at_what_may_not_be_de
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3146,6 +3172,7 @@ fn writes_taken_in_one_round_count_against_the_length_limit() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3276,6 +3303,7 @@ fn a_voter_low_on_disk_refuses_only_new_data() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let outbox = Arc::new(Outbox::default());
         let mut clients = Clients::default();
@@ -3481,6 +3509,7 @@ fn a_fetch_without_zone_gets_no_preferred_replica() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &current,
+            metadata_behind: false,
         };
         let mut clients = Clients::default();
         let mut ask = async |zone: Option<&str>| {
@@ -3593,6 +3622,7 @@ fn zone_view<'a>(
         access,
         lagging,
         current_voters: &NO_CURRENT,
+        metadata_behind: false,
     }
 }
 
@@ -4076,6 +4106,7 @@ fn metadata_view<'a>(rt: &SimRuntime, voters: &'a BTreeMap<GroupId, Vec<NodeId>>
         access: &OPEN,
         lagging: &NOT_LAGGING,
         current_voters: &NO_CURRENT,
+        metadata_behind: false,
     }
 }
 
@@ -4149,6 +4180,7 @@ fn a_heartbeat_answer_carries_the_coordinator_index() {
             access: &OPEN,
             lagging: &NOT_LAGGING,
             current_voters: &NO_CURRENT,
+            metadata_behind: false,
         };
         let mut clients = Clients::default();
         let heartbeat_owning = |member: &str, epoch: i32, owned: Option<Vec<u32>>| {
@@ -4266,6 +4298,27 @@ fn a_follower_zone_read_carries_its_applied_index() {
                 assert_eq!(applied_of(tags, G), Some(applied));
             }
             other => panic!("expected one answer, got {other:?}"),
+        }
+    });
+}
+
+/// A node whose metadata state may be behind its leader's (after a restart,
+/// before it has caught up) does not call a name unknown: it answers
+/// `NOT_LEADER`, retriable, and the client asks the other nodes. A node that
+/// is current says `UNKNOWN_RESOURCE` (ADR 0145).
+#[test]
+fn a_node_behind_does_not_call_a_name_unknown() {
+    Sim::new(14).run(|rt| async move {
+        let mut groups: Groups = BTreeMap::from([(G, single_led(&rt, "m").await)]);
+        let voters = BTreeMap::new();
+        for (behind, expected) in [(false, ErrorCode::UNKNOWN_RESOURCE), (true, ErrorCode::NOT_LEADER)] {
+            let view = ClusterView { metadata_behind: behind, ..metadata_view(&rt, &voters) };
+            let mut clients = Clients::default();
+            let request = Request::Metadata(lotse_proto::MetadataRequest { names: vec!["nowhere".into()] });
+            let (_, r, _) = ask_tagged(&mut clients, &mut groups, &view, request, G).await;
+            let Response::Metadata(m) = r else { panic!("{r:?}") };
+            assert_eq!(m.resources[0].error, expected, "behind: {behind}");
+            assert!(m.resources[0].error.retriable() == behind);
         }
     });
 }

@@ -246,6 +246,11 @@ public final class LotseClient implements AutoCloseable {
             try {
                 if (call(addr, new Request.Metadata(List.of(asked))) instanceof Response.Metadata m) {
                     learn(m);
+                    // A broker whose metadata may be behind its leader's answers a name it lacks with a
+                    // retriable error (ADR 0145): it has not answered for that name.
+                    if (m.resources().stream().anyMatch(r -> r.error().retriable())) {
+                        all = false;
+                    }
                     mergeNewest(merged, m.resources());
                 } else {
                     all = false;
