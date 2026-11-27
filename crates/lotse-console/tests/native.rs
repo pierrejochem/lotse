@@ -508,6 +508,33 @@ async fn the_console_shows_a_real_cluster() {
         call(&app, "POST", "/api/v1/clusters/local/replication", Some(json!({"resource": "work", "factor": 0}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
 
+    // quotas_show_on_tenants (ADR 0147): a limit set through the console
+    // shows on the tenants page, with its usage once the leader counted.
+    for attempt in 0.. {
+        let limit = json!({"tenant": "default", "bytes": 1_000_000_000u64});
+        let (status, done) = call(&app, "POST", "/api/v1/clusters/local/quotas", Some(limit)).await;
+        if status == StatusCode::OK {
+            assert_eq!(done["cli"], "lotse-cli quota set default --bytes 1000000000", "{done}");
+            break;
+        }
+        // Until every node reported its release, the cluster version is not 0.2.
+        assert!(attempt < 150, "the limit was never taken: {done}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let prefix = json!({"tenant": "default", "prefix": "work", "bytes": 500_000_000u64});
+    let (status, done) = call(&app, "POST", "/api/v1/clusters/local/quotas", Some(prefix)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let (status, err) =
+        call(&app, "POST", "/api/v1/clusters/local/quotas", Some(json!({"tenant": "default", "bytes": 0}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let (status, v) = get(&app, "/api/v1/clusters/local/tenants").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let default = v["tenants"].as_array().unwrap().iter().find(|t| t["name"] == "default").expect("default").clone();
+    assert_eq!(default["quota_bytes"], 1_000_000_000u64, "{default}");
+    assert_eq!(default["quota_full"], false, "{default}");
+    assert_eq!(default["prefix_quotas"][0]["prefix"], "work", "{default}");
+    assert_eq!(default["prefix_quotas"][0]["bytes"], 500_000_000u64, "{default}");
+
     // Open sessions (ADR 0121): the console's own connections, and, on a
     // cluster without authentication, everyone's.
     let (status, v) = get(&app, "/api/v1/clusters/local/sessions").await;

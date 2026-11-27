@@ -1131,6 +1131,61 @@ public abstract record Request
         }
     }
 
+    /// <summary>
+    /// <c>AlterQuota</c> (69): sets or removes a storage limit (ADR 0147). Answered with <see cref="Response.Admin"/>.
+    /// </summary>
+    /// <param name="Tenant">The tenant.</param>
+    /// <param name="Prefix">A name prefix; empty for the tenant's own limit.</param>
+    /// <param name="Bytes">The limit in bytes, every replica counted; <c>null</c> removes it.</param>
+    public sealed record AlterQuota(string Tenant, string Prefix, ulong? Bytes) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.AlterQuota;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w)
+        {
+            w.String(Tenant).String(Prefix);
+            w.Bool(Bytes.HasValue);
+            if (Bytes.HasValue)
+            {
+                w.U64(Bytes.Value);
+            }
+            w.NoTags();
+        }
+
+        internal static AlterQuota Read(Reader r)
+        {
+            string tenant = r.String();
+            string prefix = r.String();
+            ulong? bytes = r.Bool() ? r.U64() : null;
+            var x = new AlterQuota(tenant, prefix, bytes);
+            r.Tags();
+            return x;
+        }
+    }
+
+    /// <summary>
+    /// <c>DescribeQuotas</c> (70): the storage limits and usage the asker may see (ADR 0147). Answered with
+    /// <see cref="Response.DescribeQuotas"/>.
+    /// </summary>
+    /// <param name="Tenant">Only this tenant, or <c>null</c> for every tenant the asker may see.</param>
+    public sealed record DescribeQuotas(string? Tenant) : Request
+    {
+        /// <inheritdoc/>
+        public override ApiKey ApiKey => ApiKey.DescribeQuotas;
+
+        /// <inheritdoc/>
+        public override void Write(Writer w) => w.OptString(Tenant).NoTags();
+
+        internal static DescribeQuotas Read(Reader r)
+        {
+            var x = new DescribeQuotas(r.OptString());
+            r.Tags();
+            return x;
+        }
+    }
+
     /// <summary>Adds a certificate to the cluster's revocation list.</summary>
     /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian, as the certificate has it.</param>

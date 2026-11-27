@@ -171,6 +171,17 @@ class ProducerTest {
     }
 
     @Test
+    void aFullStorageLimitEndsAProduceAtOnce() {
+        // ADR 0147: QUOTA_EXCEEDED is not retried; a full tenant usually stays full until someone acts.
+        serve(n -> n == 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.QUOTA_EXCEEDED, 0, null) : ok());
+        LotseClient lotse = client(true);
+        lotse.produce("s", 0, messages(1));
+        ClientException.Broker e = assertThrows(ClientException.Broker.class, () -> lotse.produce("s", 0, messages(1)));
+        assertEquals(ErrorCode.QUOTA_EXCEEDED, e.code());
+        assertEquals(2, node.requests(Request.Produce.class).size(), "not asked again");
+    }
+
+    @Test
     void aFullQueueRefusesAtOnceAndTheSequenceStaysFree() {
         // ADR 0118: nothing was written, and the caller decides whether to try again.
         serve(n -> n == 2 ? Fx.produced(STREAM_ID, 0, ErrorCode.QUEUE_FULL, 0, null) : ok());
@@ -192,6 +203,20 @@ class ProducerTest {
                 throw new FakeNode.Drop();
             }
             return Fx.produced(STREAM_ID, 0, ErrorCode.QUEUE_FULL, 0, null);
+        });
+        LotseClient lotse = client(true);
+        ClientException.Unknown e = assertThrows(ClientException.Unknown.class, () -> lotse.produce("s", 0, messages(1)));
+        assertTrue(e.getMessage().contains("may have been carried out"), e.getMessage());
+    }
+
+    @Test
+    void aFullStorageLimitAfterALostAttemptIsReportedAsUnknown() {
+        // ADR 0147: the same refusal as a full queue; the lost attempt may still commit.
+        serve(n -> {
+            if (n == 1) {
+                throw new FakeNode.Drop();
+            }
+            return Fx.produced(STREAM_ID, 0, ErrorCode.QUOTA_EXCEEDED, 0, null);
         });
         LotseClient lotse = client(true);
         ClientException.Unknown e = assertThrows(ClientException.Unknown.class, () -> lotse.produce("s", 0, messages(1)));

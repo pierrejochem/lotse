@@ -276,6 +276,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clusters/{cluster}/quotas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sets or removes a storage limit of a tenant or a name prefix in it, as
+         *     the signed-in user (ADR 0147).
+         */
+        post: operations["set_quota"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clusters/{cluster}/replication": {
         parameters: {
             query?: never;
@@ -1189,6 +1209,25 @@ export interface components {
              */
             v: number;
         };
+        /** @description A storage limit on a name prefix inside a tenant (ADR 0147). */
+        PrefixQuota: {
+            /**
+             * Format: int64
+             * @description The limit, bytes, every replica counted.
+             */
+            bytes: number;
+            /** @description New data under it is refused. */
+            full: boolean;
+            /** @description The name prefix. */
+            prefix: string;
+            /** @description A cluster admin set it, so only a cluster admin changes it. */
+            set_by_cluster_admin: boolean;
+            /**
+             * Format: int64
+             * @description Bytes used at the cluster's last count; `None` before the first.
+             */
+            used_bytes?: number | null;
+        };
         /** @description A queue priority level (ADR 0078: levels share the queue's one log). */
         PriorityLevel: {
             /** @description Leader of the queue the level belongs to. */
@@ -1551,6 +1590,18 @@ export interface components {
             /** @description Nodes that did not answer. */
             unreachable: string[];
         };
+        /** @description Request to set or remove a storage limit (ADR 0147). */
+        SetQuota: {
+            /**
+             * Format: int64
+             * @description The limit in bytes, every replica counted; absent or `null` removes it.
+             */
+            bytes?: number | null;
+            /** @description A name prefix; empty for the tenant's own limit. */
+            prefix?: string;
+            /** @description The tenant. */
+            tenant: string;
+        };
         /**
          * @description Request to give every partition of a stream or queue a number of
          *     replicas (`replication.factor`, ADR 0115). Releases its placed
@@ -1655,6 +1706,8 @@ export interface components {
         Tenant: {
             /** @description Tenant name. */
             name: string;
+            /** @description Limits on name prefixes inside the tenant (ADR 0147). */
+            prefix_quotas: components["schemas"]["PrefixQuota"][];
             /**
              * Format: int32
              * @description Principals with bindings.
@@ -1670,6 +1723,8 @@ export interface components {
              * @description Storage quota, bytes; `None` where the cluster has no quotas.
              */
             quota_bytes?: number | null;
+            /** @description The tenant's own limit is full: new data is refused (ADR 0147). */
+            quota_full: boolean;
             /** @description State chip. */
             state: components["schemas"]["Chip"];
             /**
@@ -2587,6 +2642,60 @@ export interface operations {
                 };
             };
             /** @description No such cluster or resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_quota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cluster ID */
+                cluster: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetQuota"];
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is not valid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The signed-in user may not do this. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such cluster or tenant. */
             404: {
                 headers: {
                     [name: string]: unknown;

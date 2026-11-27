@@ -139,6 +139,10 @@ public record ApiKey(int id) {
     public static final ApiKey DESCRIBE_TOKENS = new ApiKey(67);
     /** Revokes an access token: its sessions end on every node (ADR 0133). */
     public static final ApiKey REVOKE_TOKEN = new ApiKey(68);
+    /** Sets or removes a storage limit of a tenant or a name prefix in it (ADR 0147). */
+    public static final ApiKey ALTER_QUOTA = new ApiKey(69);
+    /** The storage limits and usage the asker may see, from the metadata leader (ADR 0147). */
+    public static final ApiKey DESCRIBE_QUOTAS = new ApiKey(70);
     /** Publishes messages through exchanges; the node routes (ADR 0079). */
     public static final ApiKey PUBLISH = new ApiKey(9);
     /** Node to node, not for clients: the coordinator asks a partition leader to write a transaction marker. */
@@ -171,7 +175,7 @@ public record ApiKey(int id) {
             range(RECORD_CERTIFICATES), range(REQUEST_CERTIFICATE), range(DESCRIBE_CERTIFICATE_REQUESTS),
             range(RECORD_CERTIFICATE), range(REASSIGN_PARTITION), range(DESCRIBE_SESSIONS), range(RENEW_CERTIFICATE),
             range(ALTER_UPGRADE), range(DESCRIBE_UPGRADE), range(CREATE_TOKEN), range(DESCRIBE_TOKENS),
-            range(REVOKE_TOKEN), range(PUBLISH));
+            range(REVOKE_TOKEN), range(ALTER_QUOTA), range(DESCRIBE_QUOTAS), range(PUBLISH));
 
     private static ApiVersionRange range(ApiKey key) {
         return new ApiVersionRange(key, 0, 0);

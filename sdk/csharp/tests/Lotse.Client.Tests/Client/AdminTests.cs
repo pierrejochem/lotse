@@ -73,6 +73,7 @@ public sealed class AdminTests : IDisposable
                 ErrorCode.NotLeader, hint, null, false, null, Array.Empty<Response.UpgradeNode>()),
             Request.CreateToken => new Response.CreateToken(ErrorCode.NotLeader, null, 0, 0, hint),
             Request.DescribeTokens => new Response.DescribeTokens(ErrorCode.NotLeader, hint, Array.Empty<Messages.TokenEntry>()),
+            Request.DescribeQuotas => new Response.DescribeQuotas(ErrorCode.NotLeader, hint, null, Array.Empty<Messages.QuotaEntry>()),
             Request.WhoAmI => new Response.WhoAmI(Messages.PrincipalKind.User, "node 1", Array.Empty<string>(), Array.Empty<Messages.RoleBinding>()),
             _ => new Response.Admin(ErrorCode.NotLeader, null, hint),
         };
@@ -421,6 +422,27 @@ public sealed class AdminTests : IDisposable
         Assert.Equal(nodes, got.Nodes);
         // Node 1 answered NOT_LEADER with a hint to node 2 the first time.
         Assert.Equal(1, _a.Count<Request.DescribeUpgrade>());
+    }
+
+    [Fact]
+    public async Task AlterAndDescribeQuotasReachTheMetadataLeader()
+    {
+        // ADR 0147: limits are set and read on the leader, which counts the usage.
+        var quotas = new[] { new Messages.QuotaEntry("shop", "", 10, true, false, 3) };
+        Serve((n, r) => r switch
+        {
+            Request.DescribeQuotas => new Response.DescribeQuotas(ErrorCode.None, null, 5, quotas),
+            _ => Ok(),
+        });
+        await _client!.AlterQuotaAsync("shop", "orders.", 10);
+        await _client!.AlterQuotaAsync("shop", "orders.", null);
+        Response.DescribeQuotas got = await _client!.DescribeQuotasAsync("shop");
+        Assert.Equal(5ul, got.CountedAtMs);
+        Assert.Equal(quotas, got.Quotas);
+        Assert.Equal(
+            new[] { new Request.AlterQuota("shop", "orders.", 10), new Request.AlterQuota("shop", "orders.", null) },
+            _b.Requests<Request.AlterQuota>());
+        Assert.Equal(new[] { new Request.DescribeQuotas("shop") }, _b.Requests<Request.DescribeQuotas>());
     }
 
     [Fact]

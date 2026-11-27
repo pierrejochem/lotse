@@ -93,12 +93,13 @@ async fn creating_a_queue_validates_and_returns_the_cli_command() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(v["message"].as_str().unwrap().contains("lowercase"));
 
+    // A full storage limit refuses new data, not new queues (ADR 0147).
     let mut over = good;
     over["tenant"] = "analytics".into();
     over["name"] = "x".into();
     over["dlq"] = "x.dlq".into();
     let (s, _, _) = call("POST", "/api/v1/clusters/prod-hamburg-1/queues", Some(over)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::CREATED);
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 import { useState, type ReactNode, type RefObject } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../api/client';
-import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetReplication } from '../api/queries';
+import { useMoveLeader, useNodes, usePlacePartition, usePurgeQueue, useRequeue, useSetQuota, useSetReplication } from '../api/queries';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useToast } from './toast';
 
@@ -213,6 +213,98 @@ export function ReplicationButton({ cluster, resource, current }: { cluster: str
               }
             >
               {valid ? `Set ${factor} ${factor === 1 ? 'replica' : 'replicas'}` : 'Set replicas'}
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  );
+}
+
+const GIB = 1024 ** 3;
+
+/**
+ * Sets or removes a storage limit (ADR 0147): a tenant's own without `prefix`, or one on a name prefix. The cluster
+ * decides who may: a tenant's own limit needs a cluster admin, a prefix limit also a tenant admin under their binding.
+ */
+export function QuotaButton({
+  cluster,
+  tenant,
+  prefix,
+  bytes: current,
+  label,
+}: {
+  cluster: string;
+  tenant: string;
+  /** Fixed when editing a prefix limit; `undefined` asks for one, `''` is the tenant's own limit. */
+  prefix?: string;
+  bytes: number | null;
+  label: string;
+}) {
+  const set = useSetQuota(cluster);
+  const toast = useToast();
+  const asks = prefix === undefined;
+  const [name, setName] = useState(prefix ?? '');
+  const [gib, setGib] = useState(current != null ? current / GIB : NaN);
+  const valid = Number.isFinite(gib) && gib > 0 && (!asks || name.length > 0);
+  const send = (bytes: number | null) =>
+    set.mutate(
+      { tenant, prefix: name, bytes },
+      {
+        onSuccess: (d) => toast({ title: d.message, cli: d.cli }),
+        onError: (e) => toast({ title: e instanceof ApiError ? e.message : 'Could not change the storage limit.', error: true }),
+      },
+    );
+  const what = name ? <>names starting with <span className="mono">{name}</span> in {tenant}</> : <>tenant {tenant}</>;
+  return (
+    <AlertDialog.Root
+      onOpenChange={(open) => {
+        if (open) {
+          setName(prefix ?? '');
+          setGib(current != null ? current / GIB : NaN);
+        }
+      }}
+    >
+      <AlertDialog.Trigger className="btn">{label}</AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="overlay" />
+        <AlertDialog.Content className="dialog" style={narrow}>
+          <div className="dialog-head">
+            <div>
+              <AlertDialog.Title className="h2">Storage limit</AlertDialog.Title>
+              <AlertDialog.Description className="sub" style={{ margin: '4px 0 0' }}>
+                Every replica counts. Once {what} use{name ? '' : 's'} the limit, new data is refused with QUOTA_EXCEEDED; nothing is
+                deleted, and reads and acknowledgements go on.
+              </AlertDialog.Description>
+            </div>
+          </div>
+          {asks && (
+            <div className="field" style={{ padding: '4px 24px 0' }}>
+              <label htmlFor="quota-prefix">Name prefix</label>
+              <input id="quota-prefix" className="input mono" value={name} onChange={(e) => setName(e.target.value)} placeholder="orders." />
+            </div>
+          )}
+          <div className="field" style={{ padding: '4px 24px 8px' }}>
+            <label htmlFor="quota-gib">Limit, GiB</label>
+            <input
+              id="quota-gib"
+              className="input mono"
+              type="number"
+              min={0}
+              step="any"
+              value={Number.isNaN(gib) ? '' : gib}
+              onChange={(e) => setGib(e.target.valueAsNumber)}
+            />
+          </div>
+          <div className="dialog-foot">
+            <AlertDialog.Cancel className="btn">Cancel</AlertDialog.Cancel>
+            {current != null && (
+              <AlertDialog.Action className="btn" disabled={set.isPending} onClick={() => send(null)}>
+                Remove limit
+              </AlertDialog.Action>
+            )}
+            <AlertDialog.Action className="btn primary" disabled={!valid || set.isPending} onClick={() => send(Math.round(gib * GIB))}>
+              Set limit
             </AlertDialog.Action>
           </div>
         </AlertDialog.Content>

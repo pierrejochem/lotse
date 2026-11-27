@@ -95,6 +95,16 @@ pub fn move_leader(req: &crate::model::MoveLeader) -> String {
 }
 
 /// `lotse-cli replication set …` for a replication factor.
+/// `lotse-cli quota set …` for a storage limit, or `quota remove`.
+pub fn set_quota(req: &crate::model::SetQuota) -> String {
+    let prefix = if req.prefix.is_empty() { String::new() } else { format!(" --prefix {}", req.prefix) };
+    match req.bytes {
+        Some(n) => format!("lotse-cli quota set {}{prefix} --bytes {n}", req.tenant),
+        None => format!("lotse-cli quota remove {}{prefix}", req.tenant),
+    }
+}
+
+/// `lotse-cli replication set …`.
 pub fn set_replication(req: &crate::model::SetReplication) -> String {
     format!("lotse-cli replication set {} --factor {}", req.resource, req.factor)
 }

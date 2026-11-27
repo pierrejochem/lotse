@@ -230,6 +230,15 @@ export interface DescribeTokensResponse {
   readonly leaderHint: m.LeaderHint | null;
   readonly tokens: readonly m.TokenEntry[];
 }
+/** `DescribeQuotas` (key 70): storage limits and usage, from the metadata leader (ADR 0147). */
+export interface DescribeQuotasResponse {
+  readonly type: "DescribeQuotas";
+  readonly error: ErrorCodeValue;
+  readonly leaderHint: m.LeaderHint | null;
+  /** When usage was last counted, ms since the Unix epoch; `null` before the first count. */
+  readonly countedAtMs: bigint | null;
+  readonly quotas: readonly m.QuotaEntry[];
+}
 /** `DescribeSessions` (key 59): a node's open client sessions, oldest first (ADR 0121). */
 export interface DescribeSessionsResponse {
   readonly type: "DescribeSessions";
@@ -326,6 +335,7 @@ export type Response =
   | DescribeUpgradeResponse
   | CreateTokenResponse
   | DescribeTokensResponse
+  | DescribeQuotasResponse
   | RenewCertificateResponse
   | DescribeCertificateRequestsResponse
   | DescribeTenantsResponse
@@ -614,6 +624,18 @@ export function writeResponse(w: Writer, res: Response): void {
       return;
     case "CreateToken":
       w.u16(res.error).optString(res.errorMsg).u64(res.id).u64(res.expiresAtMs);
+      m.putHint(w, res.leaderHint);
+      return;
+    case "DescribeQuotas":
+      w.u16(res.error);
+      putOptU64(w, res.countedAtMs);
+      w.array(res.quotas, (w1, q) => {
+        w1.string(q.tenant).string(q.prefix);
+        putOptU64(w1, q.bytes);
+        w1.u8(q.setByClusterAdmin ? 1 : 0).u8(q.full ? 1 : 0);
+        putOptU64(w1, q.usedBytes);
+        w1.noTags();
+      });
       m.putHint(w, res.leaderHint);
       return;
     case "DescribeTokens":
@@ -912,6 +934,7 @@ export function readResponse(apiKey: number, r: Reader): Response {
     case ApiKey.CREATE_PARTITIONS:
     case ApiKey.ALTER_UPGRADE:
     case ApiKey.REVOKE_TOKEN:
+    case ApiKey.ALTER_QUOTA:
       return { type: "Admin", error: r.u16(), errorMsg: r.optString(), leaderHint: m.getHint(r) };
     case ApiKey.DESCRIBE_NODES: {
       const error = r.u16();
@@ -1017,6 +1040,24 @@ export function readResponse(apiKey: number, r: Reader): Response {
         return t;
       });
       return { type: "DescribeTokens", error, leaderHint: m.getHint(r), tokens };
+    }
+    case ApiKey.DESCRIBE_QUOTAS: {
+      const error = r.u16();
+      const countedAtMs = getOptU64(r);
+      // tenant, prefix, bytes?, two flags, used?, no tags.
+      const quotas = r.array(2 + 2 + 1 + 1 + 1 + 1 + 1, (r1) => {
+        const q = {
+          tenant: r1.string(),
+          prefix: r1.string(),
+          bytes: getOptU64(r1),
+          setByClusterAdmin: r1.u8() !== 0,
+          full: r1.u8() !== 0,
+          usedBytes: getOptU64(r1),
+        };
+        r1.tags();
+        return q;
+      });
+      return { type: "DescribeQuotas", error, leaderHint: m.getHint(r), countedAtMs, quotas };
     }
     case ApiKey.DESCRIBE_SESSIONS: {
       const error = r.u16();

@@ -69,6 +69,8 @@ function notLeader(r: Request): Response {
       return { type: "DescribeNodes", error, leaderHint, nodes: [] };
     case "DescribeUpgrade":
       return { type: "DescribeUpgrade", error, leaderHint, clusterVersion: null, held: false, turn: null, nodes: [] };
+    case "DescribeQuotas":
+      return { type: "DescribeQuotas", error, leaderHint, countedAtMs: null, quotas: [] };
     case "QueueAction":
       return { type: "QueueAction", error, errorMsg: null, count: 0n, upTo: 0n, more: false, leaderHint };
     default:
@@ -140,6 +142,26 @@ describe("admin calls against scripted brokers", () => {
     assert.deepEqual(got, state);
     assert.equal(got.clusterVersion, 0, "version 0.0 is a version, not none");
     assert.equal(b.requests().filter((r) => r.type === "DescribeUpgrade").length, 1, "node 1 pointed to the leader");
+  });
+
+  test("alter and describe quotas reach the metadata leader", async () => {
+    // ADR 0147: limits are set and read on the leader, which counts the usage.
+    const state: Response = {
+      type: "DescribeQuotas",
+      error: ErrorCode.NONE,
+      leaderHint: null,
+      countedAtMs: 5n,
+      quotas: [{ tenant: "shop", prefix: "", bytes: 10n, setByClusterAdmin: true, full: false, usedBytes: 3n }],
+    };
+    serve((r) => (r.type === "DescribeQuotas" ? state : ok()));
+    await client.alterQuota("shop", "orders.", 10);
+    await client.alterQuota("shop", "orders.", null);
+    assert.deepEqual(await client.describeQuotas("shop"), state);
+    assert.deepEqual(b.requests("AlterQuota"), [
+      { type: "AlterQuota", tenant: "shop", prefix: "orders.", bytes: 10n },
+      { type: "AlterQuota", tenant: "shop", prefix: "orders.", bytes: null },
+    ]);
+    assert.deepEqual(b.requests("DescribeQuotas"), [{ type: "DescribeQuotas", tenant: "shop" }]);
   });
 
   test("the upgrade calls set one field each", async () => {

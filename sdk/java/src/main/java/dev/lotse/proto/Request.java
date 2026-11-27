@@ -1575,6 +1575,63 @@ public sealed interface Request {
     }
 
     /**
+     * {@code AlterQuota} (69): sets or removes a storage limit (ADR 0147). Answered with {@link Response.Admin}.
+     *
+     * @param tenant the tenant
+     * @param prefix a name prefix; empty for the tenant's own limit
+     * @param bytes the limit in bytes, every replica counted; {@code null} removes it
+     */
+    record AlterQuota(String tenant, String prefix, Long bytes) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.ALTER_QUOTA;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.string(tenant).string(prefix);
+            w.bool(bytes != null);
+            if (bytes != null) {
+                w.u64(bytes);
+            }
+            w.noTags();
+        }
+
+        static AlterQuota read(Reader r) {
+            String tenant = r.string();
+            String prefix = r.string();
+            Long bytes = r.bool() ? r.u64() : null;
+            AlterQuota x = new AlterQuota(tenant, prefix, bytes);
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
+     * {@code DescribeQuotas} (70): the storage limits and usage the asker may see (ADR 0147). Answered with
+     * {@link Response.DescribeQuotas}.
+     *
+     * @param tenant only this tenant, or {@code null} for every tenant the asker may see
+     */
+    record DescribeQuotas(String tenant) implements Request {
+        @Override
+        public ApiKey apiKey() {
+            return ApiKey.DESCRIBE_QUOTAS;
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.optString(tenant).noTags();
+        }
+
+        static DescribeQuotas read(Reader r) {
+            DescribeQuotas x = new DescribeQuotas(r.optString());
+            r.tags();
+            return x;
+        }
+    }
+
+    /**
      * {@code RequestCertificate} (55): asks the CA holder for a client certificate (cluster admin, ADR 0092). The
      * request's id is the SHA-256 of {@code csr}, so the same request twice is one request. Answered with
      * {@link Response.Admin}.

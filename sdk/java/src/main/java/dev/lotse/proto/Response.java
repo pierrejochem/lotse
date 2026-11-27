@@ -1642,4 +1642,59 @@ public sealed interface Response {
             return new DescribeTokens(error, Messages.getHint(r), tokens);
         }
     }
+
+    /**
+     * {@code DescribeQuotas} (70): storage limits and usage, from the metadata leader (ADR 0147). The leader hint is
+     * the structure's block of tagged fields, after the limits.
+     *
+     * @param error the outcome
+     * @param leaderHint the metadata group's leader, with {@link ErrorCode#NOT_LEADER}, or {@code null}
+     * @param countedAtMs when usage was last counted, ms since the Unix epoch; {@code null} before the first count
+     * @param quotas the limits, and the tenants without one
+     */
+    record DescribeQuotas(ErrorCode error, LeaderHint leaderHint, Long countedAtMs, List<Messages.QuotaEntry> quotas)
+            implements Response {
+        /** Creates the response. */
+        public DescribeQuotas {
+            quotas = List.copyOf(quotas);
+        }
+
+        @Override
+        public void write(Writer w) {
+            w.u16(error.code());
+            putOptional(w, countedAtMs);
+            w.array(quotas, (w1, q) -> {
+                w1.string(q.tenant()).string(q.prefix());
+                putOptional(w1, q.bytes());
+                w1.bool(q.setByClusterAdmin()).bool(q.full());
+                putOptional(w1, q.usedBytes());
+                w1.noTags();
+            });
+            Messages.putHint(w, leaderHint);
+        }
+
+        private static void putOptional(Writer w, Long v) {
+            w.bool(v != null);
+            if (v != null) {
+                w.u64(v);
+            }
+        }
+
+        private static Long getOptional(Reader r) {
+            return r.bool() ? r.u64() : null;
+        }
+
+        static DescribeQuotas read(Reader r) {
+            ErrorCode error = new ErrorCode(r.u16());
+            Long countedAtMs = getOptional(r);
+            // tenant, prefix, bytes?, two flags, used?, no tags
+            List<Messages.QuotaEntry> quotas = r.array(2 + 2 + 1 + 1 + 1 + 1 + 1, r1 -> {
+                Messages.QuotaEntry q = new Messages.QuotaEntry(
+                        r1.string(), r1.string(), getOptional(r1), r1.bool(), r1.bool(), getOptional(r1));
+                r1.tags();
+                return q;
+            });
+            return new DescribeQuotas(error, Messages.getHint(r), countedAtMs, quotas);
+        }
+    }
 }

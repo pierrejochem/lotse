@@ -300,6 +300,19 @@ describe("produce against a scripted broker", () => {
     assert.equal(node.count("InitProducer"), 1, "the producer id stayed");
   });
 
+  test("a full storage limit ends a produce at once with the broker's reason", async () => {
+    // ADR 0147: QUOTA_EXCEEDED is not retried; a full tenant usually stays full until someone acts.
+    serve((n) => (n === 2 ? fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUOTA_EXCEEDED) : ok()));
+    const lotse = client(true);
+    await lotse.produce("s", 0, messages(1));
+    await assert.rejects(lotse.produce("s", 0, messages(1)), (e: unknown) => {
+      assert.ok(e instanceof BrokerResponseError, String(e));
+      assert.equal(e.code, ErrorCode.QUOTA_EXCEEDED);
+      return true;
+    });
+    assert.equal(node.requests("Produce").length, 2, "not asked again");
+  });
+
   test("a full queue refuses at once and the sequence stays free", async () => {
     // ADR 0118: nothing was written, and the caller decides whether to try again.
     serve((n) => (n === 2 ? fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUEUE_FULL) : ok()));
@@ -319,6 +332,16 @@ describe("produce against a scripted broker", () => {
   test("a full queue after a lost attempt is reported as unknown", async () => {
     // The lost attempt may still commit at a leader that has it in its log.
     serve((n) => (n === 1 ? DROP : fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUEUE_FULL)));
+    await assert.rejects(client(true).produce("s", 0, messages(1)), (e: unknown) => {
+      assert.ok(e instanceof UnknownOutcomeError);
+      assert.match(e.message, /may have been carried out/);
+      return true;
+    });
+  });
+
+  test("a full storage limit after a lost attempt is reported as unknown", async () => {
+    // ADR 0147: the same refusal as a full queue; the lost attempt may still commit.
+    serve((n) => (n === 1 ? DROP : fx.produced(fx.STREAM_ID, 0, 0, ErrorCode.QUOTA_EXCEEDED)));
     await assert.rejects(client(true).produce("s", 0, messages(1)), (e: unknown) => {
       assert.ok(e instanceof UnknownOutcomeError);
       assert.match(e.message, /may have been carried out/);

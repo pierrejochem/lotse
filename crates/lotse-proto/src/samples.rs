@@ -396,6 +396,10 @@ pub fn requests() -> Vec<Request> {
         Request::DescribeTokens(DescribeTokensRequest { owner: None }),
         Request::DescribeTokens(DescribeTokensRequest { owner: Some("alice".into()) }),
         Request::RevokeToken(RevokeTokenRequest { id: 41 }),
+        Request::AlterQuota(AlterQuotaRequest { tenant: "shop".into(), prefix: "".into(), bytes: Some(1 << 30) }),
+        Request::AlterQuota(AlterQuotaRequest { tenant: "shop".into(), prefix: "orders.".into(), bytes: None }),
+        Request::DescribeQuotas(DescribeQuotasRequest { tenant: None }),
+        Request::DescribeQuotas(DescribeQuotasRequest { tenant: Some("shop".into()) }),
         Request::Publish(PublishRequest {
             txn_id: None,
             timeout_ms: 5_000,
@@ -992,6 +996,57 @@ pub fn responses() -> Vec<(ApiKey, Response)> {
         (
             ApiKey::REVOKE_TOKEN,
             Response::Admin(AdminResponse { error: ErrorCode::NONE, error_msg: None, leader_hint: None }),
+        ),
+        (
+            ApiKey::ALTER_QUOTA,
+            Response::Admin(AdminResponse {
+                error: ErrorCode::UNAUTHORIZED,
+                error_msg: Some("a cluster admin set this limit".into()),
+                leader_hint: None,
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_QUOTAS,
+            Response::DescribeQuotas(DescribeQuotasResponse {
+                error: ErrorCode::NONE,
+                leader_hint: None,
+                counted_at_ms: Some(1_800_000_000_000),
+                quotas: vec![
+                    QuotaEntry {
+                        tenant: "shop".into(),
+                        prefix: "".into(),
+                        bytes: Some(1 << 30),
+                        set_by_cluster_admin: true,
+                        full: false,
+                        used_bytes: Some(4096),
+                    },
+                    QuotaEntry {
+                        tenant: "shop".into(),
+                        prefix: "orders.".into(),
+                        bytes: Some(1024),
+                        set_by_cluster_admin: false,
+                        full: true,
+                        used_bytes: Some(2048),
+                    },
+                    QuotaEntry {
+                        tenant: "lab".into(),
+                        prefix: "".into(),
+                        bytes: None,
+                        set_by_cluster_admin: false,
+                        full: false,
+                        used_bytes: None,
+                    },
+                ],
+            }),
+        ),
+        (
+            ApiKey::DESCRIBE_QUOTAS,
+            Response::DescribeQuotas(DescribeQuotasResponse {
+                error: ErrorCode::NOT_LEADER,
+                leader_hint: Some(LeaderHint { leader: 2, term: 7 }),
+                counted_at_ms: None,
+                quotas: vec![],
+            }),
         ),
         (
             ApiKey::RENEW_CERTIFICATE,

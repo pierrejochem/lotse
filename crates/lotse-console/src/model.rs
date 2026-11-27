@@ -740,6 +740,10 @@ pub struct Tenant {
     pub used_bytes: u64,
     /// Storage quota, bytes; `None` where the cluster has no quotas.
     pub quota_bytes: Option<u64>,
+    /// The tenant's own limit is full: new data is refused (ADR 0147).
+    pub quota_full: bool,
+    /// Limits on name prefixes inside the tenant (ADR 0147).
+    pub prefix_quotas: Vec<PrefixQuota>,
     /// Streams.
     pub streams: u32,
     /// Queues.
@@ -748,6 +752,34 @@ pub struct Tenant {
     pub principals: u32,
     /// State chip.
     pub state: Chip,
+}
+
+/// A storage limit on a name prefix inside a tenant (ADR 0147).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PrefixQuota {
+    /// The name prefix.
+    pub prefix: String,
+    /// The limit, bytes, every replica counted.
+    pub bytes: u64,
+    /// Bytes used at the cluster's last count; `None` before the first.
+    pub used_bytes: Option<u64>,
+    /// New data under it is refused.
+    pub full: bool,
+    /// A cluster admin set it, so only a cluster admin changes it.
+    pub set_by_cluster_admin: bool,
+}
+
+/// Request to set or remove a storage limit (ADR 0147).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetQuota {
+    /// The tenant.
+    pub tenant: String,
+    /// A name prefix; empty for the tenant's own limit.
+    #[serde(default)]
+    pub prefix: String,
+    /// The limit in bytes, every replica counted; absent or `null` removes it.
+    #[serde(default)]
+    pub bytes: Option<u64>,
 }
 
 /// A role binding.

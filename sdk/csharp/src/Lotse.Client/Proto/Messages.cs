@@ -876,6 +876,15 @@ public static class Messages
     /// <param name="CreatedBy">Who created it.</param>
     public sealed record TokenEntry(ulong Id, string Name, string Owner, ulong CreatedAtMs, ulong ExpiresAtMs, string CreatedBy);
 
+    /// <summary>One storage limit, or one tenant without a limit of its own, in <see cref="Response.DescribeQuotas"/> (ADR 0147).</summary>
+    /// <param name="Tenant">The tenant.</param>
+    /// <param name="Prefix">The name prefix; empty for the tenant's own limit, or for a tenant listed without one.</param>
+    /// <param name="Bytes">The limit in bytes, every replica counted; <c>null</c> for a tenant listed without a limit.</param>
+    /// <param name="SetByClusterAdmin">A cluster admin set it, so only a cluster admin changes it.</param>
+    /// <param name="Full">The limit is full: new data under it is refused.</param>
+    /// <param name="UsedBytes">Bytes used at the last count, every replica counted; <c>null</c> before the first count.</param>
+    public sealed record QuotaEntry(string Tenant, string Prefix, ulong? Bytes, bool SetByClusterAdmin, bool Full, ulong? UsedBytes);
+
     /// <summary>One client certificate in the cluster's inventory.</summary>
     /// <param name="Issuer">SHA-256 of the issuer's DER name and authority key identifier (ADR 0096) (32 bytes).</param>
     /// <param name="Serial">The serial number, big-endian.</param>

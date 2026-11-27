@@ -1197,6 +1197,19 @@ public final class Messages {
     public record TokenEntry(long id, String name, String owner, long createdAtMs, long expiresAtMs, String createdBy) {}
 
     /**
+     * One storage limit, or one tenant without a limit of its own, in {@link Response.DescribeQuotas} (ADR 0147).
+     *
+     * @param tenant the tenant
+     * @param prefix the name prefix; empty for the tenant's own limit, or for a tenant listed without one
+     * @param bytes the limit in bytes, every replica counted; {@code null} for a tenant listed without a limit
+     * @param setByClusterAdmin a cluster admin set it, so only a cluster admin changes it
+     * @param full the limit is full: new data under it is refused
+     * @param usedBytes bytes used at the last count, every replica counted; {@code null} before the first count
+     */
+    public record QuotaEntry(
+            String tenant, String prefix, Long bytes, boolean setByClusterAdmin, boolean full, Long usedBytes) {}
+
+    /**
      * One client certificate in the inventory.
      *
      * @param issuer SHA-256 of the issuer's DER name and authority key identifier (ADR 0096), 32 bytes

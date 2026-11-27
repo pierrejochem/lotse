@@ -73,6 +73,10 @@ export const ApiKey = {
   DESCRIBE_TOKENS: 67,
   /** Revokes an access token: its sessions end on every node (ADR 0133). */
   REVOKE_TOKEN: 68,
+  /** Sets or removes a storage limit of a tenant or a name prefix in it (ADR 0147). */
+  ALTER_QUOTA: 69,
+  /** The storage limits and usage the asker may see, from the metadata leader (ADR 0147). */
+  DESCRIBE_QUOTAS: 70,
   WRITE_TXN_MARKERS: 1000,
 } as const;
 
@@ -139,6 +143,8 @@ export const IMPLEMENTED_KEYS: readonly number[] = [
   ApiKey.CREATE_TOKEN,
   ApiKey.DESCRIBE_TOKENS,
   ApiKey.REVOKE_TOKEN,
+  ApiKey.ALTER_QUOTA,
+  ApiKey.DESCRIBE_QUOTAS,
   ApiKey.PUBLISH,
 ];
 

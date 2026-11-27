@@ -567,6 +567,46 @@ public sealed partial class LotseClient
     }
 
     /// <summary>
+    /// Sets a storage limit in bytes, every replica counted, or removes it with <c>null</c> (ADR 0147): a tenant's own
+    /// with an empty <paramref name="prefix"/>, which needs the cluster-admin role, or one on the names that start with
+    /// <paramref name="prefix"/>, which a tenant admin may set under their binding's prefix too, unless a cluster admin
+    /// set it. Once a limit is full, new data under it is refused with <c>QUOTA_EXCEEDED</c>.
+    /// </summary>
+    /// <param name="tenant">The tenant.</param>
+    /// <param name="prefix">A name prefix; empty for the tenant's own limit.</param>
+    /// <param name="bytes">The limit in bytes, or <c>null</c> to remove it.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public Task AlterQuotaAsync(string tenant, string prefix, ulong? bytes, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        return AdminChangeAsync(new Request.AlterQuota(tenant, prefix, bytes), cancellationToken);
+    }
+
+    /// <summary>
+    /// The storage limits and usage of <paramref name="tenant"/>, or of every tenant the caller may see with
+    /// <c>null</c> (ADR 0147), from the metadata leader, which counts the usage.
+    /// </summary>
+    /// <param name="tenant">Only this tenant, or <c>null</c>.</param>
+    /// <param name="cancellationToken">Stops the call.</param>
+    public async Task<Response.DescribeQuotas> DescribeQuotasAsync(string? tenant = null, CancellationToken cancellationToken = default)
+    {
+        CheckOpen();
+        var req = new Request.DescribeQuotas(tenant);
+        return await RetryingAsync<Response.DescribeQuotas>(
+            async () =>
+            {
+                Response r = await CallAdminAsync(req, cancellationToken).ConfigureAwait(false);
+                if (r is not Response.DescribeQuotas d)
+                {
+                    throw Attempt.Retry("unexpected response " + r);
+                }
+                AdminAnswer(d.Error, d.LeaderHint, null);
+                return d;
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Revokes an access token (ADR 0133): every node ends the sessions it opened and refuses it from then on. A user
     /// revokes their own tokens, a cluster admin anyone's.
     /// </summary>

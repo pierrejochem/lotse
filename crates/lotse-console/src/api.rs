@@ -43,6 +43,7 @@ use crate::model::*;
         requeue,
         move_leader,
         set_replication,
+        set_quota,
         place_partition,
         sessions,
         users,
@@ -335,6 +336,35 @@ pub async fn set_replication(
         if req.factor == 1 { "" } else { "s" }
     );
     Ok(Json(Done { message, cli: cli::set_replication(&req) }))
+}
+
+/// Sets or removes a storage limit of a tenant or a name prefix in it, as
+/// the signed-in user (ADR 0147).
+#[utoipa::path(post, path = "/api/v1/clusters/{cluster}/quotas",
+    params(("cluster" = String, Path, description = "Cluster ID")),
+    request_body = SetQuota,
+    responses((status = 200, description = "Success.", body = Done), (status = 400, description = "The request is not valid.", body = ErrorBody), (status = 403, description = "The signed-in user may not do this.", body = ErrorBody), (status = 404, description = "No such cluster or tenant.", body = ErrorBody)))]
+pub async fn set_quota(
+    State(st): State<AppState>,
+    who: Identity,
+    Path(id): Path<String>,
+    Json(req): Json<SetQuota>,
+) -> ApiResult<Json<Done>> {
+    if req.bytes == Some(0) {
+        return Err(ApiError::BadRequest("A limit is at least 1 byte; leave it out to remove the limit.".into()));
+    }
+    cluster(&st, &id)?.set_quota(&who, &req).await?;
+    tracing::info!(principal = %who.principal, cluster = %id, tenant = %req.tenant, prefix = %req.prefix, bytes = ?req.bytes, "storage limit set");
+    let what = if req.prefix.is_empty() {
+        format!("tenant {}", req.tenant)
+    } else {
+        format!("prefix {} in tenant {}", req.prefix, req.tenant)
+    };
+    let message = match req.bytes {
+        Some(n) => format!("The storage limit of {what} is {n} bytes. Usage is counted every few seconds."),
+        None => format!("The storage limit of {what} is removed."),
+    };
+    Ok(Json(Done { message, cli: cli::set_quota(&req) }))
 }
 
 /// Places a partition's replicas on named nodes, or releases it to the

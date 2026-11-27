@@ -457,14 +457,15 @@ public final class LotseClient implements AutoCloseable {
                 switch (a.kind) {
                     case FAIL -> {
                         // A failed login or a refusal now says nothing of an earlier attempt whose answer was lost:
-                        // that one may have been carried out. So does a full queue (ADR 0118): an earlier attempt
-                        // may commit at a leader that has it in its log. (An answer about the request itself, such
-                        // as RESOURCE_EXISTS, is the caller's to read.)
+                        // that one may have been carried out. So does a full queue (ADR 0118) or a full storage
+                        // limit (ADR 0147): an earlier attempt may commit at a leader that has it in its log. (An
+                        // answer about the request itself, such as RESOURCE_EXISTS, is the caller's to read.)
                         ClientException e = a.error;
                         boolean refusal = e instanceof ClientException.Authentication
                                 || (e instanceof ClientException.Broker b
                                         && (b.code().equals(ErrorCode.UNAUTHORIZED)
-                                                || b.code().equals(ErrorCode.QUEUE_FULL)));
+                                                || b.code().equals(ErrorCode.QUEUE_FULL)
+                                                || b.code().equals(ErrorCode.QUOTA_EXCEEDED)));
                         if (maybeDone && refusal) {
                             throw new ClientException.Unknown(
                                     "an earlier attempt may have been carried out; then " + e.getMessage());
@@ -1850,6 +1851,34 @@ public final class LotseClient implements AutoCloseable {
     public void revokeToken(long id) {
         checkOpen();
         adminChange(new Request.RevokeToken(id));
+    }
+
+    /**
+     * Sets a storage limit in bytes, every replica counted, or removes it with {@code null} (ADR 0147): a tenant's
+     * own with an empty {@code prefix}, which needs the cluster-admin role, or one on the names that start with
+     * {@code prefix}, which a tenant admin may set under their binding's prefix too, unless a cluster admin set it.
+     * Once a limit is full, new data under it is refused with {@code QUOTA_EXCEEDED}.
+     */
+    public void alterQuota(String tenant, String prefix, Long bytes) {
+        checkOpen();
+        adminChange(new Request.AlterQuota(tenant, prefix, bytes));
+    }
+
+    /**
+     * The storage limits and usage of {@code tenant}, or of every tenant the caller may see with {@code null}
+     * (ADR 0147), from the metadata leader, which counts the usage.
+     */
+    public Response.DescribeQuotas describeQuotas(String tenant) {
+        checkOpen();
+        Request req = new Request.DescribeQuotas(tenant);
+        return retrying(() -> {
+            Response r = callAdmin(req);
+            if (!(r instanceof Response.DescribeQuotas d)) {
+                throw Attempt.retry("unexpected response " + r);
+            }
+            adminAnswer(d.error(), d.leaderHint(), null);
+            return d;
+        });
     }
 
     /**

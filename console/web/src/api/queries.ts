@@ -202,6 +202,17 @@ export function useSetReplication(cluster: string) {
   });
 }
 
+/** Sets or removes a storage limit of a tenant or a name prefix in it (ADR 0147). */
+export function useSetQuota(cluster: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: S['SetQuota']) => unwrap(api.POST('/api/v1/clusters/{cluster}/quotas', { ...path(cluster), body })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.tenants(cluster) });
+    },
+  });
+}
+
 /** Places a partition on named nodes, or releases it with none (ADR 0115). */
 export function usePlacePartition(cluster: string) {
   const qc = useQueryClient();

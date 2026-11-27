@@ -249,6 +249,16 @@ public class Lotse(public val java: LotseClient) : AutoCloseable {
     /** Revokes an access token; the sessions it opened end (ADR 0133). See [LotseClient.revokeToken]. */
     public suspend fun revokeToken(id: Long): Unit = io { java.revokeToken(id) }
 
+    /**
+     * Sets a storage limit in bytes, every replica counted, or removes it with `null` (ADR 0147): a tenant's own with
+     * an empty [prefix]. See [LotseClient.alterQuota].
+     */
+    public suspend fun alterQuota(tenant: String, prefix: String = "", bytes: Long?): Unit =
+        io { java.alterQuota(tenant, prefix, bytes) }
+
+    /** The storage limits and usage of [tenant], or of every tenant the caller may see (ADR 0147). See [LotseClient.describeQuotas]. */
+    public suspend fun describeQuotas(tenant: String? = null): Response.DescribeQuotas = io { java.describeQuotas(tenant) }
+
     /** Adds a certificate to the cluster's revocation list. */
     public suspend fun revokeCertificate(
         issuer: ByteArray,

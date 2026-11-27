@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         .route("/clusters/{cluster}/queues/{name}/requeue", post(api::requeue))
         .route("/clusters/{cluster}/leaders", post(api::move_leader))
         .route("/clusters/{cluster}/replication", post(api::set_replication))
+        .route("/clusters/{cluster}/quotas", post(api::set_quota))
         .route("/clusters/{cluster}/placements", post(api::place_partition))
         .route("/clusters/{cluster}/sessions", get(api::sessions))
         .route("/clusters/{cluster}/tenants", get(api::tenants))
